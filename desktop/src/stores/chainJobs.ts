@@ -1,162 +1,149 @@
 import { defineStore } from "pinia";
-import { apiFetch, apiFetchTo, apiJson, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { sseStream } from "../lib/api/sse";
-import { notifyChainFinished } from "../lib/notify";
-import { useToastStore } from "./toasts";
+import {
+  applyChainJobEvent,
+  emptyChainJobLive,
+  type ChainJobLive,
+} from "@studio/lib/chainJobEvents";
 import type {
+  AmendRequest,
+  AmendResponse,
   ChainJobDetail,
   ChainJobEvent,
   ChainJobListing,
-  ChainJobStageDetail,
   ChainJobSummary,
-  ChainRequest,
+  ChainRequestWire,
   CreateChainJobResponse,
-  GcOutcome,
-  RetakeRequest,
-  StageState,
-} from "../lib/api/types";
+} from "@studio/lib/api/chainTypes";
+import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { sseStream } from "../lib/api/sse";
+import { notifyChainFinished } from "../lib/notify";
+import type { GcOutcome, RetakeRequest } from "../lib/api/types";
+import { useHostsStore } from "./hosts";
+import { useToastStore } from "./toasts";
 
-/** Live view of the job currently being watched: its detail plus per-stage
- * denoise progress and which stage is active. */
-export interface ChainJobLive {
-  detail: ChainJobDetail | null;
-  progress: Record<number, { step: number; total: number }>;
-  activeStage: number | null;
+/** One host's durable chain-job listing. */
+export interface HostChainJobs {
+  jobs: ChainJobSummary[];
+  error: string | null;
 }
 
-export function emptyChainJobLive(): ChainJobLive {
-  return { detail: null, progress: {}, activeStage: null };
-}
+const POLL_INTERVAL_MS = 10_000;
 
-const sameTarget = (a: ApiTarget | null, b: ApiTarget | null) =>
-  a?.baseUrl === b?.baseUrl && a?.apiKey === b?.apiKey;
+const isActive = (job: ChainJobSummary) => job.state === "running" || job.state === "queued";
 
-function firstRunningStage(job: ChainJobDetail): number | null {
-  const running = job.stages.find((s) => s.state === "running");
-  return running ? running.idx : null;
-}
-
-function withStageState(
-  detail: ChainJobDetail | null,
-  idx: number,
-  state: StageState,
-  hasPreview?: boolean,
-): ChainJobDetail | null {
-  if (!detail) return detail;
-  const stages = detail.stages.map((s): ChainJobStageDetail =>
-    s.idx === idx ? { ...s, state, has_preview: hasPreview ?? s.has_preview } : s,
-  );
-  return { ...detail, stages };
-}
+const jsonInit = (body: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 
 /**
- * Pure chain-job event reducer. First frame is a `snapshot` (full detail);
- * deltas advance the active stage's state and denoise progress. Exported for
- * tests.
+ * Durable sequence (chain) jobs across EVERY connected host. Each action
+ * addresses a host by id and resolves its `ApiTarget` from the hosts store
+ * at call time — the previous store kept one mutable `target`, so cancel /
+ * remove / retake / gc silently hit whichever host was fetched last.
  */
-export function applyChainJobEvent(state: ChainJobLive, ev: ChainJobEvent): ChainJobLive {
-  switch (ev.type) {
-    case "snapshot":
-      return { detail: ev.job, progress: {}, activeStage: firstRunningStage(ev.job) };
-    case "stage_start":
-      return {
-        ...state,
-        activeStage: ev.stage_idx,
-        detail: withStageState(state.detail, ev.stage_idx, "running"),
-      };
-    case "denoise_step":
-      return {
-        ...state,
-        progress: { ...state.progress, [ev.stage_idx]: { step: ev.step, total: ev.total } },
-      };
-    case "stage_done":
-      return {
-        ...state,
-        activeStage: state.activeStage === ev.stage_idx ? null : state.activeStage,
-        detail: withStageState(state.detail, ev.stage_idx, "completed", ev.has_preview),
-      };
-    case "state_changed":
-      return {
-        ...state,
-        detail: state.detail ? { ...state.detail, state: ev.state, error: ev.error ?? null } : null,
-      };
-    default:
-      return state;
-  }
-}
-
 export const useChainJobsStore = defineStore("chainJobs", {
   state: () => ({
-    jobs: [] as ChainJobSummary[],
+    byHost: {} as Record<string, HostChainJobs>,
+    /** The one job whose SSE stream feeds `live`; null when idle. */
+    watching: null as { hostId: string; jobId: string } | null,
     live: emptyChainJobLive() as ChainJobLive,
-    watchingId: null as string | null,
     abort: null as AbortController | null,
     pollTimer: null as ReturnType<typeof setInterval> | null,
-    /** Host owning the currently displayed chain-job list and live stream. */
-    target: null as ApiTarget | null,
-    fetchVersion: 0,
+    /** Bumped whenever the watched job emits a `finalized` frame — the
+     *  Create canvas watches it to refresh the gallery. */
+    finalizedTick: 0,
+    fetchVersions: {} as Record<string, number>,
   }),
+  getters: {
+    /** Every host's jobs flattened for the activity strip, newest first. */
+    allJobs(state): { hostId: string; job: ChainJobSummary }[] {
+      return Object.entries(state.byHost)
+        .flatMap(([hostId, entry]) => entry.jobs.map((job) => ({ hostId, job })))
+        .sort((a, b) => b.job.created_at_unix_ms - a.job.created_at_unix_ms);
+    },
+    anyActive(state): boolean {
+      return Object.values(state.byHost).some((entry) => entry.jobs.some(isActive));
+    },
+  },
   actions: {
-    async fetchJobs(target?: ApiTarget | null) {
-      const resolvedTarget = target === undefined ? this.target : target;
-      if (!sameTarget(this.target, resolvedTarget)) {
-        this.unwatch();
-        this.live = emptyChainJobLive();
+    /** Resolve a host id to its live ApiTarget — at CALL time, never cached. */
+    targetFor(hostId: string): ApiTarget {
+      const host = useHostsStore().all.find((h) => h.id === hostId);
+      if (!host?.baseUrl) throw new Error(`Host ${hostId} is not connected.`);
+      return { baseUrl: host.baseUrl, apiKey: host.apiKey };
+    },
+    async fetchHost(hostId: string) {
+      const version = (this.fetchVersions[hostId] = (this.fetchVersions[hostId] ?? 0) + 1);
+      try {
+        const target = this.targetFor(hostId);
+        const listing = await apiJsonTo<ChainJobListing>(target, "/api/chain-jobs");
+        if (version !== this.fetchVersions[hostId]) return;
+        this.byHost[hostId] = {
+          jobs: listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms),
+          error: null,
+        };
+      } catch (err) {
+        if (version !== this.fetchVersions[hostId]) return;
+        // Keep the last listing visible; the poll self-heals transient drops.
+        this.byHost[hostId] = { jobs: this.byHost[hostId]?.jobs ?? [], error: String(err) };
       }
-      this.target = resolvedTarget;
-      const fetchVersion = ++this.fetchVersion;
-      const listing = resolvedTarget
-        ? await apiJsonTo<ChainJobListing>(resolvedTarget, "/api/chain-jobs")
-        : await apiJson<ChainJobListing>("/api/chain-jobs");
-      if (fetchVersion !== this.fetchVersion) return;
-      // Newest first.
-      this.jobs = listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms);
-      // Chains land from any surface (CLI, web, another machine sharing the
-      // DB) — keep the list honest while anything is in flight.
-      const active = this.jobs.some((j) => j.state === "running" || j.state === "queued");
-      if (active && !this.pollTimer) {
-        this.pollTimer = setInterval(() => void this.fetchJobs(), 10_000);
-      } else if (!active && this.pollTimer) {
+      this.syncPolling();
+    },
+    /** Refresh every connected host and drop listings for gone hosts. */
+    async fetchAll() {
+      const hosts = useHostsStore();
+      const ready = hosts.all.filter((h) => h.status === "ready" && h.baseUrl);
+      await Promise.all(ready.map((host) => this.fetchHost(host.id)));
+      const live = new Set(hosts.all.map((h) => h.id));
+      for (const id of Object.keys(this.byHost)) {
+        if (!live.has(id)) delete this.byHost[id];
+      }
+      this.syncPolling();
+    },
+    /** Chains land from any surface (CLI, web, another machine) — poll while
+     *  anything is queued or running so the strip stays honest. */
+    syncPolling() {
+      if (this.anyActive && !this.pollTimer) {
+        this.pollTimer = setInterval(() => void this.fetchAll(), POLL_INTERVAL_MS);
+      } else if (!this.anyActive && this.pollTimer) {
         clearInterval(this.pollTimer);
         this.pollTimer = null;
       }
     },
-    async create(req: ChainRequest, target: ApiTarget | null = null): Promise<string> {
-      if (!sameTarget(this.target, target)) {
-        this.unwatch();
-        this.live = emptyChainJobLive();
-      }
-      this.target = target;
-      const init = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      } satisfies RequestInit;
-      const res = target
-        ? await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", init)
-        : await apiJson<CreateChainJobResponse>("/api/chain-jobs", init);
-      await this.fetchJobs(target);
-      this.watch(res.job_id, target);
+    async create(hostId: string, req: ChainRequestWire): Promise<string> {
+      const target = this.targetFor(hostId);
+      const res = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", jsonInit(req));
+      await this.fetchHost(hostId);
+      this.watch(hostId, res.job_id);
       return res.job_id;
     },
+    async fetchDetail(hostId: string, jobId: string): Promise<ChainJobDetail> {
+      const target = this.targetFor(hostId);
+      return apiJsonTo<ChainJobDetail>(target, `/api/chain-jobs/${encodeURIComponent(jobId)}`);
+    },
     /** Subscribe to one job's event stream, replacing any prior watch. */
-    watch(id: string, target?: ApiTarget | null) {
-      const resolvedTarget = target === undefined ? this.target : target;
+    watch(hostId: string, jobId: string) {
+      const target = this.targetFor(hostId);
       this.unwatch();
-      this.target = resolvedTarget;
-      this.watchingId = id;
+      this.watching = { hostId, jobId };
       this.live = emptyChainJobLive();
       const abort = new AbortController();
       this.abort = abort;
-      void sseStream(`/api/chain-jobs/${encodeURIComponent(id)}/events`, {
+      void sseStream(`/api/chain-jobs/${encodeURIComponent(jobId)}/events`, {
         signal: abort.signal,
         retry: true,
-        ...(resolvedTarget ? { target: resolvedTarget } : {}),
+        target,
         onEvent: (_event, data) => {
+          // A superseded stream (new watch, abort still in flight) must not
+          // clobber the live view; the abort flag is the ground truth.
+          if (abort.signal.aborted) return;
           try {
             const ev = JSON.parse(data) as ChainJobEvent;
             this.live = applyChainJobEvent(this.live, ev);
-            if (ev.type === "state_changed") this.onStateChanged(ev.state, ev.error ?? null);
+            if (ev.type === "finalized") this.finalizedTick += 1;
+            if (ev.type === "state_changed") this.onStateChanged(hostId, ev.state);
           } catch {
             /* skip malformed frame */
           }
@@ -166,71 +153,94 @@ export const useChainJobsStore = defineStore("chainJobs", {
     unwatch() {
       this.abort?.abort();
       this.abort = null;
-      this.watchingId = null;
+      this.watching = null;
     },
-    onStateChanged(state: ChainJobSummary["state"], _error: string | null) {
-      void this.fetchJobs();
+    onStateChanged(hostId: string, state: ChainJobSummary["state"]) {
+      void this.fetchHost(hostId);
       if (state === "completed") {
         const frames =
           this.live.detail?.stages.reduce((n, s) => n + (s.frames_emitted ?? 0), 0) ?? 0;
-        useToastStore().push(`Chain finished · ${frames} frames`);
+        useToastStore().push(`Sequence finished · ${frames} frames`);
         notifyChainFinished(frames);
       } else if (state === "failed") {
-        useToastStore().push("Chain failed", "error");
+        useToastStore().push("Sequence failed", "error");
       }
     },
-    async resume(id: string) {
-      const path = `/api/chain-jobs/${encodeURIComponent(id)}/resume`;
-      const init = { method: "POST" } satisfies RequestInit;
-      if (this.target) await apiFetchTo(this.target, path, init);
-      else await apiFetch(path, init);
-      await this.fetchJobs();
-      this.watch(id);
-    },
-    async cancel(id: string) {
-      const path = `/api/chain-jobs/${encodeURIComponent(id)}/cancel`;
-      const init = { method: "POST" } satisfies RequestInit;
-      if (this.target) await apiFetchTo(this.target, path, init);
-      else await apiFetch(path, init);
-      await this.fetchJobs();
-    },
-    async remove(id: string) {
-      const path = `/api/chain-jobs/${encodeURIComponent(id)}`;
-      const init = { method: "DELETE" } satisfies RequestInit;
-      if (this.target) await apiFetchTo(this.target, path, init);
-      else await apiFetch(path, init);
-      if (this.watchingId === id) this.unwatch();
-      this.jobs = this.jobs.filter((j) => j.id !== id);
-    },
-    async retake(id: string, req: RetakeRequest) {
-      const path = `/api/chain-jobs/${encodeURIComponent(id)}/retake`;
-      const init = {
+    async resume(hostId: string, jobId: string) {
+      const target = this.targetFor(hostId);
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(jobId)}/resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      } satisfies RequestInit;
-      if (this.target) await apiFetchTo(this.target, path, init);
-      else await apiFetch(path, init);
-      await this.fetchJobs();
-      this.watch(id);
+      });
+      await this.fetchHost(hostId);
+      this.watch(hostId, jobId);
     },
-    /** Delete every inactive job (anything not running or queued) in one
-     *  go — including resumable failed/interrupted/cancelled ones. Partial
-     *  failures resync from the server rather than guessing. */
-    async clearInactive(): Promise<{ cleared: number; failed: number }> {
-      const finished = this.jobs.filter((j) => j.state !== "running" && j.state !== "queued");
-      const results = await Promise.allSettled(finished.map((j) => this.remove(j.id)));
+    async cancel(hostId: string, jobId: string) {
+      const target = this.targetFor(hostId);
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(jobId)}/cancel`, {
+        method: "POST",
+      });
+      await this.fetchHost(hostId);
+    },
+    async remove(hostId: string, jobId: string) {
+      const target = this.targetFor(hostId);
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(jobId)}`, {
+        method: "DELETE",
+      });
+      if (this.watching?.hostId === hostId && this.watching.jobId === jobId) this.unwatch();
+      const entry = this.byHost[hostId];
+      if (entry) entry.jobs = entry.jobs.filter((j) => j.id !== jobId);
+    },
+    async retake(hostId: string, jobId: string, req: RetakeRequest) {
+      const target = this.targetFor(hostId);
+      await apiFetchTo(
+        target,
+        `/api/chain-jobs/${encodeURIComponent(jobId)}/retake`,
+        jsonInit(req),
+      );
+      await this.fetchHost(hostId);
+      this.watch(hostId, jobId);
+    },
+    /** Edit a durable job in place: the server re-renders only dirty stages. */
+    async amend(hostId: string, jobId: string, req: AmendRequest): Promise<AmendResponse> {
+      const target = this.targetFor(hostId);
+      const outcome = await apiJsonTo<AmendResponse>(
+        target,
+        `/api/chain-jobs/${encodeURIComponent(jobId)}/amend`,
+        jsonInit(req),
+      );
+      await this.fetchHost(hostId);
+      this.watch(hostId, jobId);
+      return outcome;
+    },
+    /** Delete every inactive job (anything not running or queued) — on one
+     *  host, or every host when none is given. Partial failures resync the
+     *  affected host rather than guessing. */
+    async clearInactive(hostId?: string): Promise<{ cleared: number; failed: number }> {
+      const hostIds = hostId ? [hostId] : Object.keys(this.byHost);
+      const doomed = hostIds.flatMap((id) =>
+        (this.byHost[id]?.jobs ?? [])
+          .filter((job) => !isActive(job))
+          .map((job) => ({ hostId: id, jobId: job.id })),
+      );
+      const results = await Promise.allSettled(
+        doomed.map(({ hostId: id, jobId }) => this.remove(id, jobId)),
+      );
       const cleared = results.filter((r) => r.status === "fulfilled").length;
       const failed = results.length - cleared;
-      if (failed > 0) await this.fetchJobs();
+      if (failed > 0) {
+        const failedHosts = new Set(
+          doomed.filter((_, i) => results[i]?.status === "rejected").map((d) => d.hostId),
+        );
+        await Promise.all([...failedHosts].map((id) => this.fetchHost(id)));
+      }
       return { cleared, failed };
     },
-    async gc(): Promise<GcOutcome> {
-      const init = { method: "POST" } satisfies RequestInit;
-      const outcome = this.target
-        ? await apiJsonTo<GcOutcome>(this.target, "/api/chain-jobs/gc", init)
-        : await apiJson<GcOutcome>("/api/chain-jobs/gc", init);
-      await this.fetchJobs();
+    async gc(hostId: string): Promise<GcOutcome> {
+      const target = this.targetFor(hostId);
+      const outcome = await apiJsonTo<GcOutcome>(target, "/api/chain-jobs/gc", {
+        method: "POST",
+      });
+      await this.fetchHost(hostId);
       return outcome;
     },
   },
