@@ -88,6 +88,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent runtime EWMA. Cold and warm planning therefore add the matching
   setup disposition exactly once instead of learning it into every run.
 - **Durable video chains now schedule one leased stage at a time.** In scheduler V2 mode, every parent is a resumable actor with persisted `mold.chain-execution.v1` authority (`Dormant → Ready → Submitted → Leased → Checkpointing → Finalizing → Settled`) and attempt-fenced `(parent, generation, stage, work)` identity. Different chains can occupy different GPUs concurrently without a fixed parent cap, each stage releases its lease before the next checkpoint becomes ready, and the previous GPU is only a deterministic locality preference. Job creation freezes canonical absolute companion paths behind an immutable runtime model identity, so restart-time config, environment, or catalog-sidecar changes cannot silently substitute artifacts. Queued and active cancellation use the F0 attempt token and settle as typed cancelled outcomes, LTX-2 and LTX-Video poll cooperative denoise safe points, invalidated plans re-resolve the same stage with bounded backoff, and starvation bypasses guarantee progress under continuous ordinary arrivals. `GET /api/queue` exposes internal stages additively under `plan.work_items` without changing legacy positions or PATCH behavior. `legacy` and `observe` retain the compatibility path for rollback.
+- **Desktop Create now makes sequences where you make everything else.** The
+  Single | Sequence switch and the separate chain page are gone: **Output**
+  (One shot | Sequence) is a setting in the Create inspector beside Model.
+  Choosing Sequence turns the composer into a clip rail — clip pills joined
+  by seam pills that name each transition in words, with a click opening the
+  seam editor's teaching rows and fade-length stepper — filters the model
+  picker to sequence-capable video models (auto-picking one and remembering
+  your single-mode model), defaults new clips to the selected model's own
+  frame count, and relabels the button **Generate sequence**. Sequence jobs
+  now share the one Create activity strip with prints (watch, cancel,
+  resume, edit, clear inactive, clean up disk) instead of a separate jobs
+  list, clip prompts survive navigation and restarts, and a finished
+  sequence can be edited in place: clips reload onto the rail, pills show
+  cached ✓ versus re-render ↻ as you edit, and **Update sequence**
+  re-renders only from the earliest changed clip. Legacy `/create/chain`
+  and `/chains` URLs permanently redirect to `/create?output=sequence`, and
+  File → New Chain became **New Sequence**.
 - **Chain jobs now announce their lifecycle on the server event stream.**
   `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
   and `chain_job_ended` events — emitted on durable-job creation, resume,

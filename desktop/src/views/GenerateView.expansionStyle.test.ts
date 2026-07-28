@@ -22,7 +22,10 @@ import { expandPrompt } from "../lib/api/expand";
 import { styleHint } from "../lib/stylePresets";
 import type { ModelEntry } from "../lib/api/types";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({

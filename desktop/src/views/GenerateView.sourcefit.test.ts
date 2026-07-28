@@ -18,7 +18,10 @@ import { useUiStore } from "../stores/ui";
 import type { ModelEntry } from "../lib/api/types";
 import type { SourceFitInput } from "../lib/sourceFitPreprocess";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),

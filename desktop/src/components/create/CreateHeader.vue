@@ -1,45 +1,37 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useRouter } from "vue-router";
-import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { GenerateForm } from "../../lib/generateForm";
 import { aspectRatioLabel } from "../../lib/resolutions";
 import HostChip from "./HostChip.vue";
 
 /**
- * Create header (Mold Studio): the print title, a live summary pill, the
- * Single | Sequence composer switch, and the shared generation-host chip.
+ * Create header (Mold Studio): the print/sequence title, a live summary
+ * pill, and the shared generation-host chip. Output (One shot | Sequence)
+ * is a setting in the inspector, not a place — the old Single | Sequence
+ * route switch is gone.
  */
 const props = defineProps<{ form: GenerateForm }>();
 
-const router = useRouter();
+const draft = useSequenceDraftStore();
+const isSequence = computed(() => draft.output === "sequence");
 
-/** Create is the Single side of the composer; Sequence lives at /create/chain. */
-function setComposerMode(mode: string | number) {
-  if (mode === "sequence") void router.push("/create/chain");
-}
+const title = computed(() => (isSequence.value ? "Untitled sequence" : "Untitled print"));
 
 const summary = computed(() => {
   const { width, height, steps, family } = props.form;
-  return `${aspectRatioLabel(width, height, family)} · ${width}×${height} · ${steps} steps`;
+  const aspect = aspectRatioLabel(width, height, family);
+  if (isSequence.value) {
+    return `${aspect} · ${width}×${height} · ${draft.clips.length} clips · ${props.form.fps} fps`;
+  }
+  return `${aspect} · ${width}×${height} · ${steps} steps`;
 });
 </script>
 
 <template>
   <header data-test="create-header" class="ms-header">
-    <span class="ms-header__title">Untitled print</span>
+    <span class="ms-header__title">{{ title }}</span>
     <span class="ms-header__summary data-mono">{{ summary }}</span>
-    <SegmentedControl
-      model-value="single"
-      compact
-      :options="[
-        { value: 'single', label: 'Single' },
-        { value: 'sequence', label: 'Sequence' },
-      ]"
-      label="Composer mode"
-      data-test="composer-mode"
-      @update:model-value="setComposerMode"
-    />
     <div class="ms-header__spacer" />
     <HostChip />
   </header>

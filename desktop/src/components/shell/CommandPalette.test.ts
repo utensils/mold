@@ -44,17 +44,28 @@ describe("CommandPalette command registry", () => {
     wrapper.unmount();
   });
 
-  it("offers Compose chain and Open history alongside the five workspaces", async () => {
+  it("offers Create sequence and Open history alongside the five workspaces", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
-    await input.setValue("chain");
+    // "clips" and "video" both find the sequence entry (mode is a setting of
+    // Create now, so the entry deep-links rather than opening a chains page).
+    await input.setValue("clips");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Compose chain"))).toBe(true);
+    expect(texts.some((t) => t.includes("Create sequence"))).toBe(true);
 
     await input.setValue("history");
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Open history"))).toBe(true);
+
+    // Picking the entry deep-links into Create's sequence output (and closes).
+    await input.setValue("sequence");
+    const option = wrapper
+      .findAll("[role='option']")
+      .find((o) => o.text().includes("Create sequence"));
+    expect(option).toBeTruthy();
+    await option!.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/create?output=sequence");
     wrapper.unmount();
   });
 

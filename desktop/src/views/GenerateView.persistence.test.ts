@@ -9,7 +9,10 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import type { ModelEntry } from "../lib/api/types";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", async (importOriginal) => ({

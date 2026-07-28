@@ -15,7 +15,10 @@ import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
 import type { GenerateRequest, ModelEntry } from "../lib/api/types";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJson: vi.fn(() => Promise.resolve([])),

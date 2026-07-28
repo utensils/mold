@@ -27,7 +27,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 const placementPreview = vi.hoisted(() => vi.fn());
