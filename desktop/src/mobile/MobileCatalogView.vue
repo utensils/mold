@@ -67,10 +67,23 @@ interface DownloadRow {
   job: DownloadJob;
 }
 
-const props = defineProps<{
-  hosts: MobileHost[];
-  selectedHostId: string;
-}>();
+/** A deep link from another surface (today: Create's sequence empty state).
+ *  `token` re-fires the intent even when the KeepAlive-cached view is asked
+ *  for the same filters twice. */
+export interface CatalogFilterIntent {
+  mediaType: MediaType;
+  kind: CatalogKindFilter | "";
+  token: number;
+}
+
+const props = withDefaults(
+  defineProps<{
+    hosts: MobileHost[];
+    selectedHostId: string;
+    filterIntent?: CatalogFilterIntent | null;
+  }>(),
+  { filterIntent: null },
+);
 
 const emit = defineEmits<{
   (event: "select-host", hostId: string): void;
@@ -985,6 +998,24 @@ function showDiscoverModels(): void {
 }
 
 watch([query, source, family, kind, sort, includeNsfw], scheduleSearch);
+
+/**
+ * Apply a deep link's filters. Create's "Browse video models" must LAND on
+ * the Video + Models shelf — it used to only switch tabs and leave the user
+ * to rediscover the filters. Watching the token (not object identity) means
+ * the same intent re-applies after the user has since changed a chip.
+ */
+watch(
+  () => props.filterIntent?.token,
+  (token) => {
+    const intent = props.filterIntent;
+    if (!intent || token === undefined) return;
+    showDiscoverModels();
+    mediaType.value = intent.mediaType;
+    kind.value = intent.kind;
+  },
+  { immediate: true },
+);
 
 watch(mediaType, () => {
   if (source.value === "installed" || loading.value || mediaType.value === "all") return;

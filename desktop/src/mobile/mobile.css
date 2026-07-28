@@ -196,6 +196,34 @@ button {
   font-size: var(--text-caption);
 }
 
+/* Sequence output with no chain-capable checkpoint installed anywhere. */
+.mobile-sequence-empty {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  background: var(--bench);
+}
+
+.mobile-sequence-empty p {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+.mobile-sequence-row-error {
+  color: var(--stop);
+}
+
+.mobile-sequence-resume {
+  color: var(--safelight);
+}
+
+.mobile-sequence-dismiss {
+  color: var(--ink-3);
+}
+
 .mobile-shell.is-settings-open .mobile-content {
   padding-bottom: max(24px, env(safe-area-inset-bottom));
 }

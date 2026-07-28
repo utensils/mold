@@ -258,7 +258,8 @@ describe("MobileSequenceComposer guardrails", () => {
       "Two-stage LTX-2 dev checkpoints can't chain.",
     );
     expect(
-      (wrapper!.get("[data-test='mobile-generate-sequence']").element as HTMLButtonElement).disabled,
+      (wrapper!.get("[data-test='mobile-generate-sequence']").element as HTMLButtonElement)
+        .disabled,
     ).toBe(true);
     expect(wrapper!.emitted("submit")).toBeUndefined();
   });
@@ -282,6 +283,28 @@ describe("MobileSequenceComposer guardrails", () => {
     const audio = wrapper!.get("[data-test='mobile-sequence-audio'] input");
     await audio.setValue(true);
     expect(useSequenceDraftStore().enableAudio).toBe(true);
+  });
+
+  it("lends the host form's shared params a disclosure between the clips and Generate", () => {
+    wrapper = mount(MobileSequenceComposer, {
+      props: {
+        selectedModel: ltx2,
+        chainLimits: limits,
+        fps: 24,
+        submitting: false,
+        error: "",
+        settingsSummary: "768×512 · 24fps",
+      },
+      slots: { settings: '<div data-test="host-params">shared</div>' },
+    });
+    const settings = wrapper.get("[data-test='mobile-sequence-settings']");
+    expect(settings.text()).toContain("768×512 · 24fps");
+    expect(settings.find("[data-test='host-params']").exists()).toBe(true);
+  });
+
+  it("omits the settings disclosure when the host supplies no params", () => {
+    mountComposer();
+    expect(wrapper!.find("[data-test='mobile-sequence-settings']").exists()).toBe(false);
   });
 
   it("summarizes the timeline at the form's own frame rate", () => {

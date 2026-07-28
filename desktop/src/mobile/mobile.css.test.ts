@@ -162,9 +162,10 @@ describe("mobile sequence composer", () => {
     for (const selector of [".mobile-sequence-add", ".mobile-sequence-generate"]) {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const rule = composerComponent.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s"));
-      expect(Number(rule?.[1]?.match(/min-height:\s*(\d+)px/)?.[1]), selector).toBeGreaterThanOrEqual(
-        46,
-      );
+      expect(
+        Number(rule?.[1]?.match(/min-height:\s*(\d+)px/)?.[1]),
+        selector,
+      ).toBeGreaterThanOrEqual(46);
     }
   });
 });

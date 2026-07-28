@@ -39,8 +39,10 @@ const props = withDefaults(
     error?: string;
     /** A durable job is already starting on this host. */
     busy?: boolean;
+    /** Collapsed caption for the shared-parameter disclosure. */
+    settingsSummary?: string;
   }>(),
-  { submitting: false, error: "", busy: false },
+  { submitting: false, error: "", busy: false, settingsSummary: "" },
 );
 
 const emit = defineEmits<{ submit: [] }>();
@@ -86,14 +88,11 @@ const validation = computed(() =>
  *  inline instead of being filtered out of the picker without explanation. */
 const unsupportedReason = computed(() =>
   props.chainLimits && props.chainLimits.supports_sequence === false
-    ? (props.chainLimits.sequence_unsupported_reason ??
-      "This model can't render a clip sequence.")
+    ? (props.chainLimits.sequence_unsupported_reason ?? "This model can't render a clip sequence.")
     : null,
 );
 const blockingReason = computed(() => unsupportedReason.value ?? validation.value[0] ?? null);
-const submitError = computed(() =>
-  props.error ? friendlySequenceError(props.error) : "",
-);
+const submitError = computed(() => (props.error ? friendlySequenceError(props.error) : ""));
 
 const clipLabel = (index: number) => (index === 0 ? "opening" : `clip ${index + 1}`);
 
@@ -182,7 +181,11 @@ function submit(): void {
                 data-test="mobile-sequence-frames"
                 :disabled="locked"
               >
-                <option v-for="frames in frameOptionsFor(clip.frames)" :key="frames" :value="frames">
+                <option
+                  v-for="frames in frameOptionsFor(clip.frames)"
+                  :key="frames"
+                  :value="frames"
+                >
                   {{ frames }} frames · {{ (frames / fps).toFixed(1) }}s
                 </option>
               </select>
@@ -206,6 +209,21 @@ function submit(): void {
       {{ duration.frames }} frames · {{ duration.seconds.toFixed(1) }}s @ {{ fps }}fps
     </p>
 
+    <!-- Shared generation params are OWNED by the host form (one source of
+         truth for both outputs); the composer only lends them a place to sit
+         so the clips stay at the top of the phone's scroll. -->
+    <details
+      v-if="$slots.settings"
+      class="mobile-native-disclosure"
+      data-test="mobile-sequence-settings"
+    >
+      <summary>
+        <span>Sequence settings</span>
+        <small>{{ settingsSummary }}</small>
+      </summary>
+      <slot name="settings" />
+    </details>
+
     <label
       v-if="chainLimits?.supports_audio"
       class="mobile-sequence-check"
@@ -215,7 +233,12 @@ function submit(): void {
       Generate audio
     </label>
 
-    <p v-if="blockingReason" class="mobile-sequence-error" role="alert" data-test="mobile-sequence-error">
+    <p
+      v-if="blockingReason"
+      class="mobile-sequence-error"
+      role="alert"
+      data-test="mobile-sequence-error"
+    >
       {{ blockingReason }}
     </p>
     <p
