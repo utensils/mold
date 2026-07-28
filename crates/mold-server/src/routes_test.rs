@@ -618,6 +618,33 @@ mod tests {
         bytes
     }
 
+    fn minimal_mp4(marker: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom\x00\x00\x02\x00");
+        bytes.resize(8192, marker);
+        bytes
+    }
+
+    fn minimal_webp() -> Vec<u8> {
+        let image = image::RgbImage::from_fn(32, 32, |x, y| {
+            image::Rgb([
+                (x.wrapping_mul(17) ^ y.wrapping_mul(31)) as u8,
+                (x.wrapping_mul(29) ^ y.wrapping_mul(13)) as u8,
+                (x.wrapping_mul(7) ^ y.wrapping_mul(23)) as u8,
+            ])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::WebP,
+            )
+            .expect("encode WebP fixture");
+        bytes
+    }
+
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
             prompt: prompt.into(),
@@ -6716,6 +6743,190 @@ mod tests {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
                 | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn db_disabled_import_archive_is_authoritative_across_replay_restart_delete_and_reuse() {
+        // `Config::is_output_disabled` intentionally consults
+        // `MOLD_OUTPUT_DIR` on every call. Keep the shared environment lock
+        // for the full async lifecycle so the disabled-output route tests
+        // cannot transiently turn this gallery off underneath a replay.
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        fn state_for(dir: &std::path::Path) -> AppState {
+            let config = mold_core::Config {
+                output_dir: Some(dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            AppState::empty(
+                config,
+                crate::state::QueueHandle::new(tx),
+                AppState::empty_gpu_pool_for_test(),
+                200,
+            )
+        }
+
+        async fn import(
+            app: &axum::Router,
+            filename: &str,
+            metadata: &mold_core::OutputMetadata,
+            bytes: &[u8],
+        ) -> StatusCode {
+            app.clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(Some(metadata), bytes)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        async fn listed(app: &axum::Router) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(Request::get("/api/gallery").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_movie = minimal_mp4(0x11);
+        let webp = minimal_webp();
+        let mut movie_metadata = output_metadata("archived movie provenance");
+        movie_metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        let mut webp_metadata = output_metadata("archived WebP provenance");
+        webp_metadata.output_format = Some(mold_core::OutputFormat::Webp);
+
+        let state = state_for(dir.path());
+        let app = app_with_state(state);
+        assert_eq!(
+            import(&app, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            import(&app, "still.webp", &webp_metadata, &webp).await,
+            StatusCode::CREATED
+        );
+
+        let gallery = listed(&app).await;
+        let rows = gallery.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().any(|row| {
+                row["filename"] == "movie.mp4"
+                    && row["metadata"]["prompt"] == "archived movie provenance"
+                    && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+            }),
+            "movie archive metadata was not authoritative: {gallery}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["filename"] == "still.webp"
+                    && row["metadata"]["prompt"] == "archived WebP provenance"
+                    && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+            }),
+            "WebP archive metadata was not authoritative: {gallery}"
+        );
+        assert_eq!(
+            import(&app, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            import(&app, "still.webp", &webp_metadata, &webp).await,
+            StatusCode::OK
+        );
+
+        // A fresh state models a DB-disabled process restart. Startup recovery
+        // and the new router must retain the same committed archive authority.
+        let restarted_state = state_for(dir.path());
+        crate::batch_transaction::recover_transactions(
+            dir.path(),
+            &restarted_state.gallery_publication_gate,
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        let restarted = app_with_state(restarted_state);
+        let gallery = listed(&restarted).await;
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "movie.mp4"
+                && row["metadata"]["prompt"] == "archived movie provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+        assert_eq!(
+            import(&restarted, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::OK
+        );
+
+        let deleted = restarted
+            .clone()
+            .oneshot(
+                Request::delete("/api/gallery/image/movie.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let after_delete_state = state_for(dir.path());
+        crate::batch_transaction::recover_transactions(
+            dir.path(),
+            &after_delete_state.gallery_publication_gate,
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        let after_delete = app_with_state(after_delete_state);
+        let gallery = listed(&after_delete).await;
+        assert!(!gallery
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["filename"] == "movie.mp4"));
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "still.webp"
+                && row["metadata"]["prompt"] == "archived WebP provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+
+        let replacement_movie = minimal_mp4(0x22);
+        let mut replacement_metadata = output_metadata("replacement movie provenance");
+        replacement_metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        assert_eq!(
+            import(
+                &after_delete,
+                "movie.mp4",
+                &replacement_metadata,
+                &replacement_movie,
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        let gallery = listed(&after_delete).await;
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "movie.mp4"
+                && row["metadata"]["prompt"] == "replacement movie provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+        assert_eq!(
+            import(
+                &after_delete,
+                "movie.mp4",
+                &replacement_metadata,
+                &replacement_movie,
+            )
+            .await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

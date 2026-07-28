@@ -328,6 +328,7 @@ fn shim_build_response_and_cleanup(
             Some(generation_time_ms as i64),
             Some(db),
             Some(&state.events),
+            &state.gallery_publication_gate,
         );
         (filename, Some(metadata))
     } else {

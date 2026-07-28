@@ -1477,6 +1477,31 @@ injection covers reservation release, private-staging cleanup, cleanup
 journaling, retained-manifest archival, attempt removal, and attempt-directory
 fsync.
 
+Retained committed manifests are universal server gallery authority, not only
+a DB-disabled recovery aid. Atomic batches archive one manifest for all
+children; ordinary image/video generation and durable chain finalization
+archive an equivalent one-child committed manifest before releasing their
+no-replace filename reservation or emitting completion. For a batch, failure
+to persist that authority after entering `committing` is unresolved: the
+request cannot report success and startup recovery must settle it. An ordinary
+one-child save can instead remove and directory-fsync its still-unobserved
+public path while retaining the gallery writer and filename reservation; it
+then emits neither a gallery event nor a saved filename.
+
+Before serving, startup validates the version, canonical identity, child
+layout, final size, and SHA-256 of every retained committed manifest, finishes
+durable per-child deletion tombstones, heals an enabled SQLite metadata DB from
+the exact archived rows, and installs one in-memory archive index. Gallery
+listing and idempotent replay consult that cached index rather than rescanning
+or rehashing media per request. Delete fsyncs an exact child tombstone before
+unlinking the public file, then fsyncs the output directory; siblings in a
+multi-child manifest remain authoritative, and a later committed publication
+may safely reuse the deleted filename. Missing archived media is tombstoned at
+startup. Malformed, future-version, conflicting, or checksum-invalid retained
+authority fails startup closed rather than silently attaching suspect metadata
+or synthesizing a successful replay; deletion of the named damaged public file
+remains available after a valid archive was loaded.
+
 Each live v2 attempt holds two hashed authority files for its full lifetime:
 the predecessor v1 path under `.attempt-locks` and the current v2 path directly
 under the canonical gallery root. Both are opened and nonblockingly claimed in

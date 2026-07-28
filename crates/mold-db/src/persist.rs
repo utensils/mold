@@ -47,6 +47,24 @@ pub fn record_saved_output_returning(
     on_disk: &Path,
     params: &OutputRecordParams<'_>,
 ) -> Option<GenerationRecord> {
+    let rec = build_saved_output_record(output_dir, filename, on_disk, params);
+    if let Err(e) = db.upsert(&rec) {
+        tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
+        return None;
+    }
+    Some(rec)
+}
+
+/// Build the exact record for a saved output independently of SQLite.
+///
+/// Server-owned gallery archives use this before an optional DB upsert so
+/// DB-disabled and DB-enabled publications retain identical provenance.
+pub fn build_saved_output_record(
+    output_dir: &Path,
+    filename: &str,
+    on_disk: &Path,
+    params: &OutputRecordParams<'_>,
+) -> GenerationRecord {
     let mut rec = GenerationRecord::from_save(
         output_dir,
         filename,
@@ -59,11 +77,7 @@ pub fn record_saved_output_returning(
     rec.generation_time_ms = params.generation_time_ms;
     rec.hostname = hostname_string();
     rec.backend = params.backend.map(|s| s.to_string());
-    if let Err(e) = db.upsert(&rec) {
-        tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        return None;
-    }
-    Some(rec)
+    rec
 }
 
 /// Best-effort hostname for the `hostname` DB column. Falls back to `None`.

@@ -10,7 +10,7 @@ use anyhow::{bail, ensure, Context};
 use mold_db::GenerationRecord;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,8 @@ pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
 const MANIFEST_FILE: &str = "manifest.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const COMMITTED_DIR: &str = "committed";
+const DELETED_ARCHIVE_CHILDREN_DIR: &str = "deleted-archive-children";
+const DELETED_ARCHIVE_CHILD_VERSION: u32 = 1;
 const LEGACY_ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
 const ATTEMPT_LOCK_PREFIX: &str = ".mold-batch-attempt-";
 const ATTEMPT_LOCK_SUFFIX: &str = ".lock";
@@ -31,6 +33,7 @@ const DISK_SAFETY_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Default)]
 pub struct GalleryPublicationGate {
     inner: Arc<tokio::sync::RwLock<()>>,
+    committed_archive_index: Arc<std::sync::RwLock<Option<CommittedArchiveIndex>>>,
 }
 
 impl GalleryPublicationGate {
@@ -48,6 +51,74 @@ impl GalleryPublicationGate {
 
     pub fn blocking_read(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
         self.inner.blocking_read()
+    }
+
+    pub(crate) fn install_committed_archive_index(&self, index: CommittedArchiveIndex) {
+        *self
+            .committed_archive_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(index);
+    }
+
+    pub(crate) fn committed_archive_index(
+        &self,
+        output_dir: &Path,
+    ) -> anyhow::Result<CommittedArchiveIndex> {
+        if let Some(index) = self
+            .committed_archive_index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Ok(index);
+        }
+        let loaded = load_committed_archive_index(output_dir)?;
+        let mut current = self
+            .committed_archive_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(current.get_or_insert_with(|| loaded.clone()).clone())
+    }
+
+    fn record_committed_manifest(&self, manifest: &BatchAttemptManifest) -> anyhow::Result<()> {
+        let mut current = self
+            .committed_archive_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(index) = current.as_mut() else {
+            return Ok(());
+        };
+        for child in &manifest.children {
+            let identity = archived_child_identity(manifest, child)?;
+            match index.entries.get(&identity.final_name) {
+                Some(existing) if existing.identity == identity => continue,
+                Some(_) => anyhow::bail!(
+                    "multiple live committed archives claim gallery filename {}",
+                    identity.final_name
+                ),
+                None => {}
+            }
+            index.retired_names.remove(&identity.final_name);
+            index.entries.insert(
+                identity.final_name.clone(),
+                CommittedArchiveEntry {
+                    identity,
+                    record: child.record.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retire_committed_filename(&self, filename: &str) {
+        let mut current = self
+            .committed_archive_index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = current.as_mut() {
+            index.entries.remove(filename);
+            index.retired_names.insert(filename.to_owned());
+        }
     }
 }
 
@@ -121,6 +192,83 @@ pub struct BatchAttemptManifest {
     pub normalized_request: serde_json::Value,
     pub state: BatchManifestState,
     pub children: Vec<BatchManifestChild>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct ArchivedChildIdentity {
+    parent_id: String,
+    attempt_generation: u64,
+    child_index: usize,
+    final_name: String,
+    checksum_sha256: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeletedArchiveChild {
+    version: u32,
+    identity: ArchivedChildIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommittedArchiveEntry {
+    identity: ArchivedChildIdentity,
+    record: GenerationRecord,
+}
+
+impl CommittedArchiveEntry {
+    pub(crate) fn record(&self) -> &GenerationRecord {
+        &self.record
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CommittedArchiveIndex {
+    entries: BTreeMap<String, CommittedArchiveEntry>,
+    retired_names: BTreeSet<String>,
+}
+
+impl CommittedArchiveIndex {
+    pub(crate) fn get(&self, filename: &str) -> Option<&CommittedArchiveEntry> {
+        self.entries.get(filename)
+    }
+
+    pub(crate) fn is_retired(&self, filename: &str) -> bool {
+        self.retired_names.contains(filename) && !self.entries.contains_key(filename)
+    }
+
+    fn records(&self) -> impl Iterator<Item = &GenerationRecord> {
+        self.entries.values().map(|entry| &entry.record)
+    }
+
+    pub(crate) fn overlay_db_gallery(
+        &self,
+        rows: &[GenerationRecord],
+    ) -> Vec<mold_core::GalleryImage> {
+        let mut seen = BTreeSet::new();
+        let mut images = rows
+            .iter()
+            .filter_map(|row| {
+                if self.is_retired(&row.filename) {
+                    return None;
+                }
+                seen.insert(row.filename.clone());
+                Some(
+                    self.get(&row.filename)
+                        .map(|entry| entry.record.to_gallery_image())
+                        .unwrap_or_else(|| row.to_gallery_image()),
+                )
+            })
+            .collect::<Vec<_>>();
+        images.extend(
+            self.entries
+                .iter()
+                .filter(|(filename, _)| !seen.contains(*filename))
+                .map(|(_, entry)| entry.record.to_gallery_image()),
+        );
+        images.sort_by_key(|image| std::cmp::Reverse(image.timestamp));
+        images
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +550,7 @@ enum CommitFailpoint {
     ReservationsReleased,
     PrivateStagingCleaned,
     CleanupStartedJournal,
+    ArchiveWrite,
     ArchivedManifest,
     AttemptDirectoryRemoved,
     AttemptsDirectoryFsync,
@@ -786,7 +935,7 @@ impl BatchTransaction {
         }
         let guard = gate.write().await;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.commit_while_locked(&db)
+            self.commit_while_locked(gate, &db)
         }));
         match result {
             Ok(Ok(())) => Ok(()),
@@ -823,7 +972,7 @@ impl BatchTransaction {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.verify_owned_reservations()?;
             self.verify_all_committed()?;
-            self.commit_while_locked(&db)
+            self.commit_while_locked(gate, &db)
         }));
         match result {
             Ok(Ok(())) => Ok(()),
@@ -868,7 +1017,11 @@ impl BatchTransaction {
         Ok(())
     }
 
-    fn commit_while_locked(&mut self, db: &Arc<Option<mold_db::MetadataDb>>) -> anyhow::Result<()> {
+    fn commit_while_locked(
+        &mut self,
+        gate: &GalleryPublicationGate,
+        db: &Arc<Option<mold_db::MetadataDb>>,
+    ) -> anyhow::Result<()> {
         if self.manifest.state == BatchManifestState::Prepared {
             self.manifest.state = BatchManifestState::Committing;
             self.persist_manifest()?;
@@ -947,13 +1100,8 @@ impl BatchTransaction {
         self.inject_commit_crash(CommitFailpoint::ReservationsReleased);
         self.cleanup_private_staging();
         self.inject_commit_crash(CommitFailpoint::PrivateStagingCleaned);
-        if let Err(error) = self.archive_committed_attempt(db.is_none()) {
-            tracing::warn!(
-                attempt = %self.attempt_dir.display(),
-                %error,
-                "committed batch is durable but its recovery manifest could not be archived"
-            );
-        }
+        self.archive_committed_attempt(true)?;
+        gate.record_committed_manifest(&self.manifest)?;
         Ok(())
     }
 
@@ -1122,6 +1270,7 @@ impl BatchTransaction {
                     .context("committed manifest directory has no parent")?,
             )?;
             sync_dir(&archive_dir)?;
+            self.inject_commit_error(CommitFailpoint::ArchiveWrite)?;
             atomic_write_json(
                 &archive_dir.join(format!("{}.json", self.manifest.attempt_generation)),
                 &self.manifest,
@@ -1703,6 +1852,7 @@ pub async fn recover_transactions(
     sweep_reclaimable_attempt_authorities(&bookkeeping_lock)?;
     let root = output_dir.join(TRANSACTION_DIR);
     if !root.is_dir() {
+        gate.install_committed_archive_index(CommittedArchiveIndex::default());
         return Ok(RecoveryReport::default());
     }
     sweep_stale_reservations(&root)?;
@@ -1848,13 +1998,9 @@ pub async fn recover_transactions(
                 }
                 transaction.release_reservations();
                 transaction.cleanup_private_staging();
-                if let Err(error) = transaction.archive_committed_attempt(db.is_none()) {
-                    tracing::warn!(
-                        attempt = %transaction.attempt_dir.display(),
-                        %error,
-                        "could not archive recovered committed batch manifest"
-                    );
-                }
+                transaction
+                    .archive_committed_attempt(true)
+                    .context("archiving recovered committed batch authority")?;
             }
             BatchManifestState::Failed => {
                 ensure!(
@@ -1868,6 +2014,16 @@ pub async fn recover_transactions(
             }
         }
     }
+    let archive_index = reconcile_committed_archive_index(output_dir)
+        .context("validating committed gallery archive index during startup recovery")?;
+    if let Some(db) = db.as_ref() {
+        let records = archive_index.records().cloned().collect::<Vec<_>>();
+        if !records.is_empty() {
+            db.upsert_batch(&records)
+                .context("healing metadata DB from committed gallery archive")?;
+        }
+    }
+    gate.install_committed_archive_index(archive_index);
     Ok(report)
 }
 
@@ -3232,6 +3388,556 @@ fn committed_manifests_dir(output_dir: &Path, parent_id: &str) -> PathBuf {
         .join(TRANSACTION_DIR)
         .join(parent_id)
         .join(COMMITTED_DIR)
+}
+
+fn deleted_archive_children_dir(output_dir: &Path) -> PathBuf {
+    output_dir
+        .join(TRANSACTION_DIR)
+        .join(DELETED_ARCHIVE_CHILDREN_DIR)
+}
+
+#[derive(Debug, Default)]
+struct CommittedArchiveCatalog {
+    index: CommittedArchiveIndex,
+    retired: BTreeMap<String, Vec<ArchivedChildIdentity>>,
+    missing: Vec<ArchivedChildIdentity>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArchiveFinalValidation<'a> {
+    Strict,
+    ReconcileMissing,
+    DeleteTarget(&'a str),
+}
+
+impl ArchiveFinalValidation<'_> {
+    fn allows_missing(self, filename: &str) -> bool {
+        matches!(self, Self::ReconcileMissing)
+            || matches!(self, Self::DeleteTarget(target) if target == filename)
+    }
+
+    fn skips_content_validation(self, filename: &str) -> bool {
+        matches!(self, Self::DeleteTarget(target) if target == filename)
+    }
+}
+
+fn archived_child_identity(
+    manifest: &BatchAttemptManifest,
+    child: &BatchManifestChild,
+) -> anyhow::Result<ArchivedChildIdentity> {
+    ensure!(
+        manifest.state == BatchManifestState::Committed,
+        "only committed batch manifests can provide gallery archive authority"
+    );
+    let checksum_sha256 = child
+        .checksum_sha256
+        .clone()
+        .context("committed archive child has no checksum")?;
+    let size_bytes = child
+        .size_bytes
+        .context("committed archive child has no size")?;
+    Ok(ArchivedChildIdentity {
+        parent_id: manifest.parent_id.clone(),
+        attempt_generation: manifest.attempt_generation,
+        child_index: child.child_index,
+        final_name: child.final_name.clone(),
+        checksum_sha256,
+        size_bytes,
+    })
+}
+
+fn deleted_archive_child_digest(identity: &ArchivedChildIdentity) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.deleted-archive-child.v1\0");
+    digest.update((identity.parent_id.len() as u64).to_le_bytes());
+    digest.update(identity.parent_id.as_bytes());
+    digest.update(identity.attempt_generation.to_le_bytes());
+    digest.update((identity.child_index as u64).to_le_bytes());
+    digest.update((identity.final_name.len() as u64).to_le_bytes());
+    digest.update(identity.final_name.as_bytes());
+    digest.update((identity.checksum_sha256.len() as u64).to_le_bytes());
+    digest.update(identity.checksum_sha256.as_bytes());
+    digest.update(identity.size_bytes.to_le_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn deleted_archive_child_path(output_dir: &Path, identity: &ArchivedChildIdentity) -> PathBuf {
+    deleted_archive_children_dir(output_dir)
+        .join(format!("{}.json", deleted_archive_child_digest(identity)))
+}
+
+fn is_atomic_json_temp(name: &str) -> bool {
+    name.starts_with(&format!(".{MANIFEST_FILE}.tmp-"))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> anyhow::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path.parent().context("archive JSON path has no parent")?;
+    let name = path
+        .file_name()
+        .context("archive JSON path has no filename")?;
+    let name = CString::new(name.as_bytes()).context("archive JSON filename contains NUL")?;
+    let parent = open_unix_directory_without_symlinks(parent)?;
+    // SAFETY: `parent` owns a valid directory descriptor, `name` is
+    // NUL-terminated, and a successful descriptor is transferred once.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening no-follow archive JSON {}", path.display()));
+    }
+    // SAFETY: `fd` is a fresh owned descriptor returned by `openat`.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file(),
+        "archive JSON is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_no_follow(path: &Path) -> anyhow::Result<File> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "archive JSON is not a regular no-follow file: {}",
+        path.display()
+    );
+    let file = File::open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "archive JSON changed away from a regular file while opening: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+fn read_archive_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    serde_json::from_reader(open_regular_file_no_follow(path)?)
+        .with_context(|| format!("reading archive JSON {}", path.display()))
+}
+
+fn sorted_directory_entries(path: &Path) -> anyhow::Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn read_deleted_archive_children(
+    output_dir: &Path,
+) -> anyhow::Result<BTreeSet<ArchivedChildIdentity>> {
+    let deleted_dir = deleted_archive_children_dir(output_dir);
+    let metadata = match fs::symlink_metadata(&deleted_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeSet::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "deleted archive-child namespace is not a private directory: {}",
+        deleted_dir.display()
+    );
+
+    let mut deleted = BTreeSet::new();
+    for entry in sorted_directory_entries(&deleted_dir)? {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("deleted archive-child filename is not UTF-8"))?;
+        if is_atomic_json_temp(&name) {
+            continue;
+        }
+        let digest = name
+            .strip_suffix(".json")
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .with_context(|| {
+                format!(
+                    "unrecognized deleted archive-child entry {}; move it outside {} before restarting",
+                    entry.path().display(),
+                    TRANSACTION_DIR
+                )
+            })?;
+        let tombstone: DeletedArchiveChild = read_archive_json(&entry.path())?;
+        ensure!(
+            tombstone.version == DELETED_ARCHIVE_CHILD_VERSION,
+            "unsupported deleted archive-child version {} in {}",
+            tombstone.version,
+            entry.path().display()
+        );
+        validate_component(&tombstone.identity.parent_id, "archive parent id")?;
+        validate_component(&tombstone.identity.final_name, "archive final filename")?;
+        ensure!(
+            tombstone.identity.checksum_sha256.len() == 64
+                && tombstone
+                    .identity
+                    .checksum_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()),
+            "deleted archive child has an invalid checksum in {}",
+            entry.path().display()
+        );
+        ensure!(
+            digest == deleted_archive_child_digest(&tombstone.identity),
+            "deleted archive-child filename does not match its payload: {}",
+            entry.path().display()
+        );
+        ensure!(
+            deleted.insert(tombstone.identity),
+            "duplicate deleted archive-child authority: {}",
+            entry.path().display()
+        );
+    }
+    Ok(deleted)
+}
+
+fn read_committed_archive_catalog(
+    output_dir: &Path,
+    final_validation: ArchiveFinalValidation<'_>,
+) -> anyhow::Result<CommittedArchiveCatalog> {
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let root = canonical_output_dir.join(TRANSACTION_DIR);
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CommittedArchiveCatalog::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+        "batch transaction root is not a private directory: {}",
+        root.display()
+    );
+
+    let mut unconsumed_deletions = read_deleted_archive_children(&canonical_output_dir)?;
+    let mut catalog = CommittedArchiveCatalog::default();
+    for parent in sorted_directory_entries(&root)? {
+        let parent_name = match parent.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+        if matches!(
+            parent_name.as_str(),
+            "reservations" | LEGACY_ATTEMPT_LOCKS_DIR | DELETED_ARCHIVE_CHILDREN_DIR
+        ) {
+            continue;
+        }
+        let parent_metadata = fs::symlink_metadata(parent.path())?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            continue;
+        }
+        validate_component(&parent_name, "archive parent id")?;
+        let committed_dir = parent.path().join(COMMITTED_DIR);
+        let committed_metadata = match fs::symlink_metadata(&committed_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            committed_metadata.is_dir() && !committed_metadata.file_type().is_symlink(),
+            "committed archive namespace is not a private directory: {}",
+            committed_dir.display()
+        );
+
+        for archive in sorted_directory_entries(&committed_dir)? {
+            let name = archive
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("committed archive filename is not UTF-8"))?;
+            if is_atomic_json_temp(&name) {
+                continue;
+            }
+            let generation_name = name.strip_suffix(".json").with_context(|| {
+                format!(
+                    "unrecognized committed archive entry {}; move it outside {} before restarting",
+                    archive.path().display(),
+                    TRANSACTION_DIR
+                )
+            })?;
+            let generation = generation_name.parse::<u64>().with_context(|| {
+                format!(
+                    "committed archive generation is not numeric: {}",
+                    archive.path().display()
+                )
+            })?;
+            ensure!(
+                generation.to_string() == generation_name,
+                "committed archive generation is not canonical: {}",
+                archive.path().display()
+            );
+            let manifest: BatchAttemptManifest = read_archive_json(&archive.path())?;
+            ensure!(
+                manifest.parent_id == parent_name && manifest.attempt_generation == generation,
+                "committed archive path does not match its manifest identity: {}",
+                archive.path().display()
+            );
+            let expected_attempt =
+                attempt_dir(output_dir, &manifest.parent_id, manifest.attempt_generation);
+            validate_loaded_manifest(output_dir, &expected_attempt, &manifest)?;
+            ensure!(
+                manifest.state == BatchManifestState::Committed,
+                "archived batch manifest is not committed: {}",
+                archive.path().display()
+            );
+
+            for child in &manifest.children {
+                let identity = archived_child_identity(&manifest, child)?;
+                if unconsumed_deletions.remove(&identity) {
+                    catalog
+                        .retired
+                        .entry(identity.final_name.clone())
+                        .or_default()
+                        .push(identity);
+                    continue;
+                }
+
+                let final_path = canonical_output_dir.join(&identity.final_name);
+                let metadata = match fs::symlink_metadata(&final_path) {
+                    Ok(metadata) => metadata,
+                    Err(error)
+                        if final_validation.allows_missing(&identity.final_name)
+                            && error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ensure!(
+                            !catalog
+                                .missing
+                                .iter()
+                                .any(|missing| missing.final_name == identity.final_name),
+                            "multiple live committed archives claim missing gallery filename {}",
+                            identity.final_name
+                        );
+                        catalog
+                            .retired
+                            .entry(identity.final_name.clone())
+                            .or_default()
+                            .push(identity.clone());
+                        catalog.missing.push(identity);
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "committed archive child is missing: {}",
+                                final_path.display()
+                            )
+                        });
+                    }
+                };
+                if !final_validation.skips_content_validation(&identity.final_name) {
+                    ensure!(
+                        metadata.is_file()
+                            && !metadata.file_type().is_symlink()
+                            && metadata.len() == identity.size_bytes,
+                        "committed archive child size or type changed: {}",
+                        final_path.display()
+                    );
+                    ensure!(
+                        checksum_file(&final_path)? == identity.checksum_sha256,
+                        "committed archive child checksum changed: {}",
+                        final_path.display()
+                    );
+                }
+                let prior = catalog.index.entries.insert(
+                    identity.final_name.clone(),
+                    CommittedArchiveEntry {
+                        identity,
+                        record: child.record.clone(),
+                    },
+                );
+                ensure!(
+                    prior.is_none(),
+                    "multiple live committed archives claim gallery filename {}",
+                    child.final_name
+                );
+            }
+        }
+    }
+    ensure!(
+        unconsumed_deletions.is_empty(),
+        "deleted archive-child authority does not match any committed archive"
+    );
+
+    for (filename, retired) in &catalog.retired {
+        if catalog.index.entries.contains_key(filename) {
+            continue;
+        }
+        let final_path = canonical_output_dir.join(filename);
+        match fs::symlink_metadata(&final_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                catalog.index.retired_names.insert(filename.clone());
+            }
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && retired.iter().any(|identity| {
+                        identity.size_bytes == metadata.len()
+                            && checksum_file(&final_path)
+                                .is_ok_and(|checksum| checksum == identity.checksum_sha256)
+                    }) =>
+            {
+                catalog.index.retired_names.insert(filename.clone());
+            }
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(catalog)
+}
+
+pub(crate) fn load_committed_archive_index(
+    output_dir: &Path,
+) -> anyhow::Result<CommittedArchiveIndex> {
+    Ok(read_committed_archive_catalog(output_dir, ArchiveFinalValidation::Strict)?.index)
+}
+
+/// Persist one ordinary server publication into the same committed authority
+/// domain used by atomic batches. The public file must already be fsynced and
+/// remain hidden behind the gallery writer until this function succeeds.
+pub(crate) fn archive_ordinary_gallery_record(
+    output_dir: &Path,
+    final_path: &Path,
+    mut record: GenerationRecord,
+    gate: &GalleryPublicationGate,
+) -> anyhow::Result<GenerationRecord> {
+    validate_component(&record.filename, "ordinary gallery filename")?;
+    ensure!(
+        final_path == output_dir.join(&record.filename),
+        "ordinary gallery record path does not match its filename"
+    );
+    record.id = None;
+    record.output_dir = output_dir.to_string_lossy().into_owned();
+    record.stat_from_disk(final_path);
+    let size_bytes = fs::metadata(final_path)?.len();
+    ensure!(
+        record.file_size_bytes == Some(size_bytes as i64),
+        "ordinary gallery record stat does not match final size"
+    );
+    let parent_id = format!("gallery-output-{}", uuid::Uuid::new_v4());
+    let manifest = BatchAttemptManifest {
+        version: MANIFEST_VERSION,
+        parent_id: parent_id.clone(),
+        attempt_generation: 0,
+        normalized_request: serde_json::json!({"kind": "ordinary_gallery_publication"}),
+        state: BatchManifestState::Committed,
+        children: vec![BatchManifestChild {
+            child_index: 0,
+            staging_name: record.filename.clone(),
+            final_name: record.filename.clone(),
+            checksum_sha256: Some(checksum_file(final_path)?),
+            size_bytes: Some(size_bytes),
+            record: record.clone(),
+        }],
+    };
+    let archive_dir = committed_manifests_dir(output_dir, &parent_id);
+    fs::create_dir_all(&archive_dir)?;
+    let transaction_root = output_dir.join(TRANSACTION_DIR);
+    let parent_dir = transaction_root.join(&parent_id);
+    sync_dir(output_dir)?;
+    sync_dir(&transaction_root)?;
+    sync_dir(&parent_dir)?;
+    sync_dir(&archive_dir)?;
+    atomic_write_json(&archive_dir.join("0.json"), &manifest)?;
+    gate.record_committed_manifest(&manifest)?;
+    Ok(record)
+}
+
+/// Durably retire the exact committed archive child currently claiming
+/// `filename`. The tombstone precedes final-file deletion, so startup can
+/// complete a crash-interrupted delete without discarding sibling metadata.
+pub(crate) fn tombstone_committed_archive_filename(
+    output_dir: &Path,
+    filename: &str,
+) -> anyhow::Result<bool> {
+    // Deletion must remain an escape hatch for a public file that was
+    // modified after its archive was validated. Validate every manifest and
+    // every unrelated child strictly, but use the archived identity (not the
+    // damaged current bytes) to durably retire this exact target.
+    let catalog =
+        read_committed_archive_catalog(output_dir, ArchiveFinalValidation::DeleteTarget(filename))?;
+    let identity = catalog
+        .index
+        .get(filename)
+        .map(|entry| entry.identity.clone())
+        .or_else(|| {
+            catalog
+                .missing
+                .iter()
+                .find(|identity| identity.final_name == filename)
+                .cloned()
+        });
+    let Some(identity) = identity else {
+        return Ok(false);
+    };
+    let tombstone = DeletedArchiveChild {
+        version: DELETED_ARCHIVE_CHILD_VERSION,
+        identity: identity.clone(),
+    };
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    atomic_write_json(
+        &deleted_archive_child_path(&canonical_output_dir, &identity),
+        &tombstone,
+    )?;
+    Ok(true)
+}
+
+/// Finish any delete whose durable archive-child tombstone reached disk
+/// before the process exited, then return the one validated current index.
+pub(crate) fn reconcile_committed_archive_index(
+    output_dir: &Path,
+) -> anyhow::Result<CommittedArchiveIndex> {
+    let catalog =
+        read_committed_archive_catalog(output_dir, ArchiveFinalValidation::ReconcileMissing)?;
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    for identity in &catalog.missing {
+        let tombstone = DeletedArchiveChild {
+            version: DELETED_ARCHIVE_CHILD_VERSION,
+            identity: identity.clone(),
+        };
+        atomic_write_json(
+            &deleted_archive_child_path(&canonical_output_dir, identity),
+            &tombstone,
+        )?;
+    }
+    let catalog = if catalog.missing.is_empty() {
+        catalog
+    } else {
+        read_committed_archive_catalog(output_dir, ArchiveFinalValidation::Strict)?
+    };
+    let mut removed = false;
+    for filename in &catalog.index.retired_names {
+        let path = output_dir.join(filename);
+        match fs::remove_file(&path) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("finishing archived gallery delete {}", path.display())
+                });
+            }
+        }
+    }
+    if removed {
+        sync_dir(output_dir)?;
+    }
+    load_committed_archive_index(output_dir)
 }
 
 fn reservation_path(output_dir: &Path, final_name: &str) -> PathBuf {
@@ -5800,6 +6506,306 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_enabled_restart_heals_exact_rows_from_a_db_disabled_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = record("archived.webp", 7);
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "db-disabled-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![original.clone()],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"archived webp bytes").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(transaction);
+
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let restarted_gate = GalleryPublicationGate::default();
+        recover_transactions(dir.path(), &restarted_gate, db.clone())
+            .await
+            .unwrap();
+
+        let healed = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "archived.webp")
+            .unwrap()
+            .expect("archive row is restored when SQLite is enabled");
+        assert_eq!(healed.metadata, original.metadata);
+        assert!(!healed.metadata_synthetic);
+        assert_eq!(
+            restarted_gate
+                .committed_archive_index(dir.path())
+                .unwrap()
+                .get("archived.webp")
+                .unwrap()
+                .record()
+                .metadata,
+            original.metadata
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_archive_index_fails_closed_on_future_noncommitted_and_malformed_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(transaction);
+
+        let archive = committed_manifests_dir(dir.path(), "parent").join("0.json");
+        let original: BatchAttemptManifest = read_archive_json(&archive).unwrap();
+
+        let mut future = original.clone();
+        future.version = MANIFEST_VERSION + 1;
+        atomic_write_json(&archive, &future).unwrap();
+        let error = load_committed_archive_index(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unsupported batch manifest version"),
+            "future archive rejection was not actionable: {error:#}"
+        );
+
+        let mut noncommitted = original.clone();
+        noncommitted.state = BatchManifestState::Prepared;
+        atomic_write_json(&archive, &noncommitted).unwrap();
+        let error = load_committed_archive_index(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("archived batch manifest is not committed")
+                || format!("{error:#}").contains("non-staging/non-failed"),
+            "noncommitted archive rejection was not actionable: {error:#}"
+        );
+
+        fs::write(&archive, b"{malformed").unwrap();
+        let error = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("reading archive JSON"),
+            "startup did not fail closed on malformed archive authority: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_archive_index_ignores_active_attempts_and_rejects_duplicate_live_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut committed = BatchTransaction::begin(
+            dir.path(),
+            "committed-parent",
+            0,
+            serde_json::json!({}),
+            vec![record("same.png", 0)],
+        )
+        .unwrap();
+        committed.stage_bytes(0, b"committed").unwrap();
+        committed.mark_prepared().unwrap();
+        committed
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(committed);
+
+        let active = BatchTransaction::begin(
+            dir.path(),
+            "active-parent",
+            0,
+            serde_json::json!({}),
+            vec![record("active.png", 0)],
+        )
+        .unwrap();
+        let index = load_committed_archive_index(dir.path()).unwrap();
+        assert!(index.get("same.png").is_some());
+        assert!(
+            index.get("active.png").is_none(),
+            "an unpublished active attempt entered committed archive authority"
+        );
+        drop(active);
+
+        let original_archive =
+            committed_manifests_dir(dir.path(), "committed-parent").join("0.json");
+        let mut duplicate: BatchAttemptManifest = read_archive_json(&original_archive).unwrap();
+        duplicate.parent_id = "duplicate-parent".into();
+        let duplicate_archive =
+            committed_manifests_dir(dir.path(), "duplicate-parent").join("0.json");
+        atomic_write_json(&duplicate_archive, &duplicate).unwrap();
+        let error = load_committed_archive_index(dir.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("multiple live committed archives claim"),
+            "duplicate archive authority was not rejected: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_child_tombstone_finishes_delete_preserves_sibling_and_allows_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "first-parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0), record("sibling.png", 1)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"first bytes").unwrap();
+        transaction.stage_bytes(1, b"sibling bytes").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(transaction);
+
+        assert!(tombstone_committed_archive_filename(dir.path(), "one.png").unwrap());
+        assert!(
+            dir.path().join("one.png").is_file(),
+            "fixture must model a crash after tombstone fsync and before final unlink"
+        );
+        let index = reconcile_committed_archive_index(dir.path()).unwrap();
+        assert!(!dir.path().join("one.png").exists());
+        assert!(index.get("one.png").is_none());
+        assert!(index.is_retired("one.png"));
+        assert_eq!(
+            index.get("sibling.png").unwrap().record().metadata.prompt,
+            "prompt 1"
+        );
+
+        let mut replacement = BatchTransaction::begin(
+            dir.path(),
+            "replacement-parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 9)],
+        )
+        .unwrap();
+        assert_eq!(replacement.manifest.children[0].final_name, "one.png");
+        replacement.stage_bytes(0, b"replacement bytes").unwrap();
+        replacement.mark_prepared().unwrap();
+        replacement
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(replacement);
+
+        let index = load_committed_archive_index(dir.path()).unwrap();
+        assert_eq!(
+            index.get("one.png").unwrap().record().metadata.prompt,
+            "prompt 9"
+        );
+        assert_eq!(
+            index.get("sibling.png").unwrap().record().metadata.prompt,
+            "prompt 1"
+        );
+        assert!(!index.is_retired("one.png"));
+    }
+
+    #[tokio::test]
+    async fn startup_tombstones_an_archived_file_removed_outside_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("removed.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"removed bytes").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(transaction);
+        fs::remove_file(dir.path().join("removed.png")).unwrap();
+        sync_dir(dir.path()).unwrap();
+
+        let gate = GalleryPublicationGate::default();
+        recover_transactions(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.get("removed.png").is_none());
+        assert!(index.is_retired("removed.png"));
+        assert_eq!(
+            fs::read_dir(deleted_archive_children_dir(dir.path()))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.ends_with(".json"))
+                })
+                .count(),
+            1,
+            "startup must durably retire externally missing archive authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_can_tombstone_an_archived_file_after_its_bytes_are_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("damaged.png", 0), record("sibling.png", 1)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"original bytes").unwrap();
+        transaction.stage_bytes(1, b"sibling bytes").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        drop(transaction);
+
+        fs::write(dir.path().join("damaged.png"), b"tampered").unwrap();
+        sync_dir(dir.path()).unwrap();
+        assert!(
+            tombstone_committed_archive_filename(dir.path(), "damaged.png").unwrap(),
+            "the archived identity must remain deletable after public-byte damage"
+        );
+        fs::remove_file(dir.path().join("damaged.png")).unwrap();
+        sync_dir(dir.path()).unwrap();
+
+        let gate = GalleryPublicationGate::default();
+        recover_transactions(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.get("damaged.png").is_none());
+        assert!(index.is_retired("damaged.png"));
+        assert_eq!(
+            index.get("sibling.png").unwrap().record().metadata.prompt,
+            "prompt 1"
+        );
+    }
+
+    #[tokio::test]
     async fn collision_is_frozen_without_overwriting_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("same.png"), b"existing").unwrap();
@@ -6397,6 +7403,7 @@ mod tests {
             CommitFailpoint::ReservationsReleased,
             CommitFailpoint::PrivateStagingCleaned,
             CommitFailpoint::CleanupStartedJournal,
+            CommitFailpoint::ArchiveWrite,
             CommitFailpoint::AttemptDirectoryRemoved,
             CommitFailpoint::AttemptsDirectoryFsync,
         ];

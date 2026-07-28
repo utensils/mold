@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::Write as _;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use base64::Engine as _;
 use mold_core::{
     ImageData, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
@@ -107,6 +108,7 @@ pub(crate) fn save_image_to_dir(
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
 ) {
+    let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
     save_image_to_dir_with_suffix(
         dir,
         img,
@@ -117,6 +119,7 @@ pub(crate) fn save_image_to_dir(
         generation_time_ms,
         db,
         events,
+        &gallery_gate,
     );
 }
 
@@ -131,6 +134,7 @@ fn save_image_to_dir_with_suffix(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -146,31 +150,56 @@ fn save_image_to_dir_with_suffix(
             filename.trim_end_matches(&format!(".{ext}"))
         );
     }
-    let (filename, path) = match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
-        Ok(saved) => saved,
-        Err(e) => {
-            tracing::warn!("failed to save image to {}: {e}", dir.display());
-            return None;
-        }
-    };
+    let (filename, path, reservation) =
+        match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
+            Ok(saved) => saved,
+            Err(e) => {
+                tracing::warn!("failed to save image to {}: {e}", dir.display());
+                return None;
+            }
+        };
     tracing::info!("saved image to {}", path.display());
-    let mut image_row = None;
-    if let (Some(db), Some(meta)) = (db, metadata) {
-        image_row = mold_db::persist::record_saved_output_returning(
-            db,
+    let image_row = if let Some(meta) = metadata {
+        let params = mold_db::persist::OutputRecordParams {
+            format: img.format,
+            metadata: meta,
+            source: RecordSource::Server,
+            generation_time_ms,
+            backend: Some(mold_inference::compiled_backend_label()),
+        };
+        let record = mold_db::persist::build_saved_output_record(dir, &filename, &path, &params);
+        let record = match crate::batch_transaction::archive_ordinary_gallery_record(
             dir,
-            &filename,
             &path,
-            &mold_db::persist::OutputRecordParams {
-                format: img.format,
-                metadata: meta,
-                source: RecordSource::Server,
-                generation_time_ms,
-                backend: Some(mold_inference::compiled_backend_label()),
-            },
-        )
-        .map(|rec| Box::new(rec.to_gallery_image()));
-    }
+            record,
+            gallery_gate,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                drop(reservation);
+                tracing::error!(
+                    file = %path.display(),
+                    %error,
+                    "gallery archive failed; rolled back unpublished image"
+                );
+                return None;
+            }
+        };
+        if let Some(db) = db {
+            if let Err(error) = db.upsert(&record) {
+                tracing::warn!(
+                    "metadata DB upsert failed for {}: {error:#}",
+                    record.filename
+                );
+            }
+        }
+        Some(Box::new(record.to_gallery_image()))
+    } else {
+        None
+    };
+    drop(reservation);
     // Emit even without a DB row — `image: None` tells clients to refetch
     // `/api/gallery` instead of inserting in place.
     if let Some(events) = events {
@@ -203,6 +232,7 @@ pub(crate) fn save_generated_image_outputs(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> SavedOutputNames {
     let mut names = SavedOutputNames::default();
     if let Some(original) = original {
@@ -218,6 +248,7 @@ pub(crate) fn save_generated_image_outputs(
             generation_time_ms,
             db,
             events,
+            gallery_gate,
         );
     }
     let mut output_metadata = metadata.clone();
@@ -232,6 +263,7 @@ pub(crate) fn save_generated_image_outputs(
         generation_time_ms,
         db,
         events,
+        gallery_gate,
     );
     names
 }
@@ -256,6 +288,7 @@ pub(crate) fn save_video_to_dir(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -264,33 +297,53 @@ pub(crate) fn save_video_to_dir(
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
     let desired = mold_core::default_output_filename(model, ts, ext, 1, 0);
-    let (filename, path) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
+    let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
         Ok(saved) => saved,
         Err(e) => {
             tracing::error!("failed to save video to {}: {e}", dir.display());
             return None;
         }
     };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let record = mold_db::persist::build_saved_output_record(dir, &filename, &path, &params);
+    let record = match crate::batch_transaction::archive_ordinary_gallery_record(
+        dir,
+        &path,
+        record,
+        gallery_gate,
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+            drop(reservation);
+            tracing::error!(
+                file = %path.display(),
+                %error,
+                "gallery archive failed; rolled back unpublished video"
+            );
+            return None;
+        }
+    };
+    drop(reservation);
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
     }
-    let mut image_row = None;
     if let Some(db) = db {
-        image_row = mold_db::persist::record_saved_output_returning(
-            db,
-            dir,
-            &filename,
-            &path,
-            &mold_db::persist::OutputRecordParams {
-                format,
-                metadata,
-                source: RecordSource::Server,
-                generation_time_ms,
-                backend: Some(mold_inference::compiled_backend_label()),
-            },
-        )
-        .map(|rec| Box::new(rec.to_gallery_image()));
+        if let Err(error) = db.upsert(&record) {
+            tracing::warn!(
+                "metadata DB upsert failed for {}: {error:#}",
+                record.filename
+            );
+        }
     }
+    let image_row = Some(Box::new(record.to_gallery_image()));
     if let Some(events) = events {
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
@@ -315,6 +368,7 @@ pub(crate) fn save_video_to_dir_named(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> anyhow::Result<String> {
     let filename_path = std::path::Path::new(filename);
     if filename_path.components().count() != 1
@@ -327,7 +381,7 @@ pub(crate) fn save_video_to_dir_named(
     }
     std::fs::create_dir_all(dir)?;
     let path = dir.join(filename);
-    match std::fs::OpenOptions::new()
+    let created = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
@@ -339,6 +393,7 @@ pub(crate) fn save_video_to_dir_named(
                 return Err(error.into());
             }
             crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
+            true
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing = std::fs::read(&path)?;
@@ -348,33 +403,53 @@ pub(crate) fn save_video_to_dir_named(
                     path.display()
                 );
             }
+            false
         }
         Err(error) => return Err(error.into()),
-    }
-
-    let image_row = match db {
-        Some(db) => Some(
-            mold_db::persist::record_saved_output_returning(
-                db,
-                dir,
-                filename,
-                &path,
-                &mold_db::persist::OutputRecordParams {
-                    format,
-                    metadata,
-                    source: RecordSource::Server,
-                    generation_time_ms,
-                    backend: Some(mold_inference::compiled_backend_label()),
-                },
-            )
-            .ok_or_else(|| anyhow::anyhow!("recording durable chain gallery metadata failed"))?,
-        ),
-        None => None,
     };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let index = gallery_gate.committed_archive_index(dir)?;
+    let record = if let Some(existing) = index.get(filename) {
+        anyhow::ensure!(
+            existing.record().format == format
+                && existing.record().metadata == *metadata
+                && !existing.record().metadata_synthetic,
+            "gallery replay target '{}' exists with different archived metadata",
+            path.display()
+        );
+        existing.record().clone()
+    } else {
+        let record = mold_db::persist::build_saved_output_record(dir, filename, &path, &params);
+        match crate::batch_transaction::archive_ordinary_gallery_record(
+            dir,
+            &path,
+            record,
+            gallery_gate,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                }
+                return Err(error).context("archiving durable chain gallery publication");
+            }
+        }
+    };
+    if let Some(db) = db {
+        db.upsert(&record)
+            .context("recording durable chain gallery metadata")?;
+    }
     if let Some(events) = events {
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.to_string(),
-            image: image_row.map(|record| Box::new(record.to_gallery_image())),
+            image: Some(Box::new(record.to_gallery_image())),
         });
     }
     Ok(filename.to_string())
@@ -384,7 +459,11 @@ fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,
     bytes: &[u8],
-) -> anyhow::Result<(String, std::path::PathBuf)> {
+) -> anyhow::Result<(
+    String,
+    std::path::PathBuf,
+    crate::batch_transaction::GalleryNameReservation,
+)> {
     write_gallery_bytes_no_replace_with_directory_sync(
         dir,
         desired,
@@ -398,7 +477,11 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     desired: &str,
     bytes: &[u8],
     sync_directory: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
-) -> anyhow::Result<(String, std::path::PathBuf)> {
+) -> anyhow::Result<(
+    String,
+    std::path::PathBuf,
+    crate::batch_transaction::GalleryNameReservation,
+)> {
     let reservation = crate::batch_transaction::reserve_gallery_final_name_with_directory_sync(
         dir,
         desired,
@@ -416,8 +499,7 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     sync_directory(dir)?;
-    drop(reservation);
-    Ok((filename, path))
+    Ok((filename, path, reservation))
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -1419,6 +1501,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
+                let gallery_gate = state.gallery_publication_gate.clone();
                 let save_task = if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
                     let video_gif_preview = video.gif_preview.clone();
@@ -1435,6 +1518,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
+                            &gallery_gate,
                         ),
                         original: None,
                     })
@@ -1453,6 +1537,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
+                            &gallery_gate,
                         )
                     })
                 };
@@ -3384,7 +3469,7 @@ mod tests {
         std::fs::create_dir_all(&reservations).unwrap();
         std::fs::write(reservations.join("same.png.reserve"), b"reserved").unwrap();
 
-        let (filename, path) =
+        let (filename, path, _reservation) =
             write_gallery_bytes_no_replace(tmp.path(), "same.png", b"ordinary").unwrap();
 
         assert_eq!(filename, "same-1.png");
@@ -3408,7 +3493,7 @@ mod tests {
             )
         };
 
-        let (filename, path) = write_gallery_bytes_no_replace_with_directory_sync(
+        let (filename, path, _reservation) = write_gallery_bytes_no_replace_with_directory_sync(
             tmp.path(),
             "ordinary.png",
             b"generated output",
@@ -3435,7 +3520,10 @@ mod tests {
 
         save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None, None);
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         let name = entries[0]
             .as_ref()
             .unwrap()
@@ -3490,6 +3578,7 @@ mod tests {
         upscaled.width = 2048;
         upscaled.height = 2048;
         upscaled.data = vec![4, 5, 6];
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_generated_image_outputs(
             tmp.path(),
@@ -3501,6 +3590,7 @@ mod tests {
             Some(1234),
             Some(&db),
             None,
+            &gallery_gate,
         );
 
         let rows = db.list(Some(tmp.path())).unwrap();
@@ -3543,7 +3633,13 @@ mod tests {
 
         // File still on disk, but no DB row recorded — both gates must hold
         // for the upsert to fire.
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
         assert_eq!(db.list(None).unwrap().len(), 0);
     }
 
@@ -3649,6 +3745,7 @@ mod tests {
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
         let events = crate::events::EventBroadcaster::new();
         let mut rx = events.subscribe();
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -3660,6 +3757,7 @@ mod tests {
             Some(5000),
             Some(&db),
             Some(&events),
+            &gallery_gate,
         );
 
         match rx.try_recv().unwrap() {
@@ -3683,6 +3781,7 @@ mod tests {
         // Minimal MP4-ish bytes: an `ftyp` box header. The helper writes
         // bytes verbatim — content validation happens at gallery scan time.
         let bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom".to_vec();
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -3694,9 +3793,13 @@ mod tests {
             Some(5000),
             Some(&db),
             None,
+            &gallery_gate,
         );
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
             .as_ref()
@@ -3713,6 +3816,12 @@ mod tests {
         assert_eq!(rows[0].metadata.frames, Some(25));
         assert_eq!(rows[0].metadata.fps, Some(24));
         assert_eq!(rows[0].generation_time_ms, Some(5000));
+        let archived = gallery_gate.committed_archive_index(tmp.path()).unwrap();
+        assert_eq!(
+            archived.get(&name).unwrap().record().metadata.frames,
+            Some(25),
+            "DB-enabled publications must retain archive authority for a later DB-disabled restart"
+        );
     }
 
     #[test]
@@ -3723,6 +3832,7 @@ mod tests {
         let meta = OutputMetadata::from_generate_request(&req, 99, None, "test-version");
         let filename = "chain-01TEST-take-1.mp4";
         let bytes = b"stable chain bytes";
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         for _ in 0..2 {
             assert_eq!(
@@ -3735,13 +3845,20 @@ mod tests {
                     None,
                     Some(&db),
                     None,
+                    &gallery_gate,
                 )
                 .unwrap(),
                 filename
             );
         }
 
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
         let rows = db.list(Some(tmp.path())).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].filename, filename);
@@ -3753,6 +3870,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let req = fake_request("ltx-video:fp16");
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -3764,9 +3882,13 @@ mod tests {
             None,
             None,
             None,
+            &gallery_gate,
         );
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
             .as_ref()
@@ -3775,12 +3897,35 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(name.ends_with(".gif"), "{name}");
+        let archived = gallery_gate.committed_archive_index(tmp.path()).unwrap();
+        assert_eq!(archived.get(&name).unwrap().record().metadata, meta);
+
+        let restarted_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(crate::batch_transaction::recover_transactions(
+                tmp.path(),
+                &restarted_gate,
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(
+            restarted_gate
+                .committed_archive_index(tmp.path())
+                .unwrap()
+                .get(&name)
+                .unwrap()
+                .record()
+                .metadata,
+            meta
+        );
     }
 
     #[test]
     fn save_video_to_dir_invalid_path_does_not_panic() {
         let req = fake_request("ltx-video:fp16");
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
         save_video_to_dir(
             std::path::Path::new("/dev/null/nope"),
             b"x",
@@ -3791,6 +3936,7 @@ mod tests {
             None,
             None,
             None,
+            &gallery_gate,
         );
     }
 

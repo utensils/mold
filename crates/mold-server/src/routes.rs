@@ -3858,6 +3858,7 @@ async fn import_gallery_file(
     let db = state.metadata_db.clone();
     let events = state.events.clone();
     let db_for_existing = db.clone();
+    let archive_for_existing = state.gallery_publication_gate.clone();
     let filename_for_task = filename.clone();
     let dir_for_task = output_dir.clone();
     let staged_path = transaction.staging_path(0).map_err(|error| {
@@ -3913,10 +3914,45 @@ async fn import_gallery_file(
         let recorded_missing = recorded.is_none();
         let recorded_descriptor =
             recorded.map(|record| (record.metadata, record.metadata_synthetic));
+        let archive_index = match archive_for_existing.committed_archive_index(&dir_for_task) {
+            Ok(index) => index,
+            Err(error) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::internal(format!(
+                    "failed to validate committed gallery metadata: {error:#}"
+                )));
+            }
+        };
+        let archived_descriptor = archive_index.get(&filename_for_task).map(|entry| {
+            (
+                entry.record().metadata.clone(),
+                entry.record().metadata_synthetic,
+            )
+        });
         let can_backfill_missing_row = recorded_missing && embedded.is_some();
         let embedded_descriptor = embedded.map(|metadata| (metadata, false));
+        let available_descriptors = [
+            embedded_descriptor.as_ref(),
+            archived_descriptor.as_ref(),
+            recorded_descriptor.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if available_descriptors
+            .windows(2)
+            .any(|pair| pair[0] != pair[1])
+        {
+            let _ = transaction.rollback_unpublished();
+            return Err(ApiError::with_code(
+                "existing gallery metadata authorities disagree",
+                "GALLERY_METADATA_CONFLICT",
+                StatusCode::CONFLICT,
+            ));
+        }
         let authoritative = embedded_descriptor
             .as_ref()
+            .or(archived_descriptor.as_ref())
             .or(recorded_descriptor.as_ref());
         match authoritative {
             Some((metadata, synthetic))
@@ -4122,27 +4158,35 @@ async fn list_gallery(
     if state.metadata_db.is_some() {
         let db_arc = state.metadata_db.clone();
         let dir = output_dir.clone();
+        let gallery_archive = state.gallery_publication_gate.clone();
         let listed = tokio::task::spawn_blocking(move || {
-            db_arc
+            let rows = db_arc
                 .as_ref()
                 .as_ref()
                 .map(|db| db.list(Some(&dir)))
-                .transpose()
+                .transpose()?;
+            let archive = gallery_archive.committed_archive_index(&dir)?;
+            Ok::<_, anyhow::Error>((rows, archive))
         })
         .await
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
-        if let Some(rows) = listed {
+        if let (Some(rows), archive) = listed {
             if !rows.is_empty() {
-                let images = rows.iter().map(|r| r.to_gallery_image()).collect();
+                let images = archive.overlay_db_gallery(&rows);
                 return Ok(Json(images));
             }
         }
     }
 
-    let images = tokio::task::spawn_blocking(move || scan_gallery_dir(&output_dir))
-        .await
-        .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?;
+    let gallery_archive = state.gallery_publication_gate.clone();
+    let images = tokio::task::spawn_blocking(move || {
+        let archive_index = gallery_archive.committed_archive_index(&output_dir)?;
+        Ok::<_, anyhow::Error>(scan_gallery_dir_with_archive(&output_dir, &archive_index))
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("gallery archive validation failed: {e:#}")))?;
 
     Ok(Json(images))
 }
@@ -4355,14 +4399,28 @@ async fn delete_gallery_image(
     // call — run the whole batch on the blocking pool so a slow disk can't
     // stall an async worker thread mid-generation.
     let db = state.metadata_db.clone();
+    let archive = state.gallery_publication_gate.clone();
     let name = clean_name.clone();
     let dir = output_dir.clone();
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let path = dir.join(&name);
+        crate::batch_transaction::tombstone_committed_archive_filename(&dir, &name).map_err(
+            |error| {
+                ApiError::internal(format!(
+                    "failed to retire committed gallery metadata before delete: {error:#}"
+                ))
+            },
+        )?;
         if path.is_file() {
             std::fs::remove_file(&path)
                 .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
+            crate::batch_transaction::sync_ordinary_gallery_directory(&dir).map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to make gallery deletion durable: {error:#}"
+                ))
+            })?;
         }
+        archive.retire_committed_filename(&name);
 
         // Also remove server-side thumbnail (both legacy no-suffix and current
         // `.png`-suffixed cache layouts) and the animated preview sidecar so
@@ -4762,13 +4820,30 @@ fn thumbnail_warmup_enabled() -> bool {
 /// that passes the check can still be corrupt mid-stream (e.g. broken
 /// IDAT CRC). Those fall through to the thumbnail endpoint which serves
 /// the raw bytes as a last resort.
+#[cfg(test)]
 fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
+    scan_gallery_dir_with_archive(
+        dir,
+        &crate::batch_transaction::CommittedArchiveIndex::default(),
+    )
+}
+
+fn scan_gallery_dir_with_archive(
+    dir: &std::path::Path,
+    archive_index: &crate::batch_transaction::CommittedArchiveIndex,
+) -> Vec<mold_core::GalleryImage> {
     let mut images: Vec<mold_core::GalleryImage> = mold_db::scan::scan_output_dir(dir)
         .filter_map(|item| match item {
             mold_db::scan::ScanItem::Valid(file) => Some(file),
             _ => None,
         })
-        .map(|file| {
+        .filter_map(|file| {
+            if archive_index.is_retired(&file.filename) {
+                return None;
+            }
+            if let Some(entry) = archive_index.get(&file.filename) {
+                return Some(entry.record().to_gallery_image());
+            }
             let timestamp = file.timestamp_secs();
             let size_bytes = file.size_u64();
             let (metadata, synthetic) = mold_db::metadata_io::read_or_synthesize(
@@ -4777,14 +4852,14 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 &file.filename,
                 timestamp,
             );
-            mold_core::GalleryImage {
+            Some(mold_core::GalleryImage {
                 filename: file.filename,
                 metadata,
                 timestamp,
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
                 metadata_synthetic: synthetic,
-            }
+            })
         })
         .collect();
 

@@ -9289,7 +9289,10 @@ mod tests {
         assert_eq!(queue.pending(), 0);
         assert!(state.job_registry.snapshot().entries.is_empty());
         assert!(coordinator.leases.is_empty());
-        let files_before = std::fs::read_dir(&output_dir).unwrap().count();
+        let files_before = std::fs::read_dir(&output_dir)
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .count();
         assert_eq!(files_before, 1, "F0 is published exactly once");
         let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
@@ -9315,7 +9318,10 @@ mod tests {
             &mut immediate,
         );
         assert_eq!(
-            std::fs::read_dir(&output_dir).unwrap().count(),
+            std::fs::read_dir(&output_dir)
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
             files_before,
             "a late completion cannot publish or settle the parent twice"
         );

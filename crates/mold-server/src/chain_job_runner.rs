@@ -2093,6 +2093,7 @@ fn finalize_job(
                 None,
                 Some(db),
                 deps.server_events.as_deref(),
+                &deps.gallery_publication_gate,
             )?;
             #[cfg(test)]
             deps.executor.after_gallery_publication(&job.id)?;
@@ -4994,7 +4995,13 @@ mod tests {
             .unwrap()
             .finalizes
             .is_empty());
-        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(&output_dir)
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
         assert_eq!(db.list(Some(&output_dir)).unwrap().len(), 1);
 
         assert!(chain_jobs::try_transition(
@@ -5018,7 +5025,13 @@ mod tests {
             1,
             "finalization replay must not rerender completed stages"
         );
-        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(&output_dir)
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
         assert_eq!(db.list(Some(&output_dir)).unwrap().len(), 1);
         assert_eq!(
             ChainJobManifest::read_from_dir(&job_dir)

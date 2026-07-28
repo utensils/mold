@@ -2924,6 +2924,7 @@ fn finish_generation_success(
                 Some(generation_time_ms),
                 db,
                 events,
+                &job.gallery_publication_gate,
             );
         } else {
             saved_names = save_generated_image_outputs(
@@ -2936,6 +2937,7 @@ fn finish_generation_success(
                 Some(generation_time_ms),
                 db,
                 events,
+                &job.gallery_publication_gate,
             );
         }
     }
