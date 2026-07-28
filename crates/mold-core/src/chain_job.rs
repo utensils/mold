@@ -197,6 +197,13 @@ pub struct StageStatus {
     /// Relative path to the stage's PCM sidecar, when audio was rendered.
     pub audio: Option<String>,
     pub error: Option<String>,
+    /// `true` for stages written under the raw-segment contract (2026-07-28):
+    /// the segment holds every frame the engine emitted (no boundary trims or
+    /// fade blends) and all boundary math is deferred to finalize. `false`
+    /// (the pre-amend default) marks a legacy stage whose segment was trimmed
+    /// and blended at write time and passes through finalize untouched.
+    #[serde(default)]
+    pub raw_segment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -249,6 +256,7 @@ impl ChainJobManifest {
                 tail_frames: None,
                 audio: None,
                 error: None,
+                raw_segment: false,
             })
             .collect();
 

@@ -754,29 +754,62 @@ impl ChainRequest {
     /// - cut: no trim
     /// - fade: replace `2 * fade_len` frames (trailing of prior + leading of
     ///   next) with `fade_len` blended frames → net `-fade_len`
+    ///
+    /// Sums [`stage_contributed_frames`] so the per-stage boundary math
+    /// exists in exactly one place (the chain-job runner persists the same
+    /// values as `frames_emitted`).
     pub fn estimated_total_frames(&self) -> u32 {
-        const DEFAULT_FADE_FRAMES: u32 = 8;
-        let mut total: u32 = 0;
-        for (idx, stage) in self.stages.iter().enumerate() {
-            if idx == 0 {
-                total += stage.frames;
-                continue;
-            }
-            match stage.transition {
-                TransitionMode::Smooth => {
-                    total += stage.frames.saturating_sub(self.motion_tail_frames);
-                }
-                TransitionMode::Cut => {
-                    total += stage.frames;
-                }
-                TransitionMode::Fade => {
-                    let fade_len = stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
-                    total += stage.frames.saturating_sub(fade_len);
-                }
-            }
-        }
-        total
+        self.stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| {
+                let next = self.stages.get(idx + 1);
+                stage_contributed_frames(
+                    idx,
+                    stage.frames,
+                    stage.transition,
+                    next.map(|next| next.transition),
+                    next.and_then(|next| next.fade_frames),
+                    self.motion_tail_frames,
+                )
+            })
+            .sum()
     }
+}
+
+/// Default crossfade length in pixel frames when a `Fade` stage omits
+/// `fade_frames`. Announced to clients via `/api/capabilities/chain-limits`.
+pub const DEFAULT_FADE_FRAMES: u32 = 8;
+
+/// Frames stage `idx` contributes to the final stitched video after boundary
+/// accounting — the single home of the per-stage boundary math.
+/// [`ChainRequest::estimated_total_frames`] sums it and the chain-job runner
+/// persists it as each stage's `frames_emitted`.
+///
+/// Attribution matches the persisted `frames_emitted` wire meaning:
+/// - a continuation stage entering with `Smooth` loses its leading
+///   `motion_tail_frames` (they duplicate the prior stage's carried tail);
+/// - a stage whose NEXT boundary is `Fade` loses its trailing `fade_len`
+///   (the blended block replaces them and is attributed to the incoming
+///   stage);
+/// - a stage entering with `Fade` keeps its full frame count (its leading
+///   `fade_len` frames are replaced by the blend in place, not dropped).
+pub fn stage_contributed_frames(
+    idx: usize,
+    stage_frames: u32,
+    transition: TransitionMode,
+    next_transition: Option<TransitionMode>,
+    next_fade_frames: Option<u32>,
+    motion_tail_frames: u32,
+) -> u32 {
+    let mut frames = stage_frames;
+    if idx > 0 && transition == TransitionMode::Smooth {
+        frames = frames.saturating_sub(motion_tail_frames);
+    }
+    if next_transition == Some(TransitionMode::Fade) {
+        frames = frames.saturating_sub(next_fade_frames.unwrap_or(DEFAULT_FADE_FRAMES));
+    }
+    frames
 }
 
 /// Returns `true` iff `n` has the form `8k + 1` for some non-negative integer
@@ -1544,6 +1577,46 @@ mod tests {
             (TransitionMode::Smooth, 97, None),
         ]);
         assert_eq!(req.estimated_total_frames(), 266);
+    }
+
+    /// The per-stage boundary math must live in exactly one place:
+    /// `stage_contributed_frames`. `estimated_total_frames` sums it, and the
+    /// chain-job runner persists it as `frames_emitted` — attribution matches
+    /// the persisted wire meaning (a stage followed by a Fade loses its
+    /// trailing `fade_len`; a stage entering with Fade keeps its full count).
+    #[test]
+    fn stage_contributed_frames_sums_to_estimated_total() {
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Cut, 97, None),
+            (TransitionMode::Fade, 97, Some(8)),
+            (TransitionMode::Smooth, 89, None),
+            (TransitionMode::Fade, 97, None), // default fade len 8
+        ]);
+        let per_stage: Vec<u32> = req
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| {
+                let next = req.stages.get(idx + 1);
+                stage_contributed_frames(
+                    idx,
+                    stage.frames,
+                    stage.transition,
+                    next.map(|s| s.transition),
+                    next.and_then(|s| s.fade_frames),
+                    req.motion_tail_frames,
+                )
+            })
+            .collect();
+        // Stage 1 is followed by an explicit 8-frame fade (97-8), stage 3 by
+        // a default-length fade (89-25 smooth trim, then -8 outgoing fade).
+        assert_eq!(per_stage, vec![97, 89, 97, 89 - 25 - 8, 97]);
+        assert_eq!(
+            per_stage.iter().sum::<u32>(),
+            req.estimated_total_frames(),
+            "estimated_total_frames must be the sum of stage_contributed_frames",
+        );
     }
 
     #[test]
