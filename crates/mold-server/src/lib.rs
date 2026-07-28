@@ -346,7 +346,7 @@ pub async fn run_server(
             jobs_root,
             executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
                 state.gpu_pool.clone(),
-                config_snapshot,
+                state.config.clone(),
             )),
             queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
                 state.queue.clone(),
@@ -358,6 +358,7 @@ pub async fn run_server(
             claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
             output_dir,
             server_events: Some(state.events.clone()),
+            pause: Some(state.queue_pause.clone()),
         };
         state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
     }

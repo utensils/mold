@@ -1718,6 +1718,7 @@ mod tests {
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            pause: None,
         };
         let handle = crate::chain_job_runner::spawn_runner(deps);
         let mut state = AppState::for_tests();

@@ -38,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chain jobs now announce their lifecycle on the server event stream.**
+  `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
+  and `chain_job_ended` events — emitted on durable-job creation, resume,
+  and retake, when the runner claims a job, and when it settles — so clients
+  can track sequences in a unified activity surface without polling
+  `/api/chain-jobs`. Ephemeral legacy-shim jobs stay silent, and old clients
+  ignore the unknown event types.
+- **Pausing the queue now also holds the chain runner.** `POST
+  /api/queue/pause` previously only stopped print dispatch while a running
+  sequence kept claiming GPU stage after stage; the runner now holds before
+  claiming new chain work and between stages (the running stage always
+  finishes), and a cancel still lands while held.
+- **Chain stages now honor explicit GPU placement and see live config.**
+  A sequence submitted with a `gpu:N` placement previously had it silently
+  ignored at worker-selection time, letting consecutive stages migrate GPUs
+  and force model reloads; and the stage executor held a config snapshot
+  from server boot, so a model pulled after startup could fail in a chain
+  stage while running fine on the normal queue. Both fixed.
+||||||| b2314878
 - **The shared sequence kit for the unified Create view landed.** A studio
   sequence-draft store persists the clip list (with legacy web/iPhone
   draft-and-mode migration) so clip prompts survive navigation, reloads,
