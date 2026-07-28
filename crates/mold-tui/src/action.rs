@@ -151,7 +151,8 @@ pub enum Action {
 /// (Create · Library · Models · Machines · Settings, keys `1`–`5`).
 ///
 /// The chain composer is not a tab: it is a sub-mode of Create
-/// (`App::create_mode`), mirroring the desktop's `/create/chain` nesting.
+/// (`App::create_mode`), mirroring the graphical surfaces, where Sequence
+/// is an Output setting of Create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Create,
