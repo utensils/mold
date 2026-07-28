@@ -158,8 +158,8 @@ async function listenForMenu() {
       case "new-generation":
         ui.newGeneration();
         return void router.push("/generate");
-      case "new-chain":
-        return void router.push("/chains");
+      case "new-sequence":
+        return void router.push({ path: "/create", query: { output: "sequence" } });
       case "generate":
         return ui.generate();
       case "expand-prompt":

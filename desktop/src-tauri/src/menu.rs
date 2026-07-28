@@ -98,7 +98,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
                 .accelerator(accelerator("N"))
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id("new-chain", "New Chain").build(app)?)
+        .item(&MenuItemBuilder::with_id("new-sequence", "New Sequence").build(app)?)
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?)
         .build()?;
