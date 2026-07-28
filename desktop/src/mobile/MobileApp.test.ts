@@ -650,6 +650,8 @@ describe("MobileApp Output field", () => {
     expect(row.text()).toContain("needs more GPU memory");
     expect(row.find("[data-test='mobile-sequence-cancel']").exists()).toBe(false);
     expect(row.find("[data-test='mobile-sequence-dismiss']").exists()).toBe(true);
+    // The row survives for its actions, but a settled job is not active work.
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("0 active");
     // A settled job has nothing left to stream.
     expect(events.options.signal.aborted).toBe(true);
     expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();

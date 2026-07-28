@@ -565,6 +565,15 @@ const activityRows = computed<ActivityRow[]>(() =>
     return print ? [{ key: vm.key, sequence: null, print }] : [];
   }),
 );
+/** A settled sequence keeps its row (for Resume / Dismiss) but is NOT active,
+ *  so the header counts real work rather than rows on screen. */
+const activeRowCount = computed(
+  () =>
+    activityRows.value.filter(
+      (row) =>
+        row.print !== null || row.sequence.state === "queued" || row.sequence.state === "running",
+    ).length,
+);
 const sequenceRowProgress = computed(() => {
   const progress = sequenceProgress.value;
   return progress && progress.total > 0 ? Math.round((progress.step / progress.total) * 100) : null;
@@ -3299,7 +3308,7 @@ onBeforeUnmount(() => {
           >
             <div class="mobile-generation-queue-head">
               <h2>Queue</h2>
-              <span>{{ activityRows.length }} active</span>
+              <span data-test="mobile-queue-count">{{ activeRowCount }} active</span>
             </div>
             <ol>
               <li
