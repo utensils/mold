@@ -173,6 +173,7 @@ fn save_image_to_dir_with_suffix(
             &path,
             record,
             gallery_gate,
+            reservation.authority(),
         ) {
             Ok(record) => record,
             Err(error) => {
@@ -187,6 +188,7 @@ fn save_image_to_dir_with_suffix(
                 return None;
             }
         };
+        drop(reservation);
         if let Some(db) = db {
             if let Err(error) = db.upsert(&record) {
                 tracing::warn!(
@@ -197,9 +199,9 @@ fn save_image_to_dir_with_suffix(
         }
         Some(Box::new(record.to_gallery_image()))
     } else {
+        drop(reservation);
         None
     };
-    drop(reservation);
     // Emit even without a DB row — `image: None` tells clients to refetch
     // `/api/gallery` instead of inserting in place.
     if let Some(events) = events {
@@ -317,6 +319,7 @@ pub(crate) fn save_video_to_dir(
         &path,
         record,
         gallery_gate,
+        reservation.authority(),
     ) {
         Ok(record) => record,
         Err(error) => {
@@ -380,6 +383,7 @@ pub(crate) fn save_video_to_dir_named(
         anyhow::bail!("gallery filename must be one normal path component");
     }
     std::fs::create_dir_all(dir)?;
+    let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir)?;
     let path = dir.join(filename);
     let created = match std::fs::OpenOptions::new()
         .write(true)
@@ -414,7 +418,7 @@ pub(crate) fn save_video_to_dir_named(
         generation_time_ms,
         backend: Some(mold_inference::compiled_backend_label()),
     };
-    let index = gallery_gate.committed_archive_index(dir)?;
+    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
     let record = if let Some(existing) = index.get(filename) {
         anyhow::ensure!(
             existing.record().format == format
@@ -431,6 +435,7 @@ pub(crate) fn save_video_to_dir_named(
             &path,
             record,
             gallery_gate,
+            &authority,
         ) {
             Ok(record) => record,
             Err(error) => {
@@ -442,6 +447,7 @@ pub(crate) fn save_video_to_dir_named(
             }
         }
     };
+    drop(authority);
     if let Some(db) = db {
         db.upsert(&record)
             .context("recording durable chain gallery metadata")?;

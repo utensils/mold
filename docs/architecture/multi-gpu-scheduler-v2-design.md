@@ -1451,12 +1451,16 @@ Implement logical API atomicity with one `GalleryPublicationGate`:
 5. acquire the exclusive side of `GalleryPublicationGate`;
 6. atomically persist and fsync `committing`, move every final file with
    no-replace semantics, and fsync the files and affected directories;
-7. when the metadata DB is enabled, commit all gallery rows in one SQLite
-   transaction; when `MOLD_DB_DISABLE=1`, the committed manifest plus final
-   files is the durable authority and filesystem listing remains supported;
-8. atomically persist and fsync `committed`;
-9. release the publication gate;
-10. only then emit one parent completion and ordered child metadata.
+7. while holding the canonical cross-process gallery bookkeeping lock, persist
+   and fsync one generation-fenced authority mutation for the complete batch,
+   checkpoint it, then clear the write-ahead marker;
+8. release cross-process bookkeeping and, when the metadata DB is enabled,
+   project all gallery rows in one SQLite transaction; the process-local
+   publication writer remains held, and DB-disabled operation is identical;
+9. atomically persist and fsync the attempt's `committed` state and remove its
+   private staging/recovery evidence;
+10. release the publication gate;
+11. only then emit one parent completion and ordered child metadata.
 
 Every gallery observer and mutator participates in the same barrier: DB and
 filesystem listings, media-token/path validation, media lookup/open, delete,
@@ -1477,30 +1481,28 @@ injection covers reservation release, private-staging cleanup, cleanup
 journaling, retained-manifest archival, attempt removal, and attempt-directory
 fsync.
 
-Retained committed manifests are universal server gallery authority, not only
-a DB-disabled recovery aid. Atomic batches archive one manifest for all
-children; ordinary image/video generation and durable chain finalization
-archive an equivalent one-child committed manifest before releasing their
-no-replace filename reservation or emitting completion. For a batch, failure
-to persist that authority after entering `committing` is unresolved: the
-request cannot report success and startup recovery must settle it. An ordinary
-one-child save can instead remove and directory-fsync its still-unobserved
-public path while retaining the gallery writer and filename reservation; it
-then emits neither a gallery event nor a saved filename.
+Server gallery metadata authority is one compact exact-name state shared by
+batches, imports, ordinary image/video generation, and durable chain
+finalization. It uses a checksummed current checkpoint plus a mirrored
+checkpoint, a checksummed single-mutation WAL, and an atomically replaced
+generation marker. The marker is written pending before the WAL; recovery
+rolls a durable WAL forward or an absent WAL back without guessing. Every
+mutation holds `GalleryBookkeepingGuard`, and every process compares the marker
+generation before trusting its local cache. This prevents a warm server from
+missing a publication or delete committed by another process.
 
-Before serving, startup validates the version, canonical identity, child
-layout, final size, and SHA-256 of every retained committed manifest, finishes
-durable per-child deletion tombstones, heals an enabled SQLite metadata DB from
-the exact archived rows, and installs one in-memory archive index. Gallery
-listing and idempotent replay consult that cached index rather than rescanning
-or rehashing media per request. Delete fsyncs an exact child tombstone before
-unlinking the public file, then fsyncs the output directory; siblings in a
-multi-child manifest remain authoritative, and a later committed publication
-may safely reuse the deleted filename. Missing archived media is tombstoned at
-startup. Malformed, future-version, conflicting, or checksum-invalid retained
-authority fails startup closed rather than silently attaching suspect metadata
-or synthesizing a successful replay; deletion of the named damaged public file
-remains available after a valid archive was loaded.
+Each live entry retains its checksum, size, stable platform file identity,
+mtime/ctime facts, and exact metadata row. Startup stats each live filename
+once, trusts its saved checksum when all facts match, and hashes only a new or
+changed entry. Missing, replaced, checksum-invalid, or duplicate authority is
+quarantined per exact name; a malformed legacy archive is isolated without
+blocking other archives. External absence is never converted into user-delete
+authority, and restoring the matching bytes reactivates the archived metadata.
+Explicit delete first checkpoints the exact live publication, revalidates the
+current path while still holding cross-process bookkeeping, unlinks and directory
+fsyncs only matching identity, and preserves a replacement as quarantined.
+SQLite remains a repairable projection and is updated only after filesystem
+authority is durable.
 
 Each live v2 attempt holds two hashed authority files for its full lifetime:
 the predecessor v1 path under `.attempt-locks` and the current v2 path directly

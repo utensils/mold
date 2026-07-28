@@ -4404,13 +4404,24 @@ async fn delete_gallery_image(
     let dir = output_dir.clone();
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let path = dir.join(&name);
-        crate::batch_transaction::tombstone_committed_archive_filename(&dir, &name).map_err(
-            |error| {
+        let archive_disposition =
+            crate::batch_transaction::tombstone_committed_archive_filename(
+                &dir, &name, &archive,
+            )
+            .map_err(|error| {
                 ApiError::internal(format!(
                     "failed to retire committed gallery metadata before delete: {error:#}"
                 ))
-            },
-        )?;
+            })?;
+        if archive_disposition
+            == crate::batch_transaction::ArchiveDeleteDisposition::PreservedReplacement
+        {
+            return Err(ApiError::with_code(
+                "gallery file changed since publication; the replacement was preserved and quarantined",
+                "GALLERY_DELETE_IDENTITY_CHANGED",
+                StatusCode::CONFLICT,
+            ));
+        }
         if path.is_file() {
             std::fs::remove_file(&path)
                 .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
@@ -4420,7 +4431,11 @@ async fn delete_gallery_image(
                 ))
             })?;
         }
-        archive.retire_committed_filename(&name);
+        if archive_disposition
+            == crate::batch_transaction::ArchiveDeleteDisposition::NoArchive
+        {
+            archive.retire_committed_filename(&name);
+        }
 
         // Also remove server-side thumbnail (both legacy no-suffix and current
         // `.png`-suffixed cache layouts) and the animated preview sidecar so

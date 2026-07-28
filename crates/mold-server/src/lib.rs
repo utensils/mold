@@ -6,6 +6,7 @@ pub mod catalog_credentials;
 pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
+mod gallery_authority;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;
