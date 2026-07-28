@@ -34,10 +34,13 @@ vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn().mockResolvedValue(undefine
 import GenerateView from "./GenerateView.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useGenerateFormStore } from "../stores/generateForm";
+import { useChainJobsStore } from "../stores/chainJobs";
+import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import type { ModelEntry } from "../lib/api/types";
+import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
 
 enableAutoUnmount(afterEach);
 
@@ -236,5 +239,76 @@ describe("GenerateView — sequence output", () => {
 
     expect(wrapper.find("[data-test='sequence-empty']").exists()).toBe(true);
     expect(wrapper.find("sequence-composer-stub").exists()).toBe(false);
+  });
+});
+
+// Settling must never blank the canvas: the strip no longer keeps a settled
+// row, so the canvas is where the finished sequence lands.
+describe("GenerateView — settled sequence canvas", () => {
+  function watchSequence(state: ChainJobDetail["state"], extra: Partial<ChainJobDetail> = {}) {
+    const chains = useChainJobsStore();
+    chains.watching = { hostId: "local", jobId: "job-1" };
+    chains.live = {
+      detail: {
+        id: "job-1",
+        state,
+        model: "ltx-video",
+        stage_count: 2,
+        current_stage: 1,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        stages: [],
+        ...extra,
+      } as unknown as ChainJobDetail,
+      progress: {},
+      activeStage: null,
+    };
+    return chains;
+  }
+
+  async function sequenceView() {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    useGenerateFormStore().form.model = "ltx-video";
+    const wrapper = mountView();
+    await flushPromises();
+    return wrapper;
+  }
+
+  it("holds the finished sequence with Edit sequence and Show in library", async () => {
+    watchSequence("completed");
+    const wrapper = await sequenceView();
+
+    const result = wrapper.get("[data-test='sequence-result']");
+    expect(result.find("[data-test='sequence-edit']").exists()).toBe(true);
+    expect(result.find("[data-test='sequence-show-in-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='empty-canvas']").exists()).toBe(false);
+  });
+
+  it("keeps a failed sequence inspectable with Resume", async () => {
+    const chains = watchSequence("failed", { error: "CUDA ran out of memory" });
+    vi.spyOn(chains, "resume").mockResolvedValue();
+    const wrapper = await sequenceView();
+
+    const notice = wrapper.get("[data-test='sequence-failed']");
+    expect(notice.attributes("message")).toContain("GPU memory");
+    await wrapper.get("[data-test='sequence-resume']").trigger("click");
+    expect(chains.resume).toHaveBeenCalledWith("local", "job-1");
+    expect(wrapper.find("[data-test='empty-canvas']").exists()).toBe(false);
+  });
+
+  it("re-enters a job handed over from the Library", async () => {
+    const chains = useChainJobsStore();
+    const detail = vi.spyOn(chains, "fetchDetail").mockRejectedValue(new Error("not in this test"));
+    useComposerStore().setSequence({ kind: "edit", hostId: "okra-7680", jobId: "job-9" });
+    await sequenceView();
+
+    expect(detail).toHaveBeenCalledWith("okra-7680", "job-9");
+    // One-shot: a back-nav must not replay the handoff.
+    expect(useComposerStore().pendingSequence).toBeNull();
   });
 });

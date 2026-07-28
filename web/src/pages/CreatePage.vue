@@ -46,6 +46,11 @@ import {
   chainScriptToClips,
   type SequenceSharedParams,
 } from "@studio/lib/sequenceForm";
+import { isPrintOfChainJob } from "@studio/lib/sequenceReuse";
+import {
+  pendingSequenceHandoff,
+  takeSequenceHandoff,
+} from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   sequenceToVM,
@@ -486,6 +491,69 @@ const watchedSequenceActive = computed(() => {
   const d = watchedSequenceDetail.value;
   return !!d && (d.state === "running" || d.state === "queued");
 });
+
+/**
+ * The watched job once it has settled. The activity strip no longer keeps a
+ * settled row, so the canvas is what holds the result: the finished video with
+ * Edit sequence / Show in library, or the failure with Resume. Settling must
+ * never blank the canvas.
+ */
+const settledSequence = computed(() => {
+  const d = watchedSequenceDetail.value;
+  return d && d.state !== "running" && d.state !== "queued" ? d : null;
+});
+
+/** The print this job produced, when it landed in this server's gallery. */
+const settledSequencePrint = computed(() => {
+  const d = settledSequence.value;
+  if (!d) return null;
+  return (
+    galleryEntries.value.find((entry) =>
+      isPrintOfChainJob(entry.metadata, d.id),
+    ) ?? null
+  );
+});
+
+const settledSequenceCaption = computed(() => {
+  const d = settledSequence.value;
+  if (!d) return "";
+  const meta = settledSequencePrint.value?.metadata;
+  const bits = [
+    d.model,
+    `${d.stage_count} clip${d.stage_count === 1 ? "" : "s"}`,
+  ];
+  if (meta) bits.push(`S ${meta.seed}`, `${meta.width}×${meta.height}`);
+  const host = chainJobs.state.watching?.hostId;
+  if (host) bits.push(hostLabelFor(host));
+  return bits.join(" · ");
+});
+
+const settledSequenceError = computed(() =>
+  settledSequence.value?.state === "failed"
+    ? friendlySequenceError(settledSequence.value.error ?? "Sequence failed.")
+    : null,
+);
+
+function onEditSettledSequence() {
+  const d = settledSequence.value;
+  const host = chainJobs.state.watching?.hostId;
+  if (d && host) void editSequence(host, d.id);
+}
+
+function onResumeSettledSequence() {
+  const d = settledSequence.value;
+  const host = chainJobs.state.watching?.hostId;
+  if (!d || !host) return;
+  void chainJobs
+    .resume(host, d.id)
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
+
+function onShowSettledSequenceInLibrary() {
+  void router.push("/library");
+}
 const sequenceCanvasPercent = computed(() => {
   const p = watchedProgress.value;
   return p?.total ? Math.round((p.step / p.total) * 100) : 0;
@@ -571,7 +639,8 @@ watch(
   (state, prev) => {
     if (!state || !prev || state === prev) return;
     if (state === "completed") {
-      toast("info", "Sequence finished.");
+      // Verb→noun (§11): the sequence is a thing now, and it has a home.
+      toast("info", "Sequence ready — saved to Library");
       void refreshGallery();
     } else if (state === "failed") {
       toast(
@@ -958,32 +1027,22 @@ function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
   }
 }
 
-function onClearInactive() {
-  void chainJobs
-    .clearInactive()
-    .then(({ cleared, failed }) => {
-      if (failed > 0)
-        toast("error", `${failed} sequence(s) could not be cleared.`);
-      else if (cleared > 0)
-        toast("info", `Cleared ${cleared} finished sequence(s).`);
-    })
-    .catch((error) =>
-      toast("error", error instanceof Error ? error.message : String(error)),
-    );
+/** A sequence handed over from Library ▸ History. One-shot — the slot is
+ *  emptied on arrival so a back-nav cannot replay it. */
+function applySequenceHandoff() {
+  const handoff = takeSequenceHandoff();
+  if (!handoff) return;
+  void editSequence(handoff.hostId, handoff.jobId);
 }
+watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
 
-function onCleanupDisk() {
-  void chainJobs
-    .gc()
-    .then((outcome) =>
-      toast(
-        "info",
-        `Cleaned up ${outcome.pruned_artifact_dirs} artifact folder(s).`,
-      ),
-    )
-    .catch((error) =>
-      toast("error", error instanceof Error ? error.message : String(error)),
-    );
+/** The digest chip's one hop. `Clear inactive` and `Clean up disk` moved with
+ *  it: they are destructive, host-scoped, and live in the History drawer now. */
+function onShowSequenceHistory() {
+  void router.push({
+    path: "/library",
+    query: { panel: "history", tab: "sequences" },
+  });
 }
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
@@ -1797,8 +1856,7 @@ onBeforeUnmount(() => {
           @dismiss="stream.remove"
           @open="openJob"
           @sequence-action="onSequenceAction"
-          @clear-inactive="onClearInactive"
-          @cleanup-disk="onCleanupDisk"
+          @show-history="onShowSequenceHistory"
         />
 
         <div class="flex items-center gap-2">
@@ -1940,6 +1998,61 @@ onBeforeUnmount(() => {
             :print-height="form.state.value.height"
             data-test="sequence-canvas"
           />
+
+          <!-- Settling must not blank the canvas: the strip no longer keeps a
+               settled row, so the result lands here with its actions. -->
+          <div
+            v-else-if="settledSequence"
+            class="flex flex-col gap-2 rounded-card border border-edge bg-bench p-3"
+            data-test="sequence-result"
+          >
+            <video
+              v-if="settledSequencePrint"
+              :src="imageUrl(settledSequencePrint.filename)"
+              class="max-h-[60vh] w-full rounded-media bg-print object-contain"
+              controls
+              loop
+              playsinline
+            />
+            <p
+              v-if="settledSequenceError"
+              class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
+              data-test="sequence-result-error"
+              role="alert"
+            >
+              {{ settledSequenceError }}
+            </p>
+            <p class="data-mono text-caption text-ink-3">
+              {{ settledSequenceCaption }}
+            </p>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                v-if="settledSequenceError"
+                type="button"
+                class="rounded-control bg-stop px-3 py-1.5 text-sm font-semibold text-on-accent"
+                data-test="sequence-result-resume"
+                @click="onResumeSettledSequence"
+              >
+                Resume
+              </button>
+              <button
+                type="button"
+                class="rounded-control border border-ce px-3 py-1.5 text-sm text-ink-2 hover:text-rebate"
+                data-test="sequence-result-edit"
+                @click="onEditSettledSequence"
+              >
+                Edit sequence
+              </button>
+              <button
+                type="button"
+                class="rounded-control border border-ce px-3 py-1.5 text-sm text-ink-2 hover:text-rebate"
+                data-test="sequence-result-library"
+                @click="onShowSettledSequenceInLibrary"
+              >
+                Show in library
+              </button>
+            </div>
+          </div>
         </template>
 
         <template v-else>

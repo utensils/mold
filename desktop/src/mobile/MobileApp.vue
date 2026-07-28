@@ -543,6 +543,11 @@ const printActivity = computed<ActivityJobVM[]>(() => {
     chain: null,
     actions: ["cancel" as const],
     createdAtMs: newest - index,
+    // The iPhone queue renders `generation.pending` only, so nothing settled
+    // ever reaches this list — the strip's attention/expiry rules are a
+    // desktop and web concern for now.
+    settledAtMs: job.settledAtMs,
+    error: job.error,
   }));
 });
 const sequenceActivity = computed<ActivityJobVM[]>(() => {

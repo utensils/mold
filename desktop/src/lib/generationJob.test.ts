@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { GenerateRequest, SseChainCompleteEvent } from "./api/types";
-import { applyChainProgress, chainCompleteToComplete, newJob } from "./generationJob";
+import {
+  applyChainProgress,
+  chainCompleteToComplete,
+  markJobSettled,
+  newJob,
+} from "./generationJob";
 
 const request: GenerateRequest = {
   prompt: "a lighthouse through a storm",
@@ -123,5 +128,29 @@ describe("chain Job adapters", () => {
         request,
       ),
     ).toMatchObject({ image: "", filename: "chain-99.mp4", seed_used: 99 });
+  });
+});
+
+describe("settle stamps", () => {
+  it("starts unsettled and stamps a wall clock exactly once", () => {
+    const job = newJob(request);
+    expect(job.settledAtMs).toBeNull();
+    // Still in flight: nothing to stamp.
+    markJobSettled(job);
+    expect(job.settledAtMs).toBeNull();
+
+    job.status = "error";
+    markJobSettled(job);
+    const first = job.settledAtMs;
+    expect(first).toBeGreaterThan(0);
+    // A late transport frame must not restamp — the age rule would reset.
+    markJobSettled(job);
+    expect(job.settledAtMs).toBe(first);
+  });
+
+  it("submittedAtUnixMs is a real epoch stamp, not a client counter", () => {
+    // Guards the activity-strip bug where printVMs used clientId (1,2,3…)
+    // as createdAtMs and always sorted below sequence epoch timestamps.
+    expect(newJob(request).submittedAtUnixMs).toBeGreaterThan(1_600_000_000_000);
   });
 });

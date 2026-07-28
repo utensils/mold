@@ -135,8 +135,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   joins say **Join clips**) — with a click opening the seam editor's teaching
   rows and fade-length stepper. A live fits/duration forecast runs against
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
-  and sequence jobs appear in the same activity strip as prints with watch,
-  cancel, resume, and edit. Editing a finished sequence reloads its clips onto
+  and running sequence jobs appear in the same activity strip as prints with
+  watch and cancel. A finished sequence leaves the strip: its video lands on
+  the Create canvas with **Edit sequence** and **Show in library**, its print
+  is in the Library, and its job record is in **Library ▸ History ▸
+  Sequences**. Editing a finished sequence reloads its clips onto
   the rail, marks which clips stay cached versus re-render as you change
   things, and **Update sequence** re-renders only from the earliest changed
   clip. The picker shows sequence-capable video models from every connected
@@ -144,9 +147,14 @@ surface powers it, so anything the app does maps to a documented endpoint.
   with none installed the bench deep-links to Discover with Video + Models
   filters), and limits, creation, events, previews, and job actions stay
   routed to the model's host. Job and action failures stay visible inline.
-- **History** (the Runs + Prompts drawer inside Library) — a fast, searchable
-  list of past prompts from every ready host; ↩ refills the composer, while
-  Up/Down recalls the same merged history inline.
+- **History** (the Runs + Prompts + Sequences drawer inside Library) — a fast,
+  searchable list of past prompts from every ready host; ↩ refills the
+  composer, while Up/Down recalls the same merged history inline. The
+  **Sequences** tab is the one place durable sequence jobs are listed: open,
+  edit, resume, or delete a job, jump to the print it produced, and run the
+  host-scoped **Clear inactive** and **Clean up disk** maintenance that used to
+  sit in the Create composer. It renders the 200 newest jobs and says so when
+  there are more. Web has the same drawer at `?panel=history`.
 - **RunPod** (inside Machines) — secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
@@ -355,10 +363,14 @@ wire types as the CLI and web UI:
   Reorder, Pause, and Cancel all are feature-detected via `/api/capabilities`
   (`queue.can_reorder` gates reorder), so older servers simply hide the
   controls. The same queue mirrors as an activity strip on Create.
-- **History (in Library)** — two lenses: **Runs** (every finished generation with its
-  thumbnail, model, size, seed, and step count — click to reuse the full
-  settings including the seed) and **Prompts** (the raw prompt log, searchable,
-  for prompts whose outputs are gone).
+- **History (in Library)** — three lenses: **Runs** (every finished generation
+  with its thumbnail, model, size, seed, and step count — click to reuse the
+  full settings including the seed), **Prompts** (the raw prompt log,
+  searchable, for prompts whose outputs are gone), and **Sequences** (every
+  durable sequence job on every connected host, with open / edit / resume /
+  delete, a jump to the print it produced, and the host-scoped **Clear
+  inactive** and **Clean up disk** maintenance). The tab is in the URL, so
+  `?panel=history&tab=sequences` opens straight onto it.
 - **Remote prints saved locally** — generations from remote hosts and RunPod
   are also written into this Mac's output directory (Settings → App → "Save
   remote prints locally", on by default), with embedded metadata intact, so

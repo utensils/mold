@@ -25,7 +25,13 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
-import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
+import {
+  defaultClipFrames,
+  friendlySequenceError,
+  modelsForOutput,
+  sequenceMotionTailFrames,
+} from "@studio/lib/sequence";
+import { isPrintOfChainJob } from "@studio/lib/sequenceReuse";
 import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
 import {
   countLeadingCompletedStages,
@@ -94,7 +100,8 @@ import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
-import { localMediaPath, mediaPath } from "../lib/gallery/media";
+import { galleryMediaPath, localMediaPath, mediaPath } from "../lib/gallery/media";
+import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
@@ -563,6 +570,74 @@ const watchedSequencePct = computed(() => {
   const progress = chains.live.progress[active];
   return progress && progress.total > 0 ? (progress.step / progress.total) * 100 : 0;
 });
+
+/**
+ * The watched job once it has settled. The Create strip no longer keeps a
+ * settled row, so the canvas is what holds the result: the finished video with
+ * Edit sequence / Show in library, or the failure with Resume. Settling must
+ * never drop the canvas back to the empty state.
+ */
+const settledSequence = computed(() => {
+  if (!chains.watching) return null;
+  const detail = chains.live.detail;
+  if (!detail) return null;
+  return detail.state === "running" || detail.state === "queued" ? null : detail;
+});
+
+/** The gallery row this job produced, on the job's OWN host — never a sibling
+ *  host's auto-saved copy. Resolves after the finalize refetch; until then the
+ *  caption and its actions render over the last stage preview. */
+const settledSequencePrint = computed(() => {
+  const detail = settledSequence.value;
+  const hostId = chains.watching?.hostId;
+  if (!detail || !hostId) return null;
+  return (
+    hostGallery.merged.find(
+      (entry) => entry.sourceKey === hostId && isPrintOfChainJob(entry.item.metadata, detail.id),
+    ) ?? null
+  );
+});
+
+const settledSequenceCaption = computed(() => {
+  const detail = settledSequence.value;
+  if (!detail) return "";
+  const print = settledSequencePrint.value;
+  const meta = print?.item.metadata;
+  const bits = [
+    modelDisplayNameForId(detail.model, installedModels.value),
+    `${detail.stage_count} clip${detail.stage_count === 1 ? "" : "s"}`,
+  ];
+  if (meta) bits.push(`S ${meta.seed}`, `${meta.width}×${meta.height}`);
+  bits.push(hosts.all.find((h) => h.id === chains.watching?.hostId)?.label ?? "this device");
+  return bits.join(" · ");
+});
+
+const settledSequenceError = computed(() =>
+  settledSequence.value?.state === "failed"
+    ? friendlySequenceError(settledSequence.value.error ?? "Sequence failed.")
+    : null,
+);
+
+function showSettledSequenceInLibrary() {
+  const print = settledSequencePrint.value;
+  void router.push(
+    print ? { path: "/library", query: { print: print.item.filename } } : { path: "/library" },
+  );
+}
+
+function editSettledSequence() {
+  const detail = settledSequence.value;
+  const hostId = chains.watching?.hostId;
+  if (!detail || !hostId) return;
+  void editSequence({ hostId, jobId: detail.id });
+}
+
+function resumeSettledSequence() {
+  const detail = settledSequence.value;
+  const hostId = chains.watching?.hostId;
+  if (!detail || !hostId) return;
+  void chains.resume(hostId, detail.id).catch((err) => toasts.push(String(err), "error"));
+}
 
 async function generateSequence() {
   const entry = selectedEntry.value;
@@ -1562,6 +1637,16 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
 // with <model>"), including one already queued before this view mounted.
 watch(() => composer.prefill, applyPrefill, { immediate: true });
 
+/** A sequence handed over from elsewhere (Library ▸ History ▸ Sequences today;
+ *  the Library's own reuse path next). One-shot — the slot is emptied on
+ *  arrival so a back-nav cannot replay it. */
+function applySequenceHandoff() {
+  const handoff = composer.takeSequence();
+  if (!handoff) return;
+  void editSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
+}
+watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
+
 // ⌘N — clear the composer for a fresh generation, keeping the model.
 watch(
   () => ui.newGenerationTick,
@@ -1817,6 +1902,77 @@ onBeforeUnmount(() => {
               }}
               · developing…
             </span>
+          </div>
+
+          <!-- Settled sequence: the canvas holds the result, because the
+               activity strip no longer does. -->
+          <div
+            v-else-if="isSequence && settledSequence"
+            data-test="sequence-result"
+            class="flex h-full w-full min-h-0 flex-col items-center"
+          >
+            <div
+              v-if="settledSequencePrint"
+              class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden"
+            >
+              <div
+                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+              >
+                <AuthedMedia
+                  video
+                  controls
+                  :path="
+                    galleryMediaPath(
+                      settledSequencePrint.item.filename,
+                      hostGallery.mediaSourceOf(settledSequencePrint.sourceKey),
+                    )
+                  "
+                  :target="hostGallery.targetOf(settledSequencePrint.sourceKey)"
+                  :cache-key="settledSequencePrint.sourceKey"
+                  :alt="settledSequenceCaption"
+                />
+              </div>
+            </div>
+            <GenerateErrorNotice
+              v-else-if="settledSequenceError"
+              data-test="sequence-failed"
+              class="w-full"
+              :message="settledSequenceError"
+            />
+            <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
+              <span class="edge-code text-ink-3">saved to Library</span>
+            </div>
+
+            <div class="edge-code mt-2 max-w-full truncate" :title="settledSequenceCaption">
+              {{ settledSequenceCaption }}
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <button
+                v-if="settledSequenceError"
+                type="button"
+                data-test="sequence-resume"
+                class="rounded-control bg-stop px-3 py-1 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
+                @click="resumeSettledSequence"
+              >
+                Resume
+              </button>
+              <button
+                type="button"
+                data-test="sequence-edit"
+                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                @click="editSettledSequence"
+              >
+                Edit sequence
+              </button>
+              <button
+                type="button"
+                data-test="sequence-show-in-library"
+                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                @click="showSettledSequenceInLibrary"
+              >
+                Show in library
+              </button>
+            </div>
           </div>
 
           <!-- Empty -->

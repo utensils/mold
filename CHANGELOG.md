@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Create activity strip is present tense again.** Finished and failed sequences used to pile up between the canvas and the composer forever — `COMPLETED … 5 clips … [Watch][Edit][Delete]` rows that were a log, not a workspace — while the sidebar's **Now developing** insisted nothing was developing. Desktop and web now show only work that is happening, plus at most two dismissible rows for work that went wrong and still wants a decision (they expire five minutes after the server says the job settled), plus one mono chip counting the rest (`4 settled sequences`) that opens **Library ▸ History ▸ Sequences**. Dismissing a row is client-side and never deletes anything. A just-finished sequence now lands on the Create canvas with **Edit sequence** and **Show in library** instead of vanishing, a failed one keeps its error and a **Resume**, and running sequences finally appear in the sidebar's **Now developing** with their clip counter. Failed prints keep a row on desktop too, matching web. Along the way, print rows were sorting on a client-id counter rather than a clock, so any print row would have sunk below every sequence.
+
 - **Desktop dev builds no longer crash when a generation completes.** Sending a completion notice calls Apple's UserNotifications framework, which aborts the process with an uncatchable `NSInternalInconsistencyException` ("bundleProxyForCurrentProcess is nil") when the binary runs outside an `.app` bundle — exactly how `desktop-dev` runs it. The native-notification command now detects the missing bundle identity and quietly reports the notification as unsent instead of taking the app down; bundled release builds are unaffected.
 
 - **The desktop chain composer is now discoverable from Create.** Sequence authoring existed only behind File → New Chain and the ⌘K palette, so the Create workspace showed no path to it at all. The Create header now carries the same **Single | Sequence** segmented switch as web and iPhone, and the chain composer's hand-rolled toggle was replaced with the shared Mold Studio segmented control so the pair round-trips consistently.
@@ -37,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aligned desktop and web Settings cards to the full content column, removed narrow-web overflow, and gave All settings groups clearer token-based color hierarchy with shared halide icon headers and summaries.
 
 ### Added
+
+- **Library ▸ History gained a Sequences tab, and web gained the History drawer.** Every durable sequence job on every connected machine is listed in one place, newest-first with active work on top: open or edit it, resume a failed one, delete it, or jump straight to the print it produced. The host-scoped **Clear inactive** (behind a confirm that names the machine and the count) and **Clean up disk** moved here from the Create composer, where destructive maintenance never belonged. The list renders the 200 newest jobs and says how many it is holding back. The tab lives in the URL, so `/library?panel=history&tab=sequences` — where the Create activity chip points — opens straight onto it.
 
 - **Desktop Create now makes sequences where you make everything else.** The
   Single | Sequence switch and the separate chain page are gone: **Output**

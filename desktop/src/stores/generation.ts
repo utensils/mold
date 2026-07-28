@@ -27,6 +27,7 @@ import {
   base64ToBlobUrl,
   chainCompleteToComplete,
   isCancelledError,
+  markJobSettled,
   metadataOnlyResult,
   newJob,
   type Job,
@@ -278,6 +279,14 @@ function jobHasSettled(job: Job): boolean {
   return job.status === "complete" || job.status === "error";
 }
 
+/** Move a job to a terminal status and stamp when it got there. Every
+ *  terminal transition goes through here so the Create strip's attention-row
+ *  age rule (and future history ordering) can trust `settledAtMs`. */
+function settleJob(job: Job, status: "complete" | "error"): void {
+  job.status = status;
+  markJobSettled(job);
+}
+
 function resultUrlExpiry(url: string): number | null {
   try {
     const expires = new URL(url).searchParams.get("expires");
@@ -483,7 +492,7 @@ export const useGenerationStore = defineStore("generation", {
       if (jobHasSettled(job)) return;
       aborts.get(job.clientId)?.abort();
       aborts.delete(job.clientId);
-      job.status = "error";
+      settleJob(job, "error");
       if (cancellationError) {
         // Release the local stream permit even when the host did not confirm
         // cancellation. The server may still finish the queued work.
@@ -602,7 +611,7 @@ export const useGenerationStore = defineStore("generation", {
     resetJobs() {
       for (const job of this.jobs) {
         if (!jobHasSettled(job)) {
-          job.status = "error";
+          settleJob(job, "error");
           job.error = "Cancelled";
         }
         aborts.get(job.clientId)?.abort();
@@ -686,7 +695,7 @@ export const useGenerationStore = defineStore("generation", {
                 ? complete
                 : metadataOnlyResult(complete);
               current.visualSeed = String(complete.seed_used);
-              current.status = "complete";
+              settleJob(current, "complete");
               if (useSavedResult) {
                 void this.refreshRemoteResultUrl(current.clientId).catch(() => {
                   // The reactive job carries the directed, user-visible error.
@@ -778,7 +787,7 @@ export const useGenerationStore = defineStore("generation", {
               if (originHostId) void useGalleryStore().refreshHost(originHostId);
               abort.abort();
             } else if (event === "error") {
-              current.status = "error";
+              settleJob(current, "error");
               try {
                 const parsed = JSON.parse(data) as { error?: string; message?: string };
                 const message = parsed.error ?? parsed.message ?? data;
@@ -790,7 +799,7 @@ export const useGenerationStore = defineStore("generation", {
             }
           } catch {
             if (current.status !== "complete" && current.status !== "error") {
-              current.status = "error";
+              settleJob(current, "error");
               current.error = "The host returned an invalid generation update.";
               abort.abort();
             }
@@ -798,7 +807,7 @@ export const useGenerationStore = defineStore("generation", {
         },
         onClose: (err) => {
           if (err && !abort.signal.aborted && !jobHasSettled(job)) {
-            job.status = "error";
+            settleJob(job, "error");
             job.error = err.message;
             // fetch-event-source reports network/transport loss as TypeError.
             // HTTP/auth failures are deterministic and must remain final —
@@ -811,7 +820,7 @@ export const useGenerationStore = defineStore("generation", {
         streamError = error;
       });
       if (!abort.signal.aborted && !jobHasSettled(job)) {
-        job.status = "error";
+        settleJob(job, "error");
         job.interrupted = streamError === null || streamError instanceof TypeError;
         job.error = streamError
           ? streamError instanceof Error
