@@ -422,7 +422,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div class="border-edge border-b bg-bench px-4 py-3">
+    <div class="border-edge shrink-0 border-b bg-bench px-4 py-3">
       <details class="rounded-control border border-edge bg-bath/60 px-3 py-2">
         <summary class="cursor-pointer text-caption font-medium text-ink-2">Sequence tools</summary>
         <div class="mt-3 flex flex-wrap items-end gap-4">
@@ -518,7 +518,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Filmstrip -->
-    <div class="flex items-stretch gap-0 overflow-x-auto p-4">
+    <div data-test="chain-filmstrip" class="flex shrink-0 items-stretch gap-0 overflow-x-auto p-4">
       <template v-for="(stage, i) in form.stages" :key="i">
         <SpliceMark
           v-if="i > 0"
@@ -556,7 +556,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Footer: totals + fit + actions -->
-    <div class="border-edge flex flex-wrap items-center gap-3 border-t border-b bg-bench px-4 py-2">
+    <div
+      data-test="chain-footer"
+      class="border-edge flex shrink-0 flex-wrap items-center gap-3 border-t border-b bg-bench px-4 py-2"
+    >
       <span class="edge-code" :class="fit.ok ? 'text-halide' : 'text-stop'">{{ fit.text }}</span>
       <div class="ml-auto flex items-center gap-2">
         <input
@@ -623,7 +626,7 @@ onBeforeUnmount(() => {
 
     <!-- TOML editor: syntax-highlighted overlay; Apply parses via the same
          tomlToChainForm path as Open .toml. -->
-    <div v-if="showToml" data-test="toml-panel" class="border-edge border-b p-4">
+    <div v-if="showToml" data-test="toml-panel" class="border-edge shrink-0 border-b p-4">
       <div class="flex items-center justify-between pb-2">
         <span class="edge-code">chain.toml</span>
         <div class="flex items-center gap-2">
