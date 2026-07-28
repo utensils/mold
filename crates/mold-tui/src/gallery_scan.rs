@@ -518,6 +518,8 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            chain_job_id: None,
+            chain: None,
             version: "test".to_string(),
             frames: None,
             fps: None,

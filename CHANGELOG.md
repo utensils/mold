@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sequence outputs now carry full per-clip provenance.** Gallery rows for
+  multi-clip videos record a structured `chain` block — every clip's prompt,
+  frames, transition, fade length, and effective seed — plus the durable
+  `chain_job_id` on the chain-jobs path, instead of filing the whole sequence
+  under clip 1's prompt alone. Rows with distinct clip prompts store them
+  joined one-per-line so gallery search matches any clip, durable sequence
+  rows finally record their total generation time, and the CLI's local chain
+  saves carry the same block. All fields are additive; existing rows and
+  older clients are unaffected.
 - **`/api/models` now advertises per-model frame semantics.** Video models
   carry additive `default_frames`, `default_fps`, `max_frames` (the
   no-temporal-upscale single-request ceiling: 153 for LTX-2's RoPE budget,

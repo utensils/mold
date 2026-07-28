@@ -170,6 +170,8 @@ mod tests {
             temporal_upscale: None,
             frames: None,
             fps: None,
+            chain_job_id: None,
+            chain: None,
             version: "v".into(),
         }
     }
