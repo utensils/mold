@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { apiFetch, apiFetchTo } from "../../lib/api/client";
 import { galleryMediaPath, localMediaPath, mediaPath } from "../../lib/gallery/media";
@@ -53,8 +53,19 @@ const galleryError = computed(() =>
 /** Per-tile origin labels only matter with more than one gallery source. */
 const showHostLabels = computed(() => gallery.sources.length > 1);
 
+// Escape must close the dialog wherever focus sits: WKWebView (Tauri on
+// macOS) does not focus clicked buttons, so a keydown handler scoped to the
+// overlay never fires after the user interacts with the page. Listen on the
+// document while mounted and gate on `open`.
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (props.open && event.key === "Escape") emit("close");
+}
 onMounted(() => {
+  document.addEventListener("keydown", onDocumentKeydown);
   if (props.open) void loadGallery();
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("keydown", onDocumentKeydown);
 });
 watch(
   () => props.open,

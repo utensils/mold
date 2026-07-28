@@ -224,6 +224,37 @@ describe("ImagePickerModal", () => {
     vi.unstubAllGlobals();
   });
 
+  it("closes on Escape even when focus sits outside the dialog", async () => {
+    seedTwoHostGallery();
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    // WKWebView never focuses clicked buttons, so the key lands on document.
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeTruthy();
+    wrapper.unmount();
+  });
+
+  it("does not emit close on Escape while closed", async () => {
+    seedTwoHostGallery();
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: false },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeFalsy();
+    wrapper.unmount();
+  });
+
   it("clears a stale pick error on the next open", async () => {
     const gallery = useGalleryStore();
     vi.spyOn(gallery, "fetchAll").mockResolvedValue();

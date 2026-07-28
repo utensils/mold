@@ -19,8 +19,10 @@ const props = withDefaults(
     /** Accessible name for the group. */
     label?: string;
     disabled?: boolean;
+    /** Tighter segment padding for dense chrome (e.g. 52px header rows). */
+    compact?: boolean;
   }>(),
-  { disabled: false },
+  { disabled: false, compact: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: T] }>();
@@ -56,6 +58,7 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-seg"
+    :class="{ 'ms-seg--compact': compact }"
     role="radiogroup"
     :aria-label="label"
     :aria-disabled="disabled || undefined"
@@ -106,6 +109,10 @@ function onKeydown(event: KeyboardEvent) {
   transition:
     background var(--dur-quick) var(--ease),
     color var(--dur-quick) var(--ease);
+}
+
+.ms-seg--compact .ms-seg__btn {
+  padding: 4px 12px;
 }
 
 .ms-seg__btn:hover:not([data-on="true"]):not(:disabled) {
