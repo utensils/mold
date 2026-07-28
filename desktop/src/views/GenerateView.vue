@@ -31,7 +31,13 @@ import {
   modelsForOutput,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
-import { isPrintOfChainJob } from "@studio/lib/sequenceReuse";
+import {
+  clampClipsToMotionTail,
+  isPrintOfChainJob,
+  planSequenceReuse,
+  sequenceReuseClampNote,
+  sequenceReuseNote,
+} from "@studio/lib/sequenceReuse";
 import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
 import {
   countLeadingCompletedStages,
@@ -466,6 +472,10 @@ const chainLimits = ref<ChainLimits | null>(null);
 const sequenceSubmitting = ref(false);
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
 const editSharedBaseline = ref<string | null>(null);
+/** What a Library reuse could NOT restore, said once and quietly beneath the
+ *  rail. Cleared the moment the user submits or leaves Sequence — it describes
+ *  one handoff, not a standing property of the draft. */
+const sequenceReuseNotice = ref<string | null>(null);
 
 const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedEntry.value));
 const sequenceDefaultFrames = computed(() =>
@@ -691,6 +701,8 @@ async function generateSequence() {
       await chains.create(hostRoute.hostId, request);
       toasts.push("Sequence queued");
     }
+    // The caveat described the handoff, not the submitted job.
+    sequenceReuseNotice.value = null;
   } catch (err) {
     toasts.push(String(err), "error");
   } finally {
@@ -708,6 +720,8 @@ async function duplicateSequenceAsNew() {
 /** ActivityStrip Edit: load a durable job's effective script into an edit
  * session — applying its shared params to the form is the explicit action. */
 async function editSequence(payload: { hostId: string; jobId: string }) {
+  // An edit session is lossless — any reuse caveat on screen is now stale.
+  sequenceReuseNotice.value = null;
   try {
     const detail = await chains.fetchDetail(payload.hostId, payload.jobId);
     const script = normalizeServerChainScript(detail.script);
@@ -1637,15 +1651,61 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
 // with <model>"), including one already queued before this view mounted.
 watch(() => composer.prefill, applyPrefill, { immediate: true });
 
-/** A sequence handed over from elsewhere (Library ▸ History ▸ Sequences today;
- *  the Library's own reuse path next). One-shot — the slot is emptied on
- *  arrival so a back-nav cannot replay it. */
+/**
+ * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
+ * session, nothing cached, `Generate sequence` queues a fresh job. Shared
+ * params ride the same `applyPrefillToForm` path a single print's reuse uses,
+ * so model defaults, legacy normalization and capability gating stay in one
+ * place.
+ */
+function applySequenceReuse(metadata: OutputMetadata) {
+  const plan = planSequenceReuse(metadata);
+  if (!plan) return;
+  applyPrefillToForm(form, { metadata }, installedModels.value);
+  // Clip 1's prompt is the honest single-shot prompt; `metadata.prompt` for a
+  // sequence is every clip newline-joined, which is exactly the wart
+  // sequence-aware reuse exists to avoid.
+  form.prompt = plan.clips[0]?.prompt ?? "";
+
+  // The live tail belongs to the model that is selected NOW, not the one the
+  // print recorded — raise anything that no longer clears it, and say so.
+  const tail = sequenceMotionTailFrames(selectedEntry.value);
+  const { clips, raised } = clampClipsToMotionTail(plan.clips, tail, 9);
+
+  draft.stopEditing();
+  editSharedBaseline.value = null;
+  draft.output = "sequence";
+  draft.clips.splice(0, draft.clips.length, ...clips);
+  draft.activeClipId = clips[0]?.id ?? null;
+  draft.enableAudio = metadata.enable_audio === true;
+
+  const notes = [sequenceReuseNote(clips.length, plan.lossy)];
+  if (raised > 0) {
+    notes.push(
+      sequenceReuseClampNote(modelDisplayNameForId(form.model, installedModels.value)),
+    );
+  }
+  sequenceReuseNotice.value = notes.join(" · ");
+  void loadChainLimits();
+}
+
+/** A sequence handed over from elsewhere: Library ▸ History ▸ Sequences and
+ *  the canvas hand over `edit`; a Library sequence print hands over `reuse`.
+ *  One-shot — the slot is emptied on arrival so a back-nav cannot replay it. */
 function applySequenceHandoff() {
   const handoff = composer.takeSequence();
   if (!handoff) return;
+  if (handoff.kind === "reuse") {
+    applySequenceReuse(handoff.metadata);
+    return;
+  }
   void editSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
 }
 watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
+// Leaving Sequence retires the caveat with the rail it described.
+watch(isSequence, (on) => {
+  if (!on) sequenceReuseNotice.value = null;
+});
 
 // ⌘N — clear the composer for a fresh generation, keeping the model.
 watch(
@@ -2100,6 +2160,13 @@ onBeforeUnmount(() => {
           @expand="expandForCurrentBatch()"
           @restore="restoreQuickExpansion"
         />
+        <p
+          v-if="isSequence && sequenceReuseNotice"
+          data-test="sequence-reuse-note"
+          class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+        >
+          {{ sequenceReuseNotice }}
+        </p>
       </div>
     </div>
 
