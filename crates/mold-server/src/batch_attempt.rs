@@ -9,8 +9,8 @@ use crate::batch_parent::{
 };
 use crate::batch_transaction::{
     claim_parent_and_attempt_authorities, claim_parent_authority, BatchManifestState,
-    BatchTransaction, GalleryPublicationGate, ParentAuthority, RecoveryReport,
-    PARENT_AUTHORITY_DIR, TRANSACTION_DIR,
+    BatchTransaction, CommittedArchiveEntry, GalleryPublicationGate, ParentAuthority,
+    RecoveryReport, PARENT_AUTHORITY_DIR, TRANSACTION_DIR,
 };
 use anyhow::Context as _;
 use mold_db::GenerationRecord;
@@ -99,6 +99,7 @@ fn recovery_action(
         (Parent::Cancelled | Parent::Failed, Evidence::Missing) => Action::AlreadyTerminal,
         (Parent::Committed, Evidence::Active(Manifest::Committed)) => Action::AlreadyCommitted,
         (Parent::Committed, Evidence::CommittedArchive) => Action::AlreadyCommitted,
+        (Parent::Committed, Evidence::Missing) => Action::AlreadyCommitted,
         _ => anyhow::bail!(
             "no durable batch handoff for parent state {parent:?} with transaction evidence {transaction:?}"
         ),
@@ -435,11 +436,56 @@ pub fn reconcile_archived_commit(
     let parent_authority = claim_parent_authority(output_dir, parent_id)?;
     let mut parent =
         DurableBatchParent::recover_unfenced(&parent_authority_dir(output_dir, parent_id))?;
-    let result =
-        reconcile_archived_commit_claimed(output_dir, parent_id, attempt_generation, &mut parent);
+    let result = reconcile_archived_commit_claimed(
+        output_dir,
+        parent_id,
+        attempt_generation,
+        &mut parent,
+        &GalleryPublicationGate::default(),
+    );
     drop(parent);
     drop(parent_authority);
     result
+}
+
+fn central_committed_children(
+    output_dir: &Path,
+    parent_id: &str,
+    attempt_generation: u64,
+    expected_children: usize,
+    gate: &GalleryPublicationGate,
+) -> anyhow::Result<Option<Vec<CommittedArchiveEntry>>> {
+    let index = gate.committed_archive_index(output_dir)?;
+    let mut children = index
+        .entries
+        .values()
+        .filter(|entry| {
+            entry.identity.parent_id == parent_id
+                && entry.identity.attempt_generation == attempt_generation
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if children.is_empty() {
+        return Ok(None);
+    }
+    children.sort_by_key(|entry| entry.identity.child_index);
+    anyhow::ensure!(
+        children.len() == expected_children,
+        "central gallery authority for batch {parent_id}/{attempt_generation} has {} of {expected_children} children",
+        children.len()
+    );
+    for (expected_index, entry) in children.iter().enumerate() {
+        anyhow::ensure!(
+            entry.identity.child_index == expected_index,
+            "central gallery authority for batch {parent_id}/{attempt_generation} has a non-contiguous child index"
+        );
+        anyhow::ensure!(
+            !index.is_quarantined(&entry.identity.final_name),
+            "committed batch child changed after publication: {}",
+            output_dir.join(&entry.identity.final_name).display()
+        );
+    }
+    Ok(Some(children))
 }
 
 fn reconcile_archived_commit_claimed(
@@ -447,45 +493,78 @@ fn reconcile_archived_commit_claimed(
     parent_id: &str,
     attempt_generation: u64,
     parent: &mut DurableBatchParent,
+    gate: &GalleryPublicationGate,
 ) -> anyhow::Result<BatchAttemptReconciliation> {
     let manifest_path = output_dir
         .join(TRANSACTION_DIR)
         .join(parent_id)
         .join(COMMITTED_DIR)
         .join(format!("{attempt_generation}.json"));
-    let manifest = BatchTransaction::load_validated_committed_archive(
-        output_dir,
-        parent_id,
-        attempt_generation,
-    )
-    .with_context(|| {
-        format!(
-            "validating archived batch commit {}",
-            manifest_path.display()
+    if manifest_path.is_file() {
+        let manifest = BatchTransaction::load_validated_committed_archive(
+            output_dir,
+            parent_id,
+            attempt_generation,
         )
-    })?;
-    anyhow::ensure!(
-        parent.parent_id() == manifest.parent_id
-            && parent.attempt_generation() == attempt_generation
-            && parent.total_children() == manifest.children.len(),
-        "archived transaction generation does not match parent"
-    );
-    for (child_index, receipt) in parent.accepted_receipts()? {
-        let Some(receipt) = receipt else {
-            anyhow::ensure!(
-                manifest.version == 1,
-                "v2 parent success has no receipt to validate against committed archive"
-            );
-            continue;
-        };
-        let child = &manifest.children[child_index];
+        .with_context(|| {
+            format!(
+                "validating archived batch commit {}",
+                manifest_path.display()
+            )
+        })?;
         anyhow::ensure!(
-            child.checksum_sha256.as_deref() == Some(receipt.checksum_sha256.as_str())
-                && child.size_bytes == Some(receipt.size_bytes)
-                && BatchTransaction::archived_child_identity(child)?
-                    == receipt.record_identity_sha256,
-            "archived child {child_index} does not match the reducer receipt"
+            parent.parent_id() == manifest.parent_id
+                && parent.attempt_generation() == attempt_generation
+                && parent.total_children() == manifest.children.len(),
+            "archived transaction generation does not match parent"
         );
+        for (child_index, receipt) in parent.accepted_receipts()? {
+            let Some(receipt) = receipt else {
+                anyhow::ensure!(
+                    manifest.version == 1,
+                    "v2 parent success has no receipt to validate against committed archive"
+                );
+                continue;
+            };
+            let child = &manifest.children[child_index];
+            anyhow::ensure!(
+                child.checksum_sha256.as_deref() == Some(receipt.checksum_sha256.as_str())
+                    && child.size_bytes == Some(receipt.size_bytes)
+                    && BatchTransaction::archived_child_identity(child)?
+                        == receipt.record_identity_sha256,
+                "archived child {child_index} does not match the reducer receipt"
+            );
+        }
+    } else {
+        let children = central_committed_children(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            parent.total_children(),
+            gate,
+        )?
+        .with_context(|| {
+            format!(
+                "validating committed gallery authority for batch {parent_id}/{attempt_generation}"
+            )
+        })?;
+        anyhow::ensure!(
+            parent.parent_id() == parent_id && parent.attempt_generation() == attempt_generation,
+            "central gallery transaction generation does not match parent"
+        );
+        for (child_index, receipt) in parent.accepted_receipts()? {
+            let Some(receipt) = receipt else {
+                continue;
+            };
+            let child = &children[child_index];
+            anyhow::ensure!(
+                child.identity.checksum_sha256 == receipt.checksum_sha256
+                    && child.identity.size_bytes == receipt.size_bytes
+                    && BatchTransaction::central_child_record_identity(child)?
+                        == receipt.record_identity_sha256,
+                "central gallery child {child_index} does not match the reducer receipt"
+            );
+        }
     }
     let was_committed = parent.state() == BatchParentState::Committed;
     roll_parent_to_committed(parent)?;
@@ -660,7 +739,22 @@ pub async fn recover_batches(
             authorities.is_empty(),
             "unconsumed batch attempt authorities remain after recovery"
         );
-        let evidence = if archive.is_file() {
+        let evidence = if state == BatchParentState::Committed {
+            // The reducer's own committed journal is the terminal handoff.
+            // Gallery files may subsequently be deleted or quarantined and
+            // must not make an already-settled parent block server startup.
+            TransactionEvidence::Missing
+        } else if archive.is_file() {
+            TransactionEvidence::CommittedArchive
+        } else if central_committed_children(
+            output_dir,
+            &parent_id,
+            generation,
+            parent.total_children(),
+            gate,
+        )?
+        .is_some()
+        {
             TransactionEvidence::CommittedArchive
         } else {
             TransactionEvidence::Missing
@@ -672,6 +766,7 @@ pub async fn recover_batches(
                     &parent_id,
                     generation,
                     &mut parent,
+                    gate,
                 )?;
                 report.parents_rolled_forward += usize::from(reconciled.parent_rolled_forward);
                 report.outcomes.push(RecoveredParentOutcome::Committed {
@@ -686,6 +781,7 @@ pub async fn recover_batches(
                         &parent_id,
                         generation,
                         &mut parent,
+                        gate,
                     )?;
                 }
                 report.outcomes.push(RecoveredParentOutcome::Committed {
@@ -1066,6 +1162,11 @@ mod tests {
             (
                 Parent::Committed,
                 Evidence::CommittedArchive,
+                Action::AlreadyCommitted,
+            ),
+            (
+                Parent::Committed,
+                Evidence::Missing,
                 Action::AlreadyCommitted,
             ),
             (
@@ -1652,6 +1753,45 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{error:#}").contains("changed"));
+    }
+
+    #[tokio::test]
+    async fn committed_parent_survives_later_gallery_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        bridge.stage_and_accept(&lease, b"one").unwrap();
+        bridge.converge_commit(&gate, Arc::new(None)).await.unwrap();
+        assert_eq!(bridge.parent.state(), BatchParentState::Committed);
+        assert_eq!(
+            crate::batch_transaction::tombstone_committed_archive_filename(
+                dir.path(),
+                "one.png",
+                &gate,
+            )
+            .unwrap(),
+            crate::batch_transaction::ArchiveDeleteDisposition::SafeToUnlink
+        );
+        drop(bridge);
+
+        let report = recover_batches(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            report.outcomes,
+            vec![RecoveredParentOutcome::Committed {
+                parent_id: "parent".to_owned(),
+                attempt_generation: 0,
+            }]
+        );
     }
 
     #[tokio::test]

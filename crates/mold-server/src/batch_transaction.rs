@@ -1229,6 +1229,19 @@ impl BatchTransaction {
         immutable_record_identity(child)
     }
 
+    pub(crate) fn central_child_record_identity(
+        entry: &CommittedArchiveEntry,
+    ) -> anyhow::Result<String> {
+        immutable_record_identity(&BatchManifestChild {
+            child_index: entry.identity.child_index,
+            staging_name: format!("{:08}.stage", entry.identity.child_index),
+            final_name: entry.identity.final_name.clone(),
+            checksum_sha256: Some(entry.identity.checksum_sha256.clone()),
+            size_bytes: Some(entry.identity.size_bytes),
+            record: entry.record.clone(),
+        })
+    }
+
     pub fn staging_path(&self, child_index: usize) -> anyhow::Result<PathBuf> {
         let child = self
             .manifest
