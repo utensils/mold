@@ -7,6 +7,7 @@ cd "$repo_root"
 cargo test -p mold-ai-inference --test family_capability_contract
 cargo test -p mold-ai-scheduler --test multi_gpu_acceptance
 cargo test -p mold-ai-server execution_plan::tests::
+bash scripts/tests/local-multi-gpu-qualification-contract.sh
 
 matrix="docs/qualification/multi-gpu-family-matrix.md"
 for family in \

@@ -114,3 +114,84 @@ is never itself called runtime or hardware qualification.
 The schema is
 [`cuda-sm86-report.schema.json`](./cuda-sm86-report.schema.json). This is a
 reproducible evidence workflow, not a cryptographic attestation service.
+
+## Local scheduler acceptance on two RTX 3090s
+
+The distribution runner above proves one sm86 artifact on one selected device
+at a time. It does not prove multi-GPU scheduling or lifecycle behavior.
+`scripts/qualify-local-multi-gpu.py` is the separate candidate-binary gate for
+the local two-card development host.
+
+The runner refuses an occupied alternate port and never stops, restarts, or
+connects to the normal `:7680` service. It binds only loopback and creates an
+isolated `MOLD_HOME`, `MOLD_DB_PATH`, `MOLD_OUTPUT_DIR`, gallery, and server
+log tree beside the report. The candidate runs inside a Bubblewrap mount
+namespace with the host root and `--models-dir` read-only; only its private
+runtime tree and `/tmp` overlay are writable. A before/after
+path/type/mode/size/mtime manifest is an additional mutation tripwire.
+Bubblewrap is therefore a required host tool. Do not point `--report` into a
+temporary directory if the evidence needs to be retained.
+
+Prepare a request that is slow enough for the runner to observe both active
+workers and disable one while it is busy. Keep `batch_size` at one; the runner
+submits independent compatible jobs and assigns distinct prompts/seeds:
+
+```json
+{
+  "prompt": "Mold real local multi-GPU acceptance",
+  "model": "sd15:fp16",
+  "width": 512,
+  "height": 512,
+  "steps": 20,
+  "guidance": 7.5,
+  "seed": 9042026,
+  "batch_size": 1,
+  "output_format": "png"
+}
+```
+
+Run the exact final CUDA candidate on an unused alternate port:
+
+```bash
+scripts/qualify-local-multi-gpu.py \
+  --binary ./target/release/mold \
+  --models-dir /home/killswitch/.mold/models \
+  --request ./local-2x3090-request.json \
+  --expected-gpu-uuid GPU-44f80ce5-23fc-a5dd-ac4e-133142952997 \
+  --expected-gpu-uuid GPU-ba027fc5-7915-8d58-6738-b7eaafe427b4 \
+  --port 17681 \
+  --report ./local-2x3090-qualification.json
+```
+
+The required evidence includes:
+
+- exact `nvidia-smi` inventory and exact candidate PID observations on both
+  UUIDs while distinct work IDs are active;
+- `/api/devices`, legacy `/api/status`, `/api/resources`, `/api/queue`, and
+  `mold gpu list --json` projections;
+- successful outputs carrying at least two distinct `x-mold-gpu` ordinals;
+- busy disable returning `202`/`draining`, plan-version advance away from that
+  lane, drain completion, and re-enable;
+- paused queued cancellation without inference, all-disabled maintenance
+  rejection, persisted desired enablement across restart, and legacy-mode
+  mutation fencing;
+- missing/empty/all/none/ordinal/stable-ID/NVIDIA-UUID/unmatched selector
+  behavior plus stable-ID resolution under reversed `CUDA_VISIBLE_DEVICES`.
+
+These two physical UUIDs share no non-empty prefix, so they cannot produce an
+ambiguous real selector. The runner executes the deterministic ambiguous/
+missing-prefix source test and records `hardware_claimed: false` for that
+case. This is deliberate: synthetic ambiguity evidence must never be
+misrepresented as a property observed on this hardware.
+
+Validate retained evidence independently:
+
+```bash
+scripts/validate-local-multi-gpu-report.py \
+  ./local-2x3090-qualification.json
+```
+
+The validator reopens and hashes the exact candidate and every evidence file,
+requires the exact expected UUID inventory, and requires every gate to pass.
+Use `--allow-failure` only when inspecting a valid failed run; it does not
+convert that run into hardware qualification.

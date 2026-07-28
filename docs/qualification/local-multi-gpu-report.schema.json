@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/local-multi-gpu-qualification-v1.json",
+  "title": "Mold local multi-GPU qualification report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "started_at",
+    "finished_at",
+    "hardware_qualified",
+    "candidate",
+    "host",
+    "isolation",
+    "request",
+    "checks",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "mold.local.multi-gpu.qualification.v1"
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "hardware_qualified": { "type": "boolean" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "version", "server_pid"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "version": { "type": "string", "minLength": 1 },
+        "server_pid": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostname", "expected_gpu_uuids", "devices"],
+      "properties": {
+        "hostname": { "type": "string", "minLength": 1 },
+        "expected_gpu_uuids": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/gpu_uuid" }
+        },
+        "devices": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "index",
+              "uuid",
+              "name",
+              "memory_total_mib",
+              "compute_capability",
+              "driver_version"
+            ],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "uuid": { "$ref": "#/$defs/gpu_uuid" },
+              "name": { "type": "string", "minLength": 1 },
+              "memory_total_mib": { "type": "integer", "minimum": 1 },
+              "compute_capability": { "type": "string", "minLength": 1 },
+              "driver_version": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bind",
+        "port",
+        "mold_home",
+        "db_path",
+        "output_dir",
+        "models_dir",
+        "preexisting_listener_absent"
+      ],
+      "properties": {
+        "bind": { "const": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1024 },
+        "mold_home": { "type": "string", "minLength": 1 },
+        "db_path": { "type": "string", "minLength": 1 },
+        "output_dir": { "type": "string", "minLength": 1 },
+        "models_dir": { "type": "string", "minLength": 1 },
+        "preexisting_listener_absent": { "const": true }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "model", "job_count"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "model": { "type": "string", "minLength": 1 },
+        "job_count": { "type": "integer", "minimum": 2 }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "both_devices_discovered",
+        "both_devices_executed",
+        "busy_disable_drained",
+        "queue_replanned_after_disable",
+        "all_disabled_maintenance",
+        "queued_cancellation",
+        "restart_persistence",
+        "legacy_rollback",
+        "selector_matrix",
+        "client_projection",
+        "models_tree_unchanged"
+      ],
+      "properties": {
+        "both_devices_discovered": { "$ref": "#/$defs/check" },
+        "both_devices_executed": { "$ref": "#/$defs/check" },
+        "busy_disable_drained": { "$ref": "#/$defs/check" },
+        "queue_replanned_after_disable": { "$ref": "#/$defs/check" },
+        "all_disabled_maintenance": { "$ref": "#/$defs/check" },
+        "queued_cancellation": { "$ref": "#/$defs/check" },
+        "restart_persistence": { "$ref": "#/$defs/check" },
+        "legacy_rollback": { "$ref": "#/$defs/check" },
+        "selector_matrix": { "$ref": "#/$defs/check" },
+        "client_projection": { "$ref": "#/$defs/check" },
+        "models_tree_unchanged": { "$ref": "#/$defs/check" }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "path", "sha256"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "hardware_qualified": { "const": true } },
+        "required": ["hardware_qualified"]
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "properties": {
+              "both_devices_discovered": { "properties": { "status": { "const": "passed" } } },
+              "both_devices_executed": { "properties": { "status": { "const": "passed" } } },
+              "busy_disable_drained": { "properties": { "status": { "const": "passed" } } },
+              "queue_replanned_after_disable": { "properties": { "status": { "const": "passed" } } },
+              "all_disabled_maintenance": { "properties": { "status": { "const": "passed" } } },
+              "queued_cancellation": { "properties": { "status": { "const": "passed" } } },
+              "restart_persistence": { "properties": { "status": { "const": "passed" } } },
+              "legacy_rollback": { "properties": { "status": { "const": "passed" } } },
+              "selector_matrix": { "properties": { "status": { "const": "passed" } } },
+              "client_projection": { "properties": { "status": { "const": "passed" } } },
+              "models_tree_unchanged": { "properties": { "status": { "const": "passed" } } }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "server_pid": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gpu_uuid": {
+      "type": "string",
+      "pattern": "^GPU-[0-9A-Fa-f-]{36}$"
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary", "evidence_labels"],
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "evidence_labels": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
