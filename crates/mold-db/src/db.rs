@@ -546,6 +546,20 @@ impl MetadataDb {
         Ok(r)
     }
 
+    /// Run `f` in an IMMEDIATE transaction. This takes SQLite's writer
+    /// reservation before any reads, for read-validate-write invariants that
+    /// must serialize with other process-local or external writers.
+    pub(crate) fn transact_immediate<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R>,
+    ) -> Result<R> {
+        let mut conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Run `f` against the locked connection. Exposed to sibling modules
     /// (settings, model_prefs, prompt_history) so they don't need to
     /// re-implement the mutex dance for every read/write.

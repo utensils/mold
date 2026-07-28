@@ -744,7 +744,8 @@ Advanced settings:
 
 Validation requires `replan_max_delay_ms >= replan_debounce_ms`. Settings are
 profile-scoped user preferences because they alter scheduling behavior, not
-device identity. Objective weights remain internal.
+device identity. They are snapshotted when the coordinator starts, and config
+surfaces mark them restart-required. Objective weights remain internal.
 
 On the first dirty event:
 
@@ -2407,9 +2408,9 @@ Gates:
 
 ### Cutover
 
-1. ship `observe` for decision telemetry;
-2. enable V2 explicitly on development and qualification hosts;
-3. make V2 default after phases A–E gates;
+1. `observe` shipped for decision telemetry;
+2. V2 was explicitly enabled on development and qualification hosts;
+3. V2 is now the compiled default;
 4. keep `legacy` for one release as restart-time rollback;
 5. remove legacy dispatcher and flag after the rollback window.
 

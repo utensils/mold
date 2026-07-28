@@ -1418,6 +1418,18 @@ mod tests {
     fn rollout_mode_selects_exactly_one_gpu_dispatch_owner() {
         use crate::dispatch_mode::DispatchMode;
 
+        let default = startup_plan(
+            &GpuSelection::All,
+            2,
+            2,
+            true,
+            DispatchMode::from_optional_value(None).unwrap(),
+        );
+        assert!(default.start_gpu_workers);
+        assert!(!default.start_legacy_dispatcher);
+        assert!(default.start_v2_coordinator);
+        assert!(!default.observe_v2_decisions);
+
         let legacy = startup_plan(&GpuSelection::All, 2, 2, true, DispatchMode::Legacy);
         assert!(legacy.start_gpu_workers);
         assert!(legacy.start_legacy_dispatcher);

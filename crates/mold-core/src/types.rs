@@ -3215,6 +3215,7 @@ mod tests {
                 value: serde_json::json!(7680),
                 source: "file".to_string(),
                 env_var: None,
+                restart_required: false,
             }],
         };
         let json = serde_json::to_string(&listing).unwrap();
@@ -3222,21 +3223,33 @@ mod tests {
         assert!(json.contains(r#""value":7680"#), "got: {json}");
         // env_var is omitted from the wire unless the source is "env".
         assert!(!json.contains("env_var"), "got: {json}");
+        assert!(!json.contains("restart_required"), "got: {json}");
         let back: ConfigListing = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries[0].key, "server_port");
         assert_eq!(back.profile.as_deref(), Some("default"));
+        assert!(!back.entries[0].restart_required);
 
         let env_entry = ConfigEntry {
             key: "embed_metadata".to_string(),
             value: serde_json::json!(true),
             source: "env".to_string(),
             env_var: Some("MOLD_EMBED_METADATA".to_string()),
+            restart_required: false,
         };
         let json = serde_json::to_string(&env_entry).unwrap();
         assert!(
             json.contains(r#""env_var":"MOLD_EMBED_METADATA""#),
             "got: {json}"
         );
+        let restart_entry = ConfigEntry {
+            key: "scheduler.replan_debounce_ms".to_string(),
+            value: serde_json::json!(2000),
+            source: "db".to_string(),
+            env_var: None,
+            restart_required: true,
+        };
+        let json = serde_json::to_string(&restart_entry).unwrap();
+        assert!(json.contains(r#""restart_required":true"#), "got: {json}");
 
         let profiles = ConfigProfiles {
             active: "dev".to_string(),
@@ -4670,6 +4683,10 @@ pub struct ConfigEntry {
     /// without guessing the key-to-variable mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
+    /// This persisted value is read when the engine/coordinator starts and
+    /// does not change the running process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_required: bool,
 }
 
 /// Whole-config listing returned by `GET /api/config`.

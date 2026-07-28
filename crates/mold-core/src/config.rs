@@ -14,8 +14,8 @@ static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 const BOOTSTRAP_ONLY_BANNER: &str = "\
 # mold config — bootstrap-only surface.
 #
-# User preferences (expand.*, generate.default_*, per-model generation
-# defaults, lora, scheduler) live in SQLite at <MOLD_HOME>/mold.db.
+# User preferences (expand.*, scheduler.*, generate.default_*, per-model generation
+# defaults, LoRA, and generation scheduler) live in SQLite at <MOLD_HOME>/mold.db.
 # Edit them via:
 #   mold config set <key> <value>
 #   mold config get <key>
@@ -38,6 +38,7 @@ const STRIPPED_GLOBAL_KEYS: &[&str] = &[
     "t5_variant",
     "qwen3_variant",
     "expand",
+    "scheduler",
 ];
 
 const STRIPPED_MODEL_KEYS: &[&str] = &[
@@ -523,6 +524,11 @@ pub struct Config {
     #[serde(default)]
     pub expand: ExpandSettings,
 
+    /// Profile-scoped scheduler behavior. Persisted in `mold.db`; the
+    /// serialized field exists only for one-shot import of older/manual TOML.
+    #[serde(default)]
+    pub scheduler: SchedulerSettings,
+
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -569,6 +575,107 @@ pub struct LoggingConfig {
     /// Number of days to retain log files. Default: 7.
     #[serde(default = "default_log_max_days")]
     pub max_days: u32,
+}
+
+pub const SCHEDULER_TIMING_MAX_MS: u32 = 30_000;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub struct SchedulerSettings {
+    #[serde(default = "default_replan_debounce_ms")]
+    pub replan_debounce_ms: u32,
+    #[serde(default = "default_replan_max_delay_ms")]
+    pub replan_max_delay_ms: u32,
+    #[serde(default = "default_warm_wait_max_ms")]
+    pub warm_wait_max_ms: u32,
+}
+
+impl<'de> Deserialize<'de> for SchedulerSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default = "default_replan_debounce_ms")]
+            replan_debounce_ms: u32,
+            #[serde(default = "default_replan_max_delay_ms")]
+            replan_max_delay_ms: u32,
+            #[serde(default = "default_warm_wait_max_ms")]
+            warm_wait_max_ms: u32,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        SchedulerSettings {
+            replan_debounce_ms: wire.replan_debounce_ms,
+            replan_max_delay_ms: wire.replan_max_delay_ms,
+            warm_wait_max_ms: wire.warm_wait_max_ms,
+        }
+        .validate()
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+const fn default_replan_debounce_ms() -> u32 {
+    2_000
+}
+
+const fn default_replan_max_delay_ms() -> u32 {
+    5_000
+}
+
+const fn default_warm_wait_max_ms() -> u32 {
+    2_000
+}
+
+impl SchedulerSettings {
+    pub fn validate(self) -> anyhow::Result<Self> {
+        for (key, value) in [
+            ("scheduler.replan_debounce_ms", self.replan_debounce_ms),
+            ("scheduler.replan_max_delay_ms", self.replan_max_delay_ms),
+            ("scheduler.warm_wait_max_ms", self.warm_wait_max_ms),
+        ] {
+            anyhow::ensure!(
+                value <= SCHEDULER_TIMING_MAX_MS,
+                "{key} must be between 0 and {SCHEDULER_TIMING_MAX_MS}"
+            );
+        }
+        anyhow::ensure!(
+            self.replan_max_delay_ms >= self.replan_debounce_ms,
+            "scheduler.replan_max_delay_ms must be greater than or equal to \
+             scheduler.replan_debounce_ms"
+        );
+        Ok(self)
+    }
+}
+
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            replan_debounce_ms: default_replan_debounce_ms(),
+            replan_max_delay_ms: default_replan_max_delay_ms(),
+            warm_wait_max_ms: default_warm_wait_max_ms(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_settings_tests {
+    use super::SchedulerSettings;
+
+    #[test]
+    fn scheduler_settings_defaults_and_rejects_invalid_toml() {
+        let defaults: SchedulerSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, SchedulerSettings::default());
+
+        let error = toml::from_str::<SchedulerSettings>(
+            "replan_debounce_ms = 5000\nreplan_max_delay_ms = 4999",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert!(toml::from_str::<SchedulerSettings>("warm_wait_max_ms = 30001").is_err());
+    }
 }
 
 fn default_log_level() -> String {
@@ -634,6 +741,7 @@ impl Default for Config {
             media_roots: None,
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
+            scheduler: SchedulerSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
             lambda: crate::lambda::LambdaSettings::default(),

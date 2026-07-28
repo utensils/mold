@@ -3485,6 +3485,10 @@ mod tests {
         // User-preference keys live in the settings DB (post-#265 routing).
         assert_eq!(find("expand.enabled")["source"], "db");
         assert_eq!(find("default_steps")["source"], "db");
+        assert_eq!(
+            find("scheduler.replan_debounce_ms")["restart_required"],
+            true
+        );
         // Values are typed JSON, mirroring `mold config list --json`.
         assert_eq!(
             find("server_port")["value"],
@@ -3591,6 +3595,50 @@ mod tests {
             .unwrap();
         let body = json_body(resp).await;
         assert_eq!(body["value"], serde_json::json!(12));
+    }
+
+    #[tokio::test]
+    async fn scheduler_config_is_validated_persisted_and_marked_restart_required() {
+        let (app, db) = app_with_settings_db();
+        let invalid = put_json(
+            &app,
+            "/api/config/scheduler.replan_max_delay_ms",
+            r#"{"value":1999}"#,
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = put_json(
+            &app,
+            "/api/config/scheduler.replan_debounce_ms",
+            r#"{"value":1500}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["value"], 1500);
+        assert_eq!(body["source"], "db");
+        assert_eq!(body["restart_required"], true);
+
+        let settings = mold_db::Settings::for_profile(db.as_ref().as_ref().unwrap(), "default");
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_REPLAN_DEBOUNCE_MS)
+                .unwrap(),
+            Some(1500)
+        );
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_REPLAN_MAX_DELAY_MS)
+                .unwrap(),
+            Some(5000)
+        );
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_WARM_WAIT_MAX_MS)
+                .unwrap(),
+            Some(2000)
+        );
     }
 
     #[tokio::test]

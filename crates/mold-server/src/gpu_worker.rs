@@ -7491,10 +7491,6 @@ mod tests {
 
     #[test]
     fn legacy_generation_preserves_f0_when_upscale_weights_disappear_before_freeze() {
-        assert_eq!(
-            crate::dispatch_mode::DispatchMode::default(),
-            crate::dispatch_mode::DispatchMode::Legacy
-        );
         let root = tempfile::tempdir().unwrap();
         let weights = root.path().join("upscaler.safetensors");
         std::fs::write(&weights, b"present-until-generation-completes").unwrap();

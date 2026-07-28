@@ -11,11 +11,12 @@
 //! - [`hydrate_config_from_db`] — overlay DB values onto an already-loaded
 //!   `Config` so downstream consumers read the authoritative values
 //!   without knowing about the DB.
-//! - [`save_expand_to_db`] / [`save_generate_globals_to_db`] — used by the
-//!   CLI `mold config set` dispatcher for expand.* / generate.* keys.
+//! - [`save_expand_to_db`] / [`save_generate_globals_to_db`] /
+//!   [`save_scheduler_to_db`] — used by the CLI `mold config set` dispatcher
+//!   for expand.* / generate.* / scheduler.* keys.
 
 use anyhow::{Context, Result};
-use mold_core::config::{Config, ModelConfig};
+use mold_core::config::{Config, ModelConfig, SchedulerSettings};
 use mold_core::expand::ExpandSettings;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -181,6 +182,22 @@ pub fn hydrate_generate_globals_from_db(db: &MetadataDb, cfg: &mut Config) -> Re
     Ok(applied)
 }
 
+pub fn save_scheduler_to_db(db: &MetadataDb, scheduler: SchedulerSettings) -> Result<()> {
+    Settings::new(db).set_scheduler_timings_atomic(scheduler)
+}
+
+pub fn hydrate_scheduler_from_db(
+    db: &MetadataDb,
+    scheduler: &mut SchedulerSettings,
+) -> Result<bool> {
+    let s = Settings::new(db);
+    let (candidate, applied) = s.scheduler_timings(*scheduler)?;
+    if applied {
+        *scheduler = candidate;
+    }
+    Ok(applied)
+}
+
 /// Snapshot the user-editable per-model generation defaults out of a
 /// `ModelConfig` into a `ModelPrefs` row (the path fields stay in TOML).
 fn model_prefs_from_config(mc: &ModelConfig) -> ModelPrefs {
@@ -259,6 +276,7 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     // Global expand + generate.
     save_expand_to_db(db, &cfg.expand)?;
     save_generate_globals_to_db(db, cfg)?;
+    save_scheduler_to_db(db, cfg.scheduler)?;
 
     // Per-model user prefs. Skip rows that carry nothing but paths — we
     // want a ModelPrefs row only when the user has set at least one
@@ -390,6 +408,7 @@ pub fn cleanup_stale_backups(db: &MetadataDb, mold_dir: &Path, config_dir: &Path
 pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
     hydrate_expand_from_db(db, &mut cfg.expand)?;
     hydrate_generate_globals_from_db(db, cfg)?;
+    hydrate_scheduler_from_db(db, &mut cfg.scheduler)?;
 
     // Pass 1: overlay prefs for each model already in cfg.models. Keyed
     // on the canonical resolution so `flux-dev` and `flux-dev:q4` hit
@@ -512,6 +531,10 @@ pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result
         save_expand_to_db(db, &config.expand)?;
         return Ok(());
     }
+    if key.starts_with("scheduler.") {
+        save_scheduler_to_db(db, config.scheduler)?;
+        return Ok(());
+    }
     // All the global generation defaults ride one writer — cheap and
     // keeps the two halves of a `--width --height` pair consistent.
     save_generate_globals_to_db(db, config)?;
@@ -560,6 +583,12 @@ pub fn reset_global_key(db: &MetadataDb, profile: &str, key: &str) -> Result<()>
         "qwen3_variant" => keys::GENERATE_QWEN3_VARIANT,
         _ => key,
     };
+    if db_key.starts_with("scheduler.") {
+        // Reset means "use this field's compiled default". Validation and
+        // deletion share one transaction with the surviving profile rows.
+        s.reset_scheduler_timing_atomic(db_key)?;
+        return Ok(());
+    }
     s.delete(db_key)?;
     Ok(())
 }
@@ -951,6 +980,114 @@ mod tests {
         assert_eq!(cfg2.default_width, 2112);
     }
 
+    #[test]
+    fn scheduler_settings_are_profile_scoped_and_reject_invalid_pairs() {
+        let db = db();
+        let default = Settings::for_profile(&db, "default");
+        default
+            .set_int(keys::SCHEDULER_REPLAN_DEBOUNCE_MS, 1_000)
+            .unwrap();
+        default
+            .set_int(keys::SCHEDULER_REPLAN_MAX_DELAY_MS, 4_000)
+            .unwrap();
+        default
+            .set_int(keys::SCHEDULER_WARM_WAIT_MAX_MS, 3_000)
+            .unwrap();
+
+        let mut scheduler = SchedulerSettings::default();
+        hydrate_scheduler_from_db(&db, &mut scheduler).unwrap();
+        assert_eq!(
+            scheduler,
+            SchedulerSettings {
+                replan_debounce_ms: 1_000,
+                replan_max_delay_ms: 4_000,
+                warm_wait_max_ms: 3_000,
+            }
+        );
+
+        Settings::for_profile(&db, "invalid")
+            .set_int(keys::SCHEDULER_REPLAN_DEBOUNCE_MS, 5_000)
+            .unwrap();
+        Settings::for_profile(&db, "invalid")
+            .set_int(keys::SCHEDULER_REPLAN_MAX_DELAY_MS, 4_999)
+            .unwrap();
+        crate::settings::set_active_profile(&db, "invalid").unwrap();
+        let mut invalid = SchedulerSettings::default();
+        let error = hydrate_scheduler_from_db(&db, &mut invalid).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert_eq!(invalid, SchedulerSettings::default());
+    }
+
+    #[test]
+    fn scheduler_tuple_write_rolls_back_every_row_on_mid_batch_failure() {
+        let db = db();
+        let original = SchedulerSettings {
+            replan_debounce_ms: 1_000,
+            replan_max_delay_ms: 4_000,
+            warm_wait_max_ms: 3_000,
+        };
+        save_scheduler_to_db(&db, original).unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_scheduler_max_update
+                 BEFORE UPDATE OF value ON settings
+                 WHEN OLD.key = 'scheduler.replan_max_delay_ms'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected scheduler tuple failure');
+                 END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let error = save_scheduler_to_db(
+            &db,
+            SchedulerSettings {
+                replan_debounce_ms: 2_000,
+                replan_max_delay_ms: 6_000,
+                warm_wait_max_ms: 5_000,
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected scheduler tuple failure"));
+
+        let mut recovered = SchedulerSettings::default();
+        hydrate_scheduler_from_db(&db, &mut recovered).unwrap();
+        assert_eq!(
+            recovered, original,
+            "the first upsert must roll back when the second one fails"
+        );
+    }
+
+    #[test]
+    fn scheduler_reset_rejects_an_invalid_default_and_keeps_the_row() {
+        let db = db();
+        let settings = Settings::for_profile(&db, "default");
+        settings
+            .set_int(keys::SCHEDULER_REPLAN_DEBOUNCE_MS, 8_000)
+            .unwrap();
+        settings
+            .set_int(keys::SCHEDULER_REPLAN_MAX_DELAY_MS, 9_000)
+            .unwrap();
+
+        let error =
+            reset_global_key(&db, "default", keys::SCHEDULER_REPLAN_MAX_DELAY_MS).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert_eq!(
+            settings
+                .get_int(keys::SCHEDULER_REPLAN_MAX_DELAY_MS)
+                .unwrap(),
+            Some(9_000),
+            "validation must happen before the persisted row is deleted"
+        );
+    }
+
     /// Item 4 (post-#265): detect (don't delete) stale `.migrated`
     /// backups so future releases can flip to cleanup. Files returned
     /// match the three sidecars that land during the v5 → v6 upgrade.
@@ -1030,6 +1167,11 @@ qwen3_variant = "bf16"
 enabled = true
 temperature = 0.9
 
+[scheduler]
+replan_debounce_ms = 1000
+replan_max_delay_ms = 4000
+warm_wait_max_ms = 3000
+
 [logging]
 level = "info"
 
@@ -1057,6 +1199,7 @@ scheduler = "euler-ancestral"
             .expect(".migrated backup should exist");
         assert!(backup.contains("default_width = 1536"));
         assert!(backup.contains("[expand]"));
+        assert!(backup.contains("[scheduler]"));
         assert!(backup.contains("lora = \"/opt/lora.safetensors\""));
         assert!(backup.contains("scheduler = \"euler-ancestral\""));
 
@@ -1092,6 +1235,7 @@ scheduler = "euler-ancestral"
         assert!(!body.contains("t5_variant"));
         assert!(!body.contains("qwen3_variant"));
         assert!(!body.contains("[expand]"));
+        assert!(!body.contains("[scheduler]"));
         assert!(
             !body.contains("lora = "),
             "per-model lora must be stripped: {body}"

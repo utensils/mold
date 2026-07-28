@@ -291,6 +291,36 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     help: "Let the expansion model reason before writing (slower, sometimes better).",
     editor: "toggle",
   },
+  {
+    key: "scheduler.replan_debounce_ms",
+    section: "performance",
+    label: "Queue replan debounce",
+    help: "Delay after the latest queue change before globally optimizing the plan.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
+  {
+    key: "scheduler.replan_max_delay_ms",
+    section: "performance",
+    label: "Maximum replan delay",
+    help: "Maximum delay from the first unplanned queue change.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
+  {
+    key: "scheduler.warm_wait_max_ms",
+    section: "performance",
+    label: "Maximum warm-model wait",
+    help: "Longest beneficial wait for a compatible warm model.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
 ];
 
 /**

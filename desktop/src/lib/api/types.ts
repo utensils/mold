@@ -653,6 +653,8 @@ export interface ConfigRow {
   profile?: string | null;
   /** Name of the environment variable that wins when source is "env". */
   env_var?: string | null;
+  /** The persisted value applies when the engine/coordinator restarts. */
+  restart_required?: boolean;
 }
 
 /** `GET /api/config/profiles`. */

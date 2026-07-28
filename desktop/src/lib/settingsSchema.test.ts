@@ -51,6 +51,12 @@ describe("settings schema", () => {
   it("schemaFor resolves both engine keys and env knobs", () => {
     expect(schemaFor("embed_metadata")?.editor).toBe("toggle");
     expect(schemaFor("env.MOLD_VAE_TILED")?.editor).toBe("select");
+    expect(schemaFor("scheduler.replan_debounce_ms")).toMatchObject({
+      editor: "number",
+      min: 0,
+      max: 30000,
+      needsEngineRestart: true,
+    });
     expect(schemaFor("nope")).toBeNull();
   });
 

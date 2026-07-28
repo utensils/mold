@@ -89,18 +89,12 @@ status, TUI, CLI, MCP, and Discord surfaces report every device; interactive
 device buttons appear only for authoritative live lifecycle control, with the
 supported restart-enable recovery shown for read-only dispatch modes.
 
-`MOLD_DISPATCH_MODE=legacy` remains the default server dispatch owner until
-the Phase A–E cutover gates pass. Set `MOLD_DISPATCH_MODE=v2` explicitly to
-qualify the new scheduler. During the
-rollout window, restart with `legacy` for rollback or `observe` to keep legacy
-dispatch authoritative while recording the read-only V2 decision at each
-legacy dispatch point. The mode is restart-only; Mold never switches CUDA
-owners or contexts live. Legacy/observe retain their depth-two transport, but
-transport backlog is separate from the same binary execution claim used by V2
-and durable chains. Queue pause applies to generation, utility, and admin GPU
-work in every mode. Phase E/F cutover explicitly changes the compiled default
-back to V2 after the A–E acceptance matrix passes; Phase B does not imply that
-cutover.
+Scheduler V2 is the default GPU dispatch owner. During the one-release rollback
+window, restart with `MOLD_DISPATCH_MODE=legacy` to restore the previous
+depth-two dispatcher or `MOLD_DISPATCH_MODE=observe` to keep legacy dispatch
+authoritative while recording read-only V2 decisions. The mode is restart-only;
+Mold never switches CUDA owners or contexts live. Queue pause applies to
+generation, utility, and admin GPU work in every mode.
 
 ## Install
 

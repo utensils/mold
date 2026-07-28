@@ -237,6 +237,12 @@ onMounted(load);
               <span v-if="row.env_var" class="env-lock"
                 >Set by {{ row.env_var }}</span
               >
+              <span
+                v-if="schema.needsEngineRestart || row.restart_required"
+                class="env-lock"
+                :data-test="`restart-${row.key}`"
+                >Restart server to apply</span
+              >
             </div>
             <div class="config-editor">
               <input

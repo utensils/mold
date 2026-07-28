@@ -14,6 +14,12 @@ const rows = [
     env_var: "MOLD_DEFAULT_WIDTH",
   },
   { key: "future.option", value: "visible", source: "default" },
+  {
+    key: "scheduler.replan_debounce_ms",
+    value: 2000,
+    source: "db",
+    restart_required: true,
+  },
 ];
 
 function response(body: unknown, status = 200): Response {
@@ -69,6 +75,14 @@ describe("ConfigSettingsPanel", () => {
       wrapper.get('[data-test="save-output_dir"]').attributes("disabled"),
     ).toBeDefined();
     expect(wrapper.text()).toContain("Startup-only");
+    expect(
+      wrapper.get('[data-test="restart-scheduler.replan_debounce_ms"]').text(),
+    ).toBe("Restart server to apply");
+    expect(
+      wrapper
+        .get('[data-test="reset-scheduler.replan_debounce_ms"]')
+        .attributes("disabled"),
+    ).toBeUndefined();
   });
 
   it("uses the shared icon-led, accented treatment for every All settings group", async () => {

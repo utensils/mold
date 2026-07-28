@@ -3,8 +3,9 @@
 //! Shares the CLI's key registry, typed get/set, env-override detection,
 //! and DB-vs-TOML surface routing via `mold_core::config_keys`, and its
 //! DB persistence via `mold_db::config_sync`. Reads come from the server's
-//! in-memory `Config`; writes mutate it in place (so the running server
-//! reflects changes immediately) and persist to the owning surface.
+//! in-memory `Config`; writes mutate it in place and persist to the owning
+//! surface. Rows marked `restart_required` (currently `scheduler.*`) are
+//! consumed by the next coordinator start rather than hot-reconfigured.
 
 use axum::{
     extract::{Path, State},
@@ -59,6 +60,7 @@ fn entry_for(key: &str, value: serde_json::Value) -> ConfigEntry {
         value,
         source,
         env_var,
+        restart_required: key.starts_with("scheduler."),
     }
 }
 
@@ -233,11 +235,13 @@ pub async fn put_config_key(
     let value = keys::get_value(&cfg, &key)
         .map(|v| v.to_json())
         .unwrap_or(serde_json::Value::Null);
+    let restart_required = key.starts_with("scheduler.");
     Ok(Json(ConfigEntry {
         key,
         value,
         source: surface.as_str().to_string(),
         env_var: None,
+        restart_required,
     }))
 }
 
@@ -307,6 +311,7 @@ pub async fn delete_config_key(
         Some((var, _)) => ("env".to_string(), Some(var.to_string())),
         None => ("default".to_string(), None),
     };
+    let restart_required = key.starts_with("scheduler.");
     Ok(Json(ConfigEntry {
         key,
         value: fallback
@@ -314,6 +319,7 @@ pub async fn delete_config_key(
             .unwrap_or(serde_json::Value::Null),
         source,
         env_var,
+        restart_required,
     }))
 }
 

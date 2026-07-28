@@ -25,8 +25,6 @@ use crate::gpu_pool::{
 };
 use crate::state::{AppState, GenerationJob, SseMessage};
 
-const REPLAN_DEBOUNCE: Duration = Duration::from_secs(2);
-const REPLAN_MAX_DELAY: Duration = Duration::from_secs(5);
 const RECONCILE_INTERVAL: Duration = Duration::from_millis(10);
 const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_TRANSIENT_HOST_RAM: u64 = 64 * 1024 * 1024;
@@ -741,14 +739,18 @@ impl DependencyPreparer for PostUpscalePreparer {
 
 #[derive(Clone, Debug)]
 struct ReplanWindow {
+    debounce: Duration,
+    max_delay: Duration,
     dirty_since: Option<Instant>,
     last_dirty: Option<Instant>,
     dirty_through_version: u64,
 }
 
 impl ReplanWindow {
-    fn new() -> Self {
+    fn new(settings: mold_core::config::SchedulerSettings) -> Self {
         Self {
+            debounce: Duration::from_millis(u64::from(settings.replan_debounce_ms)),
+            max_delay: Duration::from_millis(u64::from(settings.replan_max_delay_ms)),
             dirty_since: None,
             last_dirty: None,
             dirty_through_version: 0,
@@ -764,8 +766,8 @@ impl ReplanWindow {
     fn deadline(&self) -> Option<Instant> {
         Some(
             self.last_dirty?
-                .checked_add(REPLAN_DEBOUNCE)?
-                .min(self.dirty_since?.checked_add(REPLAN_MAX_DELAY)?),
+                .checked_add(self.debounce)?
+                .min(self.dirty_since?.checked_add(self.max_delay)?),
         )
     }
 
@@ -1125,6 +1127,7 @@ impl From<PlannerError> for PlanPublicationError {
 struct Coordinator {
     state: AppState,
     planner: Planner,
+    admission_planner: Planner,
     pending: BTreeMap<String, PendingGeneration>,
     pending_owner_work: BTreeMap<String, PendingOwnerWork>,
     ready: BTreeMap<String, ReadyWorker>,
@@ -1157,6 +1160,12 @@ struct Coordinator {
     before_grant_hook: Option<BeforeGrantHook>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlanningPass {
+    Admission,
+    Optimize,
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 struct BeforeGrantHook {
@@ -1165,11 +1174,13 @@ struct BeforeGrantHook {
 }
 
 impl Coordinator {
-    fn new(state: AppState) -> Self {
+    async fn new(state: AppState) -> Self {
+        let scheduler = state.config.read().await.scheduler;
         Self::with_preparer_and_sampler(
             state,
             Arc::new(PostUpscalePreparer),
             Arc::new(SystemHostMemorySampler),
+            scheduler,
         )
     }
 
@@ -1177,22 +1188,46 @@ impl Coordinator {
         state: AppState,
         preparer: Arc<dyn DependencyPreparer>,
         sampler: Arc<dyn HostMemorySampler>,
+        scheduler: mold_core::config::SchedulerSettings,
     ) -> Self {
         let mut memory = HostMemoryLedger::new(sampler);
         memory.collect_now();
-        Self::with_preparer_and_memory(state, preparer, memory)
+        Self::with_preparer_and_memory_and_settings(state, preparer, memory, scheduler)
     }
 
+    #[cfg(test)]
     fn with_preparer_and_memory(
         state: AppState,
         preparer: Arc<dyn DependencyPreparer>,
         memory: HostMemoryLedger,
     ) -> Self {
+        let scheduler = state
+            .config
+            .try_read()
+            .map(|config| config.scheduler)
+            .unwrap_or_default();
+        Self::with_preparer_and_memory_and_settings(state, preparer, memory, scheduler)
+    }
+
+    fn with_preparer_and_memory_and_settings(
+        state: AppState,
+        preparer: Arc<dyn DependencyPreparer>,
+        memory: HostMemoryLedger,
+        scheduler: mold_core::config::SchedulerSettings,
+    ) -> Self {
         let (preparation_tx, preparation_rx) = tokio::sync::mpsc::unbounded_channel();
         let estimates = load_estimate_store(&state);
+        let planner_config = mold_scheduler::PlannerConfig {
+            warm_wait_max_ms: u64::from(scheduler.warm_wait_max_ms),
+            ..mold_scheduler::PlannerConfig::default()
+        };
         Self {
             state,
-            planner: Planner::default(),
+            planner: Planner::new(planner_config.clone()),
+            admission_planner: Planner::new(mold_scheduler::PlannerConfig {
+                mode: mold_scheduler::PlanningMode::WatchdogFallback,
+                ..planner_config
+            }),
             pending: BTreeMap::new(),
             pending_owner_work: BTreeMap::new(),
             ready: BTreeMap::new(),
@@ -1202,7 +1237,7 @@ impl Coordinator {
             plan_version: 0,
             synthetic_id: 0,
             memory,
-            dirty: ReplanWindow::new(),
+            dirty: ReplanWindow::new(scheduler),
             preparer,
             preparation_tx,
             preparation_rx,
@@ -1620,7 +1655,7 @@ impl Coordinator {
                         "worker acknowledged an unknown or stale lease"
                     );
                 } else {
-                    self.replan_and_publish();
+                    self.replan_and_publish_with(PlanningPass::Admission);
                 }
             }
             WorkerEvent::AllocationCommitted {
@@ -1923,7 +1958,7 @@ impl Coordinator {
                     }
                 }
                 self.mutate(immediate);
-                self.replan_and_publish();
+                self.replan_and_publish_with(PlanningPass::Admission);
             }
             WorkerEvent::Completed {
                 device_id,
@@ -1981,7 +2016,7 @@ impl Coordinator {
                     );
                 }
                 self.mutate(immediate);
-                let publication = self.try_replan_and_publish();
+                let publication = self.try_replan_and_publish_with(PlanningPass::Admission);
                 if let Some(completion) = completion {
                     if !valid {
                         completion.fail(
@@ -2075,7 +2110,7 @@ impl Coordinator {
                     }
                 }
                 self.mutate(immediate);
-                self.replan_and_publish();
+                self.replan_and_publish_with(PlanningPass::Admission);
             }
         }
     }
@@ -3664,6 +3699,27 @@ impl Coordinator {
     }
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
+        self.dispatch_ready_with(PlanningPass::Optimize).await
+    }
+
+    async fn dispatch_debounced_replan(&mut self) {
+        let planned_state_version = self.dispatch_ready().await.or_else(|| {
+            (self.pending.is_empty() && self.pending_owner_work.is_empty())
+                .then_some(self.state_version)
+        });
+        if let Some(planned_state_version) = planned_state_version {
+            // An empty queue needs no optimizer publication, but its dirty
+            // window is still settled. Otherwise a completion that drains
+            // the queue would retry this due timer every reconciliation tick.
+            self.dirty.clear_through(planned_state_version);
+        }
+    }
+
+    async fn dispatch_ready_with(&mut self, pass: PlanningPass) -> Option<u64> {
+        let planner = match pass {
+            PlanningPass::Admission => self.admission_planner.clone(),
+            PlanningPass::Optimize => self.planner.clone(),
+        };
         if self
             .dispatch_retry_not_before_ms
             .is_some_and(|deadline| deadline > monotonic_ms())
@@ -3701,7 +3757,7 @@ impl Coordinator {
                 return None;
             }
             let (snapshot, generation_plans) = self.planner_snapshot(&owner_plan_cache);
-            let plan = match self.planner.plan(&snapshot) {
+            let plan = match planner.plan(&snapshot) {
                 Ok(plan) => plan,
                 Err(error) => {
                     tracing::error!(
@@ -4393,29 +4449,41 @@ impl Coordinator {
                 }
             }
             self.state_version = self.state_version.saturating_add(1);
-            self.replan_and_publish();
+            self.replan_and_publish_with(pass);
             return Some(plan.state_version);
         }
     }
 
-    fn try_replan_and_publish(&mut self) -> Result<(), PlanPublicationError> {
+    fn try_replan_and_publish_with(
+        &mut self,
+        pass: PlanningPass,
+    ) -> Result<(), PlanPublicationError> {
         let owner_plan_cache = self.owner_plan_cache_and_settle_errors();
         let (snapshot, _) = self.planner_snapshot(&owner_plan_cache);
+        let planner = match pass {
+            PlanningPass::Admission => &self.admission_planner,
+            PlanningPass::Optimize => &self.planner,
+        };
         #[cfg(test)]
         let plan_result = self
             .next_plan_error
             .take()
-            .map_or_else(|| self.planner.plan(&snapshot), Err);
+            .map_or_else(|| planner.plan(&snapshot), Err);
         #[cfg(not(test))]
-        let plan_result = self.planner.plan(&snapshot);
+        let plan_result = planner.plan(&snapshot);
         let plan = plan_result?;
         self.publish_plan(&snapshot, &plan)?;
         self.plan_version = plan.plan_version;
         Ok(())
     }
 
+    #[cfg(test)]
     fn replan_and_publish(&mut self) {
-        if let Err(error) = self.try_replan_and_publish() {
+        self.replan_and_publish_with(PlanningPass::Optimize);
+    }
+
+    fn replan_and_publish_with(&mut self, pass: PlanningPass) {
+        if let Err(error) = self.try_replan_and_publish_with(pass) {
             tracing::error!(
                 state_version = self.state_version,
                 %error,
@@ -4603,7 +4671,7 @@ pub async fn run_scheduler_coordinator(
     );
     let (cpu_utility_tx, cpu_utility_rx) = std::sync::mpsc::sync_channel(1);
     let cpu_utility_handle = crate::gpu_worker::spawn_cpu_utility_thread(cpu_utility_rx, worker_tx);
-    let mut coordinator = Coordinator::new(state);
+    let mut coordinator = Coordinator::new(state).await;
     coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
@@ -4726,12 +4794,12 @@ pub async fn run_scheduler_coordinator(
             break;
         }
         if immediate {
-            let _ = coordinator.dispatch_ready().await;
+            let _ = coordinator
+                .dispatch_ready_with(PlanningPass::Admission)
+                .await;
         }
         if coordinator.dirty.due(Instant::now()) {
-            if let Some(planned_state_version) = coordinator.dispatch_ready().await {
-                coordinator.dirty.clear_through(planned_state_version);
-            }
+            coordinator.dispatch_debounced_replan().await;
         }
         if coordinator.device_state_dirty {
             coordinator.device_state_dirty = false;
@@ -5812,15 +5880,28 @@ mod tests {
     }
 
     #[test]
-    fn replan_timer_slides_to_two_seconds_but_never_past_five() {
+    fn replan_timer_uses_configured_sliding_delay_and_maximum() {
         let start = Instant::now();
-        let mut window = ReplanWindow::new();
+        let settings = mold_core::config::SchedulerSettings {
+            replan_debounce_ms: 700,
+            replan_max_delay_ms: 1_900,
+            warm_wait_max_ms: 0,
+        };
+        let mut window = ReplanWindow::new(settings);
         window.mark_dirty(start, 1);
-        assert_eq!(window.deadline(), Some(start + REPLAN_DEBOUNCE));
-        window.mark_dirty(start + Duration::from_secs(1), 2);
-        assert_eq!(window.deadline(), Some(start + Duration::from_secs(3)));
-        window.mark_dirty(start + Duration::from_secs(4), 3);
-        assert_eq!(window.deadline(), Some(start + REPLAN_MAX_DELAY));
+        assert_eq!(window.deadline(), Some(start + Duration::from_millis(700)));
+        window.mark_dirty(start + Duration::from_millis(600), 2);
+        assert_eq!(
+            window.deadline(),
+            Some(start + Duration::from_millis(1_300))
+        );
+        window.mark_dirty(start + Duration::from_millis(1_800), 3);
+        assert_eq!(
+            window.deadline(),
+            Some(start + Duration::from_millis(1_900))
+        );
+        assert!(!window.due(start + Duration::from_millis(1_899)));
+        assert!(window.due(start + Duration::from_millis(1_900)));
         window.clear_through(2);
         assert!(
             window.deadline().is_some(),
@@ -5828,6 +5909,108 @@ mod tests {
         );
         window.clear_through(3);
         assert!(window.deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn debounced_replan_settles_a_queue_drained_by_immediate_admission() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.state_version = 1;
+        coordinator
+            .dirty
+            .mark_dirty(Instant::now(), coordinator.state_version);
+
+        coordinator.dispatch_debounced_replan().await;
+
+        assert!(
+            coordinator.dirty.deadline().is_none(),
+            "an empty queue must not retry the elapsed debounce on every tick"
+        );
+    }
+
+    #[test]
+    fn immediate_admission_skips_global_optimizer_until_debounced_pass() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let mut config = mold_core::Config::default();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let settings = mold_db::Settings::new(&db);
+        settings
+            .set_int(mold_db::settings::SCHEDULER_REPLAN_DEBOUNCE_MS, 10)
+            .unwrap();
+        settings
+            .set_int(mold_db::settings::SCHEDULER_REPLAN_MAX_DELAY_MS, 20)
+            .unwrap();
+        settings
+            .set_int(mold_db::settings::SCHEDULER_WARM_WAIT_MAX_MS, 0)
+            .unwrap();
+        mold_db::config_sync::hydrate_config_from_db(&db, &mut config).unwrap();
+        let state = AppState::empty(config, QueueHandle::new(ingress_tx), pool, 1);
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let (snapshot, _) = coordinator.planner_snapshot(&BTreeMap::new());
+
+        assert_eq!(
+            coordinator
+                .admission_planner
+                .plan(&snapshot)
+                .unwrap()
+                .optimizer_state,
+            mold_scheduler::OptimizerState::WatchdogFallback
+        );
+        assert_ne!(
+            coordinator.planner.plan(&snapshot).unwrap().optimizer_state,
+            mold_scheduler::OptimizerState::WatchdogFallback
+        );
+        assert_eq!(coordinator.dirty.debounce, Duration::from_millis(10));
+        assert_eq!(coordinator.dirty.max_delay, Duration::from_millis(20));
+
+        let no_warm_hold = coordinator
+            .admission_planner
+            .plan(&PlannerSnapshot::new(
+                1,
+                1,
+                1_000,
+                8 << 30,
+                vec![
+                    DeviceSnapshot::idle("cold", 24 << 30),
+                    DeviceSnapshot::busy("warm", 24 << 30, 1_500).with_warm("exec"),
+                ],
+                vec![WorkSnapshot::new(
+                    "job",
+                    0,
+                    vec![
+                        CandidatePlacement::new("cold", "exec", 0).with_timing(1_000, 0, 1_000),
+                        CandidatePlacement::new("warm", "exec", 0).with_timing(1_000, 0, 100),
+                    ],
+                )],
+            ))
+            .unwrap();
+        assert_eq!(
+            no_warm_hold.immediate_leases[0].device_id.as_str(),
+            "cold",
+            "persisted warm_wait_max_ms=0 must reach both admission and optimize planners"
+        );
     }
 
     #[test]
@@ -6165,6 +6348,7 @@ mod tests {
             state,
             Arc::new(ImmediatePreparer),
             sampler.clone(),
+            mold_core::config::SchedulerSettings::default(),
         );
         let mut immediate = false;
         coordinator.enqueue_owner_work(
@@ -9154,6 +9338,7 @@ mod tests {
             state,
             Arc::new(ImmediatePreparer),
             sampler.clone(),
+            mold_core::config::SchedulerSettings::default(),
         );
         coordinator.leases.insert(
             device_id.clone(),
@@ -9906,6 +10091,7 @@ mod tests {
             state.clone(),
             Arc::new(ImmediatePreparer),
             sampler.clone(),
+            mold_core::config::SchedulerSettings::default(),
         );
         let mut immediate = false;
         coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);

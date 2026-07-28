@@ -6,6 +6,7 @@ mold keeps configuration in two places by design:
   `$MOLD_HOME`). Owns paths, ports, credentials, and the model-path
   entries that `mold pull` writes.
 - **`mold.db` (SQLite)** — owns user preferences: the `[expand]` section,
+  scheduler timing preferences (`scheduler.*`),
   global generation defaults (`default_width`, `default_height`,
   `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`,
   `default_negative_prompt`), the `last-model` sidecar, and per-model
@@ -43,6 +44,7 @@ mold config get server_port            # Get a value
 mold config set server_port 8080       # Bootstrap key → writes config.toml
 mold config set expand.enabled true    # User preference → writes mold.db
 mold config set default_width 1024     # Generation default → writes mold.db
+mold config set scheduler.replan_debounce_ms 2000 # Scheduler timing → mold.db
 mold config where expand.enabled       # Print which surface owns this key
 mold config reset expand.enabled       # Drop the DB row; next read falls back to TOML/env/default
 mold config reset --all --yes          # Drop every DB row under the active profile
@@ -77,6 +79,13 @@ priority order:
 
 Every `mold config` subcommand accepts `--profile <name>` to scope for
 a single invocation without touching the env or the meta setting.
+
+Scheduler V2 reads its profile-scoped timings when the coordinator starts.
+`scheduler.replan_debounce_ms` defaults to 2000,
+`scheduler.replan_max_delay_ms` to 5000, and
+`scheduler.warm_wait_max_ms` to 2000. Each accepts 0–30000 milliseconds;
+maximum delay must be at least the debounce. The config API and Mold Studio
+mark these rows restart-required. Restart the server after changing them.
 
 See the [CLI Reference](/guide/cli-reference#mold-config) for the full list of
 keys and options.
@@ -151,7 +160,7 @@ Environment variables take precedence over config file values.
 | `MOLD_MODELS_DIR`                 | `$MOLD_HOME/models`                | Model storage directory                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `MOLD_PORT`                       | `7680`                             | Server port                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `MOLD_MDNS`                       | `1` (on)                           | Set `0`/`false` to disable `mold serve` LAN advertising and server-assisted DNS-SD browsing (requires the `mdns` build feature)                                                                                                                                                                                                                                                                                                                                           |
-| `MOLD_DISPATCH_MODE`              | `legacy`                           | Restart-time GPU dispatch owner: `legacy` remains the default until the Phase A–E cutover gates pass and retains the prior depth-two transport while sharing one binary execution claim with chains; `observe` retains legacy ownership and records request/placement/host-memory-feasible V2 decisions read-only; `v2` explicitly enables authoritative V2 leases. Queue pause gates generation, utility, and admin GPU work in every mode. Invalid values fail startup. |
+| `MOLD_DISPATCH_MODE`              | `v2`                               | Restart-time GPU dispatch owner: V2 is authoritative by default. During the one-release rollback window, `legacy` restores the prior depth-two transport and `observe` retains legacy ownership while recording request/placement/host-memory-feasible V2 decisions read-only. Queue pause gates generation, utility, and admin GPU work in every mode. Invalid values fail startup. |
 | `MOLD_DISTRIBUTION_IMAGE_VERSION` | `latest`                           | Release-build input: official stable builds embed their exact release, fetch that release's target digest manifest, and submit `repository@sha256:…`; source/Nix/rolling builds use mutable `latest*`. End users should not override it at runtime.                                                                                                                                                                                                                       |
 | `LAMBDA_API_KEY`                  | unset                              | Overrides `lambda.api_key`                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `MOLD_LOG`                        | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |

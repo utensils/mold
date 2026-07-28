@@ -195,6 +195,12 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
         display_value,
         persisted_surface.as_str().dimmed(),
     );
+    if key.starts_with("scheduler.") {
+        println!(
+            "  {} Restart the server to apply scheduler timing changes.",
+            theme::icon_bullet()
+        );
+    }
 
     // Warn about env override
     if let Some((var, env_val)) = env_override_for(key) {
@@ -325,6 +331,10 @@ pub fn run_reset(key: Option<&str>, all: bool, yes: bool) -> Result<()> {
             dropped_settings,
             dropped_model_rows
         );
+        println!(
+            "  {} Restart the server if scheduler timing settings were reset.",
+            theme::icon_bullet()
+        );
         return Ok(());
     }
 
@@ -367,6 +377,12 @@ pub fn run_reset(key: Option<&str>, all: bool, yes: bool) -> Result<()> {
         key.bold(),
         profile.dimmed()
     );
+    if key.starts_with("scheduler.") {
+        println!(
+            "  {} Restart the server to apply scheduler timing changes.",
+            theme::icon_bullet()
+        );
+    }
     Ok(())
 }
 

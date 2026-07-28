@@ -60,7 +60,7 @@ const asNumber = computed(() => {
         ? 'Startup-only while the server is running. Use the CLI while stopped, then restart.'
         : undefined
     "
-    :needs-engine-restart="schema.needsEngineRestart"
+    :needs-engine-restart="schema.needsEngineRestart || row.restart_required"
     resettable
     @reset="reset"
   >
