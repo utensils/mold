@@ -278,8 +278,12 @@ function revertToml() {
 }
 
 async function copyToml() {
-  await navigator.clipboard?.writeText(tomlDraft.value);
-  toasts.push("Copied chain.toml");
+  try {
+    await navigator.clipboard.writeText(tomlDraft.value);
+    toasts.push("Copied chain.toml");
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
 }
 
 function exportToml() {
