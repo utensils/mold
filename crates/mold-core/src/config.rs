@@ -658,26 +658,6 @@ impl Default for SchedulerSettings {
     }
 }
 
-#[cfg(test)]
-mod scheduler_settings_tests {
-    use super::SchedulerSettings;
-
-    #[test]
-    fn scheduler_settings_defaults_and_rejects_invalid_toml() {
-        let defaults: SchedulerSettings = toml::from_str("").unwrap();
-        assert_eq!(defaults, SchedulerSettings::default());
-
-        let error = toml::from_str::<SchedulerSettings>(
-            "replan_debounce_ms = 5000\nreplan_max_delay_ms = 4999",
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("replan_max_delay_ms must be greater than or equal"));
-        assert!(toml::from_str::<SchedulerSettings>("warm_wait_max_ms = 30001").is_err());
-    }
-}
-
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -1686,5 +1666,25 @@ fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
             eprintln!("mold: ignoring {key}={raw}: {msg}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_settings_tests {
+    use super::SchedulerSettings;
+
+    #[test]
+    fn scheduler_settings_defaults_and_rejects_invalid_toml() {
+        let defaults: SchedulerSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, SchedulerSettings::default());
+
+        let error = toml::from_str::<SchedulerSettings>(
+            "replan_debounce_ms = 5000\nreplan_max_delay_ms = 4999",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert!(toml::from_str::<SchedulerSettings>("warm_wait_max_ms = 30001").is_err());
     }
 }
