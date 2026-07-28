@@ -132,15 +132,41 @@ chain joins are bounded to the original submission window, so a later
 fixed-seed duplicate cannot be mistaken for the interrupted print or cancelled
 as its zombie. Background failure notifications wait for this reconciliation.
 
-Create also includes a guided **Sequence** mode for compatible installed video
-models. It starts with two plain-language clips, derives a valid duration from
-the selected host's chain limits, and keeps advanced transition settings behind
-Sequence tools. Submission, polling, cancellation, and relaunch recovery stay
-pinned to one immutable host ID, URL, instance ID, and Keychain-supplied API
-key. Local storage retains only the non-secret route identity and durable job
-ID. The initial mobile scope does not include a local engine, the desktop TOML
-chain editor and full durable-jobs administration workspace, RunPod
-provisioning, desktop engine settings, or desktop self-update channels.
+**Output** (One shot | Sequence) is a segmented field in the Create form
+stack, directly above the model field — sequences are a setting of Create,
+not a separate place, so there is no mode pair pinned above the form. The
+clip list lives in the shared `@studio` sequence draft, which survives tab
+switches and relaunches and carries the prompt across an Output switch (One
+shot → Sequence seeds the opening clip; back again returns clip 1's prompt).
+Sequence output narrows the model picker to chain-capable video models
+through `modelsForOutput`, auto-picks one, and restores the previous single
+pick on the way back; when the host reports `supports_sequence: false` its
+`sequence_unsupported_reason` is shown inline rather than silently hiding the
+model. With no chain-capable checkpoint installed, **Browse video models**
+lands on Discover with the Video + Models filters already applied.
+
+Clips are full-width cards with a 44pt **seam pill** between consecutive
+cards. Tapping a seam opens a bottom sheet hosting the shared `SeamEditor` at
+touch size — the iPhone's only fade-length control, clamped to the host's
+`fade_frames_max` (32 when unknown). Seam wording always comes from
+`transitionLabel()`, so LTX-Video's zero motion tail reads **Join clips**
+rather than Smooth. New clip durations come from the model's own
+server-advertised default, and duration choices stay strictly longer than the
+active motion tail. Size, frame rate, steps, guidance, and seed are the SAME
+form fields One shot uses, lent to the bench through its Sequence settings
+disclosure and read live at submit time — there are no private copies to
+drift.
+
+Durable sequences stream over `/api/chain-jobs/:id/events` (SSE) with a 5s
+snapshot-poll fallback when the stream fails and a forced re-sync when iOS
+wakes the webview, and they appear in the SAME queue list as single prints:
+Cancel while live, Resume and Dismiss once settled. Submission, watching,
+cancellation, and relaunch recovery stay pinned to one immutable host ID,
+URL, instance ID, and Keychain-supplied API key. Local storage retains only
+the non-secret route identity and durable job ID. The initial mobile scope
+does not include a local engine, the desktop TOML chain editor and full
+durable-jobs administration workspace, RunPod provisioning, desktop engine
+settings, or desktop self-update channels.
 
 ## Persistence and security
 
@@ -148,7 +174,10 @@ WebView local storage contains non-secret mobile state:
 
 - `mold.mobile.hosts.v1` — host metadata with API keys removed
 - `mold.mobile.selected-host.v1` — selected generation host
-- `mold.mobile.create-mode.v1` — the last Single or Sequence authoring mode
+- `mold.sequence.draft.v1` — the shared Output mode, clip list, audio choice,
+  and remembered single-print model (base64 clip source payloads are stripped
+  before writing). Replaces the retired `mold.mobile.create-mode.v1`, which
+  migrates into this draft once and is then removed
 - `mold.mobile.sequence-job.v1` — non-secret exact-host identity and active
   durable sequence job ID for relaunch recovery; a saved instance UUID must
   exactly match the current host identity before Mold reattaches
