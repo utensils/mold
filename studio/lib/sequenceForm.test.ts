@@ -1,0 +1,236 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildChainRequest,
+  chainScriptToClips,
+  clipsToChainScript,
+  newSequenceClip,
+  stageInvalidation,
+  type SequenceClipForm,
+  type SequenceSharedParams,
+} from "./sequenceForm";
+import type { ChainScript } from "./api/chainTypes";
+
+function shared(extra: Partial<SequenceSharedParams> = {}): SequenceSharedParams {
+  return {
+    model: "ltx-2-19b-distilled:fp8",
+    family: "ltx2",
+    width: 1216,
+    height: 704,
+    fps: 24,
+    steps: 8,
+    guidance: 3,
+    strength: 1,
+    seed: "",
+    ...extra,
+  };
+}
+
+function clip(extra: Partial<SequenceClipForm> = {}): SequenceClipForm {
+  return { ...newSequenceClip(97), prompt: "a kingfisher waits", ...extra };
+}
+
+describe("buildChainRequest", () => {
+  it("reads the LIVE shared params at submit time", () => {
+    // Regression for the web divergence bug: sequence submissions ignored
+    // inspector changes because the composer kept its own copies. There is
+    // no second copy here — mutate shared params after the clips exist and
+    // the request must carry the new values.
+    const params = shared();
+    const clips = [clip(), clip({ prompt: "it lifts off" })];
+    params.width = 704;
+    params.height = 1216;
+    params.steps = 30;
+    params.guidance = 5;
+
+    const req = buildChainRequest(params, clips, {
+      motionTailFrames: 17,
+      enableAudio: false,
+    });
+    expect(req.width).toBe(704);
+    expect(req.height).toBe(1216);
+    expect(req.steps).toBe(30);
+    expect(req.guidance).toBe(5);
+    expect(req.model).toBe("ltx-2-19b-distilled:fp8");
+    expect(req.motion_tail_frames).toBe(17);
+    expect(req.stages).toHaveLength(2);
+  });
+
+  it("coerces clip 1's transition to smooth and gates fade_frames", () => {
+    const clips = [
+      clip({ transition: "fade", fadeFrames: 12 }),
+      clip({ prompt: "b", transition: "cut", fadeFrames: 12 }),
+      clip({ prompt: "c", transition: "fade", fadeFrames: 8 }),
+    ];
+    const req = buildChainRequest(shared(), clips, {
+      motionTailFrames: 17,
+      enableAudio: false,
+    });
+    expect(req.stages[0]?.transition).toBe("smooth");
+    expect(req.stages[0]?.fade_frames).toBeUndefined();
+    expect(req.stages[1]?.transition).toBe("cut");
+    expect(req.stages[1]?.fade_frames).toBeUndefined();
+    expect(req.stages[2]?.transition).toBe("fade");
+    expect(req.stages[2]?.fade_frames).toBe(8);
+  });
+
+  it("sends a numeric seed only when fixed, and audio only when on", () => {
+    const random = buildChainRequest(shared({ seed: "" }), [clip(), clip()], {
+      motionTailFrames: 17,
+      enableAudio: false,
+    });
+    expect(random.seed).toBeUndefined();
+    expect(random.enable_audio).toBeUndefined();
+
+    const fixed = buildChainRequest(shared({ seed: "42" }), [clip(), clip()], {
+      motionTailFrames: 17,
+      enableAudio: true,
+    });
+    expect(fixed.seed).toBe(42);
+    expect(fixed.enable_audio).toBe(true);
+  });
+
+  it("carries per-clip negative prompts and the opening source image", () => {
+    const clips = [
+      clip({
+        negativePrompt: "no rain",
+        sourceImage: { filename: "open.png", base64: "QUJD" },
+      }),
+      clip({ prompt: "b" }),
+    ];
+    const req = buildChainRequest(shared(), clips, {
+      motionTailFrames: 17,
+      enableAudio: false,
+    });
+    expect(req.stages[0]?.negative_prompt).toBe("no rain");
+    expect(req.stages[0]?.source_image).toBe("QUJD");
+    expect(req.stages[1]?.source_image).toBeUndefined();
+  });
+});
+
+describe("script round-trip", () => {
+  it("converts a job's effective script into editable clips and back", () => {
+    const script: ChainScript = {
+      schema: "mold.chain.v1",
+      chain: {
+        model: "ltx-2-19b-distilled:fp8",
+        motion_tail_frames: 17,
+        width: 1216,
+        height: 704,
+        fps: 24,
+        steps: 8,
+        guidance: 3,
+        enable_audio: true,
+      },
+      stages: [
+        { prompt: "opening", frames: 97 },
+        { prompt: "landing", frames: 33, transition: "fade", fade_frames: 8 },
+      ],
+    };
+
+    const loaded = chainScriptToClips(script);
+    expect(loaded.clips).toHaveLength(2);
+    expect(loaded.clips[0]?.prompt).toBe("opening");
+    expect(loaded.clips[0]?.frames).toBe(97);
+    expect(loaded.clips[1]?.transition).toBe("fade");
+    expect(loaded.clips[1]?.fadeFrames).toBe(8);
+    expect(loaded.enableAudio).toBe(true);
+    expect(loaded.shared.model).toBe("ltx-2-19b-distilled:fp8");
+    expect(loaded.shared.width).toBe(1216);
+
+    const back = clipsToChainScript(shared(), loaded.clips, {
+      motionTailFrames: 17,
+      enableAudio: true,
+    });
+    expect(back.schema).toBe("mold.chain.v1");
+    expect(back.stages).toHaveLength(2);
+    expect(back.stages[1]?.transition).toBe("fade");
+    expect(back.stages[1]?.fade_frames).toBe(8);
+  });
+});
+
+describe("stageInvalidation", () => {
+  const baseline = [
+    clip({ prompt: "one", frames: 97, transition: "smooth" }),
+    clip({ prompt: "two", frames: 97, transition: "smooth" }),
+    clip({ prompt: "three", frames: 97, transition: "cut" }),
+  ];
+
+  function plan(
+    current: SequenceClipForm[],
+    opts: { chainLevelDirty?: boolean; completedStages?: number } = {},
+  ) {
+    return stageInvalidation(baseline, current, {
+      chainLevelDirty: opts.chainLevelDirty ?? false,
+      completedStages: opts.completedStages ?? 3,
+    });
+  }
+
+  it("keeps everything cached when nothing changed", () => {
+    const p = plan(baseline.map((c) => ({ ...c })));
+    expect(p.firstDirtyStage).toBeNull();
+    expect(p.perClip).toEqual(["cached", "cached", "cached"]);
+  });
+
+  it("edits to clip k re-render k..end (smooth carry cascades)", () => {
+    const current = baseline.map((c) => ({ ...c }));
+    const middle = current[1];
+    if (middle) middle.prompt = "two, revised";
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBe(1);
+    expect(p.perClip).toEqual(["cached", "rerender", "rerender"]);
+  });
+
+  it("chain-level changes re-render everything", () => {
+    const p = plan(
+      baseline.map((c) => ({ ...c })),
+      { chainLevelDirty: true },
+    );
+    expect(p.firstDirtyStage).toBe(0);
+    expect(p.perClip).toEqual(["rerender", "rerender", "rerender"]);
+  });
+
+  it("cut↔fade and fade-length edits are finalize-only (no re-render)", () => {
+    // Under raw segments, cut vs fade only changes how finalize blends the
+    // seam — the rendered pixels are identical. Smooth is different: it
+    // carries motion INTO the clip, so it participates in render identity.
+    const current = baseline.map((c) => ({ ...c }));
+    const last = current[2];
+    if (last) {
+      last.transition = "fade";
+      last.fadeFrames = 12;
+    }
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBeNull();
+    expect(p.perClip).toEqual(["cached", "cached", "cached"]);
+  });
+
+  it("smooth↔other changes the carry and re-renders from that clip", () => {
+    const current = baseline.map((c) => ({ ...c }));
+    const middle = current[1];
+    if (middle) middle.transition = "cut";
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBe(1);
+  });
+
+  it("appended clips render as new; the old prefix stays cached", () => {
+    const current = [...baseline.map((c) => ({ ...c })), clip({ prompt: "four" })];
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBe(3);
+    expect(p.perClip).toEqual(["cached", "cached", "cached", "new"]);
+  });
+
+  it("removing trailing clips is boundary-only (zero renders)", () => {
+    const current = baseline.slice(0, 2).map((c) => ({ ...c }));
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBeNull();
+    expect(p.perClip).toEqual(["cached", "cached"]);
+  });
+
+  it("never marks unrendered stages as cached", () => {
+    const p = plan(
+      baseline.map((c) => ({ ...c })),
+      { completedStages: 1 },
+    );
+    expect(p.perClip).toEqual(["cached", "rerender", "rerender"]);
+  });
+});
