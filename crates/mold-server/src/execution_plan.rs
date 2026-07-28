@@ -1529,7 +1529,7 @@ fn build_plan(
     let auto_cpu_text =
         initial_memory.under_memory_pressure && context.capabilities.supports_text_encoder_cpu;
 
-    let placements = context
+    let mut placements = context
         .artifacts
         .keys()
         .map(|role| {
@@ -1541,7 +1541,9 @@ fn build_plan(
                 .unwrap_or(ResolvedComponentConstraint::Auto);
             let cpu = role.is_host_only()
                 || constraint == ResolvedComponentConstraint::Cpu
-                || (auto_cpu_text && role.is_text_encoder());
+                || (auto_cpu_text
+                    && constraint == ResolvedComponentConstraint::Auto
+                    && role.is_text_encoder());
             (role.clone(), cpu)
         })
         .collect::<BTreeMap<_, _>>();
@@ -1555,7 +1557,7 @@ fn build_plan(
         })
         .all(|(_, cpu)| *cpu);
     let gpu_paths = gpu_resident_paths(context.paths, &placements);
-    let memory = crate::memory_preflight::estimate_generation_memory_for_request(
+    let mut memory = crate::memory_preflight::estimate_generation_memory_for_request(
         context.request,
         &gpu_paths,
         hint,
@@ -1564,6 +1566,27 @@ fn build_plan(
         request_has_lora,
         gemma_competes,
     );
+    if memory.fits_available_memory != Some(true)
+        && context.capabilities.supports_vae_cpu
+        && context
+            .effective
+            .components
+            .get(&ComponentRole::Vae)
+            .is_none_or(|constraint| constraint == &ResolvedComponentConstraint::Auto)
+        && placements.contains_key(&ComponentRole::Vae)
+    {
+        placements.insert(ComponentRole::Vae, true);
+        let gpu_paths = gpu_resident_paths(context.paths, &placements);
+        memory = crate::memory_preflight::estimate_generation_memory_for_request(
+            context.request,
+            &gpu_paths,
+            hint,
+            Some(device.available_vram_bytes),
+            initial_memory.block_offload && !transformer_on_cpu,
+            request_has_lora,
+            gemma_competes,
+        );
+    }
     if memory.fits_available_memory != Some(true) {
         return None;
     }
@@ -3280,6 +3303,64 @@ mod tests {
         assert_eq!(
             resolve_execution_plans(&unsupported, &request(None), &devices(&[3 * GIB]), false,),
             Err(ExecutionPlanError::InsufficientVram)
+        );
+    }
+
+    #[test]
+    fn auto_cpu_moves_flux2_vae_only_when_encoder_offload_is_insufficient() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = sized_config(root.path(), "flux2", 8, 5, 2);
+
+        let roomy = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_ne!(
+            roomy.components[&ComponentRole::Vae].placement,
+            ResolvedComponentPlacement::Cpu,
+            "GPU-first placement must keep the VAE resident when capacity is roomy"
+        );
+
+        let pressured = resolve_execution_plans(&config, &request, &devices(&[12 * GIB]), false)
+            .expect("Flux.2 should park its VAE after text-only CPU placement still cannot fit")
+            .remove(0);
+        assert_eq!(
+            pressured.components[&ComponentRole::Vae].placement,
+            ResolvedComponentPlacement::Cpu
+        );
+        assert_eq!(
+            materialized_placement(&pressured)
+                .advanced
+                .expect("resolved plans always materialize advanced placement")
+                .vae,
+            DeviceRef::Cpu,
+            "the engine must receive the scheduler's concrete VAE placement"
+        );
+        assert!(
+            pressured.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 5 * GIB,
+            "a parked VAE must be charged to host RAM admission"
+        );
+        assert_ne!(
+            pressured.execution_fingerprint, roomy.execution_fingerprint,
+            "placement changes must produce distinct lease identities"
+        );
+    }
+
+    #[test]
+    fn explicit_gpu_vae_pin_prevents_pressure_fallback() {
+        let root = TempDir::new().unwrap();
+        let (config, mut request) = sized_config(root.path(), "flux2", 8, 5, 2);
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                vae: DeviceRef::device("cuda:0"),
+                ..AdvancedPlacement::default()
+            }),
+        });
+
+        assert_eq!(
+            resolve_execution_plans(&config, &request, &devices(&[12 * GIB]), false),
+            Err(ExecutionPlanError::InsufficientVram),
+            "automatic CPU fallback must never override an explicit VAE GPU pin"
         );
     }
 
