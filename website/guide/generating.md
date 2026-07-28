@@ -4,11 +4,12 @@ The web Create composer shows an advisory peak-VRAM estimate for the selected
 machine before you submit. Video models expose their supported camera-motion
 controls under Advanced, and a durable sequence remains attached after a page
 reload so its server-side progress does not disappear from the workspace.
-Switching to **Sequence** filters the model picker to compatible installed
-video checkpoints and selects one when possible. If none are installed,
-**Browse video models** opens Models → Discover with the Video and Models
-filters already applied. Two-stage LTX-2 dev checkpoints render single clips;
-multi-stage sequences require a distilled or one-stage checkpoint.
+Setting **Output** to **Sequence** filters the model picker to compatible
+installed video checkpoints and selects one when possible, remembering your
+one-shot model for the way back. If none are installed, **Browse video models**
+opens Models → Discover with the Video and Models filters already applied.
+Two-stage LTX-2 dev checkpoints render single clips; multi-stage sequences
+require a distilled or one-stage checkpoint.
 
 On phone-sized web views, Create keeps every interactive target at least 44px
 high and editable fields at a zoom-safe 16px.
@@ -107,13 +108,36 @@ On a phone, Create follows one vertical workflow: prompt and style, model and
 core controls, Generate, the developing/result canvas, then recent prints.
 Advanced options remain in the mobile sheet so the primary flow stays compact.
 
-For a multi-prompt video, switch Create from **Single** to **Sequence**. Mold
-starts with two clips, requires a description for each, and presents joins as
-**Smooth**, **Cut**, or **Fade** (LTX-Video's zero-overlap joins say **Join
-clips**). The summary shows the stitched
-duration before you generate. **Sequence tools** contains TOML import/export
-and other script-oriented controls. On a multi-machine web setup, the durable
-job and its live progress stay on the machine selected by **Run on**.
+For a multi-prompt video, set **Output** — the control beside Model in the
+Create settings column — from **One shot** to **Sequence**. Multi-clip video is
+a setting, not a separate page: the composer becomes a clip rail. Mold starts
+with two clips, requires a description for each, and joins them with seam pills
+that name each transition in words — **Smooth**, **Cut**, or **Fade 8f**, with
+LTX-Video's zero-overlap joins reading **Join clips**. Clicking a seam pill
+opens the seam editor with its three teaching rows and the fade-length stepper.
+New clips take their frame count from the selected model's own advertised
+default rather than a fixed constant, and the summary shows the stitched
+duration before you generate. Switching Output back to One shot keeps clip 1 as
+the prompt and parks the rest — nothing is erased. **Sequence tools** contains
+TOML import/export and other script-oriented controls. On a multi-machine web
+setup, the durable job and its live progress stay on the machine selected by
+**Run on**.
+
+Sequences queue in the same activity strip as ordinary prints, with watch,
+cancel, and resume. Once one settles it leaves the strip: the video lands in the
+Create canvas with **Edit sequence** and **Show in library**, its print is in the
+Library, and its job record is in **Library ▸ History ▸ Sequences** — which is
+also where the host-scoped **Clear inactive** and **Clean up disk** actions live.
+
+A finished sequence can be edited in place. Its clips reload onto the rail and
+each pill shows whether that clip is cached (✓) or will re-render (↻) as you
+edit; **Update sequence** re-renders only from the earliest changed clip.
+Changing a transition type or a fade length re-renders nothing at all — those
+are applied when the video is stitched. From a sequence print in the Library,
+**Reuse settings** starts a fresh sequence from the recorded clips (telling you
+how many it restored and naming anything a print does not record), while
+**Edit sequence** re-enters the original job on the machine that produced it so
+its rendered clips stay cached.
 
 On every surface, a **↺ Reset** in the Create settings header restores the
 generation settings to the selected model's defaults — shape, resolution,

@@ -147,7 +147,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   Sequences**. Editing a finished sequence reloads its clips onto
   the rail, marks which clips stay cached versus re-render as you change
   things, and **Update sequence** re-renders only from the earliest changed
-  clip. The picker shows sequence-capable video models from every connected
+  clip — changing a transition type or a fade length re-stitches with no
+  re-render at all. From a sequence print in the Library, **Reuse settings**
+  starts a fresh sequence from the recorded clips and **Edit sequence**
+  re-enters the original job with its cached clips. The picker shows
+  sequence-capable video models from every connected
   host (choosing Sequence auto-picks one and remembers your single-mode model;
   with none installed the bench deep-links to Discover with Video + Models
   filters), and limits, creation, events, previews, and job actions stay

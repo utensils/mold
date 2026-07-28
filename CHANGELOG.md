@@ -115,10 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can track sequences in a unified activity surface without polling
   `/api/chain-jobs`. Ephemeral legacy-shim jobs stay silent, and old clients
   ignore the unknown event types.
-- **Pausing the queue now also holds the chain runner.** `POST
-  /api/queue/pause` previously only stopped print dispatch while a running
-  sequence kept claiming GPU stage after stage; the runner now holds before
-  claiming new chain work and between stages (the running stage always
+- **Pausing the queue now also holds the chain runner.**
+  `POST /api/queue/pause` previously only stopped print dispatch while a
+  running sequence kept claiming GPU stage after stage; the runner now holds
+  before claiming new chain work and between stages (the running stage always
   finishes), and a cancel still lands while held.
 - **Chain stages now honor explicit GPU placement and see live config.**
   A sequence submitted with a `gpu:N` placement previously had it silently
