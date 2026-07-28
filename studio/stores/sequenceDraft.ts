@@ -139,9 +139,15 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
 
   /** One-shot migrations from the pre-unification keys. */
   function migrateLegacy() {
-    const legacyDraft = readJson<ChainScript>(LEGACY_WEB_DRAFT_KEY);
-    if (legacyDraft?.stages?.length) {
-      const loaded = chainScriptToClips(legacyDraft);
+    // web's ScriptComposer persisted its TOML-shaped draft verbatim, which
+    // keys stages as `stage` (mold.chain.v1 / Rust serde rename); accept
+    // both spellings so real drafts migrate, not just idealized ones.
+    const legacyDraft = readJson<ChainScript & { stage?: ChainScript["stages"] }>(
+      LEGACY_WEB_DRAFT_KEY,
+    );
+    const legacyStages = legacyDraft?.stages ?? legacyDraft?.stage;
+    if (legacyDraft && legacyStages?.length) {
+      const loaded = chainScriptToClips({ ...legacyDraft, stages: legacyStages });
       clips.splice(0, clips.length, ...loaded.clips);
       enableAudio.value = loaded.enableAudio;
       // Deliberately NOT importing the legacy chain-level width/steps/
