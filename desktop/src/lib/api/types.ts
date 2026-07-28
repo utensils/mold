@@ -4,6 +4,8 @@
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
 
+import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+
 export interface GpuSnapshot {
   ordinal: number;
   name: string;
@@ -373,6 +375,9 @@ export interface OutputMetadata {
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
+  /** Per-clip provenance for a stitched sequence — what the Library's
+   * sequence-aware Reuse settings reloads into the clip rail. */
+  chain?: ChainOutputMetadata | null;
   /** Plain kebab-case name, or a serde-tagged object for parameterized
    * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
   scheduler?: string | Record<string, unknown> | null;

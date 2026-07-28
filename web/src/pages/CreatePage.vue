@@ -46,7 +46,13 @@ import {
   chainScriptToClips,
   type SequenceSharedParams,
 } from "@studio/lib/sequenceForm";
-import { isPrintOfChainJob } from "@studio/lib/sequenceReuse";
+import {
+  clampClipsToMotionTail,
+  isPrintOfChainJob,
+  planSequenceReuse,
+  sequenceReuseClampNote,
+  sequenceReuseNote,
+} from "@studio/lib/sequenceReuse";
 import {
   pendingSequenceHandoff,
   takeSequenceHandoff,
@@ -110,6 +116,7 @@ import type {
   GalleryImage,
   GenerateRequestWire,
   ModelInfoExtended,
+  OutputMetadata,
   SourceFitPolicy,
   SourceImageState,
 } from "../types";
@@ -384,6 +391,8 @@ function setOutput(mode: OutputMode) {
     // Remember the single-mode model so switching back restores it.
     draft.lastSingleModel = form.state.value.model || null;
   }
+  // Leaving Sequence retires the reuse caveat with the rail it described.
+  if (mode !== "sequence") sequenceReuseNotice.value = null;
   draft.setOutput(mode, promptBridge, sequenceDefaultFrames.value);
 }
 
@@ -868,6 +877,9 @@ const sequenceTarget = computed<StreamTarget | undefined>(
 // Edit sessions snapshot the shared params at load so shape/detail changes
 // mark every clip as re-rendering in the rail's plan badges.
 const editBaselineShared = ref<string | null>(null);
+/** What a Library reuse could NOT restore, said once and quietly beneath the
+ *  rail. It describes one handoff, not a standing property of the draft. */
+const sequenceReuseNotice = ref<string | null>(null);
 const chainLevelDirty = computed(
   () =>
     editBaselineShared.value !== null &&
@@ -948,6 +960,8 @@ async function onSubmitSequence() {
       draft.stopEditing();
       editBaselineShared.value = null;
     }
+    // The caveat described the handoff, not the submitted job.
+    sequenceReuseNotice.value = null;
     toast("info", `Sequence queued on ${route.label}.`);
   } catch (error) {
     composerError.value =
@@ -957,6 +971,8 @@ async function onSubmitSequence() {
 
 /** Load a durable job's effective script into an edit session. */
 async function editSequence(hostId: string, jobId: string) {
+  // An edit session is lossless — any reuse caveat on screen is now stale.
+  sequenceReuseNotice.value = null;
   try {
     const detail = await getChainJob(jobId, hostTargetFor(hostId));
     const script = normalizeServerChainScript(detail.script);
@@ -1027,11 +1043,50 @@ function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
   }
 }
 
-/** A sequence handed over from Library ▸ History. One-shot — the slot is
+/**
+ * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
+ * session, nothing cached, Generate queues a fresh job. Shared params ride
+ * the same `applyMetadataToForm` path a single print's reuse uses.
+ */
+function applySequenceReuse(metadata: OutputMetadata) {
+  const plan = planSequenceReuse(metadata);
+  if (!plan) return;
+  form.state.value = applyMetadataToForm(form.state.value, metadata, {
+    models: models.value,
+  });
+  // Clip 1's prompt, never `metadata.prompt` — for a sequence that field is
+  // every clip newline-joined, the wart this path exists to avoid.
+  form.state.value.prompt = plan.clips[0]?.prompt ?? "";
+
+  // The live tail belongs to the model selected NOW, not the recorded one.
+  const { clips, raised } = clampClipsToMotionTail(
+    plan.clips,
+    sequenceMotionTail.value,
+    9,
+  );
+
+  draft.stopEditing();
+  editBaselineShared.value = null;
+  draft.output = "sequence";
+  draft.clips.splice(0, draft.clips.length, ...clips);
+  draft.activeClipId = clips[0]?.id ?? null;
+  draft.enableAudio = metadata.enable_audio === true;
+
+  const notes = [sequenceReuseNote(clips.length, plan.lossy)];
+  if (raised > 0) notes.push(sequenceReuseClampNote(currentModelLabel.value));
+  sequenceReuseNotice.value = notes.join(" · ");
+}
+
+/** A sequence handed over from the Library: History ▸ Sequences hands over
+ *  `edit`; a sequence print hands over `reuse`. One-shot — the slot is
  *  emptied on arrival so a back-nav cannot replay it. */
 function applySequenceHandoff() {
   const handoff = takeSequenceHandoff();
   if (!handoff) return;
+  if (handoff.kind === "reuse") {
+    applySequenceReuse(handoff.metadata);
+    return;
+  }
   void editSequence(handoff.hostId, handoff.jobId);
 }
 watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
@@ -1963,6 +2018,14 @@ onBeforeUnmount(() => {
             @expand-clip="onExpandClip"
             @import-shared="onImportShared"
           />
+
+          <p
+            v-if="sequenceReuseNotice"
+            data-test="sequence-reuse-note"
+            class="font-mono text-[0.7rem] leading-relaxed text-ink-3"
+          >
+            {{ sequenceReuseNotice }}
+          </p>
 
           <div
             v-if="composerError"

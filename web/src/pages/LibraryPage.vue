@@ -22,7 +22,19 @@ import {
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
-import { deleteGalleryImage, fetchModels } from "../api";
+import {
+  ApiHttpError,
+  deleteGalleryImage,
+  fetchModels,
+  getChainJob,
+} from "../api";
+import {
+  planSequenceReuse,
+  sequenceEditAvailability,
+  sequenceGoneMessage,
+  sequenceHostUnreachableMessage,
+} from "@studio/lib/sequenceReuse";
+import { useChainJobs } from "../composables/useChainJobs";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import { requestConfirm, toast, undoableAction } from "../lib/toasts";
@@ -81,6 +93,7 @@ const hostFilter = ref("all");
 const thumbnailSize = ref(loadGalleryThumbnailSize());
 
 const form = useGenerateForm();
+const chainJobs = useChainJobs();
 const route = useRoute();
 const router = useRouter();
 
@@ -506,7 +519,44 @@ function stepLightbox(delta: number) {
   selected.value = list[next] ?? null;
 }
 
+// ── Sequence prints ─────────────────────────────────────────────────────────
+// A print stitched from a sequence carries per-clip provenance
+// (`metadata.chain`) and, when a durable job produced it, that job's id.
+// Reuse settings follows the print — One shot for a still, a fresh clip rail
+// for a sequence — and Edit sequence is the second, distinct action that
+// CONTINUES the original job with its cached clips.
+
+const isSequencePrint = (item: GalleryImage | null) =>
+  item !== null && planSequenceReuse(item.metadata) !== null;
+
+/** Render-time gate — never probes. See `sequenceEditAvailability`. */
+function canEditSequence(item: GalleryImage | null): boolean {
+  if (!item || !isSequencePrint(item)) return false;
+  const host = hostForEntry(item);
+  return (
+    sequenceEditAvailability({
+      chainJobId: item.metadata.chain_job_id,
+      hostId: host?.id ?? null,
+      knownJobIds: host
+        ? (chainJobs.state.byHost[host.id]?.jobs.map((job) => job.id) ?? null)
+        : null,
+    }) === "available"
+  );
+}
+
+function reuseSequence(item: GalleryImage) {
+  // Clips are clamped against the LIVE model's motion tail in Create, so the
+  // metadata travels and Create decides.
+  setSequenceHandoff({ kind: "reuse", metadata: item.metadata });
+  closeLightbox();
+  void router.push({ path: "/create", query: { output: "sequence" } });
+}
+
 function onReuse(item: GalleryImage) {
+  if (isSequencePrint(item)) {
+    reuseSequence(item);
+    return;
+  }
   // Existing recreate flow — restore serialized knobs, then land on Create.
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
@@ -514,6 +564,34 @@ function onReuse(item: GalleryImage) {
   });
   closeLightbox();
   void router.push({ name: "create" });
+}
+
+/**
+ * Check once, on click. A 404 means the job was deleted or GC'd, so fall back
+ * to the reuse path rather than leaving an enabled control as a dead end; any
+ * other failure keeps the cached clips by refusing to downgrade.
+ */
+async function onEditSequence(item: GalleryImage) {
+  const host = hostForEntry(item);
+  const jobId = item.metadata.chain_job_id;
+  if (!host || !jobId) return;
+  try {
+    await getChainJob(jobId, {
+      baseUrl: host.url,
+      ...(host.apiKey ? { apiKey: host.apiKey } : {}),
+    });
+  } catch (error) {
+    if (error instanceof ApiHttpError && error.status === 404) {
+      toast("info", sequenceGoneMessage(host.name));
+      reuseSequence(item);
+      return;
+    }
+    toast("error", sequenceHostUnreachableMessage(host.name));
+    return;
+  }
+  setSequenceHandoff({ kind: "edit", hostId: host.id, jobId });
+  closeLightbox();
+  void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
 async function setAsSource(item: GalleryImage): Promise<boolean> {
@@ -628,6 +706,11 @@ function contextReuse() {
   const item = contextMenu.value?.item;
   closeContextMenu();
   if (item) onReuse(item);
+}
+async function contextEditSequence() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) await onEditSequence(item);
 }
 async function contextSource() {
   const item = contextMenu.value?.item;
@@ -961,6 +1044,15 @@ onBeforeUnmount(() => {
       <button type="button" role="menuitem" @click="contextReuse">
         Reuse settings
       </button>
+      <button
+        v-if="canEditSequence(contextMenu.item)"
+        type="button"
+        role="menuitem"
+        data-test="context-edit-sequence"
+        @click="contextEditSequence"
+      >
+        Edit sequence
+      </button>
       <button type="button" role="menuitem" @click="contextSource">
         Use as source
       </button>
@@ -1055,6 +1147,8 @@ onBeforeUnmount(() => {
       :has-prev="selectedIndex > 0"
       :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :muted="muted"
+      :is-sequence="isSequencePrint(selected)"
+      :can-edit-sequence="canEditSequence(selected)"
       @close="closeLightbox"
       @prev="stepLightbox(-1)"
       @next="stepLightbox(1)"
@@ -1062,6 +1156,7 @@ onBeforeUnmount(() => {
       @use-source="onUseAsSource"
       @upscale="onUpscale"
       @delete="onLightboxDelete"
+      @edit-sequence="onEditSequence"
     />
 
     <HistoryDrawer

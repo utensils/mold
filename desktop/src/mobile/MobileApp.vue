@@ -24,6 +24,7 @@ import {
 } from "@studio/lib/sequence";
 import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
+import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -2467,11 +2468,33 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
-    setGenerationStatus(
-      reuse.substitutedModel
-        ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
-        : "Prompt settings restored",
-    );
+    if (reuse.sequence) {
+      // A sequence print reloads the clip rail as a NEW draft: no edit
+      // session, nothing cached (iPhone has no chain-detail recovery route,
+      // so Edit sequence stays a desktop/web action for now).
+      draft.stopEditing();
+      draft.output = "sequence";
+      draft.clips.splice(0, draft.clips.length, ...reuse.sequence.clips);
+      draft.activeClipId = reuse.sequence.clips[0]?.id ?? null;
+      draft.enableAudio = print.metadata.enable_audio === true;
+    }
+    const notes: string[] = [];
+    if (reuse.substitutedModel) {
+      notes.push(
+        `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`,
+      );
+    }
+    if (reuse.sequence) {
+      notes.push(sequenceReuseNote(reuse.sequence.clips.length, reuse.sequence.lossy));
+      if (reuse.sequence.raised > 0) {
+        notes.push(
+          sequenceReuseClampNote(modelDisplayNameForId(form.model, generationModels.value)),
+        );
+      }
+    } else if (notes.length === 0) {
+      notes.push("Prompt settings restored");
+    }
+    setGenerationStatus(notes.join(" · "));
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.

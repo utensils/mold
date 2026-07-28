@@ -91,7 +91,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   badges on fresh prints, a two-pane lightbox, and a History drawer holding
   Runs and Prompts. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Create with
-  every parameter restored. All merges every connected host without repeating
+  every parameter restored. On a print a sequence produced, **Reuse settings**
+  loads its recorded clips onto the Create clip rail as a new sequence, and a
+  second action, **Edit sequence**, re-enters the original job on the machine
+  that made it so its already-rendered clips stay cached (if that job is gone
+  it reuses the settings and says so; if the machine is unreachable it says so
+  and changes nothing). All merges every connected host without repeating
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and

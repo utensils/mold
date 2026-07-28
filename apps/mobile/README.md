@@ -70,8 +70,12 @@ pushed screen opened from the header.
   viewer shows uncropped images, streams videos with native controls, swipes
   horizontally between prints, explicitly copies or saves full-resolution
   stills through UIKit, restores recorded prompt settings, and can use a still
-  as the next source or Qwen edit target. Generated stills open the same viewer
-  on tap. Persistent New badges match desktop Library visits, and post-generation
+  as the next source or Qwen edit target. On a print a sequence produced, **Use
+  as prompt** reloads that sequence's recorded clips onto the Create clip rail
+  as a new draft (raising any clip duration the selected model's motion tail no
+  longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
+  a desktop/web action until mobile has a chain-detail recovery route.
+  Generated stills open the same viewer on tap. Persistent New badges match desktop Library visits, and post-generation
   upscaled images carry the shared Upscaled badge.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent

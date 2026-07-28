@@ -5,16 +5,20 @@
  * drawer sets it, Create takes it on arrival, and taking empties it so a
  * back-nav can never replay the handoff.
  *
- * `edit` re-enters the original job in place, preserving its cached clips.
- * The Library's settings-reuse variant lands on this same slot in a follow-up.
+ * - `edit` re-enters the original job in place, preserving its cached clips.
+ * - `reuse` starts a FRESH draft from a print's recorded per-clip provenance
+ *   (`metadata.chain`) — a new sequence, no edit session, nothing cached.
+ *
+ * The reuse variant travels as metadata rather than as finished clips because
+ * clip durations must be clamped against the motion tail of the model that is
+ * selected in CREATE, which the Library has no view of.
  */
 import { ref, type Ref } from "vue";
+import type { OutputMetadata } from "../types";
 
-export interface SequenceHandoff {
-  kind: "edit";
-  hostId: string;
-  jobId: string;
-}
+export type SequenceHandoff =
+  | { kind: "edit"; hostId: string; jobId: string }
+  | { kind: "reuse"; metadata: OutputMetadata };
 
 const pending = ref<SequenceHandoff | null>(null);
 

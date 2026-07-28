@@ -1,3 +1,4 @@
+import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
@@ -54,6 +55,9 @@ export interface OutputMetadata {
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
+  /** Per-clip provenance for a stitched sequence — what the Library's
+   * sequence-aware Reuse settings reloads into the clip rail. */
+  chain?: ChainOutputMetadata | null;
   scheduler?: Scheduler | null;
   output_format?: OutputFormat | null;
   cfg_plus?: boolean | null;
