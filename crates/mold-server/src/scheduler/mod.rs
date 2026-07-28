@@ -3968,24 +3968,10 @@ impl Coordinator {
                 let current_execution_fingerprint = if generation.is_some() {
                     let planned_execution = generation_plans
                         .get(&work_id)
-                        .into_iter()
-                        .flatten()
-                        .find(|execution| {
-                            execution.device_id == device_id
-                                && execution.execution_fingerprint
-                                    == lease.placement.execution_fingerprint.as_str()
-                                && execution.predicted_vram_peak_bytes
-                                    == lease.placement.predicted_vram_bytes
-                                && execution.predicted_host_increment_bytes
-                                    == lease.placement.incremental_host_ram_bytes
-                                && execution.admitted_available_vram_bytes
-                                    == lease.placement.device_available_vram_bytes
-                        });
+                        .and_then(|plans| exact_leased_execution_plan(plans, lease));
                     let current_execution = current_generation_plans
                         .get(&work_id)
-                        .into_iter()
-                        .flatten()
-                        .find(|execution| execution.device_id == device_id);
+                        .and_then(|plans| exact_leased_execution_plan(plans, lease));
                     if planned_execution.is_none() || planned_execution != current_execution {
                         return false;
                     }
@@ -4258,18 +4244,7 @@ impl Coordinator {
                     // potentially different plan after admission.
                     let execution_plan = generation_plans
                         .get(&id)
-                        .into_iter()
-                        .flatten()
-                        .find(|execution| {
-                            execution.device_id == device_id
-                                && execution.execution_fingerprint
-                                    == lease.placement.execution_fingerprint.as_str()
-                                && execution.predicted_vram_peak_bytes
-                                    == lease.placement.predicted_vram_bytes
-                                && execution.predicted_host_increment_bytes
-                                    == lease.placement.incremental_host_ram_bytes
-                        })
-                        .cloned();
+                        .and_then(|plans| exact_leased_execution_plan(plans, lease));
                     let Some(execution_plan) = execution_plan else {
                         self.pending.insert(id.clone(), pending);
                         worker.release_in_flight();
@@ -5016,6 +4991,10 @@ fn exact_leased_execution_plan(
     plans: &[crate::execution_plan::ResolvedExecutionPlan],
     lease: &mold_scheduler::ImmediateLease,
 ) -> Option<crate::execution_plan::ResolvedExecutionPlan> {
+    // Lease memory is a conservative scheduling envelope and may exceed the
+    // immutable plan's static prediction after learned high-water samples.
+    // Device plus execution fingerprint is the transport identity; callers
+    // separately validate current capacity and full plan equality.
     plans
         .iter()
         .find(|plan| {
@@ -7955,6 +7934,90 @@ mod tests {
                 .unwrap()
                 .execution_fingerprint,
             "wanted"
+        );
+    }
+
+    #[tokio::test]
+    async fn learned_generation_memory_does_not_block_exact_plan_transport() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        let (job, _result_rx) = fake_generation("learned-memory");
+        state
+            .job_registry
+            .register("learned-memory", &job.request.model);
+        queue.submit(job, 1).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("learned-memory")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+
+        let execution = coordinator
+            .generation_plans(coordinator.pending.get("learned-memory").unwrap())
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let learned_vram = execution.predicted_vram_peak_bytes + (1 << 30);
+        assert!(learned_vram < worker.gpu.total_vram_bytes);
+        coordinator.observe_estimate(
+            generation_estimate_key(
+                &coordinator.state,
+                &worker,
+                &coordinator.pending["learned-memory"].job.request,
+                &execution.execution_fingerprint,
+            ),
+            EstimateObservation {
+                total_ms: Some(1_000),
+                phases: EstimatePhaseTimings::default(),
+                vram_high_water_bytes: Some(learned_vram),
+                host_incremental_high_water_bytes: None,
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
+
+        let (snapshot, _) = coordinator.planner_snapshot(&BTreeMap::new());
+        let plan = coordinator.admission_planner.plan(&snapshot).unwrap();
+        assert_eq!(
+            plan.immediate_leases[0].placement.predicted_vram_bytes, learned_vram,
+            "the lease reservation must retain conservative learned memory"
+        );
+
+        coordinator.dispatch_ready().await;
+
+        let transported = recv_grant(&worker_rx);
+        assert_eq!(transported.id, "learned-memory");
+        assert_eq!(
+            transported
+                .execution_plan
+                .unwrap()
+                .predicted_vram_peak_bytes,
+            execution.predicted_vram_peak_bytes,
+            "the worker must receive the immutable execution plan selected by identity"
         );
     }
 

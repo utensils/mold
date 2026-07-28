@@ -1167,6 +1167,18 @@ def api_snapshot(api: Api) -> dict[str, object]:
     return result
 
 
+def validate_initial_queue(queue: object) -> None:
+    if not isinstance(queue, dict) or not isinstance(queue.get("entries"), list):
+        raise ValueError("initial queue listing omitted its entries array")
+    plan = queue.get("plan")
+    if plan is None:
+        if queue["entries"]:
+            raise ValueError("non-empty initial queue omitted the V2 plan")
+        return
+    if not isinstance(plan, dict):
+        raise ValueError("initial queue V2 plan is not an object")
+
+
 def validate_initial_projection(
     snapshot: dict[str, object], expected_uuids: list[str]
 ) -> tuple[list[dict[str, object]], list[str]]:
@@ -1217,9 +1229,10 @@ def validate_initial_projection(
         and capabilities.get("dispatch", {}).get("active_mode") == "v2"
     ):
         raise RuntimeError("candidate did not advertise authoritative V2 device APIs")
-    queue = snapshot["queue"]
-    if not isinstance(queue, dict) or not isinstance(queue.get("plan"), dict):
-        raise RuntimeError("queue listing omitted the V2 plan")
+    try:
+        validate_initial_queue(snapshot["queue"])
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
     return devices, [device["id"] for device in devices]
 
 

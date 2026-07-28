@@ -117,6 +117,20 @@ class RunnerPureContracts(unittest.TestCase):
             self.assertFalse(runner.embedded_git_sha_matches_source(embedded, source))
             self.assertFalse(validator.embedded_git_sha_matches_source(embedded, source))
 
+    def test_initial_queue_allows_idle_before_first_v2_plan(self):
+        runner.validate_initial_queue({"entries": []})
+        runner.validate_initial_queue(
+            {"entries": [], "plan": {"plan_version": 0, "work_items": []}}
+        )
+        for invalid in (
+            {},
+            {"entries": "not-a-list"},
+            {"entries": [{"id": "queued-without-plan"}]},
+            {"entries": [], "plan": "not-an-object"},
+        ):
+            with self.assertRaisesRegex(ValueError, "queue|plan|entries"):
+                runner.validate_initial_queue(invalid)
+
     def test_sandbox_environment_is_allowlisted_and_home_stays_read_only(self):
         with tempfile.TemporaryDirectory() as raw:
             runtime = pathlib.Path(raw)
