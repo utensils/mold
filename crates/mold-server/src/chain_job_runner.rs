@@ -13,8 +13,9 @@ use mold_core::chain::{
     stage_contributed_frames, ChainRequest, ChainStage, TransitionMode, DEFAULT_FADE_FRAMES,
 };
 use mold_core::chain_job::{
-    effective_stage_seed, settled, ChainJobEvent, ChainJobManifest, ChainJobState, FinalizeRecord,
-    GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState, STAGES_DIR,
+    effective_stage_seed, settled, AmendRecord, AmendRequest, ChainJobEvent, ChainJobManifest,
+    ChainJobState, FinalizeRecord, GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode,
+    RetakeRequest, StageState, StageStatus, STAGES_DIR,
 };
 use mold_core::{GenerateRequest, OutputFormat};
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
@@ -1842,6 +1843,321 @@ pub fn apply_retake(
     chain_jobs::set_current_stage(db, job_id, req.stage_idx, now_i64)?;
 
     chain_jobs::get_job(db, job_id)?.ok_or_else(|| anyhow!("chain job disappeared after retake"))
+}
+
+/// Marker prefix for amend validation failures; the route maps it to 422.
+pub const CHAIN_JOB_AMEND_INVALID: &str = "CHAIN_JOB_AMEND_INVALID";
+
+/// Build the candidate request an amend produces: the job's current
+/// EFFECTIVE request (retakes folded) with `req.stages` REPLACING the stage
+/// list and any provided chain-level overlays applied. The result must still
+/// pass the exact create-time gates (async family validation in the route,
+/// then `normalise()` + the Mp4-only gate inside [`apply_amend`]).
+pub(crate) fn amend_candidate_request(
+    effective: &ChainRequest,
+    req: &AmendRequest,
+) -> ChainRequest {
+    let mut candidate = effective.clone();
+    candidate.stages = req.stages.clone();
+    if let Some(motion_tail_frames) = req.motion_tail_frames {
+        candidate.motion_tail_frames = motion_tail_frames;
+    }
+    if let Some(fps) = req.fps {
+        candidate.fps = fps;
+    }
+    if let Some(seed) = req.seed {
+        candidate.seed = Some(seed);
+    }
+    if let Some(steps) = req.steps {
+        candidate.steps = steps;
+    }
+    if let Some(guidance) = req.guidance {
+        candidate.guidance = guidance;
+    }
+    if let Some(enable_audio) = req.enable_audio {
+        candidate.enable_audio = Some(enable_audio);
+    }
+    candidate
+}
+
+/// Longest preserved prefix of per-stage render identity between the old
+/// effective request and the amended candidate (both normalised).
+///
+/// Chain-level invalidation first: a changed seed/steps/guidance/fps/
+/// motion_tail_frames, or enable_audio flipping OFF→ON, dirties everything
+/// (ON→OFF preserves — finalize just ignores sidecars). Otherwise the prefix
+/// compares `(prompt, frames, negative_prompt, source_image bytes, effective
+/// per-stage seed, uses_carry)` where `uses_carry = idx > 0 && transition ==
+/// Smooth`: Cut↔Fade toggles and fade_frames edits are finalize-only under
+/// raw segments and do NOT break the prefix, while Smooth↔(Cut|Fade) changes
+/// the rendered pixels and does.
+pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> u32 {
+    let old_audio = old.enable_audio.unwrap_or(false);
+    let new_audio = new.enable_audio.unwrap_or(false);
+    if old.seed != new.seed
+        || old.steps != new.steps
+        || old.guidance != new.guidance
+        || old.fps != new.fps
+        || old.motion_tail_frames != new.motion_tail_frames
+        || (!old_audio && new_audio)
+    {
+        return 0;
+    }
+    let old_base = old.seed.unwrap_or(0);
+    let new_base = new.seed.unwrap_or(0);
+    let mut prefix = 0u32;
+    for (idx, (old_stage, new_stage)) in old.stages.iter().zip(new.stages.iter()).enumerate() {
+        let old_carry = idx > 0 && old_stage.transition == TransitionMode::Smooth;
+        let new_carry = idx > 0 && new_stage.transition == TransitionMode::Smooth;
+        if old_stage.prompt != new_stage.prompt
+            || old_stage.frames != new_stage.frames
+            || old_stage.negative_prompt != new_stage.negative_prompt
+            || old_stage.source_image != new_stage.source_image
+            || effective_stage_seed(old_base, old_stage.seed_offset)
+                != effective_stage_seed(new_base, new_stage.seed_offset)
+            || old_carry != new_carry
+        {
+            break;
+        }
+        prefix = idx as u32 + 1;
+    }
+    prefix
+}
+
+/// Can a preserved LEGACY stage's baked-in artifacts serve the amended
+/// boundary plan? Legacy segments carry their boundary treatment from write
+/// time, so any change to the incoming boundary, and most changes around the
+/// outgoing one, force a re-render even though the raw-stage identity prefix
+/// would have kept the stage.
+fn legacy_stage_serves_new_plan(
+    status: &mold_core::chain_job::StageStatus,
+    layout: &JobDirLayout,
+    idx: usize,
+    old: &ChainRequest,
+    new: &ChainRequest,
+) -> bool {
+    let Some(old_stage) = old.stages.get(idx) else {
+        return false;
+    };
+    let Some(new_stage) = new.stages.get(idx) else {
+        return false;
+    };
+    // Incoming boundary: baked into the legacy segment (leading smooth trim
+    // or leading fade blend). A Cut↔Fade toggle or fade-length change here
+    // invalidates the artifact.
+    if idx > 0 {
+        if old_stage.transition != new_stage.transition {
+            return false;
+        }
+        if new_stage.transition == TransitionMode::Fade
+            && old_stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES)
+                != new_stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES)
+        {
+            return false;
+        }
+    }
+    // Outgoing boundary: legacy stages truncated their trailing fade_len for
+    // an old Fade successor and wrote tails only for an old Smooth successor.
+    let old_next_fade = old.stages.get(idx + 1).and_then(|next| {
+        (next.transition == TransitionMode::Fade)
+            .then(|| next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES))
+    });
+    match new.stages.get(idx + 1) {
+        Some(next) if next.transition == TransitionMode::Smooth => {
+            old_next_fade.is_none()
+                && (new.motion_tail_frames == 0
+                    || (status.tail_frames.unwrap_or(0) > 0
+                        && layout.tail_dir(idx as u32).exists()))
+        }
+        Some(next) if next.transition == TransitionMode::Fade => {
+            old_next_fade == Some(next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES))
+        }
+        // Cut successor or last stage: trailing frames must be intact.
+        _ => old_next_fade.is_none(),
+    }
+}
+
+/// Apply an amend: replace the stage list (plus chain-level overlays), keep
+/// every cached stage up to the earliest genuinely-dirty one, reset the
+/// rest, and requeue. Returns the updated row and the preserved-stage count.
+///
+/// The caller holds the per-job mutation lock (`handle.lock_job`, like
+/// retake) and has already run the async family gate on the same candidate;
+/// this function re-runs the sync gates (`normalise()` + Mp4-only) and CASes
+/// the state so racing writers lose cleanly.
+pub fn apply_amend(
+    db: &MetadataDb,
+    jobs_root: &Path,
+    job_id: &str,
+    req: &AmendRequest,
+) -> anyhow::Result<(ChainJobRow, u32)> {
+    let job = chain_jobs::get_job(db, job_id)?.ok_or_else(|| anyhow!("chain job not found"))?;
+    if job.state == ChainJobState::Running {
+        bail!("CHAIN_JOB_RUNNING");
+    }
+    let job_dir = if job.job_dir.is_absolute() {
+        job.job_dir.clone()
+    } else {
+        jobs_root.join(&job.job_dir)
+    };
+    let mut manifest = ChainJobManifest::read_from_dir(&job_dir)?;
+    if manifest.ephemeral {
+        bail!("CHAIN_JOB_EPHEMERAL");
+    }
+    let allowed_from = [
+        ChainJobState::Queued,
+        ChainJobState::Interrupted,
+        ChainJobState::Failed,
+        ChainJobState::Cancelled,
+        ChainJobState::Completed,
+    ];
+    let old_effective = effective_request(&manifest)?;
+    let candidate = amend_candidate_request(&old_effective, req)
+        .normalise()
+        .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
+    if candidate.output_format != OutputFormat::Mp4 {
+        bail!("{CHAIN_JOB_AMEND_INVALID}: durable chain jobs require output_format = mp4");
+    }
+
+    // Invalidation: longest identity prefix, clamped to the leading run of
+    // completed stages, then shrunk past any legacy stage whose baked-in
+    // artifacts can't serve the new boundary plan.
+    let layout = JobDirLayout::new(job_dir.clone());
+    let mut preserved = preserved_stage_prefix(&old_effective, &candidate);
+    let completed_leading = manifest
+        .stage_status
+        .iter()
+        .take_while(|status| status.state == StageState::Completed)
+        .count() as u32;
+    preserved = preserved.min(completed_leading);
+    for idx in 0..preserved {
+        let status = &manifest.stage_status[idx as usize];
+        if !status.raw_segment
+            && !legacy_stage_serves_new_plan(
+                status,
+                &layout,
+                idx as usize,
+                &old_effective,
+                &candidate,
+            )
+        {
+            preserved = idx;
+            break;
+        }
+    }
+
+    let now = now_ms_u64();
+    let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+    if !chain_jobs::try_transition(
+        db,
+        job_id,
+        &allowed_from,
+        ChainJobState::Queued,
+        None,
+        now_i64,
+    )? {
+        let observed = chain_jobs::get_job(db, job_id)?
+            .map(|row| row.state.as_str().to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        if observed == ChainJobState::Running.as_str() {
+            bail!("CHAIN_JOB_RUNNING");
+        }
+        bail!("chain job is not amendable from current state {observed}");
+    }
+
+    // Manifest rewrite: snapshot the pre-amend EFFECTIVE request, replace
+    // request_json, clear retakes (their content lives on in the snapshot),
+    // keep preserved rows verbatim, append fresh Pending rows, drop trailing
+    // rows.
+    manifest.amends.push(AmendRecord {
+        at_unix_ms: now,
+        previous_request_json: serde_json::to_string(&old_effective)?,
+        preserved_stages: preserved,
+    });
+    manifest.request_json = serde_json::to_string(&candidate)?;
+    manifest.retakes.clear();
+
+    let old_count = manifest.stage_status.len() as u32;
+    let new_count = candidate.stages.len() as u32;
+    let base_seed = candidate.seed.unwrap_or(0);
+    manifest.stage_status.truncate(preserved as usize);
+    for idx in preserved..new_count {
+        let stage = &candidate.stages[idx as usize];
+        manifest.stage_status.push(StageStatus {
+            idx,
+            state: StageState::Pending,
+            seed: effective_stage_seed(base_seed, stage.seed_offset),
+            frames_emitted: None,
+            generation_time_ms: None,
+            segment: None,
+            tail_frames: None,
+            audio: None,
+            error: None,
+            raw_segment: false,
+        });
+    }
+    // Preserved RAW stages keep their artifacts verbatim, but their
+    // contributed-frame accounting follows the NEW boundary plan (a Cut↔Fade
+    // toggle after them changes what they contribute at finalize). Legacy
+    // stages keep their stored values — the compatibility check above
+    // guarantees their baked boundaries still match the plan.
+    for idx in 0..preserved as usize {
+        let recomputed = {
+            let stage = &candidate.stages[idx];
+            let next = candidate.stages.get(idx + 1);
+            stage_contributed_frames(
+                idx,
+                stage.frames,
+                stage.transition,
+                next.map(|next| next.transition),
+                next.and_then(|next| next.fade_frames),
+                candidate.motion_tail_frames,
+            )
+        };
+        let status = &mut manifest.stage_status[idx];
+        if status.raw_segment && status.frames_emitted.is_some() {
+            status.frames_emitted = Some(recomputed);
+        }
+    }
+
+    // Delete invalidated stage dirs; preserved dirs are NEVER renumbered.
+    for idx in preserved..old_count.max(new_count) {
+        let stage_dir = layout.stage_dir(idx);
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).with_context(|| {
+                format!(
+                    "removing amended chain stage directory '{}'",
+                    stage_dir.display()
+                )
+            })?;
+        }
+    }
+    manifest.write_atomic(&job_dir)?;
+
+    // DB index follows the manifest.
+    chain_jobs::set_request_json(db, job_id, &manifest.request_json, now_i64)?;
+    chain_jobs::delete_stages_from(db, job_id, new_count)?;
+    for status in &manifest.stage_status {
+        chain_jobs::upsert_stage(
+            db,
+            &ChainJobStageRow {
+                job_id: job_id.to_string(),
+                stage_idx: status.idx,
+                state: status.state,
+                seed: status.seed,
+                frames_emitted: status.frames_emitted,
+                generation_time_ms: status.generation_time_ms,
+                segment_rel_path: status.segment.clone(),
+                error: status.error.clone(),
+                updated_at_ms: now_i64,
+            },
+        )?;
+    }
+    chain_jobs::update_stage_shape(db, job_id, new_count, preserved, now_i64)?;
+
+    let updated = chain_jobs::get_job(db, job_id)?
+        .ok_or_else(|| anyhow!("chain job disappeared after amend"))?;
+    Ok((updated, preserved))
 }
 
 pub struct ProductionStageExecutor {
@@ -3914,6 +4230,525 @@ mod tests {
             );
             assert!(job_dir.join("final/output-2.mp4").exists());
         }
+    }
+
+    fn amend_with_stages(stages: Vec<ChainStage>) -> AmendRequest {
+        AmendRequest {
+            stages,
+            motion_tail_frames: None,
+            fps: None,
+            seed: None,
+            steps: None,
+            guidance: None,
+            enable_audio: None,
+        }
+    }
+
+    #[test]
+    fn preserved_stage_prefix_matrix() {
+        let base = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+        ]);
+
+        // Prompt edit at stage k invalidates from k.
+        let mut new = base.clone();
+        new.stages[1].prompt = "edited".into();
+        assert_eq!(preserved_stage_prefix(&base, &new), 1, "prompt edit");
+
+        // Per-stage seed change at stage k invalidates from k.
+        let mut new = base.clone();
+        new.stages[2].seed_offset = Some(7);
+        assert_eq!(preserved_stage_prefix(&base, &new), 2, "seed_offset edit");
+
+        // Appending clips preserves every old stage.
+        let mut new = base.clone();
+        new.stages.push(stage("stage 3", TransitionMode::Cut));
+        assert_eq!(preserved_stage_prefix(&base, &new), 3, "append");
+
+        // Removing trailing clips preserves the (shorter) new length.
+        let mut new = base.clone();
+        new.stages.truncate(2);
+        assert_eq!(preserved_stage_prefix(&base, &new), 2, "remove last");
+
+        // Cut↔Fade toggles are finalize-only under raw segments.
+        let mut new = base.clone();
+        new.stages[2].transition = TransitionMode::Fade;
+        assert_eq!(preserved_stage_prefix(&base, &new), 3, "cut→fade toggle");
+
+        // fade_frames edits are finalize-only too.
+        let mut old = base.clone();
+        old.stages[2].transition = TransitionMode::Fade;
+        let mut new = old.clone();
+        new.stages[2].fade_frames = Some(4);
+        assert_eq!(preserved_stage_prefix(&old, &new), 3, "fade_frames edit");
+
+        // Smooth↔(Cut|Fade) changes the rendered pixels (carry).
+        let mut new = base.clone();
+        new.stages[1].transition = TransitionMode::Cut;
+        assert_eq!(preserved_stage_prefix(&base, &new), 1, "smooth→cut");
+
+        // Chain-level render inputs dirty everything.
+        for mutate in [
+            (|req: &mut ChainRequest| req.seed = Some(43)) as fn(&mut ChainRequest),
+            |req| req.steps = 4,
+            |req| req.guidance = 2.0,
+            |req| req.fps = 12,
+            |req| req.motion_tail_frames = 0,
+        ] {
+            let mut new = base.clone();
+            mutate(&mut new);
+            assert_eq!(preserved_stage_prefix(&base, &new), 0, "chain-level edit");
+        }
+
+        // enable_audio ON→OFF preserves (finalize ignores sidecars)…
+        let mut old = base.clone();
+        old.enable_audio = Some(true);
+        let mut new = old.clone();
+        new.enable_audio = Some(false);
+        assert_eq!(preserved_stage_prefix(&old, &new), 3, "audio on→off");
+
+        // …but OFF→ON needs sidecars that were never rendered.
+        let mut new = base.clone();
+        new.enable_audio = Some(true);
+        assert_eq!(preserved_stage_prefix(&base, &new), 0, "audio off→on");
+    }
+
+    #[test]
+    fn amend_preserves_prefix_resets_suffix_and_requeues() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55AMEND", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 3);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let effective = effective_request(&manifest).unwrap();
+        let mut stages = effective.stages.clone();
+        stages[1].prompt = "edited middle".into();
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 1);
+        assert_eq!(updated.state, ChainJobState::Queued);
+        assert_eq!(updated.current_stage, 1);
+        assert_eq!(updated.stage_count, 3);
+        let layout = JobDirLayout::new(job_dir.clone());
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status[0].state, StageState::Completed);
+        assert!(manifest.stage_status[0].raw_segment);
+        assert_eq!(manifest.stage_status[1].state, StageState::Pending);
+        assert_eq!(manifest.stage_status[2].state, StageState::Pending);
+        assert_eq!(manifest.amends.len(), 1);
+        assert_eq!(manifest.amends[0].preserved_stages, 1);
+        assert!(layout.stage_dir(0).exists(), "preserved dir kept");
+        assert!(!layout.stage_dir(1).exists(), "dirty dirs deleted");
+        assert!(!layout.stage_dir(2).exists());
+        let stage_rows = chain_jobs::stages_for_job(db, &row.id).unwrap();
+        assert_eq!(stage_rows[0].state, StageState::Completed);
+        assert_eq!(stage_rows[1].state, StageState::Pending);
+        assert_eq!(stage_rows[2].state, StageState::Pending);
+        assert_eq!(
+            effective_request(&manifest).unwrap().stages[1].prompt,
+            "edited middle"
+        );
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            5,
+            "requeue renders only the invalidated suffix"
+        );
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .finalizes
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn amend_append_renders_only_new_stage_and_refinalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55APPEND", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 2);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages.push(stage("appended clip", TransitionMode::Smooth));
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 2);
+        assert_eq!(updated.stage_count, 3);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            3,
+            "append must render exactly the new stage"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status[2].state, StageState::Completed);
+        assert_eq!(manifest.finalizes.len(), 2);
+        assert!(job_dir.join("final/output-2.mp4").exists());
+    }
+
+    #[test]
+    fn amend_boundary_only_edit_refinalizes_without_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55BOUNDARYA",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        // 9 + 9 cut concat.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-1.mp4")), 18);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages[1].transition = TransitionMode::Fade;
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 2, "cut→fade is a boundary-only amend");
+        assert_eq!(updated.state, ChainJobState::Queued);
+        assert_eq!(updated.current_stage, 2);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            2,
+            "boundary-only amend must not render"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.finalizes.len(), 2, "a new take was finalized");
+        // 9 + (9 - fade 2) with the new fade boundary from cached raw segments.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-2.mp4")), 16);
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
+    #[test]
+    fn amend_shrink_deletes_trailing_db_rows_and_updates_stage_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55SHRINKA", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages.truncate(2);
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 2);
+        assert_eq!(updated.stage_count, 2);
+        assert_eq!(updated.current_stage, 2);
+        let stage_rows = chain_jobs::stages_for_job(db, &row.id).unwrap();
+        assert_eq!(
+            stage_rows.iter().map(|s| s.stage_idx).collect::<Vec<_>>(),
+            vec![0, 1],
+            "trailing DB rows removed"
+        );
+        let layout = JobDirLayout::new(job_dir.clone());
+        assert!(!layout.stage_dir(2).exists(), "trailing stage dir removed");
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status.len(), 2);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            3,
+            "shrink is boundary-only: no renders"
+        );
+        // 9 + (9 - 1 smooth) without the removed third clip.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-2.mp4")), 17);
+    }
+
+    #[test]
+    fn amend_folds_prior_retakes_and_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55FOLD", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let retaken = apply_retake(
+            db,
+            dir.path(),
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 1,
+                mode: RetakeMode::Splice,
+                seed_offset: Some(9),
+                prompt: Some("retaken clip".into()),
+            },
+        )
+        .unwrap();
+        execute_job(&deps, &retaken, retaken.current_stage).unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.retakes.len(), 1);
+        let effective = effective_request(&manifest).unwrap();
+        let previous_json = serde_json::to_string(&effective).unwrap();
+        let retaken_seed = manifest.stage_status[1].seed;
+
+        let mut stages = effective.stages.clone();
+        stages.push(stage("third clip", TransitionMode::Cut));
+        let (_updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(
+            preserved, 2,
+            "identity must hold for the retaken stage (folded seed + prompt)"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(
+            manifest.retakes.is_empty(),
+            "retakes are folded into the amended request and cleared"
+        );
+        assert_eq!(manifest.amends.len(), 1);
+        assert_eq!(
+            manifest.amends[0].previous_request_json, previous_json,
+            "snapshot is the pre-amend EFFECTIVE request"
+        );
+        let effective = effective_request(&manifest).unwrap();
+        assert_eq!(effective.stages[1].prompt, "retaken clip");
+        assert_eq!(manifest.stage_status[1].seed, retaken_seed);
+    }
+
+    #[test]
+    fn amend_rejects_running_and_ephemeral() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+
+        let running_dir = dir.path().join("running");
+        let running = persist_job(
+            &db,
+            &running_dir,
+            "01JBR55ARUN",
+            &req,
+            ChainJobState::Queued,
+        );
+        assert!(chain_jobs::claim_job(&db, &running.id).unwrap());
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &running.id,
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CHAIN_JOB_RUNNING"), "{err:#}");
+
+        let eph_dir = dir.path().join("eph");
+        let eph = persist_job(&db, &eph_dir, "01JBR55AEPH", &req, ChainJobState::Completed);
+        let mut manifest = ChainJobManifest::read_from_dir(&eph.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&eph.job_dir).unwrap();
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &eph.id,
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CHAIN_JOB_EPHEMERAL"), "{err:#}");
+
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            "missing-job",
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err:#}");
+    }
+
+    #[test]
+    fn amend_rejects_invalid_stage_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55AINVALID",
+            &req,
+            ChainJobState::Completed,
+        );
+
+        let mut bad_stage = stage("bad", TransitionMode::Smooth);
+        bad_stage.frames = 10; // not 8k+1
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &row.id,
+            &amend_with_stages(vec![bad_stage]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(CHAIN_JOB_AMEND_INVALID),
+            "validation failures carry the amend-invalid marker, got {err:#}"
+        );
+        assert_eq!(
+            chain_jobs::get_job(&db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed,
+            "invalid amends must not touch job state"
+        );
+    }
+
+    #[test]
+    fn resume_after_amend_reuses_tail_pngs_bit_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55ATAIL", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db_arc = deps.db.clone();
+        let db = db_arc.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages[1].prompt = "edited continuation".into();
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 1);
+
+        // Re-render the invalidated stage with a carry-inspecting executor:
+        // the smooth carry must be the bit-exact tail PNG persisted by the
+        // preserved raw stage (FakeExecutor stage 0 tail pixel = 18).
+        let inspect = Arc::new(CarryInspectExecutor {
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps2 = RunnerDeps {
+            db: db_arc.clone(),
+            jobs_root: dir.path().join("jobs"),
+            executor: inspect.clone(),
+            queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+            events: Arc::new(JobEventBus::new()),
+            cancel: Arc::new(CancelRegistry::new()),
+            job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
+            output_dir: None,
+            server_events: None,
+            pause: None,
+        };
+        execute_job(&deps2, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            inspect.seen.lock().unwrap().as_slice(),
+            &[Some([18, 18, 18])],
+            "amended continuation must re-render from the preserved stage's tail PNGs"
+        );
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
     }
 
     #[test]
