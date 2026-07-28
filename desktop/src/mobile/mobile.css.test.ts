@@ -5,6 +5,8 @@ const css = readFileSync("src/mobile/mobile.css", "utf8");
 const mobileHtml = readFileSync("index.mobile.html", "utf8");
 const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
 const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
+const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", "utf8");
+const seamPillComponent = readFileSync("../ui/components/SeamPill.vue", "utf8");
 
 describe("mobile viewport scaling", () => {
   it("disables iPhone page and double-tap zoom without document gesture handlers", () => {
@@ -112,6 +114,62 @@ describe("mobile advanced sheet", () => {
   });
 });
 
+describe("mobile seam sheet", () => {
+  it("is a fixed overlay that only becomes visible when opened", () => {
+    // @ui/SheetPanel is `position: absolute; inset: 0` and its `full` variant
+    // has no #header slot, so the seam editor gets this bespoke fixed sheet
+    // (the MobileAdvancedSheet pattern) instead.
+    const sheet = css.match(/\.mobile-seam-sheet\s*\{([^}]*)\}/s);
+    const open = css.match(/\.mobile-seam-sheet\.is-open\s*\{([^}]*)\}/s);
+    expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
+    expect(sheet?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+  });
+
+  it("scrolls its own body with the pinned mobile containment invariants", () => {
+    const body = css.match(/\.mobile-seam-sheet-body\s*\{([^}]*)\}/s);
+    expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
+    expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(body?.[1]).toContain("env(safe-area-inset-left)");
+    expect(body?.[1]).toContain("env(safe-area-inset-right)");
+    expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
+  });
+
+  it("keeps the sheet's Done control and the backdrop at touch size", () => {
+    const done = css.match(/\.mobile-seam-sheet-done\s*\{([^}]*)\}/s);
+    const backdrop = css.match(/\.mobile-seam-sheet-backdrop\s*\{([^}]*)\}/s);
+    expect(Number(done?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(46);
+    expect(backdrop?.[1]).toMatch(/position:\s*absolute\s*;/);
+    expect(backdrop?.[1]).toMatch(/inset:\s*0\s*;/);
+  });
+
+  it("keeps the seam pill that opens it at the iPhone 44pt floor", () => {
+    // The pill's touch size comes from the shared kit's `large` variant —
+    // assert it there so a kit restyle can't shrink the iPhone target.
+    const large = seamPillComponent.match(/\.ms-seam--large\s*\{([^}]*)\}/s);
+    expect(Number(large?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+  });
+});
+
+describe("mobile sequence composer", () => {
+  it("keeps clip prompts at the iOS no-focus-zoom size", () => {
+    expect(composerComponent).toMatch(/\.mobile-sequence-prompt\s*\{[^}]*font-size:\s*16px/s);
+  });
+
+  it("keeps Add clip and Generate sequence at the sheet-button height", () => {
+    for (const selector of [".mobile-sequence-add", ".mobile-sequence-generate"]) {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rule = composerComponent.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s"));
+      expect(
+        Number(rule?.[1]?.match(/min-height:\s*(\d+)px/)?.[1]),
+        selector,
+      ).toBeGreaterThanOrEqual(46);
+    }
+  });
+});
+
 describe("mobile style row", () => {
   it("renders the collapsed head value as a compact pill, not a 44pt tap chip", () => {
     const styleComponent = readFileSync("src/mobile/MobileStyleChips.vue", "utf8");
@@ -150,6 +208,7 @@ describe("mobile safe areas", () => {
     for (const selector of [
       ".mobile-resolution-segment",
       ".mobile-resolution-tier .ms-seg .ms-seg__btn",
+      ".mobile-output-mode .ms-seg .ms-seg__btn",
       ".mobile-resolution-aspect",
       ".mobile-catalog-segment button",
       ".mobile-catalog-media button",
