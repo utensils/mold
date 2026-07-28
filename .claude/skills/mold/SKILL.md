@@ -299,7 +299,8 @@ mold run ltx-2-19b-distilled:fp8 \
 ### API
 
 - Chain endpoint: `POST /api/generate/chain[/stream]`
-- Capabilities: `GET /api/capabilities/chain-limits?model=<name>`
+- Capabilities: `GET /api/capabilities/chain-limits?model=<name>` — also carries `frames_per_clip_recommended` (the model's own default), `supports_audio`, and model-specific `supports_sequence` + `sequence_unsupported_reason`
+- Per-model frame semantics ride on each `GET /api/models` row (flattened, video models only): `default_frames`, `default_fps`, `max_frames` (no-temporal-upscale ceiling), `frame_step` (valid counts are `k·step+1`). Absent on image models — never substitute a constant
 - Max stages: 16. LTX-2 distilled cap: 97 frames/clip.
 
 ### mold jobs CLI
@@ -780,6 +781,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
   - `POST /api/chain-jobs` · `GET /api/chain-jobs` · `GET /api/chain-jobs/:id`
   - `GET /api/chain-jobs/:id/events` — SSE snapshot + live job events
   - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
+  - `POST /api/chain-jobs/:id/amend` — edit a settled/queued sequence in place: body is `AmendRequest` (the FULL edited `stages[]` plus optional `motion_tail_frames`/`fps`/`seed`/`steps`/`guidance`/`enable_audio` overlays; model, size, output format, placement, strength, and batch provenance are NOT amendable). Returns 202 `AmendResponse` (flattened `ChainJobSummary` + `preserved_stages`) and requeues from the earliest dirty clip; `cut`↔`fade` and fade-length edits re-finalize with zero re-renders
   - `DELETE /api/chain-jobs/:id` · `POST /api/chain-jobs/gc` · `GET /api/chain-jobs/:id/stages/:idx/preview`
 - `POST /api/expand` — LLM prompt expansion; optional `style` is absorbed as a natural-language directive
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
@@ -791,6 +793,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
 - `PATCH /api/queue/:id` — re-lane and/or reorder a queued job (`target_gpu?`, queued-only 0-based `position?`); omitted fields stay unchanged
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
+- `GET /api/events` — one server-wide SSE stream of `job_queued`/`job_started`/`job_ended`, `gallery_added`/`gallery_removed`, `queue_paused`/`queue_resumed`, plus the additive durable-sequence lifecycle `chain_job_queued` (`id`, `model`, `stage_count`), `chain_job_started` (`id`, `model`), and `chain_job_ended` (`id`, `state`). Deltas only — subscribe first, then bootstrap from `/api/queue` + `/api/gallery`. Ephemeral legacy-shim chain jobs stay silent
 - `GET /api/history?query=&limit=` · `DELETE /api/history[?keep=N]` — prompt history (newest first, substring filter, limit ≤ 500; 503 when the metadata DB is disabled)
 - `GET /api/config` · `GET/PUT/DELETE /api/config/:key` — the `mold config` verbs over HTTP: rows are `{ key, value, source: db|file|env, env_var? }`; PUT routes by surface like `config set` (403 on env-overridden keys), DELETE resets DB-backed keys like `config reset`
 - `GET /api/config/profiles` · `PUT /api/config/profile` — list/switch the active settings profile (503 when the metadata DB is disabled)
