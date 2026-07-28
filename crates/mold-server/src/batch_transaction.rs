@@ -122,6 +122,10 @@ impl GalleryPublicationGate {
             }
             index.retired_names.remove(&identity.final_name);
             index.retired_entries.remove(&identity.final_name);
+            index.retirement_epochs.remove(&identity.final_name);
+            index
+                .retirement_projection_epochs
+                .remove(&identity.final_name);
             index.quarantined_names.remove(&identity.final_name);
             index.entries.insert(
                 identity.final_name.clone(),
@@ -140,7 +144,7 @@ impl GalleryPublicationGate {
             output_dir,
             bookkeeping,
             prior_generation,
-            &index,
+            &mut index,
             "publish_batch",
             manifest
                 .children
@@ -162,6 +166,50 @@ impl GalleryPublicationGate {
             index.quarantined_names.remove(filename);
             index.retired_names.insert(filename.to_owned());
         }
+    }
+
+    pub(crate) fn acknowledge_retirement_projections(
+        &self,
+        output_dir: &Path,
+        filenames: impl IntoIterator<Item = String>,
+    ) -> anyhow::Result<()> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical_output_dir = bookkeeping.canonical_root();
+        let mut index =
+            self.committed_archive_index_while_locked(canonical_output_dir, &bookkeeping)?;
+        let generation =
+            crate::gallery_authority::read_generation(canonical_output_dir, &bookkeeping)?
+                .context("gallery authority generation is missing")?;
+        let projection_generation = generation
+            .checked_add(1)
+            .context("gallery authority generation overflow")?;
+        let mut exact_names = Vec::new();
+        for filename in filenames {
+            if !index.retired_names.contains(&filename) {
+                continue;
+            }
+            index
+                .retirement_epochs
+                .entry(filename.clone())
+                .or_insert(generation);
+            index
+                .retirement_projection_epochs
+                .insert(filename.clone(), projection_generation);
+            exact_names.push(filename);
+        }
+        if exact_names.is_empty() {
+            return Ok(());
+        }
+        let generation = crate::gallery_authority::commit_snapshot(
+            canonical_output_dir,
+            &bookkeeping,
+            generation,
+            &mut index,
+            "retirement_projection_complete",
+            exact_names,
+        )?;
+        self.install_committed_archive_index(generation, index);
+        Ok(())
     }
 }
 
@@ -328,6 +376,10 @@ pub(crate) struct CommittedArchiveIndex {
     pub(crate) quarantined_names: BTreeSet<String>,
     #[serde(default)]
     pub(crate) retired_entries: BTreeMap<String, CommittedArchiveEntry>,
+    #[serde(default)]
+    pub(crate) retirement_epochs: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub(crate) retirement_projection_epochs: BTreeMap<String, u64>,
 }
 
 impl CommittedArchiveIndex {
@@ -2220,11 +2272,22 @@ pub async fn recover_transactions(
     }
     let archive_index = reconcile_committed_archive_index(output_dir)
         .context("validating committed gallery archive index during startup recovery")?;
+    let retired_names = archive_index
+        .retired_names
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     if let Some(db) = db.as_ref() {
         let records = archive_index.records().cloned().collect::<Vec<_>>();
         if !records.is_empty() {
             db.upsert_batch(&records)
                 .context("healing metadata DB from committed gallery archive")?;
+        }
+        let canonical_output_dir = fs::canonicalize(output_dir)
+            .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+        for filename in &retired_names {
+            db.delete(&canonical_output_dir, filename)
+                .with_context(|| format!("projecting retired gallery row {filename}"))?;
         }
     }
     let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
@@ -2232,6 +2295,8 @@ pub async fn recover_transactions(
         Ok(archive_index)
     })?;
     gate.install_committed_archive_index(loaded.generation, loaded.index);
+    drop(bookkeeping);
+    gate.acknowledge_retirement_projections(output_dir, retired_names)?;
     Ok(report)
 }
 
@@ -3606,6 +3671,150 @@ fn deleted_archive_children_dir(output_dir: &Path) -> PathBuf {
         .join(DELETED_ARCHIVE_CHILDREN_DIR)
 }
 
+pub(crate) fn legacy_gallery_evidence_paths(output_dir: &Path) -> anyhow::Result<BTreeSet<String>> {
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let root = canonical_output_dir.join(TRANSACTION_DIR);
+    let metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeSet::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "batch transaction root is not a private directory: {}",
+        root.display()
+    );
+
+    let mut evidence = BTreeSet::new();
+    let deleted = root.join(DELETED_ARCHIVE_CHILDREN_DIR);
+    if let Ok(metadata) = fs::symlink_metadata(&deleted) {
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "deleted archive-child namespace is not a private directory: {}",
+            deleted.display()
+        );
+        for entry in sorted_directory_entries(&deleted)? {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "legacy gallery evidence is not a regular file: {}",
+                entry.path().display()
+            );
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("legacy gallery evidence filename is not UTF-8"))?;
+            evidence.insert(format!("{DELETED_ARCHIVE_CHILDREN_DIR}/{name}"));
+        }
+    }
+
+    for parent in sorted_directory_entries(&root)? {
+        let parent_name = match parent.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+        if matches!(
+            parent_name.as_str(),
+            "reservations" | LEGACY_ATTEMPT_LOCKS_DIR | DELETED_ARCHIVE_CHILDREN_DIR
+        ) || parent_name == crate::gallery_authority::authority_dir_name()
+        {
+            continue;
+        }
+        let parent_metadata = fs::symlink_metadata(parent.path())?;
+        ensure!(
+            parent_metadata.is_dir() && !parent_metadata.file_type().is_symlink(),
+            "unrecognized non-directory gallery transaction entry: {}",
+            parent.path().display()
+        );
+        let committed = parent.path().join(COMMITTED_DIR);
+        let metadata = match fs::symlink_metadata(&committed) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "committed archive namespace is not a private directory: {}",
+            committed.display()
+        );
+        for entry in sorted_directory_entries(&committed)? {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "legacy gallery evidence is not a regular file: {}",
+                entry.path().display()
+            );
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("legacy gallery evidence filename is not UTF-8"))?;
+            evidence.insert(format!("{parent_name}/{COMMITTED_DIR}/{name}"));
+        }
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn remove_legacy_gallery_evidence(
+    output_dir: &Path,
+    evidence: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let root = canonical_output_dir.join(TRANSACTION_DIR);
+    let mut touched_directories = BTreeSet::new();
+    for relative in evidence {
+        let components = Path::new(relative)
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(value) => Ok(value),
+                _ => anyhow::bail!("legacy gallery evidence path is not relative: {relative}"),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let valid_shape = (components.len() == 2
+            && components[0] == std::ffi::OsStr::new(DELETED_ARCHIVE_CHILDREN_DIR))
+            || (components.len() == 3 && components[1] == std::ffi::OsStr::new(COMMITTED_DIR));
+        ensure!(
+            valid_shape,
+            "legacy gallery evidence path has an invalid shape: {relative}"
+        );
+        let path = root.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "legacy gallery evidence changed away from a regular file: {}",
+                    path.display()
+                );
+                fs::remove_file(&path)?;
+                touched_directories.insert(
+                    path.parent()
+                        .context("legacy gallery evidence has no parent")?
+                        .to_path_buf(),
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for directory in touched_directories {
+        sync_dir(&directory)?;
+        if fs::read_dir(&directory)?.next().is_none() {
+            fs::remove_dir(&directory)?;
+            if let Some(parent) = directory.parent() {
+                sync_dir(parent)?;
+                if parent != root && fs::read_dir(parent)?.next().is_none() {
+                    fs::remove_dir(parent)?;
+                    sync_dir(&root)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct CommittedArchiveCatalog {
     index: CommittedArchiveIndex,
@@ -4105,6 +4314,10 @@ pub(crate) fn tombstone_committed_archive_filename(
         index.quarantined_names.remove(filename);
         index.retired_names.insert(filename.to_owned());
         index.retired_entries.insert(filename.to_owned(), entry);
+        index
+            .retirement_epochs
+            .insert(filename.to_owned(), generation.saturating_add(1));
+        index.retirement_projection_epochs.remove(filename);
         ArchiveDeleteDisposition::SafeToUnlink
     } else {
         index.quarantined_names.insert(filename.to_owned());
@@ -4114,7 +4327,7 @@ pub(crate) fn tombstone_committed_archive_filename(
         output_dir,
         &bookkeeping,
         generation,
-        &index,
+        &mut index,
         match disposition {
             ArchiveDeleteDisposition::SafeToUnlink => "user_delete",
             ArchiveDeleteDisposition::PreservedReplacement => "delete_replacement_quarantine",
@@ -4140,7 +4353,7 @@ pub(crate) fn tombstone_committed_archive_filename(
                 output_dir,
                 &bookkeeping,
                 next_generation,
-                &index,
+                &mut index,
                 "delete_replacement_quarantine",
                 vec![filename.to_owned()],
             )?;
@@ -6780,8 +6993,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_disabled_commit_publishes_all_children_and_durable_manifest() {
+    async fn db_disabled_commit_publishes_all_children_and_durable_central_authority() {
         let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
         let mut transaction = BatchTransaction::begin(
             dir.path(),
             "parent",
@@ -6794,19 +7008,21 @@ mod tests {
         transaction.stage_bytes(1, b"second").unwrap();
         transaction.mark_prepared().unwrap();
 
-        transaction
-            .commit(&GalleryPublicationGate::default(), Arc::new(None))
-            .await
-            .unwrap();
+        transaction.commit(&gate, Arc::new(None)).await.unwrap();
 
         assert_eq!(fs::read(dir.path().join("same.png")).unwrap(), b"first");
         assert_eq!(fs::read(dir.path().join("other.png")).unwrap(), b"second");
         assert_eq!(transaction.manifest().state, BatchManifestState::Committed);
         assert!(!transaction.attempt_dir.exists());
-        let archive = committed_manifests_dir(dir.path(), "parent").join("0.json");
-        let archived: BatchAttemptManifest =
-            serde_json::from_slice(&fs::read(archive).unwrap()).unwrap();
-        assert_eq!(archived.state, BatchManifestState::Committed);
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert!(index.get("same.png").is_some());
+        assert!(index.get("other.png").is_some());
+        assert!(
+            !committed_manifests_dir(dir.path(), "parent")
+                .join("0.json")
+                .exists(),
+            "legacy recovery evidence must be collected after two central checkpoints"
+        );
     }
 
     #[tokio::test]
@@ -6854,6 +7070,12 @@ mod tests {
                 .metadata,
             original.metadata
         );
+        assert!(
+            !committed_manifests_dir(dir.path(), "db-disabled-parent")
+                .join("0.json")
+                .exists(),
+            "two durable central checkpoints must collect migrated per-batch authority"
+        );
     }
 
     #[tokio::test]
@@ -6873,16 +7095,16 @@ mod tests {
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
             .await
             .unwrap();
+        let original = transaction.manifest().clone();
         drop(transaction);
-
         let archive = committed_manifests_dir(dir.path(), "parent").join("0.json");
-        let original: BatchAttemptManifest = read_archive_json(&archive).unwrap();
         fs::remove_dir_all(
             dir.path()
                 .join(TRANSACTION_DIR)
                 .join(crate::gallery_authority::authority_dir_name()),
         )
         .unwrap();
+        atomic_write_json(&archive, &original).unwrap();
 
         let mut future = original.clone();
         future.version = MANIFEST_VERSION + 1;
@@ -6935,6 +7157,7 @@ mod tests {
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
             .await
             .unwrap();
+        let original = committed.manifest().clone();
         drop(committed);
 
         let active = BatchTransaction::begin(
@@ -6955,7 +7178,8 @@ mod tests {
 
         let original_archive =
             committed_manifests_dir(dir.path(), "committed-parent").join("0.json");
-        let mut duplicate: BatchAttemptManifest = read_archive_json(&original_archive).unwrap();
+        atomic_write_json(&original_archive, &original).unwrap();
+        let mut duplicate = original;
         duplicate.parent_id = "duplicate-parent".into();
         let duplicate_archive =
             committed_manifests_dir(dir.path(), "duplicate-parent").join("0.json");
@@ -7225,8 +7449,8 @@ mod tests {
             "unchanged startup must trust stable identity facts"
         );
         assert!(
-            crate::gallery_authority::storage_file_count(dir.path()) <= 3,
-            "checkpoint, previous checkpoint, and generation marker are the bounded steady state"
+            crate::gallery_authority::storage_file_count(dir.path()) <= 4,
+            "current, backup, previous, and generation marker are the bounded steady state"
         );
         drop(bookkeeping);
 
@@ -7284,7 +7508,7 @@ mod tests {
             dir.path(),
             &bookkeeping,
             loaded.generation,
-            &index,
+            &mut index,
             "scale_fixture",
             Vec::new(),
         )
@@ -7298,14 +7522,43 @@ mod tests {
             tombstone_committed_archive_filename(dir.path(), "entry-05000.png", &gate).unwrap(),
             ArchiveDeleteDisposition::SafeToUnlink
         );
+        gate.acknowledge_retirement_projections(dir.path(), ["entry-05000.png".to_owned()])
+            .unwrap();
         assert_eq!(
             authority_hash_count(),
             0,
             "stable file identity must make delete independent of unrelated gallery bytes"
         );
         assert!(
-            crate::gallery_authority::storage_file_count(dir.path()) <= 3,
+            crate::gallery_authority::storage_file_count(dir.path()) <= 4,
             "authority persistence must remain bounded independently of publication count"
+        );
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let mut current = gate
+            .committed_archive_index_while_locked(dir.path(), &bookkeeping)
+            .unwrap();
+        let generation = crate::gallery_authority::read_generation(dir.path(), &bookkeeping)
+            .unwrap()
+            .unwrap();
+        let next_generation = crate::gallery_authority::commit_snapshot(
+            dir.path(),
+            &bookkeeping,
+            generation,
+            &mut current,
+            "retirement_gc_test",
+            Vec::new(),
+        )
+        .unwrap();
+        gate.install_committed_archive_index(next_generation, current);
+        drop(bookkeeping);
+        assert!(
+            !gate
+                .committed_archive_index(dir.path())
+                .unwrap()
+                .retired_names
+                .contains("entry-05000.png"),
+            "a projected retirement must leave current authority after two durable checkpoints"
         );
     }
 
@@ -7623,9 +7876,13 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
         assert_eq!(fs::read(dir.path().join("two.png")).unwrap(), b"two");
         assert!(!transaction.attempt_dir.exists());
-        assert!(committed_manifests_dir(dir.path(), "parent")
+        assert!(!committed_manifests_dir(dir.path(), "parent")
             .join("0.json")
-            .is_file());
+            .exists());
+        assert!(load_committed_archive_index(dir.path())
+            .unwrap()
+            .get("one.png")
+            .is_some());
     }
 
     #[tokio::test]
@@ -8046,10 +8303,11 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
         assert!(!attempt_dir(dir.path(), "parent", 0).exists());
         assert!(
-            committed_manifests_dir(dir.path(), "parent")
-                .join("0.json")
-                .is_file(),
-            "database-free recovery authority must survive attempt cleanup"
+            gate.committed_archive_index(dir.path())
+                .unwrap()
+                .get("one.png")
+                .is_some(),
+            "database-free central authority must survive attempt cleanup"
         );
     }
 
@@ -8571,10 +8829,10 @@ mod tests {
         assert_eq!(fs::read(final_path).unwrap(), b"one");
         assert!(!reservation.exists());
         assert!(!transaction.attempt_dir.exists());
-        let archived = committed_manifests_dir(dir.path(), "parent").join("0.json");
-        let manifest: BatchAttemptManifest =
-            serde_json::from_slice(&fs::read(archived).unwrap()).unwrap();
-        assert_eq!(manifest.state, BatchManifestState::Committed);
+        assert!(load_committed_archive_index(dir.path())
+            .unwrap()
+            .get("one.png")
+            .is_some());
     }
 
     #[tokio::test]

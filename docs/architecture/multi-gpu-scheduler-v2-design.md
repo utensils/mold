@@ -1453,7 +1453,10 @@ Implement logical API atomicity with one `GalleryPublicationGate`:
    no-replace semantics, and fsync the files and affected directories;
 7. while holding the canonical cross-process gallery bookkeeping lock, persist
    and fsync one generation-fenced authority mutation for the complete batch,
-   checkpoint it, then clear the write-ahead marker;
+   checkpoint it, then clear the write-ahead marker. The durable authority
+   retains a current-generation backup and the immediately prior checkpoint;
+   once both current and prior contain an imported batch, epoch GC removes its
+   legacy per-batch manifest without weakening crash recovery;
 8. release cross-process bookkeeping and, when the metadata DB is enabled,
    project all gallery rows in one SQLite transaction; the process-local
    publication writer remains held, and DB-disabled operation is identical;
@@ -1471,6 +1474,18 @@ binding/serving gallery routes, including when the DB is disabled or empty.
 The transaction root is deliberately inside the resolved gallery filesystem
 so every final no-replace rename stays on one filesystem; gallery scanners and
 reconcile must ignore that reserved directory.
+
+Delete authority follows the same two-checkpoint rule. The exact retired file
+identity remains authoritative until the metadata DB deletion is acknowledged
+(DB-disabled operation acknowledges immediately). The next checkpoint keeps
+that retirement in `checkpoint.previous.json` while removing it from current
+state. Replacements remain quarantined and are never deleted by this GC.
+Steady authority storage is four files: current checkpoint, same-generation
+backup, immediately prior checkpoint, and generation marker. During mutation,
+one full-snapshot WAL and at most one atomic-write temporary file are added.
+Checkpoint bytes are therefore bounded by two copies of current live authority
+plus one immediately prior copy; legacy evidence and completed tombstones do
+not accumulate with lifetime publication count.
 
 Desktop-to-local-server imports are one-child instances of this transaction.
 The immutable metadata descriptor is parsed and disk-preflighted before the

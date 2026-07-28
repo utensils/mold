@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 const AUTHORITY_DIR: &str = "gallery-authority-v2";
 const CHECKPOINT_FILE: &str = "checkpoint.json";
 const PREVIOUS_CHECKPOINT_FILE: &str = "checkpoint.previous.json";
+const BACKUP_CHECKPOINT_FILE: &str = "checkpoint.backup.json";
 const MARKER_FILE: &str = "generation.json";
 const WAL_FILE: &str = "mutation.wal";
 const STORAGE_VERSION: u32 = 2;
@@ -27,6 +28,8 @@ struct AuthoritySnapshot {
     version: u32,
     generation: u64,
     index: CommittedArchiveIndex,
+    #[serde(default)]
+    legacy_evidence_epochs: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +86,10 @@ fn previous_checkpoint_path(root: &Path) -> PathBuf {
     authority_dir(root).join(PREVIOUS_CHECKPOINT_FILE)
 }
 
+fn backup_checkpoint_path(root: &Path) -> PathBuf {
+    authority_dir(root).join(BACKUP_CHECKPOINT_FILE)
+}
+
 fn marker_path(root: &Path) -> PathBuf {
     authority_dir(root).join(MARKER_FILE)
 }
@@ -131,41 +138,44 @@ fn read_checkpoint_at(path: &Path) -> anyhow::Result<AuthoritySnapshot> {
 }
 
 fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
-    let current = checkpoint_path(root);
-    match read_checkpoint_at(&current) {
-        Ok(snapshot) => Ok(Some(snapshot)),
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            match read_checkpoint_at(&previous_checkpoint_path(root)) {
-                Ok(snapshot) => Ok(Some(snapshot)),
-                Err(previous)
-                    if previous
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
-                {
-                    Ok(None)
+    let candidates = [
+        ("current", checkpoint_path(root)),
+        ("backup", backup_checkpoint_path(root)),
+        ("previous", previous_checkpoint_path(root)),
+    ];
+    let mut errors = Vec::new();
+    let mut any_present = false;
+    for (label, path) in candidates {
+        match read_checkpoint_at(&path) {
+            Ok(snapshot) => {
+                if label != "current" {
+                    tracing::warn!(
+                        checkpoint = label,
+                        "using fallback checksummed gallery authority checkpoint"
+                    );
                 }
-                Err(previous) => Err(previous.context(format!(
-                "current gallery authority checkpoint is absent and previous is invalid ({error:#})"
-            ))),
+                return Ok(Some(snapshot));
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                errors.push(format!("{label}: absent"));
+            }
+            Err(error) => {
+                any_present = true;
+                errors.push(format!("{label}: {error:#}"));
             }
         }
-        Err(current_error) => match read_checkpoint_at(&previous_checkpoint_path(root)) {
-            Ok(snapshot) => {
-                tracing::warn!(
-                    error = %current_error,
-                    "using previous checksummed gallery authority checkpoint"
-                );
-                Ok(Some(snapshot))
-            }
-            Err(previous_error) => Err(anyhow::anyhow!(
-                "both gallery authority checkpoints are invalid; current: {current_error:#}; \
-                 previous: {previous_error:#}"
-            )),
-        },
+    }
+    if any_present {
+        Err(anyhow::anyhow!(
+            "all gallery authority checkpoints are invalid: {}",
+            errors.join("; ")
+        ))
+    } else {
+        Ok(None)
     }
 }
 
@@ -235,15 +245,24 @@ fn write_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result
     let current = checkpoint_path(root);
     let previous = previous_checkpoint_path(root);
     if current.is_file() {
-        let existing = read_checkpoint_at(&current)?;
-        atomic_write_json(&previous, &wrap_snapshot(existing)?)?;
+        let existing = read_checkpoint_at(&current)
+            .or_else(|_| read_checkpoint_at(&backup_checkpoint_path(root)))?;
+        ensure!(
+            existing.generation <= snapshot.generation,
+            "gallery authority checkpoint generation regressed from {} to {}",
+            existing.generation,
+            snapshot.generation
+        );
+        if existing.generation < snapshot.generation {
+            atomic_write_json(&previous, &wrap_snapshot(existing)?)?;
+        }
     }
     atomic_write_json(&current, &wrap_snapshot(snapshot.clone())?)
 }
 
-fn mirror_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
+fn backup_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
     atomic_write_json(
-        &previous_checkpoint_path(root),
+        &backup_checkpoint_path(root),
         &wrap_snapshot(snapshot.clone())?,
     )
 }
@@ -280,6 +299,15 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
         .as_ref()
         .map(|marker| marker.committed_generation)
         .unwrap_or_else(|| current.as_ref().map_or(0, |snapshot| snapshot.generation));
+    if marker
+        .as_ref()
+        .is_some_and(|marker| marker.pending.is_none())
+        && current
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.generation != committed_generation)
+    {
+        anyhow::bail!("gallery authority checkpoint generation does not match its stable marker");
+    }
     if let Some(pending) = marker.as_ref().and_then(|marker| marker.pending.as_ref()) {
         if let Some(wal_snapshot) = wal.as_ref().filter(|wal| {
             wal.generation == pending.generation
@@ -295,7 +323,7 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
                 },
             )?;
             remove_wal(root)?;
-            mirror_checkpoint(root, wal_snapshot)?;
+            backup_checkpoint(root, wal_snapshot)?;
             current = Some(wal_snapshot.clone());
         } else {
             write_marker(
@@ -319,7 +347,7 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
                     pending: None,
                 },
             )?;
-            mirror_checkpoint(root, &wal_snapshot)?;
+            backup_checkpoint(root, &wal_snapshot)?;
             current = Some(wal_snapshot);
         }
         remove_wal(root)?;
@@ -364,13 +392,23 @@ pub(crate) fn load_or_initialize(
         None => {
             let mut index = legacy()?;
             populate_missing_facts(root, &mut index)?;
+            let legacy_evidence_epochs =
+                crate::batch_transaction::legacy_gallery_evidence_paths(root)?
+                    .into_iter()
+                    .map(|path| (path, 0))
+                    .collect();
             let snapshot = AuthoritySnapshot {
                 version: STORAGE_VERSION,
                 generation: 0,
                 index,
+                legacy_evidence_epochs,
             };
             write_checkpoint(root, &snapshot)?;
-            mirror_checkpoint(root, &snapshot)?;
+            atomic_write_json(
+                &previous_checkpoint_path(root),
+                &wrap_snapshot(snapshot.clone())?,
+            )?;
+            backup_checkpoint(root, &snapshot)?;
             write_marker(
                 root,
                 &MutationMarker {
@@ -394,9 +432,22 @@ pub(crate) fn load_or_initialize(
             root,
             guard,
             snapshot.generation,
-            &snapshot.index,
+            &mut snapshot.index,
             "startup_validation",
             exact_names,
+        )?;
+    }
+    for _ in 0..2 {
+        if crate::batch_transaction::legacy_gallery_evidence_paths(root)?.is_empty() {
+            break;
+        }
+        snapshot.generation = commit_snapshot(
+            root,
+            guard,
+            snapshot.generation,
+            &mut snapshot.index,
+            "legacy_evidence_gc_epoch",
+            Vec::new(),
         )?;
     }
     Ok(LoadedAuthority {
@@ -410,7 +461,7 @@ pub(crate) fn commit_snapshot(
     root: &Path,
     guard: &GalleryBookkeepingGuard,
     expected_generation: u64,
-    index: &CommittedArchiveIndex,
+    index: &mut CommittedArchiveIndex,
     kind: &str,
     exact_names: Vec<String>,
 ) -> anyhow::Result<u64> {
@@ -425,10 +476,47 @@ pub(crate) fn commit_snapshot(
     let generation = expected_generation
         .checked_add(1)
         .context("gallery authority generation overflow")?;
+    let mut legacy_evidence_epochs = current.legacy_evidence_epochs;
+    let observed_legacy = crate::batch_transaction::legacy_gallery_evidence_paths(root)?;
+    legacy_evidence_epochs.retain(|path, _| observed_legacy.contains(path));
+    for path in &observed_legacy {
+        legacy_evidence_epochs
+            .entry(path.clone())
+            .or_insert(generation);
+    }
+    let collect_legacy = legacy_evidence_epochs
+        .iter()
+        .filter(|(_, first_generation)| **first_generation < generation)
+        .map(|(path, _)| path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for path in &collect_legacy {
+        legacy_evidence_epochs.remove(path);
+    }
+
+    let collect_retirements = index
+        .retirement_projection_epochs
+        .iter()
+        .filter(|(name, projected_generation)| {
+            **projected_generation < generation
+                && index
+                    .retirement_epochs
+                    .get(*name)
+                    .is_some_and(|retired_generation| retired_generation <= *projected_generation)
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    for name in collect_retirements {
+        index.retired_names.remove(&name);
+        index.retired_entries.remove(&name);
+        index.retirement_epochs.remove(&name);
+        index.retirement_projection_epochs.remove(&name);
+    }
+
     let snapshot = AuthoritySnapshot {
         version: STORAGE_VERSION,
         generation,
         index: index.clone(),
+        legacy_evidence_epochs,
     };
     let snapshot_sha256 = digest_json(&snapshot)?;
     guard.ensure_root(root)?;
@@ -461,7 +549,8 @@ pub(crate) fn commit_snapshot(
     guard.ensure_root(root)?;
     remove_wal(root)?;
     guard.ensure_root(root)?;
-    mirror_checkpoint(root, &snapshot)?;
+    backup_checkpoint(root, &snapshot)?;
+    crate::batch_transaction::remove_legacy_gallery_evidence(root, &collect_legacy)?;
     Ok(generation)
 }
 
@@ -605,6 +694,7 @@ mod tests {
             version: STORAGE_VERSION,
             generation,
             index: CommittedArchiveIndex::default(),
+            legacy_evidence_epochs: Default::default(),
         }
     }
 
@@ -664,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_current_checkpoint_falls_back_to_previous_checksummed_snapshot() {
+    fn corrupt_current_checkpoint_falls_back_to_current_generation_backup() {
         let dir = tempfile::tempdir().unwrap();
         let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
         let initial =
@@ -676,7 +766,7 @@ mod tests {
             dir.path(),
             &guard,
             initial.generation,
-            &index,
+            &mut index,
             "test",
             vec!["old.png".into()],
         )
@@ -686,5 +776,58 @@ mod tests {
         let recovered = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
         assert_eq!(recovered.generation, 1);
         assert!(recovered.index.is_retired("old.png"));
+        let mut recovered_index = recovered.index;
+        assert_eq!(
+            commit_snapshot(
+                dir.path(),
+                &guard,
+                recovered.generation,
+                &mut recovered_index,
+                "heal_corrupt_current",
+                Vec::new(),
+            )
+            .unwrap(),
+            2,
+            "the current-generation backup must remain writable recovery authority"
+        );
+    }
+
+    #[test]
+    fn completed_mutation_keeps_current_backup_and_immediately_prior_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        index.quarantined_names.insert("changed.png".into());
+        commit_snapshot(
+            dir.path(),
+            &guard,
+            initial.generation,
+            &mut index,
+            "test",
+            vec!["changed.png".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_checkpoint_at(&checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(
+            read_checkpoint_at(&backup_checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(
+            read_checkpoint_at(&previous_checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            0
+        );
     }
 }

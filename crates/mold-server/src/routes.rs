@@ -4451,17 +4451,35 @@ async fn delete_gallery_image(
         // Drop the matching metadata row if the DB is enabled. Errors here are
         // logged — they don't roll back the disk delete since the file is the
         // source of truth and reconciliation will re-sync on the next restart.
-        if let Some(db) = db.as_ref().as_ref() {
+        let projection_complete = if let Some(db) = db.as_ref().as_ref() {
             match db.delete(&dir, &name) {
-                Ok(true) => {}
+                Ok(true) => true,
                 Ok(false) => {
-                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display())
+                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display());
+                    true
                 }
-                Err(e) => tracing::warn!(
-                    "metadata DB delete failed for {}: {e:#}",
-                    dir.join(&name).display()
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        "metadata DB delete failed for {}: {e:#}",
+                        dir.join(&name).display()
+                    );
+                    false
+                }
             }
+        } else {
+            true
+        };
+        if projection_complete
+            && archive_disposition
+                == crate::batch_transaction::ArchiveDeleteDisposition::SafeToUnlink
+        {
+            archive
+                .acknowledge_retirement_projections(&dir, [name.clone()])
+                .map_err(|error| {
+                    ApiError::internal(format!(
+                        "failed to checkpoint gallery deletion projection: {error:#}"
+                    ))
+                })?;
         }
         Ok(())
     })
