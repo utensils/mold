@@ -49,6 +49,11 @@ describe("SegmentedControl", () => {
     expect(tabs).toEqual(["-1", "0", "-1"]);
   });
 
+  it("applies the compact modifier class only when requested", () => {
+    expect(make().classes()).not.toContain("ms-seg--compact");
+    expect(make("a", { compact: true }).classes()).toContain("ms-seg--compact");
+  });
+
   it("ignores interaction when disabled", async () => {
     const wrapper = make("a", { disabled: true });
     await wrapper.find("[role=radiogroup]").trigger("keydown", {

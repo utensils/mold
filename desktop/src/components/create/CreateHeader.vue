@@ -102,13 +102,13 @@ onBeforeUnmount(() => {
     <span class="ms-header__summary data-mono">{{ summary }}</span>
     <SegmentedControl
       model-value="single"
+      compact
       :options="[
         { value: 'single', label: 'Single' },
         { value: 'sequence', label: 'Sequence' },
       ]"
       label="Composer mode"
       data-test="composer-mode"
-      class="ms-header__mode"
       @update:model-value="setComposerMode"
     />
     <div class="ms-header__spacer" />
@@ -211,10 +211,6 @@ onBeforeUnmount(() => {
 }
 .ms-header__spacer {
   flex: 1;
-}
-/* Compact the shared segmented control to the 52px header row. */
-.ms-header__mode :deep(.ms-seg__btn) {
-  padding: 4px 12px;
 }
 .ms-header__host {
   position: relative;

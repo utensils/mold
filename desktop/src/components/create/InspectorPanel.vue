@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { computed, ref, watch } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -16,9 +15,8 @@ import {
   findInstalledModel,
   mergeInstalledModels,
 } from "../../lib/generateModels";
-import { modelAvailabilityTag, normalizeTargetHost } from "../../lib/hosts";
+import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
-import { modelSource } from "../../lib/modelSource";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { applyAspectId, applyMp, aspectIdFor } from "../../lib/resolutions";
@@ -30,7 +28,7 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { dragWidth } from "../../lib/panelResize";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import ModelPicker from "./ModelPicker.vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import { formatGB } from "../../lib/format";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
@@ -51,7 +49,6 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
-const router = useRouter();
 
 // The inspector is docked to the window's right edge, so dragging its left
 // handle left grows it. Keep pointer moves local and persist only on commit.
@@ -80,10 +77,7 @@ const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
 const advancedExpanded = ref(false);
 
-// ── Model picker (moved verbatim from the previous inspector) ────────────────
-const pickerEl = ref<HTMLDivElement | null>(null);
-const pickerOpen = ref(false);
-
+// ── Model picker (the shared ModelPicker; chains uses the same control) ──────
 const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
 );
@@ -104,25 +98,6 @@ const pickerModels = computed<ModelEntry[]>(() => {
     fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
   );
 });
-
-const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
-  const byName = new Map<string, ModelEntry>();
-  for (const m of pickerModels.value) byName.set(m.name, m);
-  const groups = new Map<string, ModelEntry[]>();
-  for (const m of byName.values()) {
-    const list = groups.get(m.family) ?? [];
-    list.push(m);
-    groups.set(m.family, list);
-  }
-  return groups;
-});
-
-function availabilityTag(m: ModelEntry): string | null {
-  if (!hosts.multiHost) return null;
-  const target = stickyTarget.value;
-  if (target && target !== "capable") return null;
-  return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
-}
 
 const stickyHostMissingModel = computed<string | null>(() => {
   const sel = stickyTarget.value;
@@ -146,24 +121,7 @@ const modelDescription = computed(() => {
 
 function pickModel(m: ModelEntry) {
   formStore.applyModel(m);
-  pickerOpen.value = false;
 }
-
-function onDocumentPointerDown(event: PointerEvent) {
-  if (!pickerOpen.value || !pickerEl.value) return;
-  if (!event.composedPath().includes(pickerEl.value)) pickerOpen.value = false;
-}
-
-// Force-fresh availability when the picker opens — a model pulled on an extra
-// host by another client then shows up the moment the user looks. The demand
-// refresh keyed on the set of ready hosts lives in the view so routing is
-// model-aware even before the inspector's picker is first opened.
-watch(pickerOpen, (open) => {
-  if (open) void hostModels.refresh(true);
-});
-
-onMounted(() => document.addEventListener("pointerdown", onDocumentPointerDown));
-onBeforeUnmount(() => document.removeEventListener("pointerdown", onDocumentPointerDown));
 
 // ── Shape + resolution projection ────────────────────────────────────────────
 const shapeId = computed(() => aspectIdFor(props.form.width, props.form.height) ?? "");
@@ -244,67 +202,13 @@ function resetSettings() {
       <!-- Model -->
       <div class="ms-field">
         <div class="ms-field__label">Model</div>
-        <div ref="pickerEl" class="ms-model">
-          <button
-            type="button"
-            :aria-expanded="pickerOpen"
-            class="ms-model__button"
-            @click="pickerOpen = !pickerOpen"
-          >
-            <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-              selectedModel ? modelDisplayName(selectedModel) : "Choose a model"
-            }}</span>
-            <span v-if="selectedModel?.disk_usage_bytes" class="data-mono ms-model__size">
-              {{ formatGB(selectedModel.disk_usage_bytes) }}
-            </span>
-          </button>
-          <div v-if="pickerOpen" data-test="model-picker-menu" class="ms-model__menu">
-            <template v-for="[family, list] in pickerFamilies" :key="family">
-              <div class="ms-model__group">{{ family.toUpperCase() }}</div>
-              <button
-                v-for="m in list"
-                :key="m.name"
-                type="button"
-                class="ms-model__option"
-                @click="pickModel(m)"
-              >
-                <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
-                <span class="min-w-0 flex-1">
-                  <span
-                    data-test="model-option-name"
-                    class="block break-all text-ink"
-                    :title="modelDisplayName(m)"
-                  >
-                    {{ modelDisplayName(m) }}
-                  </span>
-                  <span
-                    v-if="availabilityTag(m)"
-                    data-test="model-availability"
-                    class="edge-code mt-0.5 block break-all whitespace-normal"
-                  >
-                    {{ availabilityTag(m) }}
-                  </span>
-                </span>
-                <span
-                  class="ms-model__loaded"
-                  :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
-                  :title="m.is_loaded ? 'On GPU' : ''"
-                />
-              </button>
-            </template>
-            <button
-              type="button"
-              data-test="browse-catalog"
-              class="ms-model__browse"
-              @click="
-                pickerOpen = false;
-                void router.push(caps.supportsVideo ? '/models?type=video' : '/models');
-              "
-            >
-              Browse all models →
-            </button>
-          </div>
-        </div>
+        <ModelPicker
+          :models="pickerModels"
+          :selected="selectedModel"
+          :show-availability="!stickyTarget || stickyTarget === 'capable'"
+          :browse-target="caps.supportsVideo ? '/models?type=video' : '/models'"
+          @pick="pickModel"
+        />
         <p v-if="modelDescription" class="ms-field__hint">{{ modelDescription }}</p>
         <p v-if="stickyHostMissingModel" class="ms-field__hint">
           Not on {{ stickyHostMissingModel }} — will download there.
@@ -537,81 +441,6 @@ function resetSettings() {
   font-size: 11px;
   color: var(--stop);
   margin-top: 6px;
-}
-.ms-model {
-  position: relative;
-}
-.ms-model__button {
-  display: flex;
-  min-height: 40px;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border: 1px solid var(--ce);
-  border-radius: 9px;
-  background: var(--bath);
-  padding: 0 12px;
-  font-size: 13px;
-  color: var(--rebate);
-}
-.ms-model__size {
-  flex-shrink: 0;
-  color: var(--ink-3);
-}
-.ms-model__menu {
-  position: absolute;
-  z-index: 10;
-  margin-top: 4px;
-  max-height: 18rem;
-  width: 100%;
-  overflow-y: auto;
-  border: 1px solid var(--edge);
-  border-radius: 12px;
-  background: var(--bench);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
-}
-.ms-model__group {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  padding: 8px 8px 4px;
-}
-.ms-model__option {
-  display: flex;
-  width: 100%;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 8px;
-  text-align: left;
-  font-size: 13px;
-  color: var(--ink-2);
-}
-.ms-model__option:hover {
-  background: var(--bath);
-  color: var(--rebate);
-}
-.ms-model__loaded {
-  margin-top: 8px;
-  height: 6px;
-  width: 6px;
-  flex-shrink: 0;
-  border-radius: 9999px;
-}
-.ms-model__browse {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  border-top: 1px solid var(--edge);
-  padding: 8px;
-  text-align: left;
-  font-size: 13px;
-  color: var(--halide);
-}
-.ms-model__browse:hover {
-  background: var(--bath);
 }
 .ms-seg {
   display: flex;

@@ -116,6 +116,140 @@ describe("ChainsView multi-host video generation", () => {
     expect(routerPush).toHaveBeenCalledWith("/create");
   });
 
+  it("closes the File tools menu on outside pointerdown and on Escape", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='file-tools-toggle']").trigger("click");
+    expect(wrapper.find("[data-test='file-tools-menu']").exists()).toBe(true);
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find("[data-test='file-tools-menu']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='file-tools-toggle']").trigger("click");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.find("[data-test='file-tools-menu']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("closes the File tools menu after picking an action", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='file-tools-toggle']").trigger("click");
+    const viewToml = wrapper
+      .get("[data-test='file-tools-menu']")
+      .findAll("button")
+      .find((b) => b.text().includes("View as TOML"));
+    await viewToml!.trigger("click");
+    expect(wrapper.find("[data-test='file-tools-menu']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("lists chain-incapable video checkpoints disabled with a reason", async () => {
+    installRemoteVideoHost();
+    const hostModels = useHostModelsStore();
+    vi.spyOn(hostModels, "refresh").mockResolvedValue();
+    hostModels.byHost["hal9000-7680"]!.entries.push({
+      ...videoModel,
+      name: "ltx-2.3-22b-dev:fp8",
+      family: "ltx2",
+      hf_repo: "Lightricks/LTX-2.3",
+    });
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    // The compatible ltx-video checkpoint is auto-selected, not the dev one.
+    expect(wrapper.get("[data-test='selected-model-name']").text()).toContain("ltx-video");
+
+    await wrapper.get(".ms-model__button").trigger("click");
+    await flushPromises();
+    const options = wrapper.findAll(".ms-model__option");
+    const dev = options.find((o) => o.text().includes("ltx-2.3-22b-dev:fp8"));
+    expect(dev).toBeTruthy();
+    expect(dev!.attributes("disabled")).toBeDefined();
+    expect(dev!.get("[data-test='model-disabled-reason']").text()).toContain("Two-stage");
+    wrapper.unmount();
+  });
+
+  it("keeps the Create header anatomy: title, summary, and mode switch", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
+    await flushPromises();
+    const header = wrapper.get("[data-test='chain-header']");
+    expect(header.text()).toContain("Untitled sequence");
+    expect(header.find("[data-test='composer-mode']").exists()).toBe(true);
+    expect(header.get("[data-test='chain-summary']").text()).toMatch(/\d+ clips/);
+    wrapper.unmount();
+  });
+
+  it("edits the sequence through the highlighted TOML panel", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='file-tools-toggle']").trigger("click");
+    const viewToml = wrapper
+      .get("[data-test='file-tools-menu']")
+      .findAll("button")
+      .find((b) => b.text().includes("View as TOML"));
+    await viewToml!.trigger("click");
+
+    const editor = wrapper.get<HTMLTextAreaElement>("[data-test='toml-editor']");
+    expect(editor.element.value).toContain("[chain]");
+    // The highlight layer mirrors the draft with token spans.
+    expect(wrapper.get(".ms-toml__hl").html()).toContain('class="tk-table"');
+
+    // A third stage applied through the editor lands in the filmstrip form.
+    const withThirdStage = `${editor.element.value}\n[[stage]]\nprompt = "the end"\nframes = 25\ntransition = "cut"\n`;
+    await editor.setValue(withThirdStage);
+    await wrapper.get("[data-test='toml-apply']").trigger("click");
+    const state = wrapper.vm as unknown as { form: { stages: { prompt: string }[] } };
+    expect(state.form.stages).toHaveLength(3);
+    expect(state.form.stages[2]!.prompt).toBe("the end");
+    expect(wrapper.find("[data-test='toml-error']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("surfaces a parse error inline instead of clobbering the sequence", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='file-tools-toggle']").trigger("click");
+    const viewToml = wrapper
+      .get("[data-test='file-tools-menu']")
+      .findAll("button")
+      .find((b) => b.text().includes("View as TOML"));
+    await viewToml!.trigger("click");
+
+    const editor = wrapper.get<HTMLTextAreaElement>("[data-test='toml-editor']");
+    await editor.setValue("not = toml [");
+    await wrapper.get("[data-test='toml-apply']").trigger("click");
+    expect(wrapper.get("[data-test='toml-error']").text()).toContain("Couldn't parse");
+    const state = wrapper.vm as unknown as { form: { stages: unknown[] } };
+    expect(state.form.stages).toHaveLength(2);
+    wrapper.unmount();
+  });
+
   it("starts with two guided clips and requires every prompt", async () => {
     installRemoteVideoHost();
     const wrapper = mount(ChainsView, {
@@ -130,18 +264,18 @@ describe("ChainsView multi-host video generation", () => {
     ).toBe(true);
   });
 
-  it("hides known non-chain LTX development checkpoints", async () => {
+  it("never auto-selects a non-chain LTX development checkpoint", async () => {
     installRemoteVideoHost();
     useHostModelsStore().byHost["hal9000-7680"]!.entries = [
       { ...videoModel, name: "ltx-2.3-22b-dev:fp8", family: "ltx2" },
       videoModel,
     ];
 
-    const wrapper = mount(ChainsView, { shallow: true });
+    const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
     await flushPromises();
 
-    expect(wrapper.get("select").text()).not.toContain("22b-dev");
-    expect(wrapper.get("select").text()).toContain("ltx-video");
+    expect(wrapper.get("[data-test='selected-model-name']").text()).not.toContain("22b-dev");
+    expect(wrapper.get("[data-test='selected-model-name']").text()).toContain("ltx-video");
   });
 
   it("does not enable generation for an imported unavailable model", async () => {
@@ -168,11 +302,13 @@ describe("ChainsView multi-host video generation", () => {
   it("shows a video model installed only on a connected remote host", async () => {
     installRemoteVideoHost();
 
-    const wrapper = mount(ChainsView, { shallow: true });
+    const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("No video models yet");
-    expect(wrapper.get("select").text()).toContain("ltx-video-0.9.6:bf16");
+    expect(wrapper.get("[data-test='selected-model-name']").text()).toContain(
+      "ltx-video-0.9.6:bf16",
+    );
   });
 
   it("uses the remote CUDA host when LTX-2 is also installed on local Metal", async () => {
