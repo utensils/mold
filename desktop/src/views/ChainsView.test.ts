@@ -408,10 +408,17 @@ describe("ChainsView multi-host video generation", () => {
       return Promise.resolve({});
     });
 
-    const wrapper = mount(ChainsView, { shallow: true });
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+    });
     await flushPromises();
 
-    const option = wrapper.get(`option[value="${ltx2.name}"]`);
+    await wrapper.get(".ms-model__button").trigger("click");
+    const option = wrapper
+      .findAll(".ms-model__option")
+      .find((candidate) => candidate.text().includes(ltx2.name));
+    expect(option).toBeDefined();
+    if (!option) throw new Error("expected local LTX-2 model option");
     expect(option.attributes("disabled")).toBeUndefined();
     expect(option.text()).not.toContain("CUDA only");
   });
