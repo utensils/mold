@@ -27,7 +27,10 @@ import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
-import { countLeadingCompletedStages, normalizeServerChainScript } from "../lib/chainScript";
+import {
+  countLeadingCompletedStages,
+  normalizeServerChainScript,
+} from "@studio/lib/chainScriptWire";
 import { routeForModel } from "../lib/sequenceRoute";
 import { sequenceParams } from "../lib/sequenceParams";
 import { fetchChainLimits } from "../lib/api/chains";

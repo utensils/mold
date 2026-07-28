@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chainScriptFromWire, sequenceSharedParams } from "./sequenceParams";
-import type { ChainScriptWire, GenerateFormState } from "../types";
+import { sequenceSharedParams } from "./sequenceParams";
+import type { GenerateFormState } from "../types";
 
 function formState(): GenerateFormState {
   return {
@@ -78,28 +78,5 @@ describe("sequenceSharedParams", () => {
     const state = formState();
     state.fps = null;
     expect(sequenceSharedParams(state, "ltx2").fps).toBe(24);
-  });
-});
-
-describe("chainScriptFromWire", () => {
-  it("normalizes the server's `stage` key and integer seed into the studio shape", () => {
-    const wire: ChainScriptWire = {
-      schema: "mold.chain.v1",
-      chain: { model: "ltx-video", seed: 7, width: 768, fps: 24 },
-      stage: [
-        { prompt: "a", frames: 25 },
-        { prompt: "b", frames: 25, transition: "cut" },
-      ],
-    };
-    const script = chainScriptFromWire(wire);
-    expect(script?.stages).toHaveLength(2);
-    expect(script?.stages[1]?.transition).toBe("cut");
-    expect(script?.chain.model).toBe("ltx-video");
-    expect(script?.chain.seed).toBe("7");
-  });
-
-  it("returns null for a missing script", () => {
-    expect(chainScriptFromWire(null)).toBeNull();
-    expect(chainScriptFromWire(undefined)).toBeNull();
   });
 });

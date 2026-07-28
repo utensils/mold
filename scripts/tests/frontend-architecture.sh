@@ -53,7 +53,9 @@ for duplicate in \
   web/src/lib/promptCycler.ts \
   desktop/src/lib/promptCycler.ts \
   web/src/lib/sourceFit.ts \
-  desktop/src/lib/sourceFit.ts; do
+  desktop/src/lib/sourceFit.ts \
+  web/src/lib/chainToml.ts \
+  desktop/src/lib/chainScript.ts; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 

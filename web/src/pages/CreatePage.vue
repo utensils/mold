@@ -67,10 +67,11 @@ import {
   type StreamTarget,
 } from "../api";
 import { useChainJobs } from "../composables/useChainJobs";
+import { sequenceSharedParams } from "../lib/sequenceParams";
 import {
-  chainScriptFromWire,
-  sequenceSharedParams,
-} from "../lib/sequenceParams";
+  countLeadingCompletedStages,
+  normalizeServerChainScript,
+} from "@studio/lib/chainScriptWire";
 import {
   applyMetadataToForm,
   isQwenImageEditFamily,
@@ -889,21 +890,16 @@ async function onSubmitSequence() {
 async function editSequence(hostId: string, jobId: string) {
   try {
     const detail = await getChainJob(jobId, hostTargetFor(hostId));
-    const script = chainScriptFromWire(detail.script);
+    const script = normalizeServerChainScript(detail.script);
     if (!script) throw new Error("This sequence job has no editable script.");
     const loaded = chainScriptToClips(script);
     applySharedToForm(loaded.shared);
-    let completedStages = 0;
-    for (const stage of [...detail.stages].sort((a, b) => a.idx - b.idx)) {
-      if (stage.state !== "completed") break;
-      completedStages += 1;
-    }
     draft.loadFromJob(
       {
         jobId,
         hostId,
         baseline: loaded.clips.map((clip) => ({ ...clip })),
-        completedStages,
+        completedStages: countLeadingCompletedStages(detail.stages),
       },
       loaded.clips,
       loaded.enableAudio,
