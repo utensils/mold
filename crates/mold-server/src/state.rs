@@ -78,6 +78,10 @@ pub struct GenerationJob {
 #[derive(Clone, Debug)]
 pub struct BatchChildExecution {
     pub lease: crate::batch_parent::BatchChildLease,
+    /// Attempt-scoped cooperative cancellation authority. Cancelling the
+    /// parent signals every active child through the exact token returned by
+    /// its durable lease grant.
+    pub cancellation: mold_inference::InferenceCancellationToken,
     /// Parent-level deterministic execution identity. The coordinator filters
     /// every later re-resolution through this fence.
     pub execution_equivalence_fingerprint: String,

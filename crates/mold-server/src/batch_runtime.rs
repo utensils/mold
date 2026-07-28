@@ -493,6 +493,18 @@ fn media_bytes(result: &GenerationJobResult) -> &[u8] {
         .map_or(result.image.data.as_slice(), |video| video.data.as_slice())
 }
 
+fn committed_video_preview<'a>(
+    result: &'a GenerationJobResult,
+    filename: &'a str,
+) -> Option<(&'a str, &'a [u8])> {
+    result
+        .response
+        .video
+        .as_ref()
+        .filter(|video| !video.gif_preview.is_empty())
+        .map(|video| (filename, video.gif_preview.as_slice()))
+}
+
 fn completed_record(
     output_dir: &Path,
     filename: &str,
@@ -541,6 +553,7 @@ async fn submit_child(
     parent_id: &str,
     request: GenerateRequest,
     lease: BatchChildLease,
+    cancellation: mold_inference::InferenceCancellationToken,
     plan: &FrozenBatchPlan,
     ordinal: usize,
     retry: u8,
@@ -580,6 +593,7 @@ async fn submit_child(
         output_dir: None,
         batch_child: Some(BatchChildExecution {
             lease,
+            cancellation,
             execution_equivalence_fingerprint: plan.equivalence.clone(),
             prepared_inputs: plan.prepared_inputs.clone(),
         }),
@@ -652,8 +666,19 @@ pub(crate) async fn execute_server_batch(
             .ordinal_by_device
             .get(partition.device_id.as_str())
             .context("adaptive batch plan references an unknown device")?;
-        let (lease, _) = attempt.grant(index)?;
-        match submit_child(state, &parent_id, child, lease.clone(), &plan, ordinal, 0).await {
+        let (lease, cancellation) = attempt.grant(index)?;
+        match submit_child(
+            state,
+            &parent_id,
+            child,
+            lease.clone(),
+            cancellation,
+            &plan,
+            ordinal,
+            0,
+        )
+        .await
+        {
             Ok(submitted) => receivers.push((index, lease, ordinal, submitted.0, submitted.1)),
             Err(error) => {
                 let _ = attempt.complete_without_artifact(&lease, ChildCompletion::Cancelled)?;
@@ -735,6 +760,7 @@ pub(crate) async fn execute_server_batch(
                             &parent_id,
                             children[index].clone(),
                             lease.clone(),
+                            granted.1,
                             &plan,
                             ordinal,
                             retry,
@@ -804,6 +830,13 @@ pub(crate) async fn execute_server_batch(
     let mut outputs = Vec::with_capacity(results.len());
     let mut events = Vec::with_capacity(results.len());
     for (index, (result, filename)) in results.into_iter().zip(filenames).enumerate() {
+        // The animated preview is cache data rather than gallery authority, so
+        // persist it only after the parent commit made every primary artifact
+        // visible. This preserves the singleton video contract without
+        // allowing a preview sidecar to expose an uncommitted batch child.
+        if let Some((filename, preview)) = committed_video_preview(&result, &filename) {
+            crate::queue::save_video_preview_gif(filename, preview);
+        }
         let metadata = OutputMetadata::from_generate_request(
             &children[index],
             result.response.seed_used,
@@ -964,12 +997,13 @@ async fn resume_recovered_batch(
             .ordinal_by_device
             .get(partition.device_id.as_str())
             .context("recovered batch plan references an unknown device")?;
-        let (lease, _) = attempt.grant(index)?;
+        let (lease, cancellation) = attempt.grant(index)?;
         match submit_child(
             state,
             parent_id,
             children[index].clone(),
             lease.clone(),
+            cancellation,
             &plan,
             ordinal,
             0,
@@ -1044,12 +1078,14 @@ async fn resume_recovered_batch(
                     let disposition = attempt.complete_without_artifact(&lease, completion)?;
                     if disposition == CompletionDisposition::RetryChild {
                         retry = retry.saturating_add(1);
-                        lease = attempt.grant(index)?.0;
+                        let granted = attempt.grant(index)?;
+                        lease = granted.0;
                         match submit_child(
                             state,
                             parent_id,
                             children[index].clone(),
                             lease.clone(),
+                            granted.1,
                             &plan,
                             ordinal,
                             retry,
@@ -1200,6 +1236,45 @@ mod tests {
         assert_eq!(children[2].batch_count, Some(3));
     }
 
+    #[test]
+    fn committed_video_batch_retains_preview_under_final_gallery_name() {
+        let result = GenerationJobResult {
+            response: mold_core::GenerateResponse {
+                images: Vec::new(),
+                video: Some(mold_core::VideoData {
+                    data: b"mp4".to_vec(),
+                    format: mold_core::OutputFormat::Mp4,
+                    width: 64,
+                    height: 64,
+                    frames: 9,
+                    fps: 24,
+                    thumbnail: b"png".to_vec(),
+                    gif_preview: b"GIF89a".to_vec(),
+                    has_audio: false,
+                    duration_ms: None,
+                    audio_sample_rate: None,
+                    audio_channels: None,
+                }),
+                generation_time_ms: 1,
+                model: "ltx-video:q8".to_string(),
+                seed_used: 7,
+                gpu: Some(1),
+            },
+            image: mold_core::ImageData {
+                data: b"png".to_vec(),
+                format: mold_core::OutputFormat::Png,
+                width: 64,
+                height: 64,
+                index: 0,
+            },
+        };
+
+        let (filename, bytes) =
+            committed_video_preview(&result, "ordered-child-2.mp4").expect("video preview");
+        assert_eq!(filename, "ordered-child-2.mp4");
+        assert_eq!(bytes, b"GIF89a");
+    }
+
     fn durable_attempt(directory: &Path) -> (DurableBatchAttempt, Vec<GenerateRequest>) {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "batch",
@@ -1269,11 +1344,25 @@ mod tests {
     fn cancellation_vs_last_success_discards_bytes_without_receipt() {
         let directory = tempfile::tempdir().unwrap();
         let (mut attempt, _) = durable_attempt(directory.path());
-        let first = attempt.grant(0).unwrap().0;
+        let (first, cancellation) = attempt.grant(0).unwrap();
+        let child_execution = BatchChildExecution {
+            lease: first.clone(),
+            cancellation,
+            execution_equivalence_fingerprint: "same".to_string(),
+            prepared_inputs: PreparedExecutionInputs {
+                authority_fingerprint: "prepared".to_string(),
+                by_device: BTreeMap::new(),
+                retryable_device_failures: BTreeMap::new(),
+            },
+        };
         let last = attempt.grant(1).unwrap().0;
         assert_eq!(
             attempt.request_cancel().unwrap(),
             CompletionDisposition::Accepted
+        );
+        assert!(
+            child_execution.cancellation.is_cancelled(),
+            "the exact durable child token carried into GPU work must observe parent cancellation"
         );
         attempt
             .complete_without_artifact(&first, ChildCompletion::Cancelled)

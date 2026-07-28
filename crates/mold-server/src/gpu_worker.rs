@@ -2628,10 +2628,25 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
+    // The durable parent owns an attempt-scoped token. Installing that exact
+    // token lets cancellation stop expensive inference at family-defined safe
+    // checkpoints instead of merely fencing publication after work completes.
+    let batch_cancellation = job
+        .batch_child
+        .as_ref()
+        .map(|child| child.cancellation.clone());
+
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
-        cached_engine.engine.generate(&job.request)
+        match batch_cancellation.as_ref() {
+            Some(cancellation) => mold_inference::with_inference_cancellation(
+                &mut *cached_engine.engine,
+                cancellation.clone(),
+                |engine| engine.generate(&job.request),
+            ),
+            None => cached_engine.engine.generate(&job.request),
+        }
     }));
 
     watchdog_stop.store(true, Ordering::SeqCst);
@@ -2799,7 +2814,7 @@ fn process_job_with_sink(
                             generation: Box::new(job),
                             response,
                             image: img,
-                            cancellation: mold_inference::InferenceCancellationToken::default(),
+                            cancellation: batch_cancellation.clone().unwrap_or_default(),
                             execution_plan: None,
                         })),
                     )
