@@ -3988,6 +3988,28 @@ pub enum ServerEvent {
     GalleryRemoved {
         filename: String,
     },
+    /// A durable chain job entered the queue — created, resumed, retaken,
+    /// or amended. Never emitted for the ephemeral legacy-shim jobs.
+    /// Distinct from [`Self::JobQueued`] on purpose: old clients ignore
+    /// unknown `type` tags, so chain jobs never inherit print-queue
+    /// affordances (reorder, `DELETE /api/queue/:id`) they don't support.
+    ChainJobQueued {
+        id: String,
+        model: String,
+        stage_count: u32,
+    },
+    /// The chain runner claimed a chain job and began rendering stages.
+    ChainJobStarted {
+        id: String,
+        model: String,
+    },
+    /// A chain job settled — completed, failed, or cancelled. Terminal chain
+    /// jobs stay listed on `/api/chain-jobs` (that is the resumability
+    /// feature); this event only says the runner is done with it.
+    ChainJobEnded {
+        id: String,
+        state: crate::chain_job::ChainJobState,
+    },
     /// New-job dispatch was paused via `POST /api/queue/pause`. Emitted only
     /// on the resumed→paused transition — idempotent no-op pauses are silent.
     QueuePaused,
@@ -4028,6 +4050,41 @@ mod server_event_tests {
         assert_eq!(
             serde_json::to_string(&ended).unwrap(),
             r#"{"type":"job_ended","id":"j1"}"#
+        );
+    }
+
+    /// Chain jobs get their own distinct event variants (not a `kind` field
+    /// on the print-job events) so old clients — whose reducers ignore
+    /// unknown `type` tags — never render chain jobs as reorderable /
+    /// queue-cancellable rows aimed at the wrong endpoints.
+    #[test]
+    fn chain_job_events_serialize_with_snake_case_tags() {
+        let queued = ServerEvent::ChainJobQueued {
+            id: "c1".into(),
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stage_count: 3,
+        };
+        assert_eq!(
+            serde_json::to_string(&queued).unwrap(),
+            r#"{"type":"chain_job_queued","id":"c1","model":"ltx-2-19b-distilled:fp8","stage_count":3}"#
+        );
+
+        let started = ServerEvent::ChainJobStarted {
+            id: "c1".into(),
+            model: "ltx-2-19b-distilled:fp8".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&started).unwrap(),
+            r#"{"type":"chain_job_started","id":"c1","model":"ltx-2-19b-distilled:fp8"}"#
+        );
+
+        let ended = ServerEvent::ChainJobEnded {
+            id: "c1".into(),
+            state: crate::chain_job::ChainJobState::Completed,
+        };
+        assert_eq!(
+            serde_json::to_string(&ended).unwrap(),
+            r#"{"type":"chain_job_ended","id":"c1","state":"completed"}"#
         );
     }
 
