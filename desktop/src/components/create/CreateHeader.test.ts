@@ -7,6 +7,7 @@ import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
@@ -46,26 +47,34 @@ function addRemote(id = "hal9000-7680", label = "hal9000") {
 }
 
 describe("CreateHeader", () => {
-  it("surfaces the composer mode switch with Single active", () => {
+  it("no longer renders the retired Single | Sequence switch", () => {
+    // Output is a setting in the inspector now, not a place — the header
+    // must not push a route to change modes.
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
-    const segments = wrapper.get("[data-test='composer-mode']").findAll("button[role='radio']");
-    expect(segments.map((b) => b.text())).toEqual(["Single", "Sequence"]);
-    expect(segments[0]!.attributes("aria-checked")).toBe("true");
-  });
-
-  it("opens the chain composer when Sequence is picked", async () => {
-    readyLocal();
-    const wrapper = mount(CreateHeader, { props: { form: form() } });
-    const segments = wrapper.get("[data-test='composer-mode']").findAll("button[role='radio']");
-    await segments[1]!.trigger("click");
-    expect(routerPush).toHaveBeenCalledWith("/create/chain");
+    expect(wrapper.find("[data-test='composer-mode']").exists()).toBe(false);
   });
 
   it("renders the live summary of shape, dimensions, and steps", () => {
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
+    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled print");
     expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 4 steps");
+  });
+
+  it("titles a sequence draft and summarizes clips + fps instead of steps", () => {
+    readyLocal();
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    const sequenceForm = form();
+    sequenceForm.family = "ltx2";
+    sequenceForm.width = 1216;
+    sequenceForm.height = 704;
+    sequenceForm.fps = 24;
+    const wrapper = mount(CreateHeader, { props: { form: sequenceForm } });
+    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled sequence");
+    expect(wrapper.get(".ms-header__summary").text()).toBe("16:9 · 1216×704 · 2 clips · 24 fps");
   });
 
   it("does not open a routing menu with a single host", async () => {
