@@ -10,15 +10,11 @@ import { computed } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import ClipPill from "./ClipPill.vue";
 import SeamPill from "./SeamPill.vue";
-import type { SequenceTransition } from "../lib/seam";
+import type { RailClip } from "./types";
 
-export interface RailClip {
-  id: string;
-  prompt: string;
-  frames: number;
-  transition: SequenceTransition;
-  fadeFrames: number;
-}
+// Re-exported for convenience; the canonical home is ./types (see its
+// header comment — SFC named exports break clean-sandbox builds).
+export type { RailClip };
 
 const props = withDefaults(
   defineProps<{
