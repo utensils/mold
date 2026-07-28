@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { useRouter } from "vue-router";
 import { modelSupportsSequence } from "@mold/studio";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import HostChip from "../components/create/HostChip.vue";
 import ModelPicker from "../components/create/ModelPicker.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import ImagePickerModal from "../components/generate/ImagePickerModal.vue";
@@ -15,7 +16,9 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useToastStore } from "../stores/toasts";
+import { useAppPrefsStore } from "../stores/appPrefs";
 import { isVideoFamily } from "../lib/capabilities";
+import { normalizeTargetHost } from "../lib/hosts";
 import {
   MAX_CHAIN_STAGES,
   chainToToml,
@@ -51,6 +54,7 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const chains = useChainJobsStore();
+const prefs = useAppPrefsStore();
 const toasts = useToastStore();
 
 const form = reactive(newChainForm());
@@ -90,9 +94,14 @@ const isCudaOnlyOnThisMachine = (m?: ModelEntry) => {
   return backend.value === "metal";
 };
 
+/** The header chip's sticky pick wins; Auto keeps the model-aware default
+ *  (CUDA-only families escalate to "capable" so LTX-2 lands on a CUDA box). */
+const stickyGenTarget = computed(() =>
+  normalizeTargetHost(prefs.settings?.generateTargetHost ?? null, hosts.all),
+);
 function routeForModel(model: ModelEntry) {
   const cudaOnly = model.family === "ltx2" || model.family === "ltx-2";
-  return hosts.resolveRoute(cudaOnly ? "capable" : null, model.name);
+  return hosts.resolveRoute(stickyGenTarget.value ?? (cudaOnly ? "capable" : null), model.name);
 }
 
 const selectedRoute = computed(() => {
@@ -410,6 +419,7 @@ onBeforeUnmount(() => {
         @update:model-value="setComposerMode"
       />
       <div class="flex-1" />
+      <HostChip />
       <div class="w-72 min-w-0">
         <ModelPicker
           :models="pickerVideoModels"

@@ -26,6 +26,7 @@ import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
+import { useAppPrefsStore } from "../stores/appPrefs";
 
 const videoModel: ModelEntry = {
   name: "ltx-video-0.9.6:bf16",
@@ -199,7 +200,7 @@ describe("ChainsView multi-host video generation", () => {
     expect(classesFor("toml-panel")).toContain("shrink-0");
   });
 
-  it("keeps the Create header anatomy: title, summary, and mode switch", async () => {
+  it("keeps the Create header anatomy: title, summary, mode switch, and host chip", async () => {
     installRemoteVideoHost();
     const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
     await flushPromises();
@@ -207,7 +208,45 @@ describe("ChainsView multi-host video generation", () => {
     expect(header.text()).toContain("Untitled sequence");
     expect(header.find("[data-test='composer-mode']").exists()).toBe(true);
     expect(header.get("[data-test='chain-summary']").text()).toMatch(/\d+ clips/);
+    expect(header.find("[data-test='host-chip']").exists()).toBe(true);
     wrapper.unmount();
+  });
+
+  it("routes chain limits to the sticky generation host over auto least-busy", async () => {
+    installRemoteVideoHost();
+    // Local also has the model and is less busy, so Auto would pick local —
+    // only the sticky pick explains routing to hal9000.
+    const hosts = useHostsStore();
+    hosts.telemetry["hal9000-7680"]!.queueDepth = 5;
+    useHostModelsStore().byHost.local = {
+      entries: [videoModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    hosts.telemetry.local = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: "0.17.1",
+      modelsLoaded: [],
+      gpuInfo: {
+        backend: "metal",
+        name: "Apple Metal GPU",
+        vram_total_mb: 32_768,
+        vram_used_mb: 0,
+      },
+      instanceId: "local",
+      hostname: "local",
+    };
+    useModelStore().all = [videoModel];
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+
+    mount(ChainsView, { shallow: true });
+    await flushPromises();
+
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      expect.stringContaining("/api/capabilities/chain-limits"),
+    );
   });
 
   it("edits the sequence through the highlighted TOML panel", async () => {
