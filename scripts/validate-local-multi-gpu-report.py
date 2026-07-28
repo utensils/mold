@@ -1297,6 +1297,7 @@ def validate_passing_evidence(
     )
     cancellation_job = cancellation.get("job_id")
     cancellation_work = cancellation.get("work_id")
+    pause_response = cancellation.get("pause_response")
     queue_before = cancellation.get("queue_before_cancel")
     devices_before = cancellation.get("devices_before_cancel")
     queue_after = cancellation.get("queue_after")
@@ -1375,6 +1376,10 @@ def validate_passing_evidence(
     )
     if (
         cancellation.get("server_pid") != pid
+        or not isinstance(pause_response, dict)
+        or pause_response.get("status") != 200
+        or not isinstance(pause_response.get("body"), dict)
+        or pause_response["body"].get("paused") is not True
         or cancellation.get("cancel_status") != 204
         or cancellation.get("resume_status") != 200
         or cancellation.get("stream_http_status") != 200
@@ -1384,12 +1389,11 @@ def validate_passing_evidence(
         or cancellation.get("queue_was_paused") is not True
         or not cancellation_job
         or not cancellation_work
-        or queue_before.get("paused") is not True
         or len(before_entries) != 1
         or before_entries[0].get("state") != "queued"
         or len(before_work) != 1
-        or before_work[0].get("activity_phase")
-        not in {"queued", "planned", "blocked"}
+        or before_work[0].get("activity_phase") != "blocked"
+        or before_work[0].get("blocked_reason") != "queue_paused"
         or before_active
         or after_queued
         or after_planned

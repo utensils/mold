@@ -1816,6 +1816,7 @@ def run_queued_cancellation(
             "work_id": work_id,
             "cancel_status": cancel_status,
             "cancel_body": cancel_body,
+            "pause_response": {"status": status, "body": pause},
             "resume_status": resume_status,
             "stream_http_status": response_status,
             "stream_tail": stream_text[-2000:],

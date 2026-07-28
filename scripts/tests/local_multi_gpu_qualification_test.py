@@ -829,6 +829,7 @@ class ReportValidationContracts(unittest.TestCase):
                 "server_pid": 123,
                 "job_id": "job-cancel",
                 "work_id": "work-cancel",
+                "pause_response": {"status": 200, "body": {"paused": True}},
                 "cancel_status": 204,
                 "resume_status": 200,
                 "stream_http_status": 200,
@@ -844,14 +845,14 @@ class ReportValidationContracts(unittest.TestCase):
                 "terminal_observed_at": "2026-07-28T00:00:40Z",
                 "resume_at": "2026-07-28T00:00:41Z",
                 "queue_before_cancel": {
-                    "paused": True,
                     "entries": [{"id": "job-cancel", "state": "queued"}],
                     "plan": {
                         "work_items": [
                             {
                                 "parent_id": "job-cancel",
                                 "work_id": "work-cancel",
-                                "activity_phase": "queued",
+                                "activity_phase": "blocked",
+                                "blocked_reason": "queue_paused",
                             }
                         ]
                     },
@@ -1478,6 +1479,23 @@ class ReportValidationContracts(unittest.TestCase):
             path.write_text(json.dumps(report), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "cancellation"):
                 validator.validate(path, require_passing=True)
+
+    def test_cancellation_uses_pause_response_and_typed_plan_blocker(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+
+            def mutate(payload):
+                payload["pause_response"] = {
+                    "status": 200,
+                    "body": {"paused": True},
+                }
+                payload["queue_before_cancel"].pop("paused", None)
+                work = payload["queue_before_cancel"]["plan"]["work_items"][0]
+                work["activity_phase"] = "blocked"
+                work["blocked_reason"] = "queue_paused"
+
+            self.mutate_evidence(path, "queued-cancellation", mutate)
+            validator.validate(path, require_passing=True)
 
     def test_device_bind_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
