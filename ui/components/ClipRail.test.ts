@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ClipRail from "./ClipRail.vue";
-import type { RailClip } from "./ClipRail.vue";
+import type { RailClip } from "./types";
 
 function clips(count: number): RailClip[] {
   return Array.from({ length: count }, (_, i) => ({
