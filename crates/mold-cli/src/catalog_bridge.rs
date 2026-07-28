@@ -179,6 +179,7 @@ mod tests {
             media_roots: None,
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
+            scheduler: Default::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
             lambda: mold_core::lambda::LambdaSettings::default(),

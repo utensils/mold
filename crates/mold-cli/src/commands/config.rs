@@ -557,6 +557,7 @@ mod tests {
             media_roots: None,
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
+            scheduler: Default::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
             lambda: mold_core::lambda::LambdaSettings::default(),
@@ -620,7 +621,7 @@ mod tests {
     #[test]
     fn all_keys_count() {
         // 11 General + 8 Expand + 4 Logging + 8 RunPod + 9 Lambda = 40 static keys
-        assert_eq!(ALL_KEYS.len(), 40);
+        assert_eq!(ALL_KEYS.len(), 43);
     }
 
     #[test]
