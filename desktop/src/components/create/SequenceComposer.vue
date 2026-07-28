@@ -21,7 +21,11 @@ import {
   transitionLabel,
   type SequenceStage,
 } from "@studio/lib/sequence";
-import { chainScriptToClips, clipsToChainScript, stageInvalidation } from "@studio/lib/sequenceForm";
+import {
+  chainScriptToClips,
+  clipsToChainScript,
+  stageInvalidation,
+} from "@studio/lib/sequenceForm";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -111,9 +115,7 @@ function reorderClips(ids: string[]) {
 // ── Seam editing (rail-anchored popover) ─────────────────────────────────────
 const openSeamId = ref<string | null>(null);
 const seamClip = computed(() => draft.clips.find((clip) => clip.id === openSeamId.value) ?? null);
-const seamIndex = computed(() =>
-  draft.clips.findIndex((clip) => clip.id === openSeamId.value),
-);
+const seamIndex = computed(() => draft.clips.findIndex((clip) => clip.id === openSeamId.value));
 const clipLabel = (idx: number) => (idx === 0 ? "opening" : `clip ${idx + 1}`);
 
 function onSeamClick(id: string) {
@@ -395,7 +397,11 @@ async function copyToml() {
             class="ms-seqbench__tool"
             @click="imageInput?.click()"
           >
-            {{ activeClip.sourceImage ? `Image: ${activeClip.sourceImage.filename}` : "Attach opening image…" }}
+            {{
+              activeClip.sourceImage
+                ? `Image: ${activeClip.sourceImage.filename}`
+                : "Attach opening image…"
+            }}
           </button>
           <button
             v-if="activeClip.sourceImage"
@@ -516,13 +522,7 @@ async function copyToml() {
         :disabled="disabledReason !== null || submitting"
         @click="submit"
       >
-        {{
-          submitting
-            ? "Starting…"
-            : draft.editing
-              ? "Update sequence"
-              : "Generate sequence"
-        }}
+        {{ submitting ? "Starting…" : draft.editing ? "Update sequence" : "Generate sequence" }}
       </button>
     </div>
   </div>

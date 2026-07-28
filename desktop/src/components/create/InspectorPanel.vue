@@ -9,11 +9,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { nearestMp } from "@ui/lib/resolution";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import {
-  defaultClipFrames,
-  modelsForOutput,
-  sequenceMotionTailFrames,
-} from "@studio/lib/sequence";
+import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";

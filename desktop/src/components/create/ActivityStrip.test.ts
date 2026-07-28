@@ -140,9 +140,7 @@ describe("ActivityStrip — sequences", () => {
     await wrapper.get("[data-test='seq-resume']").trigger("click");
     expect(resume).toHaveBeenCalledWith("local", "job-1");
     await wrapper.get("[data-test='seq-edit']").trigger("click");
-    expect(wrapper.emitted("edit-sequence")?.[0]).toEqual([
-      { hostId: "local", jobId: "job-1" },
-    ]);
+    expect(wrapper.emitted("edit-sequence")?.[0]).toEqual([{ hostId: "local", jobId: "job-1" }]);
   });
 
   it("confirms before deleting a sequence job", async () => {
@@ -158,9 +156,7 @@ describe("ActivityStrip — sequences", () => {
 
   it("strip-level Clear inactive clears sequences and prunes finished prints", async () => {
     const chains = useChainJobsStore();
-    const clear = vi
-      .spyOn(chains, "clearInactive")
-      .mockResolvedValue({ cleared: 1, failed: 0 });
+    const clear = vi.spyOn(chains, "clearInactive").mockResolvedValue({ cleared: 1, failed: 0 });
     const generation = useGenerationStore();
     const prune = vi.spyOn(generation, "prune");
     chains.byHost.local = { jobs: [seqJob()], error: null };

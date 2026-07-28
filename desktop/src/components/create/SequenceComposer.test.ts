@@ -144,9 +144,7 @@ describe("SequenceComposer — footer", () => {
     const wrapper = mountComposer();
     expect(wrapper.get("[data-test='sequence-fit']").text()).toContain("✓ fits");
     expect(wrapper.get("[data-test='sequence-fit']").text()).toContain("@ 24fps");
-    expect(
-      wrapper.get("[data-test='generate-sequence']").attributes("disabled"),
-    ).toBeUndefined();
+    expect(wrapper.get("[data-test='generate-sequence']").attributes("disabled")).toBeUndefined();
   });
 
   it("blocks sequence-incapable checkpoints with the server's reason", () => {
@@ -191,12 +189,16 @@ describe("SequenceComposer — edit sessions", () => {
     const draft = startEditing();
     const wrapper = mountComposer();
     expect(wrapper.get("[data-test='edit-banner']").text()).toContain("Editing sequence abcdef12");
-    expect(wrapper.get("[data-test='edit-banner']").text()).toContain("2 cached · 0 will re-render");
+    expect(wrapper.get("[data-test='edit-banner']").text()).toContain(
+      "2 cached · 0 will re-render",
+    );
     expect(wrapper.get("[data-test='generate-sequence']").text()).toContain("Update sequence");
 
     draft.clips[1]!.prompt = "changed beat";
     await flushPromises();
-    expect(wrapper.get("[data-test='edit-banner']").text()).toContain("1 cached · 1 will re-render");
+    expect(wrapper.get("[data-test='edit-banner']").text()).toContain(
+      "1 cached · 1 will re-render",
+    );
   });
 
   it("Duplicate as new emits duplicate; Discard restores the baseline and stops editing", async () => {

@@ -25,11 +25,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
-import {
-  defaultClipFrames,
-  modelsForOutput,
-  sequenceMotionTailFrames,
-} from "@studio/lib/sequence";
+import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
 import { countLeadingCompletedStages, normalizeServerChainScript } from "../lib/chainScript";
 import { routeForModel } from "../lib/sequenceRoute";
@@ -468,10 +464,7 @@ const sequenceDefaultFrames = computed(() =>
 /** No chain-capable video model installed anywhere → guide to Discover. */
 const showSequenceEmpty = computed(
   () =>
-    isSequence.value &&
-    conn.ready &&
-    !models.loading &&
-    sequenceCapableModels.value.length === 0,
+    isSequence.value && conn.ready && !models.loading && sequenceCapableModels.value.length === 0,
 );
 
 function sharedSnapshot(): string {
