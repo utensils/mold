@@ -3921,7 +3921,7 @@ impl Coordinator {
                     return None;
                 }
             };
-            if let Err(error) = self.publish_plan(&snapshot, &plan) {
+            if let Err(error) = self.publish_plan(&snapshot, &plan, self.dirty.dirty_since) {
                 tracing::error!(
                     state_version = snapshot.state_version,
                     %error,
@@ -4628,7 +4628,11 @@ impl Coordinator {
         #[cfg(not(test))]
         let plan_result = planner.plan(&snapshot);
         let plan = plan_result?;
-        self.publish_plan(&snapshot, &plan)?;
+        let published_dirty_since = prospective_dirty
+            .as_ref()
+            .and_then(|dirty| dirty.dirty_since)
+            .or(self.dirty.dirty_since);
+        self.publish_plan(&snapshot, &plan, published_dirty_since)?;
         self.plan_version = plan.plan_version;
         Ok((prospective_state_version, prospective_dirty))
     }
@@ -4688,6 +4692,7 @@ impl Coordinator {
         &self,
         snapshot: &PlannerSnapshot,
         plan: &Plan,
+        dirty_since: Option<Instant>,
     ) -> Result<(), PlanPublicationError> {
         let mut confidence = plan
             .lanes
@@ -4741,7 +4746,7 @@ impl Coordinator {
             &self.state.gpu_pool,
             &self.leases,
             &confidence,
-            self.dirty.dirty_since,
+            dirty_since,
         );
         let mut current = self
             .state
@@ -8468,6 +8473,67 @@ mod tests {
             queue_transitions,
             vec![true, false],
             "queue transition events must match serialized plan publication order"
+        );
+    }
+
+    #[test]
+    fn queue_control_plan_projects_the_complete_committed_replan_window() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.reconcile_external_mutations(&mut immediate);
+        coordinator.dirty.clear_through(coordinator.state_version);
+        assert!(
+            coordinator.dirty.dirty_since.is_none(),
+            "test must begin from a clean replan window"
+        );
+
+        assert!(coordinator.set_queue_paused_and_publish(true).unwrap());
+
+        let published = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("pause transition must publish queue authority");
+        let published_start = published
+            .dirty_since_unix_ms
+            .expect("transition plan must publish its dirty-window start");
+        let published_deadline = published
+            .next_replan_at_unix_ms
+            .expect("transition plan must publish its replan deadline");
+        let committed_start = coordinator
+            .dirty
+            .dirty_since
+            .expect("transition must commit its dirty-window start");
+        let committed_deadline = coordinator
+            .dirty
+            .deadline()
+            .expect("transition must commit its replan deadline");
+        let published_window_ms = published_deadline.saturating_sub(published_start);
+        let committed_window_ms: u64 = committed_deadline
+            .saturating_duration_since(committed_start)
+            .as_millis()
+            .try_into()
+            .unwrap();
+
+        assert_eq!(published.state_version, coordinator.state_version);
+        assert!(
+            published_window_ms.abs_diff(committed_window_ms) <= 1,
+            "published and committed replan windows must describe the same interval"
         );
     }
 
