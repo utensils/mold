@@ -355,6 +355,7 @@ describe("MobileApp Output field", () => {
     default_width: 704,
     default_height: 480,
     default_frames: 25,
+    default_fps: 30,
   };
 
   function installModels(entries: ModelEntry[]): void {
@@ -509,6 +510,20 @@ describe("MobileApp Output field", () => {
     expect(checkpoints.attributes("aria-pressed")).toBe("true");
   });
 
+  it("reads the selected model's fps into the shared params, not a generic 24", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+
+    expect(
+      (wrapper.get("[data-test='mobile-sequence-fps'] input").element as HTMLInputElement).value,
+    ).toBe("30");
+    expect(wrapper.get("[data-test='mobile-sequence-duration']").text()).toContain("@ 30fps");
+  });
+
   it("submits the sequence with the form's live shared params, not composer copies", async () => {
     installModels([model, sequenceModel]);
     wrapper = mountMobileApp();
@@ -534,6 +549,8 @@ describe("MobileApp Output field", () => {
     expect(body.guidance).toBe(2.5);
     expect(body.width).toBe(sequenceModel.default_width);
     expect(body.height).toBe(sequenceModel.default_height);
+    // The model's own fps, not the generic 24-fps form fallback.
+    expect(body.fps).toBe(sequenceModel.default_fps);
     // LTX-Video carries no motion tail, so its seams are plain joins.
     expect(body.motion_tail_frames).toBe(0);
     expect(body.stages).toEqual([

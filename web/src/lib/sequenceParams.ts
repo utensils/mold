@@ -8,6 +8,7 @@
  */
 
 import type { SequenceSharedParams } from "@studio/lib/sequenceForm";
+import { DEFAULT_VIDEO_FPS } from "@studio/lib/sequence";
 import type { GenerateFormState } from "../types";
 
 /** Project the live web generate form onto the shared chain params. */
@@ -20,7 +21,9 @@ export function sequenceSharedParams(
     family,
     width: state.width,
     height: state.height,
-    fps: state.fps ?? 24,
+    // The form carries the selected model's own `default_fps`; this fallback
+    // only covers a form that never saw a video model.
+    fps: state.fps ?? DEFAULT_VIDEO_FPS,
     steps: state.steps,
     guidance: state.guidance,
     strength: state.strength,

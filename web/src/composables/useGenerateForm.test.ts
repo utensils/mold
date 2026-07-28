@@ -283,6 +283,21 @@ describe("useGenerateForm", () => {
     expect(form.state.value.fps).toBe(24);
   });
 
+  it("applyModelDefaults takes the model's advertised fps, like steps and guidance", () => {
+    const form = useGenerateForm();
+    form.state.value.fps = 24;
+
+    form.applyModelDefaults(
+      makeModel({
+        name: "ltx-video-0.9.6-distilled:bf16",
+        family: "ltx-video",
+        default_fps: 30,
+      }),
+    );
+
+    expect(form.state.value.fps).toBe(30);
+  });
+
   it("applyModelDefaults preserves user-chosen frame/fps for video families", () => {
     const form = useGenerateForm();
     form.state.value.frames = 49;
