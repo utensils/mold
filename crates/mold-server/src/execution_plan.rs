@@ -20,10 +20,16 @@ const MIB: u64 = 1024 * 1024;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
 const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
 
+/// Semantic position of an artifact consumed by one engine execution.
+///
+/// Indexed roles retain the native `Vec` index so building the keyed artifact
+/// topology cannot truncate, alias, and replace an earlier component. Serde's
+/// numeric JSON representation remains unchanged for every previously valid
+/// index.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum ComponentRole {
     Transformer,
-    TransformerShard(u8),
+    TransformerShard(usize),
     Vae,
     T5,
     T5Tokenizer,
@@ -31,11 +37,11 @@ pub enum ComponentRole {
     ClipLTokenizer,
     ClipG,
     ClipGTokenizer,
-    QwenShard(u16),
-    GemmaShard(u16),
-    GenericTextEncoderShard(u16),
+    QwenShard(usize),
+    GemmaShard(usize),
+    GenericTextEncoderShard(usize),
     TextTokenizer,
-    Lora(u16),
+    Lora(usize),
     SpatialUpscaler,
     TemporalUpscaler,
     Decoder,
@@ -1239,7 +1245,7 @@ fn concrete_artifacts_for_family(
     // (`supports_audio_components_cpu == false`).
     artifacts.insert(ComponentRole::Transformer, paths.transformer.clone());
     for (index, shard) in paths.transformer_shards.iter().enumerate() {
-        artifacts.insert(ComponentRole::TransformerShard(index as u8), shard.clone());
+        artifacts.insert(ComponentRole::TransformerShard(index), shard.clone());
     }
     artifacts.insert(ComponentRole::Vae, paths.vae.clone());
     if let Some(path) = engine_config
@@ -1292,7 +1298,6 @@ fn concrete_artifacts_for_family(
         paths.text_encoder_files.clone()
     };
     for (index, path) in selected_text_paths.iter().enumerate() {
-        let index = index as u16;
         let role = match family {
             "ltx2" | "ltx-2" | "ltx2.3" => ComponentRole::GemmaShard(index),
             "qwen-image" | "qwen-image-edit" | "z-image" | "flux2" | "flux.2" | "flux2-klein" => {
@@ -1318,7 +1323,7 @@ fn concrete_artifacts_for_family(
         artifacts.insert(ComponentRole::DistilledLora, path.clone());
     }
     for (index, lora) in effective_loras.iter().enumerate() {
-        artifacts.insert(ComponentRole::Lora(index as u16), lora.path.clone());
+        artifacts.insert(ComponentRole::Lora(index), lora.path.clone());
     }
     artifacts
 }
@@ -1811,7 +1816,7 @@ fn gpu_resident_paths(
             .into_iter()
             .enumerate()
             .filter_map(|(index, path)| {
-                (!on_cpu(&ComponentRole::TransformerShard(index as u8))).then_some(path)
+                (!on_cpu(&ComponentRole::TransformerShard(index))).then_some(path)
             })
             .collect();
     }
@@ -1833,7 +1838,6 @@ fn gpu_resident_paths(
         .iter()
         .enumerate()
         .filter_map(|(index, path)| {
-            let index = index as u16;
             let on_cpu_for_family = [
                 ComponentRole::QwenShard(index),
                 ComponentRole::GemmaShard(index),
@@ -2827,13 +2831,17 @@ pub fn resolved_model_fingerprint(
         ModelPaths::resolve(model, config).ok_or_else(|| ExecutionPlanError::MissingArtifacts {
             model: model.to_string(),
         })?;
+    Ok(resolved_paths_model_fingerprint(model, paths))
+}
+
+fn resolved_paths_model_fingerprint(model: &str, paths: ModelPaths) -> String {
     let mut artifacts = BTreeMap::new();
     artifacts.insert(ComponentRole::Transformer, paths.transformer);
     for (index, shard) in paths.transformer_shards.into_iter().enumerate() {
-        artifacts.insert(ComponentRole::TransformerShard(index as u8), shard);
+        artifacts.insert(ComponentRole::TransformerShard(index), shard);
     }
     artifacts.insert(ComponentRole::Vae, paths.vae);
-    Ok(model_fingerprint(model, &artifacts))
+    model_fingerprint(model, &artifacts)
 }
 
 /// Fingerprint the complete immutable input to engine construction for a
@@ -3058,6 +3066,29 @@ mod tests {
         .unwrap();
         request.placement = placement;
         request
+    }
+
+    fn indexed_paths(
+        transformer_shards: Vec<PathBuf>,
+        text_encoder_files: Vec<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer: PathBuf::from("/models/transformer.safetensors"),
+            transformer_shards,
+            vae: PathBuf::from("/models/vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files,
+            text_tokenizer: None,
+            decoder: None,
+        }
     }
 
     fn sized_config(
@@ -3574,6 +3605,126 @@ mod tests {
             role,
             ComponentRole::T5 | ComponentRole::ClipL | ComponentRole::ClipG
         )));
+    }
+
+    #[test]
+    fn transformer_artifact_roles_do_not_alias_past_u8_cardinality() {
+        let transformer_shards = (0..=usize::from(u8::MAX) + 1)
+            .map(|index| PathBuf::from(format!("/models/transformer-{index}.safetensors")))
+            .collect::<Vec<_>>();
+        let paths = indexed_paths(transformer_shards.clone(), Vec::new());
+        let frozen = mold_inference::FrozenEngineConfig::resolve("unused", &Config::default());
+        let artifacts = concrete_artifacts_for_family(&paths, "z-image", &[], &frozen);
+        let shard_artifacts = artifacts
+            .iter()
+            .filter(|(role, _)| matches!(role, ComponentRole::TransformerShard(_)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(shard_artifacts.len(), transformer_shards.len());
+        assert_eq!(
+            artifacts.get(&ComponentRole::TransformerShard(0)),
+            Some(&transformer_shards[0]),
+            "the first shard must not be replaced by shard 256"
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::TransformerShard(usize::from(u8::MAX) + 1)),
+            transformer_shards.last(),
+        );
+    }
+
+    #[test]
+    fn resolved_paths_model_fingerprint_retains_shards_past_u8_cardinality() {
+        let paths = |first: &str| {
+            indexed_paths(
+                (0..=usize::from(u8::MAX) + 1)
+                    .map(|index| {
+                        if index == 0 {
+                            PathBuf::from(first)
+                        } else {
+                            PathBuf::from(format!("/models/transformer-{index}.safetensors"))
+                        }
+                    })
+                    .collect(),
+                Vec::new(),
+            )
+        };
+
+        assert_ne!(
+            resolved_paths_model_fingerprint("model", paths("/models/first-a.safetensors")),
+            resolved_paths_model_fingerprint("model", paths("/models/first-b.safetensors")),
+            "a shard aliased out of the artifact map must not disappear from model identity"
+        );
+    }
+
+    #[test]
+    fn text_encoder_and_lora_roles_do_not_alias_past_u16_cardinality() {
+        let role_count = usize::from(u16::MAX) + 2;
+        let text_encoder_files = (0..role_count)
+            .map(|index| PathBuf::from(format!("/models/text-{index}.safetensors")))
+            .collect::<Vec<_>>();
+        let paths = indexed_paths(Vec::new(), text_encoder_files.clone());
+        let loras = (0..role_count)
+            .map(|index| PlannedLora {
+                path: PathBuf::from(format!("/models/lora-{index}.safetensors")),
+                content_fingerprint: ContentFingerprint(index.to_string()),
+                scale_bits: 1.0_f64.to_bits(),
+            })
+            .collect::<Vec<_>>();
+        let frozen = mold_inference::FrozenEngineConfig::resolve("unused", &Config::default());
+        let artifacts = concrete_artifacts_for_family(&paths, "qwen-image", &loras, &frozen);
+
+        assert_eq!(
+            artifacts
+                .keys()
+                .filter(|role| matches!(role, ComponentRole::QwenShard(_)))
+                .count(),
+            role_count
+        );
+        assert_eq!(
+            artifacts
+                .keys()
+                .filter(|role| matches!(role, ComponentRole::Lora(_)))
+                .count(),
+            role_count
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::QwenShard(0)),
+            Some(&text_encoder_files[0]),
+            "text encoder 65536 must not replace text encoder zero"
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::QwenShard(usize::from(u16::MAX) + 1)),
+            text_encoder_files.last(),
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::Lora(0)),
+            Some(&loras[0].path),
+            "LoRA 65536 must not replace LoRA zero"
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::Lora(usize::from(u16::MAX) + 1)),
+            loras.last().map(|lora| &lora.path),
+        );
+    }
+
+    #[test]
+    fn indexed_component_roles_preserve_legacy_serialization_shape() {
+        assert_eq!(
+            serde_json::to_string(&ComponentRole::TransformerShard(u8::MAX.into())).unwrap(),
+            r#"{"TransformerShard":255}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentRole::QwenShard(u16::MAX.into())).unwrap(),
+            r#"{"QwenShard":65535}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentRole::TransformerShard(256)).unwrap(),
+            r#"{"TransformerShard":256}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentRole::Lora(65_536)).unwrap(),
+            r#"{"Lora":65536}"#
+        );
     }
 
     #[test]
