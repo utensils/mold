@@ -53,6 +53,9 @@ On CUDA servers, resource telemetry is joined to CUDA's startup-visible
 devices by UUID. `CUDA_VISIBLE_DEVICES` remains a hard boundary even when it
 reorders cards or uses GPU/MIG UUID selectors: hidden GPUs are not published,
 and a MIG worker never inherits its parent GPU's full-memory sample.
+One versioned device registry supplies those telemetry targets, worker
+construction, scheduler candidates, `/api/devices`, and legacy status, so a
+device cannot silently acquire a different identity between subsystems.
 GPU startup defaults to `all`. `--gpus` / `MOLD_GPUS` also accepts `none`
 (maintenance mode), visible ordinals, Mold stable IDs (`cuda:<uuid>` or
 `metal:default`), and NVIDIA `GPU-...` / `MIG-...` UUIDs. Prefer stable IDs in

@@ -431,6 +431,14 @@ One `DeviceRegistry` supplies discovery, worker construction, scheduling,
 telemetry joins, status, settings, API mutation, and client display. Remove
 parallel ordinal-only inventories.
 
+Implementation status: runtime discovery is consumed once into immutable
+canonical records. Startup owners and the dynamic owner factory clone their
+`DiscoveredGpu` construction facts from those records; the background sampler
+clones only their telemetry targets; scheduler and API/legacy status consume
+the same atomic, revisioned administrative/health/activity projection.
+Owner-thread worker objects and join handles remain outside the records, but
+they cannot create an identity or construction fact absent from the registry.
+
 Suggested internal record:
 
 ```rust

@@ -1,12 +1,14 @@
-//! Authoritative read projection for runtime-visible devices.
+//! Canonical runtime device registry.
 //!
-//! Phase A deliberately does not own dispatch or worker lifecycle. The
-//! registry joins a narrow discovery inventory with the current worker pool,
-//! the background telemetry cache, and machine-wide desired preferences. That
-//! keeps `/api/devices` and legacy `/api/status` on one source without moving
-//! jobs or querying CUDA on an HTTP request.
+//! CUDA/Metal discovery is consumed exactly once at server startup. The
+//! registry retains the immutable identity, worker-construction, and telemetry
+//! join facts and owns the versioned desired/administrative/health/activity
+//! projection. Worker objects and join handles remain on their owner-thread
+//! boundary, but worker construction, scheduler candidates, telemetry, the
+//! device API, and legacy status all derive from this registry. No request
+//! path performs CUDA or NVML discovery.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -109,18 +111,99 @@ impl DeviceDiscoveryAdapter for StaticDeviceDiscovery {
     }
 }
 
+#[derive(Clone)]
+struct CanonicalDeviceRecord {
+    id: String,
+    discovered: DiscoveredDevice,
+    construction: Option<mold_inference::device::DiscoveredGpu>,
+    telemetry: Option<crate::resources::TelemetryTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SchedulerDeviceProjection {
+    pub id: String,
+    pub backend: GpuBackend,
+    pub ordinal: usize,
+    pub compute_capability: Option<(u16, u16)>,
+    pub admin_state: DeviceAdminState,
+    pub health: DeviceHealth,
+    pub activity: DeviceActivity,
+    pub schedulable: bool,
+    pub sampled_free_vram_bytes: u64,
+    pub sampled_mold_vram_bytes: Option<u64>,
+    pub discovered_free_vram_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalDeviceSnapshot {
+    pub revision: u64,
+    pub device_state: DeviceState,
+    pub scheduler_devices: Vec<SchedulerDeviceProjection>,
+}
+
 pub struct DeviceRegistry {
-    discovery: Arc<dyn DeviceDiscoveryAdapter>,
+    records: Vec<CanonicalDeviceRecord>,
     explicit_preferences: RwLock<BTreeMap<String, bool>>,
     transient_unavailable: RwLock<BTreeSet<String>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
-    transient_ids: Mutex<HashMap<String, String>>,
+    projection_guard: Mutex<()>,
+    last_device_state: RwLock<Option<DeviceState>>,
     mutation_sequence: AtomicU64,
 }
 
 impl DeviceRegistry {
     pub fn new(
         discovery: Arc<dyn DeviceDiscoveryAdapter>,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) -> Self {
+        let records = discovery
+            .devices()
+            .into_iter()
+            .map(|discovered| {
+                let id = discovered.stable_id.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}:unavailable-{}",
+                        discovered.backend.wire_name(),
+                        uuid::Uuid::new_v4().simple()
+                    )
+                });
+                let telemetry = discovered.visible_ordinal.map(|logical_ordinal| {
+                    crate::resources::TelemetryTarget {
+                        logical_ordinal,
+                        backend: discovered.backend,
+                        raw_cuda_uuid: None,
+                        cuda_kind: match discovered.device_kind {
+                            DeviceKind::FullGpu => {
+                                Some(mold_inference::device::CudaDeviceKind::FullGpu)
+                            }
+                            DeviceKind::Mig => Some(mold_inference::device::CudaDeviceKind::Mig),
+                            DeviceKind::UnknownCuda => {
+                                Some(mold_inference::device::CudaDeviceKind::UnknownCuda)
+                            }
+                            DeviceKind::Metal => None,
+                        },
+                        name: discovered.name.clone(),
+                        total_memory_bytes: discovered.total_memory_bytes.unwrap_or(0),
+                        nvml_uuid: discovered.nvml_uuid.clone(),
+                        physical_uuid: discovered.physical_uuid.clone(),
+                        mig_uuid: discovered.mig_uuid.clone(),
+                        pci_bus_id: discovered.pci_bus_id.clone(),
+                    }
+                });
+                CanonicalDeviceRecord {
+                    id,
+                    discovered,
+                    construction: None,
+                    telemetry,
+                }
+            })
+            .collect();
+
+        Self::with_records(records, metadata_db)
+    }
+
+    fn with_records(
+        records: Vec<CanonicalDeviceRecord>,
         metadata_db: Arc<Option<mold_db::MetadataDb>>,
     ) -> Self {
         let explicit_preferences = metadata_db
@@ -141,15 +224,83 @@ impl DeviceRegistry {
                 }
             })
             .unwrap_or_default();
-
         Self {
-            discovery,
+            records,
             explicit_preferences: RwLock::new(explicit_preferences),
             transient_unavailable: RwLock::new(BTreeSet::new()),
             metadata_db,
-            transient_ids: Mutex::new(HashMap::new()),
+            projection_guard: Mutex::new(()),
+            last_device_state: RwLock::new(None),
             mutation_sequence: AtomicU64::new(0),
         }
+    }
+
+    /// Consume the process-visible discovery result and startup selection into
+    /// the single immutable registry inventory. CUDA/NVML enrichment happens
+    /// here, before any owner thread or request handler exists.
+    pub(crate) fn from_runtime_inventory(
+        discovered: Vec<mold_inference::device::DiscoveredGpu>,
+        selected: &[mold_inference::device::DiscoveredGpu],
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) -> Self {
+        let telemetry = crate::resources::discover_telemetry_targets(&discovered);
+        Self::from_inventory_with_targets(discovered, selected, telemetry, metadata_db)
+    }
+
+    /// Build a registry around an already-created worker pool without
+    /// repeating NVML enrichment. Production startup passes its original
+    /// registry explicitly; this adapter is for embedding/tests that supply a
+    /// preconstructed pool.
+    pub(crate) fn from_worker_inventory(
+        discovered: Vec<mold_inference::device::DiscoveredGpu>,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) -> Self {
+        let telemetry = discovered
+            .iter()
+            .map(crate::resources::TelemetryTarget::from_discovered)
+            .collect();
+        let selected = discovered.clone();
+        Self::from_inventory_with_targets(discovered, &selected, telemetry, metadata_db)
+    }
+
+    fn from_inventory_with_targets(
+        discovered: Vec<mold_inference::device::DiscoveredGpu>,
+        selected: &[mold_inference::device::DiscoveredGpu],
+        telemetry: Vec<crate::resources::TelemetryTarget>,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) -> Self {
+        let selected = selected
+            .iter()
+            .map(runtime_device_key)
+            .collect::<BTreeSet<_>>();
+        let inventory = discovered
+            .into_iter()
+            .map(|gpu| {
+                let target = telemetry
+                    .iter()
+                    .find(|target| {
+                        target.backend == gpu.backend && target.logical_ordinal == gpu.ordinal
+                    })
+                    .cloned();
+                let startup_allowed = selected.contains(&runtime_device_key(&gpu));
+                let discovered =
+                    DiscoveredDevice::from_runtime_gpu(&gpu, startup_allowed, target.as_ref());
+                let id = discovered.stable_id.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}:unavailable-{}",
+                        discovered.backend.wire_name(),
+                        uuid::Uuid::new_v4().simple()
+                    )
+                });
+                CanonicalDeviceRecord {
+                    id,
+                    discovered,
+                    construction: Some(gpu),
+                    telemetry: target,
+                }
+            })
+            .collect::<Vec<_>>();
+        Self::with_records(inventory, metadata_db)
     }
 
     pub fn empty() -> Arc<Self> {
@@ -166,6 +317,10 @@ impl DeviceRegistry {
     /// changed. The write lock spans persistence so concurrent callers cannot
     /// both publish the same logical transition.
     pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<bool> {
+        let _projection = self
+            .projection_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut preferences = self
             .explicit_preferences
             .write()
@@ -188,10 +343,10 @@ impl DeviceRegistry {
     }
 
     pub fn discovered_device(&self, device_id: &str) -> Option<DiscoveredDevice> {
-        self.discovery
-            .devices()
-            .into_iter()
-            .find(|device| device.stable_id.as_deref() == Some(device_id))
+        self.records
+            .iter()
+            .find(|record| record.id == device_id)
+            .map(|record| record.discovered.clone())
     }
 
     pub fn desired_enabled(&self, device_id: &str) -> bool {
@@ -204,16 +359,87 @@ impl DeviceRegistry {
     }
 
     pub fn has_devices(&self) -> bool {
-        !self.discovery.devices().is_empty()
+        !self.records.is_empty()
     }
 
     pub fn mutation_sequence(&self) -> u64 {
         self.mutation_sequence.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn visible_device_count(&self) -> usize {
+        self.records.len()
+    }
+
+    pub(crate) fn startup_allowed_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| record.discovered.startup_allowed)
+            .count()
+    }
+
+    /// Complete startup-selected construction catalog. Persisted-disabled
+    /// devices remain here so V2 can start a fresh owner without rediscovery.
+    #[cfg(test)]
+    pub(crate) fn worker_constructions(
+        &self,
+    ) -> BTreeMap<String, mold_inference::device::DiscoveredGpu> {
+        self.records
+            .iter()
+            .filter(|record| record.discovered.startup_allowed)
+            .filter_map(|record| {
+                record
+                    .construction
+                    .clone()
+                    .map(|gpu| (record.id.clone(), gpu))
+            })
+            .collect()
+    }
+
+    pub(crate) fn worker_construction(
+        &self,
+        device_id: &str,
+    ) -> Option<mold_inference::device::DiscoveredGpu> {
+        self.records
+            .iter()
+            .find(|record| record.id == device_id && record.discovered.startup_allowed)
+            .and_then(|record| record.construction.clone())
+    }
+
+    pub(crate) fn startup_worker_devices(&self) -> Vec<mold_inference::device::DiscoveredGpu> {
+        self.records
+            .iter()
+            .filter(|record| record.discovered.startup_allowed)
+            .filter(|record| self.desired_enabled(&record.id))
+            .filter_map(|record| record.construction.clone())
+            .collect()
+    }
+
+    pub(crate) fn persisted_disabled_worker_devices(
+        &self,
+    ) -> Vec<mold_inference::device::DiscoveredGpu> {
+        self.records
+            .iter()
+            .filter(|record| record.discovered.startup_allowed)
+            .filter(|record| !self.desired_enabled(&record.id))
+            .filter_map(|record| record.construction.clone())
+            .collect()
+    }
+
+    /// Driver-free telemetry join targets cloned from canonical startup facts.
+    pub(crate) fn telemetry_targets(&self) -> Vec<crate::resources::TelemetryTarget> {
+        self.records
+            .iter()
+            .filter_map(|record| record.telemetry.clone())
+            .collect()
+    }
+
     /// Record a scheduler transport/start failure in the authoritative device
     /// projection. Returns true only for a real health transition.
     pub fn mark_unavailable(&self, device_id: &str) -> bool {
+        let _projection = self
+            .projection_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let changed = self
             .transient_unavailable
             .write()
@@ -228,6 +454,10 @@ impl DeviceRegistry {
     /// Clear a transient scheduler failure when the worker announces Ready.
     /// Returns true only for a real health transition.
     pub fn mark_available(&self, device_id: &str) -> bool {
+        let _projection = self
+            .projection_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let changed = self
             .transient_unavailable
             .write()
@@ -245,69 +475,19 @@ impl DeviceRegistry {
         resources: Option<&ResourceSnapshot>,
         jobs: &SharedJobRegistry,
     ) -> DeviceState {
-        let mut discovered = self.discovery.devices();
-        let known_workers: BTreeSet<_> = discovered
-            .iter()
-            .filter_map(|device| {
-                device
-                    .visible_ordinal
-                    .map(|ordinal| (device.backend, ordinal))
-            })
-            .collect();
+        self.canonical_snapshot(pool, resources, jobs).device_state
+    }
 
-        // During integration and tests, a worker may predate the UUID-first
-        // adapter. Keep it visible, but mark it unavailable because an ordinal
-        // is not a persistable identity.
-        for worker in pool.worker_snapshot() {
-            let telemetry_device = resources.and_then(|snapshot| {
-                snapshot
-                    .gpus
-                    .iter()
-                    .find(|gpu| gpu.ordinal == worker.gpu.ordinal)
-            });
-            let backend = discovered
-                .iter()
-                .find(|device| device.visible_ordinal == Some(worker.gpu.ordinal))
-                .map(|device| device.backend)
-                .or_else(|| telemetry_device.map(|gpu| gpu.backend))
-                .unwrap_or_else(runtime_backend);
-            if known_workers.contains(&(backend, worker.gpu.ordinal)) {
-                continue;
-            }
-            discovered.push(DiscoveredDevice {
-                stable_id: None,
-                backend,
-                visible_ordinal: Some(worker.gpu.ordinal),
-                device_kind: if backend == GpuBackend::Metal {
-                    DeviceKind::Metal
-                } else {
-                    DeviceKind::UnknownCuda
-                },
-                nvml_uuid: None,
-                physical_uuid: None,
-                mig_uuid: None,
-                mig_parent_uuid: None,
-                mig_profile: None,
-                pci_bus_id: None,
-                name: worker.gpu.name.clone(),
-                compute_capability: None,
-                total_memory_bytes: Some(worker.gpu.total_vram_bytes),
-                startup_allowed: true,
-                telemetry_ordinal: telemetry_device
-                    .map(|gpu| gpu.ordinal)
-                    .or_else(|| worker_telemetry_ordinal(backend, worker.gpu.ordinal)),
-            });
-        }
-
-        discovered.sort_by(|left, right| {
-            left.backend
-                .wire_name()
-                .cmp(right.backend.wire_name())
-                .then(left.visible_ordinal.cmp(&right.visible_ordinal))
-                .then(left.name.cmp(&right.name))
-        });
-
-        let worker_statuses = pool.gpu_status();
+    pub(crate) fn canonical_snapshot(
+        &self,
+        pool: &GpuPool,
+        resources: Option<&ResourceSnapshot>,
+        jobs: &SharedJobRegistry,
+    ) -> CanonicalDeviceSnapshot {
+        let _projection = self
+            .projection_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let workers = pool.worker_snapshot();
         let queue = jobs.snapshot();
         let preferences = self
@@ -318,20 +498,36 @@ impl DeviceRegistry {
             .transient_unavailable
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let devices = discovered
+        let mut records = self.records.iter().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.discovered
+                .backend
+                .wire_name()
+                .cmp(right.discovered.backend.wire_name())
+                .then(
+                    left.discovered
+                        .visible_ordinal
+                        .cmp(&right.discovered.visible_ordinal),
+                )
+                .then(left.discovered.name.cmp(&right.discovered.name))
+                .then(left.id.cmp(&right.id))
+        });
+        let projected = records
             .into_iter()
-            .map(|device| {
+            .map(|record| {
+                let device = &record.discovered;
                 let stable_identity = device.stable_id.is_some();
-                let id = device
-                    .stable_id
-                    .clone()
-                    .unwrap_or_else(|| self.transient_id_for(&device));
+                let id = record.id.clone();
                 let desired_enabled = preferences.get(&id).copied().unwrap_or(true);
-                let worker = device.visible_ordinal.and_then(|ordinal| {
-                    worker_statuses
-                        .iter()
-                        .find(|status| status.ordinal == ordinal)
+                let worker_ref = workers.iter().find(|worker| {
+                    if let Some(stable_id) = device.stable_id.as_deref() {
+                        worker.gpu.stable_id.as_deref() == Some(stable_id)
+                    } else {
+                        device.visible_ordinal == Some(worker.gpu.ordinal)
+                            && device.backend == worker.gpu.backend
+                    }
                 });
+                let worker = worker_ref.map(|worker| worker.status());
                 let telemetry = device.telemetry_ordinal.and_then(|ordinal| {
                     resources.and_then(|snapshot| {
                         snapshot
@@ -340,28 +536,23 @@ impl DeviceRegistry {
                             .find(|gpu| gpu.backend == device.backend && gpu.ordinal == ordinal)
                     })
                 });
-
-                let worker_ref = workers.iter().find(|worker| {
-                    device.visible_ordinal == Some(worker.gpu.ordinal)
-                        && device.backend == worker.gpu.backend
-                });
-                let active = worker.is_some_and(|status| {
+                let active = worker.as_ref().is_some_and(|status| {
                     !matches!(
                         status.state,
                         GpuWorkerState::Idle | GpuWorkerState::Degraded
                     )
                 });
+                let drain_state = worker_ref
+                    .map(|worker| worker.drain_state.load(std::sync::atomic::Ordering::SeqCst));
                 let admin_state = if !device.startup_allowed {
                     DeviceAdminState::StartupExcluded
                 } else if pool.workers.is_starting(&id)
-                    || (desired_enabled
-                        && worker_ref.is_some_and(|worker| {
-                            worker.drain_state.load(std::sync::atomic::Ordering::SeqCst)
-                                == crate::gpu_pool::DRAIN_COMMITTED
-                        }))
+                    || (desired_enabled && drain_state == Some(crate::gpu_pool::DRAIN_COMMITTED))
                 {
                     DeviceAdminState::Starting
-                } else if !desired_enabled && worker_ref.is_some() {
+                } else if drain_state.is_some_and(|state| state != crate::gpu_pool::DRAIN_RUNNING)
+                    || (!desired_enabled && worker_ref.is_some())
+                {
                     DeviceAdminState::Draining
                 } else if desired_enabled {
                     DeviceAdminState::Enabled
@@ -395,6 +586,7 @@ impl DeviceRegistry {
                     DeviceHealth::Unavailable
                 };
                 let activity = worker
+                    .as_ref()
                     .map(|status| match status.state {
                         GpuWorkerState::Generating => DeviceActivity::Generating,
                         GpuWorkerState::Loading => DeviceActivity::Loading,
@@ -437,6 +629,7 @@ impl DeviceRegistry {
                     .to_string()
                 });
                 let loaded_models = worker
+                    .as_ref()
                     .and_then(|status| status.loaded_model.clone())
                     .into_iter()
                     .collect();
@@ -451,18 +644,18 @@ impl DeviceRegistry {
                         .map(|entry| entry.id.clone())
                 });
 
-                DeviceInfo {
-                    id,
+                let info = DeviceInfo {
+                    id: id.clone(),
                     backend: device.backend,
                     ordinal: device.visible_ordinal,
                     device_kind: device.device_kind,
-                    nvml_uuid: device.nvml_uuid,
-                    physical_uuid: device.physical_uuid,
-                    mig_uuid: device.mig_uuid,
-                    mig_parent_uuid: device.mig_parent_uuid,
-                    mig_profile: device.mig_profile,
-                    name: device.name,
-                    pci_bus_id: device.pci_bus_id,
+                    nvml_uuid: device.nvml_uuid.clone(),
+                    physical_uuid: device.physical_uuid.clone(),
+                    mig_uuid: device.mig_uuid.clone(),
+                    mig_parent_uuid: device.mig_parent_uuid.clone(),
+                    mig_profile: device.mig_profile.clone(),
+                    name: device.name.clone(),
+                    pci_bus_id: device.pci_bus_id.clone(),
                     compute_capability: device
                         .compute_capability
                         .map(|(major, minor)| format!("{major}.{minor}")),
@@ -491,13 +684,60 @@ impl DeviceRegistry {
                     loaded_models,
                     active_work_id,
                     planned_work_ids: Vec::new(),
-                }
+                };
+                let scheduler = device.visible_ordinal.map(|ordinal| {
+                    let total = info.memory.total_bytes.unwrap_or(0);
+                    let discovered_free_vram_bytes = record
+                        .construction
+                        .as_ref()
+                        .map_or(0, |gpu| gpu.free_vram_bytes);
+                    SchedulerDeviceProjection {
+                        id,
+                        backend: device.backend,
+                        ordinal,
+                        compute_capability: device.compute_capability,
+                        admin_state: info.admin_state,
+                        health: info.health,
+                        activity: info.activity,
+                        schedulable: info.schedulable,
+                        sampled_free_vram_bytes: info
+                            .memory
+                            .used_bytes
+                            .map_or(discovered_free_vram_bytes, |used| {
+                                total.saturating_sub(used)
+                            }),
+                        sampled_mold_vram_bytes: info.memory.mold_used_bytes,
+                        discovered_free_vram_bytes,
+                    }
+                });
+                (info, scheduler)
             })
-            .collect();
-
-        DeviceState {
-            devices,
+            .collect::<Vec<_>>();
+        let device_state = DeviceState {
+            devices: projected.iter().map(|(device, _)| device.clone()).collect(),
             plan_version: 0,
+        };
+        let scheduler_devices = projected
+            .into_iter()
+            .filter_map(|(_, scheduler)| scheduler)
+            .collect();
+        let changed = self
+            .last_device_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            != Some(&device_state);
+        if changed {
+            *self
+                .last_device_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(device_state.clone());
+            self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        }
+        CanonicalDeviceSnapshot {
+            revision: self.mutation_sequence.load(Ordering::SeqCst),
+            device_state,
+            scheduler_devices,
         }
     }
 
@@ -563,30 +803,6 @@ impl DeviceRegistry {
             free as f64 / 1_000_000_000.0
         ))
     }
-
-    fn transient_id_for(&self, device: &DiscoveredDevice) -> String {
-        let key = format!(
-            "{}:{}:{}",
-            device.backend.wire_name(),
-            device
-                .visible_ordinal
-                .map_or_else(|| "none".to_string(), |ordinal| ordinal.to_string()),
-            device.name
-        );
-        let mut ids = self
-            .transient_ids
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ids.entry(key)
-            .or_insert_with(|| {
-                format!(
-                    "{}:unavailable-{}",
-                    device.backend.wire_name(),
-                    uuid::Uuid::new_v4().simple()
-                )
-            })
-            .clone()
-    }
 }
 
 trait GpuBackendWireName {
@@ -602,19 +818,10 @@ impl GpuBackendWireName for GpuBackend {
     }
 }
 
-fn runtime_backend() -> GpuBackend {
-    if cfg!(feature = "cuda") {
-        GpuBackend::Cuda
-    } else {
-        GpuBackend::Metal
-    }
-}
-
-fn worker_telemetry_ordinal(backend: GpuBackend, ordinal: usize) -> Option<usize> {
-    let _ = backend;
-    // Resource snapshots are projected back onto process-local ordinals by
-    // UUID before publication. Never translate to a physical NVML ordinal.
-    Some(ordinal)
+fn runtime_device_key(
+    gpu: &mold_inference::device::DiscoveredGpu,
+) -> (GpuBackend, usize, Option<String>) {
+    (gpu.backend, gpu.ordinal, gpu.stable_id.clone())
 }
 
 #[cfg(test)]
@@ -799,11 +1006,11 @@ mod tests {
             Arc::new(StaticDeviceDiscovery::new(vec![
                 discovered(Some("cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), false),
                 DiscoveredDevice {
-                    stable_id: Some("cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                    stable_id: Some("cuda:00000000000000000000000000000001".into()),
                     visible_ordinal: Some(1),
                     name: "active GPU".into(),
                     telemetry_ordinal: Some(1),
-                    ..discovered(Some("cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), true)
+                    ..discovered(Some("cuda:00000000000000000000000000000001"), true)
                 },
                 DiscoveredDevice {
                     stable_id: Some("cuda:cccccccccccccccccccccccccccccccc".into()),
@@ -890,7 +1097,7 @@ mod tests {
 
     #[test]
     fn transient_worker_unavailability_is_authoritative_until_ready() {
-        let id = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let id = "cuda:00000000000000000000000000000000";
         let registry = DeviceRegistry::new(
             Arc::new(StaticDeviceDiscovery::new(vec![discovered(Some(id), true)])),
             Arc::new(None),
@@ -981,5 +1188,174 @@ mod tests {
         let legacy = DeviceRegistry::legacy_gpu_info(&state).unwrap();
         assert_eq!(legacy.vram_total_mb, 24_576);
         assert_eq!(legacy.vram_used_mb, 8_192);
+    }
+
+    fn runtime_gpu(
+        ordinal: usize,
+        uuid_byte: u8,
+        kind: mold_inference::device::CudaDeviceKind,
+    ) -> mold_inference::device::DiscoveredGpu {
+        let raw_uuid = [uuid_byte; 16];
+        mold_inference::device::DiscoveredGpu {
+            ordinal,
+            stable_id: Some(mold_inference::device::stable_cuda_id(raw_uuid)),
+            raw_cuda_uuid: Some(raw_uuid),
+            device_kind: Some(kind),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: format!("synthetic GPU {uuid_byte}"),
+            compute_capability: Some((10, 0)),
+            pci_bus_id: Some(format!("00000000:{ordinal:02x}:00.0")),
+            total_vram_bytes: 192 << 30,
+            free_vram_bytes: 180 << 30,
+        }
+    }
+
+    #[test]
+    fn one_runtime_inventory_drives_worker_factory_telemetry_and_sixty_four_devices() {
+        let discovered = (0..64)
+            .map(|ordinal| {
+                runtime_gpu(
+                    ordinal,
+                    (ordinal + 1) as u8,
+                    match ordinal % 3 {
+                        0 => mold_inference::device::CudaDeviceKind::Mig,
+                        1 => mold_inference::device::CudaDeviceKind::FullGpu,
+                        _ => mold_inference::device::CudaDeviceKind::UnknownCuda,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let disabled_id = discovered[42].stable_id.clone().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::DevicePreferences::new(&db)
+            .set(&disabled_id, false)
+            .unwrap();
+
+        let registry = DeviceRegistry::from_runtime_inventory(
+            discovered.clone(),
+            &discovered,
+            Arc::new(Some(db)),
+        );
+        let construction = registry.worker_constructions();
+        let telemetry = registry.telemetry_targets();
+
+        assert_eq!(registry.visible_device_count(), 64);
+        assert_eq!(registry.startup_allowed_count(), 64);
+        assert_eq!(construction.len(), 64);
+        assert_eq!(telemetry.len(), 64);
+        assert_eq!(registry.startup_worker_devices().len(), 63);
+        assert!(construction.contains_key(&disabled_id));
+        for gpu in &discovered {
+            let id = gpu.stable_id.as_deref().unwrap();
+            assert_eq!(construction[id].ordinal, gpu.ordinal);
+            let target = telemetry
+                .iter()
+                .find(|target| target.logical_ordinal == gpu.ordinal)
+                .expect("every canonical construction has one telemetry target");
+            assert_eq!(target.raw_cuda_uuid, gpu.raw_cuda_uuid);
+            assert_eq!(target.cuda_kind, gpu.device_kind);
+        }
+    }
+
+    #[test]
+    fn stable_uuid_keeps_construction_identity_when_visible_ordinals_reorder() {
+        let gpu_a = runtime_gpu(1, 0xaa, mold_inference::device::CudaDeviceKind::FullGpu);
+        let gpu_b = runtime_gpu(0, 0xbb, mold_inference::device::CudaDeviceKind::UnknownCuda);
+        let selected = vec![gpu_b.clone(), gpu_a.clone()];
+        let registry = DeviceRegistry::from_runtime_inventory(
+            vec![gpu_a.clone(), gpu_b.clone()],
+            &selected,
+            Arc::new(None),
+        );
+        let construction = registry.worker_constructions();
+
+        assert_eq!(construction[gpu_a.stable_id.as_deref().unwrap()].ordinal, 1);
+        assert_eq!(construction[gpu_b.stable_id.as_deref().unwrap()].ordinal, 0);
+    }
+
+    #[test]
+    fn metal_default_uses_the_same_construction_and_telemetry_registry() {
+        let metal = mold_inference::device::DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some("metal:default".to_string()),
+            raw_cuda_uuid: None,
+            device_kind: None,
+            identity_error: None,
+            backend: GpuBackend::Metal,
+            name: "Apple GPU".to_string(),
+            compute_capability: None,
+            pci_bus_id: None,
+            total_vram_bytes: 32 << 30,
+            free_vram_bytes: 28 << 30,
+        };
+        let registry = DeviceRegistry::from_runtime_inventory(
+            vec![metal.clone()],
+            std::slice::from_ref(&metal),
+            Arc::new(None),
+        );
+
+        assert_eq!(
+            registry.worker_constructions()["metal:default"].backend,
+            GpuBackend::Metal
+        );
+        let target = registry.telemetry_targets().pop().unwrap();
+        assert_eq!(target.backend, GpuBackend::Metal);
+        assert_eq!(target.raw_cuda_uuid, None);
+        assert_eq!(
+            registry
+                .discovered_device("metal:default")
+                .unwrap()
+                .device_kind,
+            DeviceKind::Metal
+        );
+    }
+
+    #[test]
+    fn lifecycle_mutation_publishes_one_coherent_api_and_scheduler_projection() {
+        let gpu = runtime_gpu(0, 0, mold_inference::device::CudaDeviceKind::FullGpu);
+        let registry = DeviceRegistry::from_runtime_inventory(
+            vec![gpu.clone()],
+            std::slice::from_ref(&gpu),
+            Arc::new(None),
+        );
+        let worker = worker(0);
+        let pool = GpuPool {
+            workers: vec![worker.clone()].into(),
+        };
+        let jobs = crate::job_registry::JobRegistry::new();
+
+        let initial = registry.canonical_snapshot(&pool, None, &jobs);
+        assert_eq!(initial.device_state.devices.len(), 1);
+        assert_eq!(initial.scheduler_devices.len(), 1);
+        assert_eq!(
+            initial.device_state.devices[0].id,
+            initial.scheduler_devices[0].id
+        );
+        assert_eq!(
+            initial.device_state.devices[0].admin_state,
+            initial.scheduler_devices[0].admin_state
+        );
+        assert_eq!(
+            initial.device_state.devices[0].health,
+            initial.scheduler_devices[0].health
+        );
+
+        registry
+            .set_desired_enabled(gpu.stable_id.as_deref().unwrap(), false)
+            .unwrap();
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let draining = registry.canonical_snapshot(&pool, None, &jobs);
+        assert!(draining.revision > initial.revision);
+        assert_eq!(
+            draining.device_state.devices[0].admin_state,
+            DeviceAdminState::Draining
+        );
+        assert_eq!(
+            draining.scheduler_devices[0].admin_state,
+            DeviceAdminState::Draining
+        );
+        assert!(!draining.device_state.devices[0].schedulable);
+        assert!(!draining.scheduler_devices[0].schedulable);
     }
 }

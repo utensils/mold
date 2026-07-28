@@ -359,9 +359,9 @@ impl UtilityExecutionPlan {
 pub(crate) enum UtilityPlacement {
     Cpu,
     /// Backend/ordinal is safe for the lifetime of a frozen utility plan
-    /// because `WorkerSet` can only restart an entry from its immutable
-    /// `WorkerFactory.devices` map, keyed by stable device ID and retaining the
-    /// same `DiscoveredGpu`. The scheduler candidate and lease still carry and
+    /// because `WorkerSet` can only restart an entry from the canonical
+    /// `DeviceRegistry`, keyed by stable device ID and retaining the same
+    /// `DiscoveredGpu`. The scheduler candidate and lease still carry and
     /// validate that stable ID. Any future hotplug/re-enumeration support must
     /// add stable identity to the inference plan and its fingerprint.
     Device {
@@ -1002,7 +1002,7 @@ impl OwnerThreadSpawner for RuntimeOwnerThreadSpawner {
 }
 
 pub(crate) struct WorkerFactory {
-    pub devices: BTreeMap<String, DiscoveredGpu>,
+    pub registry: Arc<crate::device_registry::DeviceRegistry>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
     pub fatal_cuda_error: Arc<AtomicBool>,
     pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
@@ -1376,9 +1376,8 @@ impl WorkerSet {
             );
         }
         let gpu = factory
-            .devices
-            .get(device_id)
-            .cloned()
+            .registry
+            .worker_construction(device_id)
             .ok_or_else(|| format!("device '{device_id}' cannot be started in this process"))?;
         let owner_epoch = lifecycle.next_owner_epoch.max(1);
         lifecycle.next_owner_epoch = owner_epoch.saturating_add(1);
@@ -1914,7 +1913,13 @@ mod tests {
         workers
             .install_factory(
                 WorkerFactory {
-                    devices: BTreeMap::from([(device_id.clone(), template.gpu.clone())]),
+                    registry: Arc::new(
+                        crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                            vec![template.gpu.clone()],
+                            std::slice::from_ref(&template.gpu),
+                            Arc::new(None),
+                        ),
+                    ),
                     shared_pool: Arc::new(Mutex::new(SharedPool::new())),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
@@ -1996,7 +2001,13 @@ mod tests {
         workers
             .install_factory(
                 WorkerFactory {
-                    devices: BTreeMap::from([(device_id.clone(), template.gpu.clone())]),
+                    registry: Arc::new(
+                        crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                            vec![template.gpu.clone()],
+                            std::slice::from_ref(&template.gpu),
+                            Arc::new(None),
+                        ),
+                    ),
                     shared_pool: Arc::new(Mutex::new(SharedPool::new())),
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),

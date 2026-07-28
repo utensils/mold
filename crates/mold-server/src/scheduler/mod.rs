@@ -1558,6 +1558,9 @@ impl Coordinator {
                 // before dedupe so a stale cancelled Drain wake cannot strand
                 // the GPU forever.
                 self.unavailable.remove(&device_id);
+                if !is_cpu_utility {
+                    self.state.device_registry.mark_available(&device_id);
+                }
                 if self.ready.get(&device_id).is_some_and(|ready| {
                     ready.owner_epoch == owner_epoch && ready.generation >= worker_generation
                 }) {
@@ -1610,6 +1613,7 @@ impl Coordinator {
                     self.ready.remove(&device_id);
                 }
                 self.unavailable.insert(device_id.clone());
+                self.state.device_registry.mark_unavailable(&device_id);
                 if start_was_announced {
                     self.state
                         .events
@@ -2148,9 +2152,9 @@ impl Coordinator {
         let Some(snapshot) = self.state.resources.latest() else {
             return;
         };
-        let workers = self.state.gpu_pool.worker_snapshot();
         for (device_id, lease) in &mut self.leases {
-            let sample = vram_sample_for_stable_device(&snapshot, &workers, device_id);
+            let sample =
+                vram_sample_for_stable_device(&snapshot, &self.state.device_registry, device_id);
             lease.vram_high_water_bytes = max_optional(lease.vram_high_water_bytes, sample);
             // ResourceSnapshot does not yet expose process-attributable host
             // RAM. Keep this explicitly unavailable instead of relabeling a
@@ -2255,85 +2259,70 @@ impl Coordinator {
     }
 
     fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
-        let sampled_free = self
-            .state
-            .resources
-            .latest()
-            .map(|snapshot| {
-                snapshot
-                    .gpus
-                    .into_iter()
-                    .map(|gpu| {
-                        (
-                            (gpu.backend, gpu.ordinal),
-                            (
-                                gpu.vram_total.saturating_sub(gpu.vram_used),
-                                gpu.vram_used_by_mold,
-                            ),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut snapshots = self
-            .state
-            .gpu_pool
-            .schedulable_workers()
+        let resources = self.state.resources.latest();
+        let canonical = self.state.device_registry.canonical_snapshot(
+            &self.state.gpu_pool,
+            resources.as_ref(),
+            &self.state.job_registry,
+        );
+        let workers = self.state.gpu_pool.worker_snapshot();
+        let mut snapshots = canonical
+            .scheduler_devices
             .into_iter()
-            .map(|worker| {
-                let id = worker_device_id(&worker);
-                let ready = self.ready.get(&id);
-                let desired_enabled = self.state.device_registry.desired_enabled(&id);
-                let busy =
-                    self.leases.contains_key(&id) || worker.in_flight.load(Ordering::SeqCst) > 0;
-                let health = if worker.poisoned.load(Ordering::SeqCst) {
-                    DeviceHealth::Poisoned
-                } else if self.unavailable.contains(&id) {
-                    DeviceHealth::Unavailable
-                } else if worker.is_degraded() {
-                    DeviceHealth::Degraded
-                } else {
-                    DeviceHealth::Healthy
-                };
-                let mut warm = BTreeSet::new();
-                if let Some(fingerprint) = worker
-                    .resident_execution_fingerprint
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()
-                {
-                    warm.insert(ExecutionFingerprint::new(fingerprint));
-                }
-                let active_lease = self.leases.get(&id);
-                let (sampled_available_vram_bytes, sampled_mold_vram_bytes) = sampled_free
-                    .get(&(worker.gpu.backend, worker.gpu.ordinal))
-                    .cloned()
-                    .unwrap_or((worker.gpu.free_vram_bytes, None));
+            .map(|device| {
+                let worker = workers
+                    .iter()
+                    .find(|worker| worker_device_id(worker) == device.id);
+                let ready = self.ready.get(&device.id);
+                let active_lease = self.leases.get(&device.id);
                 let measured_cache_bytes = worker
-                    .model_cache
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .active_vram_bytes();
-                let reclaimable_cache_bytes = sampled_mold_vram_bytes
+                    .map(|worker| {
+                        worker
+                            .model_cache
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .active_vram_bytes()
+                    })
+                    .unwrap_or(0);
+                let reclaimable_cache_bytes = device
+                    .sampled_mold_vram_bytes
                     .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
                     .unwrap_or(0);
+                let mut warm = BTreeSet::new();
+                if let Some(fingerprint) = worker.and_then(|worker| {
+                    worker
+                        .resident_execution_fingerprint
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone()
+                }) {
+                    warm.insert(ExecutionFingerprint::new(fingerprint));
+                }
                 DeviceSnapshot {
-                    id: DeviceId::new(id),
-                    backend: match worker.gpu.backend {
+                    id: DeviceId::new(device.id),
+                    backend: match device.backend {
+                        mold_core::GpuBackend::Cuda => Backend::Cuda,
                         mold_core::GpuBackend::Metal => Backend::Metal,
-                        _ => Backend::Cuda,
                     },
-                    admin_state: if desired_enabled {
-                        DeviceAdminState::Enabled
-                    } else if busy {
-                        DeviceAdminState::Draining
-                    } else {
-                        DeviceAdminState::Disabled
+                    admin_state: match device.admin_state {
+                        mold_core::DeviceAdminState::StartupExcluded => {
+                            DeviceAdminState::StartupExcluded
+                        }
+                        mold_core::DeviceAdminState::Starting => DeviceAdminState::Disabled,
+                        mold_core::DeviceAdminState::Enabled => DeviceAdminState::Enabled,
+                        mold_core::DeviceAdminState::Draining => DeviceAdminState::Draining,
+                        mold_core::DeviceAdminState::Disabled => DeviceAdminState::Disabled,
                     },
-                    health,
-                    activity: if ready.is_some()
-                        && !self.leases.contains_key(&worker_device_id(&worker))
-                        && worker.in_flight.load(Ordering::SeqCst) == 0
+                    health: match device.health {
+                        mold_core::DeviceHealth::Healthy => DeviceHealth::Healthy,
+                        mold_core::DeviceHealth::Degraded => DeviceHealth::Degraded,
+                        mold_core::DeviceHealth::Unavailable => DeviceHealth::Unavailable,
+                        mold_core::DeviceHealth::Poisoned => DeviceHealth::Poisoned,
+                    },
+                    activity: if device.schedulable
+                        && ready.is_some()
+                        && active_lease.is_none()
+                        && worker.is_some_and(|worker| worker.in_flight.load(Ordering::SeqCst) == 0)
                     {
                         DeviceActivity::Idle
                     } else {
@@ -2341,14 +2330,10 @@ impl Coordinator {
                     },
                     available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
                     worker_generation: ready.map_or(0, |ready| ready.generation),
-                    // The periodic resource sample is authoritative. Before
-                    // its first tick, discovery's driver sample is still an
-                    // actual free-memory reading; total VRAM is never used as
-                    // a proxy for free capacity.
                     available_vram_bytes: effective_available_vram_bytes(
-                        sampled_available_vram_bytes,
+                        device.sampled_free_vram_bytes,
                         reclaimable_cache_bytes,
-                        worker.gpu.total_vram_bytes,
+                        worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
                     ),
                     warm_execution_fingerprints: warm,
                 }
@@ -5366,18 +5351,15 @@ fn max_optional(current: Option<u64>, sample: Option<u64>) -> Option<u64> {
 
 fn vram_sample_for_stable_device(
     snapshot: &mold_core::ResourceSnapshot,
-    workers: &[Arc<GpuWorker>],
+    registry: &crate::device_registry::DeviceRegistry,
     device_id: &str,
 ) -> Option<u64> {
-    let logical_ordinal = workers
-        .iter()
-        .find(|worker| worker_device_id(worker) == device_id)?
-        .gpu
-        .ordinal;
+    let device = registry.discovered_device(device_id)?;
+    let logical_ordinal = device.telemetry_ordinal?;
     snapshot
         .gpus
         .iter()
-        .find(|gpu| gpu.ordinal == logical_ordinal)?
+        .find(|gpu| gpu.backend == device.backend && gpu.ordinal == logical_ordinal)?
         .vram_used_by_mold
 }
 
@@ -6989,7 +6971,16 @@ mod tests {
     fn vram_high_water_joins_by_stable_device_before_ordinal() {
         let (gpu_zero, _rx_zero) = test_worker(0);
         let (gpu_one, _rx_one) = test_worker(1);
-        let workers = vec![gpu_one.clone(), gpu_zero];
+        let workers = [gpu_one.clone(), gpu_zero];
+        let discovered = workers
+            .iter()
+            .map(|worker| worker.gpu.clone())
+            .collect::<Vec<_>>();
+        let registry = crate::device_registry::DeviceRegistry::from_runtime_inventory(
+            discovered.clone(),
+            &discovered,
+            Arc::new(None),
+        );
         let snapshot = mold_core::ResourceSnapshot {
             hostname: "test".into(),
             timestamp: 1,
@@ -7029,7 +7020,7 @@ mod tests {
         assert_eq!(
             vram_sample_for_stable_device(
                 &snapshot,
-                &workers,
+                &registry,
                 gpu_one.gpu.stable_id.as_deref().unwrap()
             ),
             Some(7 << 30)

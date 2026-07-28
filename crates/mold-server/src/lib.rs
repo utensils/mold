@@ -223,47 +223,6 @@ fn startup_plan(
     }
 }
 
-struct StartupDeviceSelection<'a> {
-    /// Owners created immediately at startup.
-    enabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
-    persisted_disabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
-    /// Complete startup-selected inventory retained by V2 so a persisted-
-    /// disabled device can be enabled without restarting the server.
-    v2_factory_devices: std::collections::BTreeMap<String, mold_inference::device::DiscoveredGpu>,
-}
-
-fn startup_device_selection<'a>(
-    selected: &'a [mold_inference::device::DiscoveredGpu],
-    registry: &device_registry::DeviceRegistry,
-) -> StartupDeviceSelection<'a> {
-    let (enabled, persisted_disabled) = selected.iter().partition(|gpu| {
-        gpu.stable_id
-            .as_deref()
-            .is_none_or(|device_id| registry.desired_enabled(device_id))
-    });
-    StartupDeviceSelection {
-        enabled,
-        persisted_disabled,
-        v2_factory_devices: v2_lifecycle_devices(selected),
-    }
-}
-
-fn v2_lifecycle_devices(
-    selected: &[mold_inference::device::DiscoveredGpu],
-) -> std::collections::BTreeMap<String, mold_inference::device::DiscoveredGpu> {
-    selected
-        .iter()
-        .cloned()
-        .map(|gpu| {
-            let id = gpu
-                .stable_id
-                .clone()
-                .unwrap_or_else(|| format!("runtime:gpu:{}", gpu.ordinal));
-            (id, gpu)
-        })
-        .collect()
-}
-
 pub async fn run_server(
     bind: &str,
     port: u16,
@@ -321,26 +280,13 @@ pub async fn run_server(
             std::sync::Arc::new(None)
         }
     };
-    let selected_ordinals: std::collections::BTreeSet<_> =
-        selected.iter().map(|gpu| gpu.ordinal).collect();
-    let telemetry_inventory =
-        std::sync::Arc::new(resources::TelemetryInventory::from_discovered(&discovered));
-    let inventory = discovered
-        .iter()
-        .map(|gpu| {
-            device_registry::DiscoveredDevice::from_runtime_gpu(
-                gpu,
-                selected_ordinals.contains(&gpu.ordinal),
-                telemetry_inventory.target(gpu.ordinal),
-            )
-        })
-        .collect();
-    let device_registry = std::sync::Arc::new(device_registry::DeviceRegistry::new(
-        std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
-        metadata_db.clone(),
-    ));
-    let startup_device_selection = startup_device_selection(&selected, &device_registry);
-    for gpu in &startup_device_selection.persisted_disabled {
+    let device_registry =
+        std::sync::Arc::new(device_registry::DeviceRegistry::from_runtime_inventory(
+            discovered,
+            &selected,
+            metadata_db.clone(),
+        ));
+    for gpu in device_registry.persisted_disabled_worker_devices() {
         info!(
             gpu = gpu.ordinal,
             device_id = gpu.stable_id.as_deref().unwrap_or("unknown"),
@@ -349,13 +295,14 @@ pub async fn run_server(
             "GPU owner skipped at startup"
         );
     }
-    let startup_devices = startup_device_selection.enabled;
-    let v2_factory_devices = startup_device_selection.v2_factory_devices;
+    let startup_devices = device_registry.startup_worker_devices();
+    let discovered_count = device_registry.visible_device_count();
+    let selected_count = device_registry.startup_allowed_count();
 
     let startup = startup_plan(
         &gpu_selection,
-        discovered.len(),
-        selected.len(),
+        discovered_count,
+        selected_count,
         cfg!(any(feature = "cuda", feature = "metal")),
         dispatch_mode,
     );
@@ -447,7 +394,7 @@ pub async fn run_server(
             .workers
             .install_factory(
                 gpu_pool::WorkerFactory {
-                    devices: v2_factory_devices,
+                    registry: device_registry.clone(),
                     shared_pool: shared_pool.clone(),
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
@@ -481,7 +428,7 @@ pub async fn run_server(
         }
         StartupMode::Maintenance => {
             tracing::warn!(
-                discovered = discovered.len(),
+                discovered = discovered_count,
                 "no selected GPU worker is safe to start; generation is unavailable"
             );
         }
@@ -543,7 +490,13 @@ pub async fn run_server(
         } else {
             info!("no default model configured — models will be pulled on first request");
         }
-        let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
+        let mut state = state::AppState::empty_with_device_registry(
+            config,
+            queue_handle,
+            gpu_pool.clone(),
+            queue_size,
+            device_registry.clone(),
+        );
         state.shared_pool = shared_pool;
         state
     } else if startup.create_cpu_engine {
@@ -603,11 +556,23 @@ pub async fn run_server(
             }
             None => {
                 info!("no default model configured — models will be pulled on first request");
-                state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size)
+                state::AppState::empty_with_device_registry(
+                    config,
+                    queue_handle,
+                    gpu_pool.clone(),
+                    queue_size,
+                    device_registry.clone(),
+                )
             }
         }
     } else {
-        let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
+        let mut state = state::AppState::empty_with_device_registry(
+            config,
+            queue_handle,
+            gpu_pool.clone(),
+            queue_size,
+            device_registry.clone(),
+        );
         state.shared_pool = shared_pool;
         let reason = if matches!(gpu_selection, GpuSelection::None) {
             "generation is unavailable while GPU selection is 'none' (maintenance mode)"
@@ -961,7 +926,7 @@ pub async fn run_server(
     // bound so we can `.abort()` it when `axum::serve` returns — otherwise
     // the task outlives server shutdown and keeps ticking until process exit.
     let resources_aggregator =
-        resources::spawn_aggregator(state.resources.clone(), telemetry_inventory);
+        resources::spawn_aggregator(state.resources.clone(), state.device_registry.clone());
 
     // Start a long-lived DNS-SD browser independently of advertising. A
     // loopback-bound primary still needs to surface the server machine's LAN
@@ -1233,11 +1198,11 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cors_layer, classify_startup_mode, startup_device_selection, startup_plan,
-        trace_request_path, GpuOwnerThreads, StartupMode,
+        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, GpuOwnerThreads,
+        StartupMode,
     };
     use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
-    use crate::device_registry::{DeviceRegistry, StaticDeviceDiscovery};
+    use crate::device_registry::DeviceRegistry;
     use crate::gpu_pool::{GpuWorker, GpuWorkerCommand};
     use crate::{gpu_worker, model_cache};
     use axum::http::{header, Method, Request};
@@ -1516,11 +1481,9 @@ mod tests {
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
         let preferences = mold_db::DevicePreferences::new(&db);
         preferences.set(GPU_1, false).unwrap();
-        let registry = DeviceRegistry::new(
-            Arc::new(StaticDeviceDiscovery::default()),
-            Arc::new(Some(db)),
-        );
+        let db = Arc::new(Some(db));
         let all = vec![discovered_gpu(0, GPU_0), discovered_gpu(1, GPU_1)];
+        let registry = DeviceRegistry::from_runtime_inventory(all.clone(), &all, db.clone());
 
         for dispatch_mode in [
             DispatchMode::Legacy,
@@ -1535,30 +1498,29 @@ mod tests {
                 dispatch_mode,
             );
             assert!(plan.start_gpu_workers);
-            let worker_ids: BTreeSet<_> = startup_device_selection(&all, &registry)
-                .enabled
+            let worker_ids: BTreeSet<_> = registry
+                .startup_worker_devices()
                 .into_iter()
-                .filter_map(|gpu| gpu.stable_id.as_deref())
+                .filter_map(|gpu| gpu.stable_id)
                 .collect();
-            assert_eq!(worker_ids, BTreeSet::from([GPU_0]));
+            assert_eq!(worker_ids, BTreeSet::from([GPU_0.to_string()]));
         }
 
         // Explicit startup allowlists are resolved before preferences. A
         // disabled allowed device gets no owner; an excluded device is never
         // reintroduced by its enabled-by-default preference.
-        assert!(startup_device_selection(&all[1..], &registry)
-            .enabled
-            .is_empty());
-        assert!(startup_device_selection(&[], &registry).enabled.is_empty());
+        let only_disabled =
+            DeviceRegistry::from_runtime_inventory(all.clone(), &all[1..], db.clone());
+        assert!(only_disabled.startup_worker_devices().is_empty());
+        let none = DeviceRegistry::from_runtime_inventory(all.clone(), &[], db.clone());
+        assert!(none.startup_worker_devices().is_empty());
 
         registry.set_desired_enabled(GPU_0, false).unwrap();
-        assert!(startup_device_selection(&all, &registry).enabled.is_empty());
+        assert!(registry.startup_worker_devices().is_empty());
 
-        let startup_selection = startup_device_selection(&all, &registry);
-        assert!(startup_selection.enabled.is_empty());
         assert_eq!(
-            startup_selection
-                .persisted_disabled
+            registry
+                .persisted_disabled_worker_devices()
                 .iter()
                 .map(|gpu| (gpu.stable_id.as_deref().unwrap(), gpu.name.as_str()))
                 .collect::<Vec<_>>(),
@@ -1568,8 +1530,8 @@ mod tests {
         // V2 retains the complete startup-selected inventory for dynamic
         // re-enable even though neither disabled device owns a worker.
         assert_eq!(
-            startup_selection
-                .v2_factory_devices
+            registry
+                .worker_constructions()
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
@@ -1579,10 +1541,9 @@ mod tests {
         // The non-authoritative restart-recovery API writes this same
         // preference. The next Legacy/Observe boot must recreate the owner.
         registry.set_desired_enabled(GPU_0, true).unwrap();
-        let recovered = startup_device_selection(&all, &registry);
         assert_eq!(
-            recovered
-                .enabled
+            registry
+                .startup_worker_devices()
                 .iter()
                 .filter_map(|gpu| gpu.stable_id.as_deref())
                 .collect::<BTreeSet<_>>(),
@@ -1593,15 +1554,13 @@ mod tests {
     #[test]
     fn one_gpu_defaults_enabled_without_a_persisted_preference() {
         const GPU_0: &str = "cuda:00000000000000000000000000000000";
-        let registry = DeviceRegistry::new(
-            Arc::new(StaticDeviceDiscovery::default()),
+        let selected = vec![discovered_gpu(0, GPU_0)];
+        let registry = DeviceRegistry::from_runtime_inventory(
+            selected.clone(),
+            &selected,
             Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
         );
-        let selected = vec![discovered_gpu(0, GPU_0)];
-        assert_eq!(
-            startup_device_selection(&selected, &registry).enabled.len(),
-            1
-        );
+        assert_eq!(registry.startup_worker_devices().len(), 1);
     }
 
     #[test]
@@ -1612,19 +1571,16 @@ mod tests {
         mold_db::DevicePreferences::new(&db)
             .set(DISABLED_GPU, false)
             .unwrap();
-        let registry = DeviceRegistry::new(
-            Arc::new(StaticDeviceDiscovery::default()),
-            Arc::new(Some(db)),
-        );
         let selected = vec![
             discovered_gpu(0, ENABLED_GPU),
             discovered_gpu(1, DISABLED_GPU),
         ];
+        let registry =
+            DeviceRegistry::from_runtime_inventory(selected.clone(), &selected, Arc::new(Some(db)));
 
-        let startup_inputs = startup_device_selection(&selected, &registry);
         assert_eq!(
-            startup_inputs
-                .enabled
+            registry
+                .startup_worker_devices()
                 .iter()
                 .filter_map(|gpu| gpu.stable_id.as_deref())
                 .collect::<BTreeSet<_>>(),
@@ -1632,8 +1588,8 @@ mod tests {
             "only enabled devices may construct startup owners"
         );
         assert_eq!(
-            startup_inputs
-                .v2_factory_devices
+            registry
+                .worker_constructions()
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),

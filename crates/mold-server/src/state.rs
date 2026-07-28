@@ -502,13 +502,38 @@ impl AppState {
         gpu_pool: Arc<GpuPool>,
         queue_capacity: usize,
     ) -> Self {
+        let discovered = gpu_pool
+            .worker_snapshot()
+            .into_iter()
+            .map(|worker| worker.gpu.clone())
+            .collect::<Vec<_>>();
+        let device_registry = if discovered.is_empty() {
+            crate::device_registry::DeviceRegistry::empty()
+        } else {
+            Arc::new(
+                crate::device_registry::DeviceRegistry::from_worker_inventory(
+                    discovered,
+                    Arc::new(None),
+                ),
+            )
+        };
+        Self::empty_with_device_registry(config, queue, gpu_pool, queue_capacity, device_registry)
+    }
+
+    pub(crate) fn empty_with_device_registry(
+        config: Config,
+        queue: QueueHandle,
+        gpu_pool: Arc<GpuPool>,
+        queue_capacity: usize,
+        device_registry: Arc<crate::device_registry::DeviceRegistry>,
+    ) -> Self {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
+            device_registry,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),

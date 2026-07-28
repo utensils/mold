@@ -271,53 +271,47 @@ async fn ensure_downloaded(
 
 fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
     let resources = state.resources.latest();
-    let registry =
-        state
-            .device_registry
-            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let registry = state.device_registry.canonical_snapshot(
+        &state.gpu_pool,
+        resources.as_ref(),
+        &state.job_registry,
+    );
     registry
-        .devices
+        .scheduler_devices
         .into_iter()
         .filter(|device| device.schedulable)
         .filter_map(|device| {
-            let ordinal = device.ordinal?;
-            let total = device.memory.total_bytes?;
             let worker = state
                 .gpu_pool
                 .workers
                 .iter()
-                .find(|worker| worker.gpu.ordinal == ordinal);
-            let fallback_free = worker.as_ref().map(|worker| worker.gpu.free_vram_bytes);
+                .find(|worker| crate::scheduler::worker_device_id(worker) == device.id)?;
             let reclaimable_cache_bytes = worker
-                .as_ref()
-                .map(|worker| {
-                    worker
-                        .model_cache
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .active_vram_bytes()
-                })
+                .model_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active_vram_bytes();
+            let reclaimable_cache_bytes = device
+                .sampled_mold_vram_bytes
+                .map(|used_by_mold| reclaimable_cache_bytes.min(used_by_mold))
                 .unwrap_or(0);
-            let available = match device.memory.used_bytes {
-                Some(used) => effective_preparation_available_vram(
-                    total,
-                    Some(used),
-                    device.memory.mold_used_bytes,
-                    reclaimable_cache_bytes,
-                ),
-                None => fallback_free.unwrap_or(0),
-            };
+            let available = crate::scheduler::effective_available_vram_bytes(
+                device.sampled_free_vram_bytes,
+                reclaimable_cache_bytes,
+                worker.gpu.total_vram_bytes,
+            );
             Some(DeviceFact {
                 id: device.id,
-                ordinal,
+                ordinal: device.ordinal,
                 backend: device.backend,
-                compute_capability: worker.and_then(|worker| worker.gpu.compute_capability),
+                compute_capability: device.compute_capability,
                 available_vram_bytes: available,
             })
         })
         .collect()
 }
 
+#[cfg(test)]
 fn effective_preparation_available_vram(
     total_vram_bytes: u64,
     used_vram_bytes: Option<u64>,

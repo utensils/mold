@@ -770,7 +770,7 @@ mod tests {
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
                 crate::device_registry::DiscoveredDevice {
-                    stable_id: Some("cuda:0123456789abcdef0123456789abcdef".into()),
+                    stable_id: Some("cuda:00000000000000000000000000000000".into()),
                     backend: mold_core::GpuBackend::Cuda,
                     visible_ordinal: Some(0),
                     device_kind: mold_core::DeviceKind::FullGpu,
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(body["devices"].as_array().unwrap().len(), 1);
         assert_eq!(
             body["devices"][0]["id"],
-            "cuda:0123456789abcdef0123456789abcdef"
+            "cuda:00000000000000000000000000000000"
         );
         assert_eq!(body["devices"][0]["device_kind"], "full_gpu");
         assert_eq!(body["devices"][0]["desired_enabled"], true);
@@ -1266,45 +1266,25 @@ mod tests {
             runtime_gpu(0, GPU_0, "disabled startup GPU 0"),
             runtime_gpu(1, GPU_1, "disabled startup GPU 1"),
         ];
-        let discovered = selected
-            .iter()
-            .map(|gpu| crate::device_registry::DiscoveredDevice {
-                stable_id: gpu.stable_id.clone(),
-                backend: gpu.backend,
-                visible_ordinal: Some(gpu.ordinal),
-                device_kind: mold_core::DeviceKind::FullGpu,
-                nvml_uuid: None,
-                physical_uuid: None,
-                mig_uuid: None,
-                mig_parent_uuid: None,
-                mig_profile: None,
-                pci_bus_id: None,
-                name: gpu.name.clone(),
-                compute_capability: gpu.compute_capability,
-                total_memory_bytes: Some(gpu.total_vram_bytes),
-                startup_allowed: true,
-                telemetry_ordinal: None,
-            })
-            .collect();
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
         let preferences = mold_db::DevicePreferences::new(&db);
         preferences.set(GPU_0, false).unwrap();
         preferences.set(GPU_1, false).unwrap();
-        let registry = Arc::new(crate::device_registry::DeviceRegistry::new(
-            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(
-                discovered,
-            )),
-            Arc::new(Some(db)),
-        ));
+        let registry = Arc::new(
+            crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                selected.clone(),
+                &selected,
+                Arc::new(Some(db)),
+            ),
+        );
 
-        let startup_selection = crate::startup_device_selection(&selected, &registry);
         assert!(
-            startup_selection.enabled.is_empty(),
+            registry.startup_worker_devices().is_empty(),
             "persisted-disabled devices must not construct startup GPU owners"
         );
         assert_eq!(
-            startup_selection
-                .persisted_disabled
+            registry
+                .persisted_disabled_worker_devices()
                 .iter()
                 .map(|gpu| gpu.name.as_str())
                 .collect::<Vec<_>>(),
@@ -1328,7 +1308,7 @@ mod tests {
         pool.workers
             .install_factory(
                 crate::gpu_pool::WorkerFactory {
-                    devices: startup_selection.v2_factory_devices,
+                    registry: registry.clone(),
                     shared_pool: Arc::new(Mutex::new(
                         mold_inference::shared_pool::SharedPool::new(),
                     )),
@@ -1425,6 +1405,13 @@ mod tests {
             total_vram_bytes: 24_000_000_000,
             free_vram_bytes: 24_000_000_000,
         };
+        let registry = Arc::new(
+            crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                vec![gpu.clone()],
+                std::slice::from_ref(&gpu),
+                Arc::new(None),
+            ),
+        );
         let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
         let pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: Vec::new().into(),
@@ -1432,7 +1419,7 @@ mod tests {
         pool.workers
             .install_factory(
                 crate::gpu_pool::WorkerFactory {
-                    devices: [(id.to_string(), gpu)].into_iter().collect(),
+                    registry: registry.clone(),
                     shared_pool: Arc::new(Mutex::new(
                         mold_inference::shared_pool::SharedPool::new(),
                     )),
@@ -1448,28 +1435,7 @@ mod tests {
             .unwrap();
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = pool.clone();
-        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
-            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
-                crate::device_registry::DiscoveredDevice {
-                    stable_id: Some(id.into()),
-                    backend: mold_core::GpuBackend::Cuda,
-                    visible_ordinal: Some(0),
-                    device_kind: mold_core::DeviceKind::FullGpu,
-                    nvml_uuid: None,
-                    physical_uuid: None,
-                    mig_uuid: None,
-                    mig_parent_uuid: None,
-                    mig_profile: None,
-                    pci_bus_id: None,
-                    name: "replacement gpu".into(),
-                    compute_capability: Some((8, 6)),
-                    total_memory_bytes: Some(24_000_000_000),
-                    startup_allowed: true,
-                    telemetry_ordinal: None,
-                },
-            ])),
-            Arc::new(None),
-        ));
+        state.device_registry = registry;
         install_authoritative_v2(&mut state);
 
         let response = app_with_state(state)
@@ -1732,7 +1698,7 @@ mod tests {
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
                 crate::device_registry::DiscoveredDevice {
-                    stable_id: Some("cuda:fedcba9876543210fedcba9876543210".into()),
+                    stable_id: Some("cuda:00000000000000000000000000000000".into()),
                     backend: mold_core::GpuBackend::Cuda,
                     visible_ordinal: Some(0),
                     device_kind: mold_core::DeviceKind::FullGpu,
@@ -1865,7 +1831,7 @@ mod tests {
                 ),
                 discovered(
                     1,
-                    "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "cuda:00000000000000000000000000000001",
                     "active GPU",
                     true,
                 ),

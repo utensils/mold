@@ -103,7 +103,7 @@ impl TelemetryTarget {
         }
     }
 
-    fn from_discovered(gpu: &mold_inference::device::DiscoveredGpu) -> Self {
+    pub(crate) fn from_discovered(gpu: &mold_inference::device::DiscoveredGpu) -> Self {
         Self {
             logical_ordinal: gpu.ordinal,
             backend: gpu.backend,
@@ -119,44 +119,30 @@ impl TelemetryTarget {
     }
 }
 
-/// Frozen runtime-visible telemetry boundary shared by the registry and the
-/// 1 Hz resource sampler. Devices absent from this inventory must never appear
-/// in either `/api/resources` endpoint, even if NVML can see them.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TelemetryInventory {
-    targets: Vec<TelemetryTarget>,
-}
-
-impl TelemetryInventory {
-    pub(crate) fn from_discovered(discovered: &[mold_inference::device::DiscoveredGpu]) -> Self {
-        #[allow(unused_mut)]
-        let mut targets: Vec<_> = discovered
-            .iter()
-            .map(TelemetryTarget::from_discovered)
-            .collect();
-        #[cfg(feature = "nvml")]
-        if let Ok(source) = NvmlSource::try_new() {
-            for target in &mut targets {
-                if let Some(metadata) = source.metadata(target) {
-                    target.nvml_uuid = Some(metadata.nvml_uuid.clone());
-                    target.physical_uuid = metadata.physical_uuid;
-                    target.mig_uuid = metadata.mig_uuid;
-                    target.pci_bus_id = metadata.pci_bus_id.or(target.pci_bus_id.take());
-                }
+/// Resolve the one-time telemetry metadata join used to populate the
+/// canonical [`crate::device_registry::DeviceRegistry`]. The returned values
+/// are not retained as a second inventory; the 1 Hz sampler asks the registry
+/// for its driver-free target projection on each tick.
+pub(crate) fn discover_telemetry_targets(
+    discovered: &[mold_inference::device::DiscoveredGpu],
+) -> Vec<TelemetryTarget> {
+    #[allow(unused_mut)]
+    let mut targets: Vec<_> = discovered
+        .iter()
+        .map(TelemetryTarget::from_discovered)
+        .collect();
+    #[cfg(feature = "nvml")]
+    if let Ok(source) = NvmlSource::try_new() {
+        for target in &mut targets {
+            if let Some(metadata) = source.metadata(target) {
+                target.nvml_uuid = Some(metadata.nvml_uuid.clone());
+                target.physical_uuid = metadata.physical_uuid;
+                target.mig_uuid = metadata.mig_uuid;
+                target.pci_bus_id = metadata.pci_bus_id.or(target.pci_bus_id.take());
             }
         }
-        Self { targets }
     }
-
-    pub(crate) fn target(&self, logical_ordinal: usize) -> Option<&TelemetryTarget> {
-        self.targets
-            .iter()
-            .find(|target| target.logical_ordinal == logical_ordinal)
-    }
-
-    pub(crate) fn targets(&self) -> &[TelemetryTarget] {
-        &self.targets
-    }
+    targets
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -664,7 +650,7 @@ pub fn build_snapshot() -> ResourceSnapshot {
 
 fn build_snapshot_inner(
     cpu: Option<CpuSnapshot>,
-    inventory: Option<&TelemetryInventory>,
+    inventory: Option<&[TelemetryTarget]>,
 ) -> ResourceSnapshot {
     let hostname = hostname::get()
         .ok()
@@ -721,7 +707,7 @@ impl Default for CpuSampler {
 }
 
 #[allow(clippy::needless_return)]
-fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
+fn collect_gpus(inventory: Option<&[TelemetryTarget]>) -> Vec<GpuSnapshot> {
     // Darwin: Metal is the only GPU path.
     #[cfg(target_os = "macos")]
     {
@@ -729,7 +715,6 @@ fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
         return match inventory {
             Some(inventory)
                 if !inventory
-                    .targets()
                     .iter()
                     .any(|target| target.backend == GpuBackend::Metal) =>
             {
@@ -738,7 +723,7 @@ fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
             Some(inventory) => snapshots
                 .into_iter()
                 .filter(|snapshot| {
-                    inventory.targets().iter().any(|target| {
+                    inventory.iter().any(|target| {
                         target.backend == GpuBackend::Metal
                             && target.logical_ordinal == snapshot.ordinal
                     })
@@ -752,7 +737,7 @@ fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
     {
         if let Ok(src) = NvmlSource::try_new() {
             let gpus = match inventory {
-                Some(inventory) => src.snapshot_visible(std::process::id(), inventory.targets()),
+                Some(inventory) => src.snapshot_visible(std::process::id(), inventory),
                 None => src.snapshot(std::process::id()),
             };
             if !gpus.is_empty() {
@@ -763,7 +748,7 @@ fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
     #[cfg(not(target_os = "macos"))]
     {
         match inventory {
-            Some(inventory) => SmiSource::snapshot_visible(inventory.targets()),
+            Some(inventory) => SmiSource::snapshot_visible(inventory),
             None => SmiSource::snapshot(),
         }
     }
@@ -774,13 +759,14 @@ fn collect_gpus(inventory: Option<&TelemetryInventory>) -> Vec<GpuSnapshot> {
 /// `GET /api/resources` succeeds without waiting a full second.
 pub(crate) fn spawn_aggregator(
     bcast: Arc<ResourceBroadcaster>,
-    inventory: Arc<TelemetryInventory>,
+    registry: Arc<crate::device_registry::DeviceRegistry>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         // Immediate first tick so `latest()` is populated before any HTTP
         // request arrives. CPU usage is None on this first sample (no delta
         // to compute against yet).
-        bcast.publish(build_snapshot_inner(None, Some(&inventory)));
+        let targets = registry.telemetry_targets();
+        bcast.publish(build_snapshot_inner(None, Some(&targets)));
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the first tick (it fires immediately) so we don't double-emit.
@@ -792,11 +778,12 @@ pub(crate) fn spawn_aggregator(
         loop {
             interval.tick().await;
             let taken = sampler.take();
-            let tick_inventory = inventory.clone();
+            let tick_registry = registry.clone();
             let (snap, returned) = tokio::task::spawn_blocking(move || {
                 let mut s = taken.unwrap_or_default();
                 let cpu = s.sample();
-                let snap = build_snapshot_inner(Some(cpu), Some(&tick_inventory));
+                let targets = tick_registry.telemetry_targets();
+                let snap = build_snapshot_inner(Some(cpu), Some(&targets));
                 (snap, s)
             })
             .await

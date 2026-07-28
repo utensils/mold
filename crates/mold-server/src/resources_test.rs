@@ -103,7 +103,7 @@ async fn aggregator_publishes_within_first_tick() {
     let mut rx = bcast.subscribe();
     let handle = crate::resources::spawn_aggregator(
         bcast.clone(),
-        std::sync::Arc::new(crate::resources::TelemetryInventory::default()),
+        crate::device_registry::DeviceRegistry::empty(),
     );
 
     // Advance virtual time past one tick interval (1 s).
@@ -344,8 +344,8 @@ fn live_nvml_join_matches_every_visible_full_cuda_gpu_by_uuid() {
     let Ok(source) = crate::resources::NvmlSource::try_new() else {
         return;
     };
-    let inventory = crate::resources::TelemetryInventory::from_discovered(&discovered);
-    let snapshots = source.snapshot_visible(std::process::id(), inventory.targets());
+    let inventory = crate::resources::discover_telemetry_targets(&discovered);
+    let snapshots = source.snapshot_visible(std::process::id(), &inventory);
 
     assert!(
         snapshots
@@ -357,7 +357,10 @@ fn live_nvml_join_matches_every_visible_full_cuda_gpu_by_uuid() {
         gpu.raw_cuda_uuid.is_some()
             && gpu.device_kind != Some(mold_inference::device::CudaDeviceKind::Mig)
     }) {
-        let target = inventory.target(gpu.ordinal).unwrap();
+        let target = inventory
+            .iter()
+            .find(|target| target.logical_ordinal == gpu.ordinal)
+            .unwrap();
         assert!(
             target.nvml_uuid.is_some(),
             "visible CUDA GPU {} did not resolve to an NVML UUID",
