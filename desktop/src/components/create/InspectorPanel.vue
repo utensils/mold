@@ -2,11 +2,19 @@
 import { computed, ref, watch } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { nearestMp } from "@ui/lib/resolution";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import {
+  defaultClipFrames,
+  modelsForOutput,
+  sequenceMotionTailFrames,
+} from "@studio/lib/sequence";
+import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
@@ -38,8 +46,11 @@ const props = withDefaults(
     form: GenerateForm;
     /** Seed of the most recent finished print — powers "lock last seed". */
     lastSeed?: number | null;
+    /** Per-model chain caps for the selected model, when Create has them —
+     * sizes new clips' default frames on the Output switch. */
+    chainLimits?: ChainLimits | null;
   }>(),
-  { lastSeed: null },
+  { lastSeed: null, chainLimits: null },
 );
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
@@ -92,12 +103,53 @@ const stickyTarget = computed<string | null>(() =>
 const pickerModels = computed<ModelEntry[]>(() => {
   const target = stickyTarget.value;
   const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  return filterModelsForTarget(
+  const forTarget = filterModelsForTarget(
     installedModels.value,
     target,
     fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
   );
+  // Sequence output narrows the picker to chain-capable video models.
+  return modelsForOutput(forTarget, draft.output);
 });
+
+// ── Output (One shot | Sequence) — a setting, not a place ────────────────────
+const draft = useSequenceDraftStore();
+const isSequence = computed(() => draft.output === "sequence");
+const sequenceCapableModels = computed(() => modelsForOutput(installedModels.value, "sequence"));
+const defaultFrames = computed(() =>
+  defaultClipFrames(
+    selectedModel.value,
+    props.chainLimits ?? null,
+    sequenceMotionTailFrames(selectedModel.value),
+  ),
+);
+
+function setOutputMode(mode: string | number) {
+  const next = mode === "sequence" ? "sequence" : "single";
+  if (next === draft.output) return;
+  if (next === "sequence") {
+    // A non-capable selection is remembered and swapped for the first
+    // capable model; switching back restores it.
+    const current = selectedModel.value;
+    if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
+      draft.lastSingleModel = props.form.model || null;
+      const pick = sequenceCapableModels.value[0];
+      if (pick) formStore.applyModel(pick);
+    }
+  } else if (draft.lastSingleModel) {
+    const restored = findInstalledModel(installedModels.value, draft.lastSingleModel);
+    if (restored) formStore.applyModel(restored);
+    draft.lastSingleModel = null;
+  }
+  draft.setOutput(
+    next,
+    {
+      getPrompt: () => props.form.prompt,
+      setPrompt: (value) => (props.form.prompt = value),
+    },
+    defaultFrames.value,
+  );
+}
 
 const stickyHostMissingModel = computed<string | null>(() => {
   const sel = stickyTarget.value;
@@ -215,6 +267,27 @@ function resetSettings() {
         </p>
       </div>
 
+      <!-- Output — a highlighted card: sequence is a setting of Create, not a place -->
+      <div class="ms-field">
+        <div class="ms-output" data-test="output-card">
+          <div class="ms-field__label">Output</div>
+          <SegmentedControl
+            :model-value="draft.output"
+            :options="[
+              { value: 'single', label: 'One shot' },
+              { value: 'sequence', label: 'Sequence' },
+            ]"
+            label="Output"
+            data-test="output-mode"
+            @update:model-value="setOutputMode"
+          />
+          <p v-if="isSequence" class="ms-field__hint">
+            {{ draft.clips.length }} clips on the composer rail · switching back keeps clip 1 and
+            parks the rest.
+          </p>
+        </div>
+      </div>
+
       <!-- Shape -->
       <div class="ms-field">
         <div class="ms-field__label">Shape</div>
@@ -255,6 +328,19 @@ function resetSettings() {
           label="Prompt strength"
           :value-label="form.guidance.toFixed(1)"
           @update:model-value="form.guidance = $event"
+        />
+      </div>
+
+      <!-- Frame rate — sequence output surfaces it outside Advanced -->
+      <div v-if="isSequence" class="ms-field ms-field--row" data-test="sequence-fps">
+        <span class="ms-field__label ms-field__label--inline">Frame rate</span>
+        <Stepper
+          :model-value="form.fps"
+          :min="1"
+          :max="60"
+          label="Frames per second"
+          :format="(v: number) => `${v} fps`"
+          @update:model-value="form.fps = $event"
         />
       </div>
 
@@ -307,7 +393,8 @@ function resetSettings() {
           {{ seedHint }}
         </p>
         <p v-if="uiSeedMode === 'random'" class="ms-field__hint">
-          New seed every print<template v-if="lastSeed !== null">
+          New seed every print<template v-if="lastSeed !== null && !isSequence">
+            <!-- lock-last is coupled to single prints; hidden for sequences -->
             ·
             <button
               type="button"
@@ -325,14 +412,17 @@ function resetSettings() {
       <div class="ms-field ms-field--row">
         <span class="ms-field__label ms-field__label--inline">Batch</span>
         <Stepper
+          v-if="!isSequence"
           :model-value="form.batchSize"
           :min="1"
           :max="batchMax"
           label="Batch size"
           @update:model-value="form.batchSize = $event"
         />
+        <span v-else class="data-mono text-ink-2" data-test="batch-locked">1</span>
       </div>
-      <p v-if="caps.forcesBatchSizeOne" class="ms-field__hint -mt-2">
+      <p v-if="isSequence" class="ms-field__hint -mt-2">a sequence renders one timeline</p>
+      <p v-else-if="caps.forcesBatchSizeOne" class="ms-field__hint -mt-2">
         Locked to 1 — edit models render one at a time.
       </p>
 
@@ -416,6 +506,16 @@ function resetSettings() {
 }
 .ms-field {
   margin-bottom: 20px;
+}
+/* Highlighted per mockup 1c: the Output choice reads as a mode, not a knob. */
+.ms-output {
+  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
+  background: color-mix(in srgb, var(--safelight) 7%, transparent);
+  border-radius: 9px;
+  padding: 11px;
+}
+.ms-output .ms-field__hint {
+  margin-top: 8px;
 }
 .ms-field--row {
   display: flex;
