@@ -269,7 +269,6 @@ class CandidateServer:
                 "MOLD_DISPATCH_MODE": self.dispatch_mode,
                 "MOLD_MDNS": "0",
                 "MOLD_LOG": "info",
-                "HOME": str(self.home),
                 "TMPDIR": str(self.runtime_dir / "tmp"),
                 "XDG_CACHE_HOME": str(self.runtime_dir / "cache" / "xdg"),
                 "XDG_CONFIG_HOME": str(self.runtime_dir / "config"),
