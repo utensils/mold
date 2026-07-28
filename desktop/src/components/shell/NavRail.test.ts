@@ -8,6 +8,7 @@ import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useGalleryStore } from "../../stores/gallery";
 import { useGenerationStore } from "../../stores/generation";
+import { useChainJobsStore } from "../../stores/chainJobs";
 import { useHostModelsStore } from "../../stores/hostModels";
 
 const stub = { template: "<div />" };
@@ -119,6 +120,60 @@ describe("NavRail developing jobs", () => {
       expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]),
     );
     expect(jobs.classes()).not.toContain("max-h-44");
+  });
+
+  // G14 hole: the rail only ever read `generation.jobs`, so a running sequence
+  // rendered on the canvas while the sidebar insisted "nothing developing".
+  it("shows a running sequence with its clip counter", async () => {
+    const wrapper = await mountAt("/create");
+    const chains = useChainJobsStore();
+    chains.byHost["hal9000-7680"] = {
+      jobs: [
+        {
+          id: "job-1",
+          state: "running",
+          model: "ltx-2.3-22b-distilled:fp8",
+          stage_count: 5,
+          current_stage: 2,
+          created_at_unix_ms: Date.now(),
+          updated_at_unix_ms: Date.now(),
+          error: null,
+        },
+      ],
+      error: null,
+    };
+    await flushPromises();
+
+    const rail = wrapper.get("[data-test='developing-jobs']");
+    expect(rail.text()).toContain("clip 3/5");
+    expect(rail.text()).toContain("developing");
+    expect(wrapper.text()).not.toContain("nothing developing");
+  });
+
+  // Settled sequences have two homes already (the print in Library, the job in
+  // History) — rebuilding the pile one route away is the thing we removed.
+  it("keeps settled sequences out of the rail", async () => {
+    const wrapper = await mountAt("/create");
+    const chains = useChainJobsStore();
+    chains.byHost.local = {
+      jobs: [
+        {
+          id: "job-done",
+          state: "completed",
+          model: "ltx-video",
+          stage_count: 3,
+          current_stage: 2,
+          created_at_unix_ms: Date.now(),
+          updated_at_unix_ms: Date.now(),
+          error: null,
+        },
+      ],
+      error: null,
+    };
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='developing-jobs']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("nothing developing");
   });
 });
 

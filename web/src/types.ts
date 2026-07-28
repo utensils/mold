@@ -50,6 +50,10 @@ export interface OutputMetadata {
   generation_width?: number | null;
   generation_height?: number | null;
   strength?: number | null;
+  /** Durable sequence job this print was stitched from. Present only for
+   * chain jobs with a server-side record — ephemeral chain outputs and
+   * pre-#564 rows carry nothing (additive; newer servers only). */
+  chain_job_id?: string | null;
   scheduler?: Scheduler | null;
   output_format?: OutputFormat | null;
   cfg_plus?: boolean | null;

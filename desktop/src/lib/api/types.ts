@@ -369,6 +369,10 @@ export interface OutputMetadata {
   /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
    * for Reuse-settings source restore (additive; newer servers only). */
   source_image_sha256?: string | null;
+  /** Durable sequence job this print was stitched from. Present only for
+   * chain jobs with a server-side record — ephemeral chain outputs and
+   * pre-#564 rows carry nothing (additive; newer servers only). */
+  chain_job_id?: string | null;
   /** Plain kebab-case name, or a serde-tagged object for parameterized
    * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
   scheduler?: string | Record<string, unknown> | null;

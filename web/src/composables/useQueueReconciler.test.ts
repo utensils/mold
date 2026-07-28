@@ -44,6 +44,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     result: null,
     error: null,
     state: "running",
+    settledAt: null,
     chain: null,
     lastProgressAt: 1000,
     workStarted: true,

@@ -46,7 +46,9 @@ import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
+import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
+import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -105,6 +107,38 @@ watch(
   },
   { immediate: true },
 );
+
+// History drawer state lives in the URL (?panel=history), so the Create
+// activity digest can deep-link straight to its Sequences lens.
+const historyOpen = computed(() => route.query.panel === "history");
+function openHistory() {
+  void router.push({
+    query: { ...route.query, panel: "history", tab: "sequences" },
+  });
+}
+function closeHistory() {
+  const query = { ...route.query };
+  delete query.panel;
+  delete query.tab;
+  void router.replace({ query });
+}
+/** Re-enter a durable sequence in Create: the job is watched (or edited)
+ *  there, never in a Library drawer. */
+function onOpenSequence(payload: {
+  hostId: string;
+  jobId: string;
+  edit: boolean;
+}) {
+  closeHistory();
+  if (payload.edit) {
+    setSequenceHandoff({
+      kind: "edit",
+      hostId: payload.hostId,
+      jobId: payload.jobId,
+    });
+  }
+  void router.push({ path: "/create", query: { output: "sequence" } });
+}
 
 function syncSearchToUrl(value: string) {
   const q = value.trim();
@@ -718,6 +752,18 @@ onBeforeUnmount(() => {
       </label>
 
       <div class="gal__tools">
+        <button
+          type="button"
+          class="gal__icon"
+          data-test="open-history"
+          aria-label="History"
+          title="History"
+          :aria-pressed="historyOpen"
+          @click="openHistory"
+        >
+          <Icon name="history" :size="16" />
+        </button>
+
         <div class="gal__viewtoggle" role="group" aria-label="View mode">
           <button
             type="button"
@@ -1016,6 +1062,12 @@ onBeforeUnmount(() => {
       @use-source="onUseAsSource"
       @upscale="onUpscale"
       @delete="onLightboxDelete"
+    />
+
+    <HistoryDrawer
+      :open="historyOpen"
+      @close="closeHistory"
+      @open-sequence="onOpenSequence"
     />
   </div>
 </template>

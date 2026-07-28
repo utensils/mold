@@ -1,16 +1,21 @@
 <script setup lang="ts">
 /*
- * Activity strip (Mold Studio Create) — the "Activity" row above the composer.
- * Active jobs show a shimmer thumb + prompt + mono percent + a thin progress
- * bar; jobs still waiting in the queue show as pills with an ✕ cancel. Hidden
- * entirely when nothing is in flight. The per-GPU lane view lives in host
- * detail now — this strip is the lightweight at-a-glance indicator.
+ * Activity strip (Mold Studio Create) — the "Activity" row above the composer,
+ * and it is present tense. Active jobs show a shimmer thumb + prompt + mono
+ * percent + a thin progress bar; jobs still waiting in the queue show as pills
+ * with an ✕ cancel. Settled-but-wrong work (a failed print, a failed or
+ * interrupted sequence) keeps a dismissible row for five minutes, capped at
+ * two; everything else settled collapses into one digest chip that opens
+ * Library ▸ History ▸ Sequences. Hidden entirely when nothing is in flight and
+ * there is nothing left to count. The per-GPU lane view lives in host detail.
  */
-import { computed } from "vue";
+import { computed, reactive } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import {
+  activityDigestLabel,
   mergeActivity,
+  partitionActivity,
   type ActivityAction,
   type ActivityJobVM,
 } from "@studio/lib/activity";
@@ -39,15 +44,67 @@ const emit = defineEmits<{
   dismiss: [id: string];
   open: [job: Job];
   "sequence-action": [action: ActivityAction, vm: ActivityJobVM];
-  "clear-inactive": [];
-  "cleanup-disk": [];
+  "show-history": [];
 }>();
 
-// mergeActivity orders active work first (running before queued), then by
-// recency — the shared rule for both prints and sequences.
-const orderedSequences = computed(() =>
-  mergeActivity([], props.sequences).filter((vm) => vm.kind === "sequence"),
+/** Session-only sequence dismissals, keyed by VM key. Deliberately not
+ * persisted: the age rule already reads server timestamps and survives a
+ * reload, and a second retention mechanism could disagree with it. */
+const dismissedSequences = reactive(new Set<string>());
+
+/** Failed prints join the same partition so their rows expire on the same
+ * clock as sequences. Running/queued prints keep the strip's own chrome. */
+const printVMs = computed<ActivityJobVM[]>(() =>
+  props.jobs
+    .filter((job) => job.state === "error" && job.error)
+    .map((job) => ({
+      kind: "print" as const,
+      key: `print:${job.id}`,
+      hostId: job.hostId ?? ORIGIN_HOST_ID,
+      hostLabel: job.hostLabel ?? "",
+      model: job.request.model,
+      prompt: promptFor(job),
+      phase: "failed" as const,
+      progress: null,
+      chain: null,
+      actions: [],
+      createdAtMs: job.startedAt,
+      settledAtMs: job.settledAt,
+      error: job.error,
+    })),
 );
+
+const partition = computed(() =>
+  partitionActivity(mergeActivity(printVMs.value, props.sequences), {
+    dismissed: dismissedSequences,
+  }),
+);
+
+const orderedSequences = computed(() =>
+  [...partition.value.active, ...partition.value.attention].filter(
+    (vm) => vm.kind === "sequence",
+  ),
+);
+
+/** Which sequence rows carry the non-destructive ✕. */
+const attentionKeys = computed(
+  () => new Set(partition.value.attention.map((vm) => vm.key)),
+);
+
+/** Failed prints the strip is still holding, in partition order. */
+const errors = computed(() =>
+  partition.value.attention.flatMap((vm) => {
+    if (vm.kind !== "print") return [];
+    const job = props.jobs.find((j) => `print:${j.id}` === vm.key);
+    return job ? [job] : [];
+  }),
+);
+
+const digest = computed(() => activityDigestLabel(partition.value));
+
+function dismissSequence(vm: ActivityJobVM) {
+  dismissedSequences.add(vm.key);
+}
 
 const ACTION_LABELS: Record<ActivityAction, string> = {
   watch: "Watch",
@@ -95,16 +152,13 @@ const running = computed(() =>
 const queued = computed(() =>
   props.jobs.filter((j) => j.state === "running" && !j.workStarted),
 );
-const errors = computed(() =>
-  props.jobs.filter((j) => j.state === "error" && j.error),
-);
 const active = computed(
   () =>
-    running.value.length +
-      queued.value.length +
-      errors.value.length +
-      props.sequences.length >
-    0,
+    running.value.length > 0 ||
+    queued.value.length > 0 ||
+    partition.value.active.length > 0 ||
+    partition.value.attention.length > 0 ||
+    digest.value !== null,
 );
 </script>
 
@@ -112,24 +166,16 @@ const active = computed(
   <div v-if="active" class="activity" data-test="activity-strip">
     <div class="activity__head">
       <div class="activity__kicker">Activity</div>
-      <div v-if="sequences.length" class="activity__head-actions">
-        <button
-          type="button"
-          class="activity__head-action"
-          data-test="activity-clear-inactive"
-          @click="emit('clear-inactive')"
-        >
-          Clear inactive
-        </button>
-        <button
-          type="button"
-          class="activity__head-action"
-          data-test="activity-cleanup-disk"
-          @click="emit('cleanup-disk')"
-        >
-          Clean up disk
-        </button>
-      </div>
+      <button
+        v-if="digest"
+        type="button"
+        class="activity__digest"
+        data-test="activity-digest"
+        title="Show settled sequences in History"
+        @click="emit('show-history')"
+      >
+        {{ digest }}
+      </button>
     </div>
 
     <div v-for="job in running" :key="job.id" class="activity__running">
@@ -228,6 +274,17 @@ const active = computed(
         >
           {{ ACTION_LABELS[action] }}
         </button>
+        <button
+          v-if="attentionKeys.has(vm.key)"
+          type="button"
+          class="activity__cancel"
+          :data-test="`activity-seq-dismiss-${vm.kind === 'sequence' ? vm.jobId : ''}`"
+          title="Hide this from Activity. The sequence stays in Library ▸ History."
+          :aria-label="`Dismiss ${vm.model}`"
+          @click="dismissSequence(vm)"
+        >
+          <Icon name="close" :size="13" />
+        </button>
       </span>
     </div>
 
@@ -307,23 +364,17 @@ const active = computed(
   gap: 8px;
 }
 
-.activity__head-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.activity__head-action {
-  border: 1px solid var(--ce);
+.activity__digest {
+  border: 0;
   background: transparent;
   color: var(--ink-3);
-  padding: 3px 9px;
-  border-radius: var(--radius-pill);
+  padding: 0;
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
   cursor: pointer;
 }
-.activity__head-action:hover {
-  border-color: var(--safelight);
+.activity__digest:hover {
   color: var(--rebate);
 }
 

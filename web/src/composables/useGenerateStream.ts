@@ -41,6 +41,10 @@ export interface Job {
   result: SseCompleteEvent | null;
   error: string | null;
   state: "running" | "done" | "error" | "canceled";
+  /** Wall clock when the job stopped moving; `null` while it is running.
+   * The Create activity strip expires settled-but-failed rows against this
+   * (shared @studio partition rule) instead of keeping them forever. */
+  settledAt: number | null;
   /** When the job was auto-promoted to the chain endpoint. `null` for a
    * normal single-clip submission. */
   chain: ChainJobMeta | null;
@@ -396,6 +400,7 @@ interface PersistedJob {
   result: PersistedResult | null;
   error: string | null;
   state: Job["state"];
+  settledAt?: number | null;
   chain: ChainJobMeta | null;
   lastProgressAt: number;
   workStarted: boolean;
@@ -469,6 +474,13 @@ function loadPersistedJobs(raw: string | null): Job[] {
         result: p.result as SseCompleteEvent | null,
         error,
         state,
+        // Rows persisted before this field existed fall back to the last
+        // thing that actually happened — never `null`, which would read as
+        // "just now" and resurrect a three-day-old failure in the strip.
+        settledAt:
+          state === "running"
+            ? null
+            : (p.settledAt ?? p.lastProgressAt ?? p.startedAt),
         chain: p.chain,
         lastProgressAt: p.lastProgressAt,
         workStarted: p.workStarted,
@@ -506,6 +518,7 @@ function persistJobs(jobs: Job[]) {
       result: stripHeavyResult(j.result),
       error: j.error,
       state: j.state,
+      settledAt: j.settledAt,
       chain: j.chain,
       lastProgressAt: j.lastProgressAt,
       workStarted: j.workStarted,
@@ -635,6 +648,7 @@ function submitJob(
     result: null,
     error: null,
     state: "running",
+    settledAt: null,
     chain: isChain
       ? {
           stageCount: (
@@ -674,6 +688,7 @@ function submitJob(
       job.error = err.message ?? "network error";
     }
     job.state = "error";
+    job.settledAt = Date.now();
     job.previewUrl = null;
   };
 
@@ -687,6 +702,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = chainCompleteToSingle(req, evt);
             job.state = "done";
+            job.settledAt = Date.now();
             job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
@@ -706,6 +722,7 @@ function submitJob(
       job.error =
         "internal: ChainRequestWire submitted with non-chain routing decision";
       job.state = "error";
+      job.settledAt = Date.now();
     } else {
       return generateStream(
         req,
@@ -714,6 +731,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = evt;
             job.state = "done";
+            job.settledAt = Date.now();
             job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
@@ -744,12 +762,14 @@ async function cancelJob(id: string): Promise<void> {
   if (!job) return;
   job.controller.abort();
   job.state = "canceled";
+  job.settledAt = Date.now();
   job.previewUrl = null;
   if (!job.serverId) return;
   try {
     await cancelQueueJob(job.serverId, job.target ?? undefined);
   } catch (error) {
     job.state = "error";
+    job.settledAt = Date.now();
     job.error = error instanceof Error ? error.message : String(error);
   }
 }

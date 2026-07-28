@@ -307,6 +307,7 @@ describe("CreatePage layout and behavior", () => {
         },
         error: null,
         state: "done",
+        settledAt: Date.now(),
         chain: null,
         lastProgressAt: Date.now(),
         workStarted: true,

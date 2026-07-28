@@ -40,8 +40,13 @@ export interface Job {
   error: string | null;
   /** Structured transport-close marker used by iOS resume reconciliation. */
   interrupted: boolean;
-  /** Client submission time used to avoid joining a later fixed-seed duplicate. */
+  /** Client submission time used to avoid joining a later fixed-seed duplicate.
+   *  Also the print's `createdAtMs` in the shared activity merge — a real wall
+   *  clock, never the clientId counter. */
   submittedAtUnixMs: number;
+  /** Wall clock at the first terminal status; null while the job is in flight.
+   *  The Create strip's attention rows expire against this. */
+  settledAtMs: number | null;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
   /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */
@@ -91,6 +96,7 @@ export function newJob(req: GenerateRequest): Job {
     error: null,
     interrupted: false,
     submittedAtUnixMs: Date.now(),
+    settledAtMs: null,
     resultUrl: null,
     previewUrl: null,
     result: null,
@@ -106,6 +112,15 @@ export function newJob(req: GenerateRequest): Job {
     resultUrlLoading: false,
     resultError: null,
   };
+}
+
+/**
+ * Stamp the wall clock the first time a job reaches a terminal status. Idempotent
+ * on purpose: a late transport frame must not restart the attention-row clock.
+ */
+export function markJobSettled(job: Job): void {
+  if (job.settledAtMs !== null) return;
+  if (job.status === "complete" || job.status === "error") job.settledAtMs = Date.now();
 }
 
 /** Pure SSE reducer shared by desktop and mobile. Mutates and returns the job. */
