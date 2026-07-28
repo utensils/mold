@@ -332,6 +332,35 @@ describe("ChainsView multi-host video generation", () => {
     expect(wrapper.get("[data-test='selected-model-name']").text()).toContain("ltx-video");
   });
 
+  it("refuses to render when the sticky host isn't ready instead of rerouting", async () => {
+    installRemoteVideoHost();
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+    const hosts = useHostsStore();
+    hosts.extras[0]!.status = "error";
+
+    const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
+    await flushPromises();
+    const state = wrapper.vm as unknown as {
+      form: { stages: { prompt: string }[] };
+      render: () => Promise<void>;
+    };
+    state.form.stages.forEach((stage, index) => (stage.prompt = `clip ${index}`));
+    apiJson.mockClear();
+    apiJsonTo.mockClear();
+
+    await state.render();
+
+    expect(apiJson).not.toHaveBeenCalledWith("/api/chain-jobs", expect.anything());
+    expect(apiJsonTo).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "/api/chain-jobs",
+      expect.anything(),
+    );
+    const { useToastStore } = await import("../stores/toasts");
+    expect(useToastStore().items.some((t) => t.message.includes("isn't reachable"))).toBe(true);
+    wrapper.unmount();
+  });
+
   it("does not enable generation for an imported unavailable model", async () => {
     installRemoteVideoHost();
     const wrapper = mount(ChainsView, {

@@ -307,6 +307,14 @@ function exportToml() {
 
 async function render() {
   if (!canRender.value) return;
+  // A concrete sticky pick that resolves to no route means that host is
+  // connected but not ready — report it (same contract as Single) instead of
+  // silently falling back to the primary.
+  const sticky = stickyGenTarget.value;
+  if (sticky && sticky !== "capable" && !selectedRoute.value) {
+    toasts.push("The selected host isn't reachable. Pick another host.", "error");
+    return;
+  }
   rendering.value = true;
   try {
     await chains.create(chainFormToRequest(form), selectedRoute.value?.target ?? null);
