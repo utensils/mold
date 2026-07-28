@@ -28,11 +28,7 @@ import {
 import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
-import type {
-  GalleryImage,
-  ModelInfoExtended,
-  OutputMetadata,
-} from "../types";
+import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
 import type { Job } from "../composables/useGenerateStream";
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));

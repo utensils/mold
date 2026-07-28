@@ -21,8 +21,7 @@ export type ComposerPrefill = GeneratePrefill;
  * sequence intent per arrival, and two slots could disagree.
  */
 export type SequenceHandoff =
-  | { kind: "edit"; hostId: string; jobId: string }
-  | { kind: "reuse"; metadata: OutputMetadata };
+  { kind: "edit"; hostId: string; jobId: string } | { kind: "reuse"; metadata: OutputMetadata };
 
 /** Carries "Reuse settings" from the gallery into the Generate composer. */
 export const useComposerStore = defineStore("composer", {

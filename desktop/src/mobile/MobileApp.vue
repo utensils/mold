@@ -2480,12 +2480,16 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     }
     const notes: string[] = [];
     if (reuse.substitutedModel) {
-      notes.push(`The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`);
+      notes.push(
+        `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`,
+      );
     }
     if (reuse.sequence) {
       notes.push(sequenceReuseNote(reuse.sequence.clips.length, reuse.sequence.lossy));
       if (reuse.sequence.raised > 0) {
-        notes.push(sequenceReuseClampNote(modelDisplayNameForId(form.model, generationModels.value)));
+        notes.push(
+          sequenceReuseClampNote(modelDisplayNameForId(form.model, generationModels.value)),
+        );
       }
     } else if (notes.length === 0) {
       notes.push("Prompt settings restored");

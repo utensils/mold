@@ -229,9 +229,7 @@ function canEditSequence(entry: MergedPrint): boolean {
     sequenceEditAvailability({
       chainJobId: entry.item.metadata.chain_job_id,
       hostId,
-      knownJobIds: hostId
-        ? (chains.byHost[hostId]?.jobs.map((job) => job.id) ?? null)
-        : null,
+      knownJobIds: hostId ? (chains.byHost[hostId]?.jobs.map((job) => job.id) ?? null) : null,
     }) === "available"
   );
 }

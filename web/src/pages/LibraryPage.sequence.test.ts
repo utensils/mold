@@ -53,10 +53,9 @@ vi.mock("../components/machines/hostClient", () => ({
 }));
 vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob: vi.fn() }));
 vi.mock("../lib/multiHostGallery", async () => {
-  const actual =
-    await vi.importActual<typeof import("../lib/multiHostGallery")>(
-      "../lib/multiHostGallery",
-    );
+  const actual = await vi.importActual<
+    typeof import("../lib/multiHostGallery")
+  >("../lib/multiHostGallery");
   return {
     ...actual,
     fetchMergedGallery: async () => {
@@ -91,6 +90,7 @@ const sequencePrint: GalleryImage = {
     guidance: 3,
     width: 1024,
     height: 576,
+    version: "test",
     chain_job_id: "job-9",
     chain: {
       stage_count: 2,
@@ -114,6 +114,7 @@ const legacyPrint: GalleryImage = {
     guidance: 3.5,
     width: 1024,
     height: 1024,
+    version: "test",
   },
 };
 
@@ -146,7 +147,16 @@ const LightboxStub = defineComponent({
     isSequence: Boolean,
     canEditSequence: Boolean,
   },
-  emits: ["close", "prev", "next", "reuse", "use-source", "upscale", "delete", "edit-sequence"],
+  emits: [
+    "close",
+    "prev",
+    "next",
+    "reuse",
+    "use-source",
+    "upscale",
+    "delete",
+    "edit-sequence",
+  ],
   template: `<div v-if="item" data-test="lightbox">
     <button data-test="lb-reuse" @click="$emit('reuse', item)">reuse</button>
     <button
@@ -291,8 +301,7 @@ describe("LibraryPage — sequence prints", () => {
     expect(
       useNotifications().toasts.some(
         (t) =>
-          t.kind === "error" &&
-          t.text.endsWith("Check the host in Machines."),
+          t.kind === "error" && t.text.endsWith("Check the host in Machines."),
       ),
     ).toBe(true);
     expect(pushMock).not.toHaveBeenCalled();

@@ -1681,9 +1681,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
 
   const notes = [sequenceReuseNote(clips.length, plan.lossy)];
   if (raised > 0) {
-    notes.push(
-      sequenceReuseClampNote(modelDisplayNameForId(form.model, installedModels.value)),
-    );
+    notes.push(sequenceReuseClampNote(modelDisplayNameForId(form.model, installedModels.value)));
   }
   sequenceReuseNotice.value = notes.join(" · ");
   void loadChainLimits();

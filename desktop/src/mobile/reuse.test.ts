@@ -138,10 +138,7 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     supports_sequence: true,
   } as ModelEntry;
 
-  function chainPrint(
-    frames: number[],
-    extra: Partial<OutputMetadata> = {},
-  ): OutputMetadata {
+  function chainPrint(frames: number[], extra: Partial<OutputMetadata> = {}): OutputMetadata {
     return {
       ...metadata,
       model: sequenceModel.name,
