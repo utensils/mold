@@ -1454,6 +1454,15 @@ out-of-order materialized set exceeds the v2 window remains in v1 drain mode:
 it accepts no new grants, persists legal v1 transitions across restarts, and
 switches once to v2 only after the sparse reducer is representable.
 
+The joint submission bridge previews a successful completion against an
+isolated clone of the exact reducer authority before creating a staged child.
+Stale leases, closing-attempt delete-artifact dispositions, and validation
+errors therefore never acquire a staging file or receipt. If parent-journal
+persistence fails after a valid receipt was staged, its append boundary is
+uncertain: the bridge retains the receipt rather than tombstoning evidence the
+parent journal may have accepted. Joint recovery then validates or removes the
+receipt and requeues the still-active lease before serving.
+
 ### 12.3 Parent and child model
 
 A server batch parent lazily represents indices `0..N`; it does not

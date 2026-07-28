@@ -5,7 +5,7 @@
 //! together; neither side is allowed to invent success for the other.
 
 use crate::batch_parent::{
-    BatchChildLease, BatchParentState, CompletionDisposition, DurableBatchParent,
+    BatchChildLease, BatchParentState, ChildCompletion, CompletionDisposition, DurableBatchParent,
 };
 use crate::batch_transaction::{
     claim_parent_and_attempt_authorities, claim_parent_authority, BatchManifestState,
@@ -228,8 +228,34 @@ impl DurableBatchAttempt {
         lease: &BatchChildLease,
         bytes: &[u8],
     ) -> anyhow::Result<CompletionDisposition> {
+        let preview = self.parent.preview_staged_completion(lease)?;
+        if matches!(
+            preview,
+            CompletionDisposition::StaleDeletePrivateArtifact
+                | CompletionDisposition::ClosedAttemptDeletePrivateArtifact
+                | CompletionDisposition::AttemptFencedDeletePrivateArtifact
+        ) {
+            let disposition = self.parent.complete(lease, ChildCompletion::Succeeded)?;
+            anyhow::ensure!(
+                disposition == preview,
+                "batch completion authority changed after exact prevalidation"
+            );
+            return Ok(disposition);
+        }
+        anyhow::ensure!(
+            matches!(
+                preview,
+                CompletionDisposition::Accepted | CompletionDisposition::AttemptPrepared
+            ),
+            "successful batch completion cannot stage for disposition {preview:?}"
+        );
+
         let receipt = self.transaction.stage_bytes_for_lease(lease, bytes)?;
         let disposition = self.parent.complete_staged(lease, receipt)?;
+        anyhow::ensure!(
+            disposition == preview,
+            "batch completion authority changed after exact prevalidation"
+        );
         if disposition == CompletionDisposition::AttemptPrepared {
             self.transaction.mark_prepared()?;
         }
@@ -1156,6 +1182,197 @@ mod tests {
         let error = DurableBatchAttempt::recover(dir.path(), "parent").unwrap_err();
 
         assert!(format!("{error:#}").contains("without a matching durable staging receipt"));
+    }
+
+    #[test]
+    fn rejected_stale_lease_never_stages_or_blocks_the_live_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        assert_eq!(lease.lease_generation, 1);
+        let stale = BatchChildLease {
+            lease_generation: 0,
+            ..lease.clone()
+        };
+        let staged = bridge.transaction.staging_path(0).unwrap();
+        let journal = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join("parent/attempts/0/journal.jsonl");
+
+        assert_eq!(
+            bridge.stage_and_accept(&stale, b"stale").unwrap(),
+            CompletionDisposition::StaleDeletePrivateArtifact
+        );
+        assert!(!staged.exists());
+        assert!(bridge.transaction.staged_receipts().is_empty());
+        assert!(
+            !std::fs::read_to_string(&journal)
+                .unwrap()
+                .contains("\"kind\":\"child_staged\""),
+            "a rejected lease must not gain durable transaction authority"
+        );
+
+        assert_eq!(
+            bridge.stage_and_accept(&lease, b"live").unwrap(),
+            CompletionDisposition::AttemptPrepared
+        );
+        assert_eq!(std::fs::read(staged).unwrap(), b"live");
+    }
+
+    #[test]
+    fn closed_success_dispositions_never_stage_private_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 2), record("two.png", 1, 2)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (first, _) = bridge.grant(0).unwrap();
+        let (last, _) = bridge.grant(1).unwrap();
+        assert_eq!(
+            bridge.parent.request_cancel().unwrap(),
+            CompletionDisposition::Accepted
+        );
+
+        assert_eq!(
+            bridge.stage_and_accept(&first, b"closed").unwrap(),
+            CompletionDisposition::ClosedAttemptDeletePrivateArtifact
+        );
+        assert!(!bridge.transaction.staging_path(0).unwrap().exists());
+        assert!(bridge.transaction.staged_receipts().is_empty());
+
+        assert_eq!(
+            bridge.stage_and_accept(&last, b"fenced").unwrap(),
+            CompletionDisposition::AttemptFencedDeletePrivateArtifact
+        );
+        assert!(!bridge.transaction.staging_path(1).unwrap().exists());
+        assert!(bridge.transaction.staged_receipts().is_empty());
+        assert_eq!(bridge.parent.state(), BatchParentState::Fenced);
+    }
+
+    #[test]
+    fn completion_validation_errors_never_stage_private_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        let ahead = BatchChildLease {
+            lease_generation: 2,
+            ..lease.clone()
+        };
+        let staged = bridge.transaction.staging_path(0).unwrap();
+
+        let error = bridge.stage_and_accept(&ahead, b"ahead").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("completion lease generation is ahead"),
+            "unexpected validation error: {error:#}"
+        );
+        assert!(!staged.exists());
+        assert!(bridge.transaction.staged_receipts().is_empty());
+        assert_eq!(
+            bridge.stage_and_accept(&lease, b"live").unwrap(),
+            CompletionDisposition::AttemptPrepared
+        );
+    }
+
+    #[test]
+    fn parent_persistence_error_retains_receipt_for_joint_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        let staged = bridge.transaction.staging_path(0).unwrap();
+        let parent_journal =
+            parent_authority_dir(dir.path(), "parent").join("parent-journal.jsonl");
+        let saved_parent_journal = parent_journal.with_extension("saved");
+        std::fs::rename(&parent_journal, &saved_parent_journal).unwrap();
+        std::fs::create_dir(&parent_journal).unwrap();
+
+        let error = bridge.stage_and_accept(&lease, b"recoverable").unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("persisting batch parent delta"),
+            "unexpected persistence error: {error:#}"
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"recoverable");
+        assert_eq!(bridge.transaction.staged_receipts().len(), 1);
+        let transaction_journal = std::fs::read_to_string(
+            dir.path()
+                .join(TRANSACTION_DIR)
+                .join("parent/attempts/0/journal.jsonl"),
+        )
+        .unwrap();
+        assert!(transaction_journal.contains("\"kind\":\"child_staged\""));
+        assert!(!transaction_journal.contains("\"kind\":\"child_unstaged\""));
+
+        std::fs::remove_dir(&parent_journal).unwrap();
+        std::fs::rename(&saved_parent_journal, &parent_journal).unwrap();
+        drop(bridge);
+
+        let (mut recovered, report) = DurableBatchAttempt::recover(dir.path(), "parent").unwrap();
+        assert_eq!(report.receipts_removed, 1);
+        assert_eq!(report.leases_requeued, 1);
+        assert!(recovered.transaction.staged_receipts().is_empty());
+        assert!(!staged.exists());
+        let (retry, _) = recovered.grant(0).unwrap();
+        assert_eq!(retry.lease_generation, 2);
+        assert_eq!(
+            recovered.stage_and_accept(&retry, b"recovered").unwrap(),
+            CompletionDisposition::AttemptPrepared
+        );
+    }
+
+    #[test]
+    fn fenced_completion_error_never_stages_private_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.png", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        bridge.parent.request_cancel().unwrap();
+        assert_eq!(
+            bridge
+                .parent
+                .complete(&lease, ChildCompletion::Cancelled)
+                .unwrap(),
+            CompletionDisposition::AttemptFenced
+        );
+
+        let error = bridge.stage_and_accept(&lease, b"after-fence").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no materialized lease"),
+            "unexpected fenced rejection: {error:#}"
+        );
+        assert!(!bridge.transaction.staging_path(0).unwrap().exists());
+        assert!(bridge.transaction.staged_receipts().is_empty());
     }
 
     #[tokio::test]

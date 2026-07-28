@@ -426,6 +426,24 @@ impl DurableBatchParent {
         self.complete_inner(lease, ChildCompletion::Succeeded, Some(receipt))
     }
 
+    /// Validate a successful staged completion against the exact current
+    /// reducer authority without mutating or journaling it.
+    ///
+    /// The joint batch bridge calls this before creating a private artifact,
+    /// so stale, closed, fenced, and otherwise invalid leases can never gain
+    /// transaction-journal authority merely by arriving at the bridge.
+    pub(crate) fn preview_staged_completion(
+        &self,
+        lease: &BatchChildLease,
+    ) -> anyhow::Result<CompletionDisposition> {
+        anyhow::ensure!(
+            !self.poisoned,
+            "batch parent durable authority is poisoned after a persistence failure"
+        );
+        let mut preview = self.reducer.clone();
+        preview.complete(lease, ChildCompletion::Succeeded)
+    }
+
     fn complete_inner(
         &mut self,
         lease: &BatchChildLease,
