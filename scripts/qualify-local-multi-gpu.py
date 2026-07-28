@@ -384,7 +384,16 @@ def models_tree_manifest(
     root: pathlib.Path, deadline: Deadline | None = None
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+    paths: list[pathlib.Path] = []
+    for directory, names, files in os.walk(root, followlinks=False):
+        if deadline is not None:
+            deadline.remaining()
+        base = pathlib.Path(directory)
+        for name in sorted([*names, *files]):
+            if deadline is not None:
+                deadline.remaining()
+            paths.append(base / name)
+    for path in sorted(paths, key=lambda item: str(item.relative_to(root))):
         if deadline is not None:
             deadline.remaining()
         stat = path.lstat()
@@ -432,7 +441,16 @@ def collect_model_artifacts(
     artifacts: list[dict[str, object]] = []
     seen: set[pathlib.Path] = set()
     for artifact_root in sorted(roots, key=str):
-        for path in sorted(artifact_root.rglob("*"), key=str):
+        candidates: list[pathlib.Path] = []
+        for directory, names, files in os.walk(artifact_root, followlinks=False):
+            if deadline is not None:
+                deadline.remaining()
+            base = pathlib.Path(directory)
+            for name in sorted([*names, *files]):
+                if deadline is not None:
+                    deadline.remaining()
+                candidates.append(base / name)
+        for path in sorted(candidates, key=str):
             if deadline is not None:
                 deadline.remaining()
             if path in seen or not path.is_file() or path.is_symlink():
@@ -496,15 +514,22 @@ class Evidence:
         self.items: list[dict[str, str]] = []
         self._labels: set[str] = set()
 
-    def _add(self, label: str, path: pathlib.Path, kind: str) -> pathlib.Path:
+    def _add(
+        self,
+        label: str,
+        path: pathlib.Path,
+        kind: str,
+        deadline: Deadline | None = None,
+    ) -> pathlib.Path:
         if label in self._labels:
             raise ValueError(f"duplicate evidence label: {label}")
+        digest = sha256(path, deadline)
         self._labels.add(label)
         self.items.append(
             {
                 "label": label,
                 "path": str(path.resolve()),
-                "sha256": sha256(path),
+                "sha256": digest,
                 "kind": kind,
             }
         )
@@ -523,8 +548,14 @@ class Evidence:
     def jsonl(self, label: str, path: pathlib.Path) -> pathlib.Path:
         return self._add(label, path, "jsonl")
 
-    def existing(self, label: str, path: pathlib.Path, kind: str) -> pathlib.Path:
-        return self._add(label, path, kind)
+    def existing(
+        self,
+        label: str,
+        path: pathlib.Path,
+        kind: str,
+        deadline: Deadline | None = None,
+    ) -> pathlib.Path:
+        return self._add(label, path, kind, deadline)
 
     def contains(self, label: str) -> bool:
         return label in self._labels
@@ -736,7 +767,7 @@ class CandidateServer:
                 if status == 200:
                     self.server_pid = self._resolve_candidate_pid()
                     self.process_identity = candidate_process_identity(
-                        self.server_pid, self.binary
+                        self.server_pid, self.binary, deadline
                     )
                     return
                 last_error = f"HTTP {status}"
@@ -772,7 +803,19 @@ class CandidateServer:
             if self.log_path.exists() and self.label + "-server-log" not in {
                 item["label"] for item in self.evidence.items
             }:
-                self.evidence.existing(f"{self.label}-server-log", self.log_path, "text")
+                try:
+                    self.evidence.existing(
+                        f"{self.label}-server-log",
+                        self.log_path,
+                        "text",
+                        deadline,
+                    )
+                except TimeoutError as error:
+                    cleanup_error = (
+                        f"{cleanup_error}; {error}"
+                        if cleanup_error
+                        else str(error)
+                    )
         return cleanup_error
 
     @property
@@ -817,7 +860,7 @@ def port_is_free(port: int) -> bool:
 
 
 def candidate_process_identity(
-    pid: int, binary: pathlib.Path
+    pid: int, binary: pathlib.Path, deadline: Deadline | None = None
 ) -> dict[str, object]:
     proc = pathlib.Path(f"/proc/{pid}")
     stat_fields = (proc / "stat").read_text(encoding="utf-8").split()
@@ -836,19 +879,23 @@ def candidate_process_identity(
         "executable": str(executable),
         "executable_device": executable_stat.st_dev,
         "executable_inode": executable_stat.st_ino,
-        "binary_sha256": sha256(binary),
+        "binary_sha256": sha256(binary, deadline),
         "pid_namespace": os.readlink(proc / "ns" / "pid"),
         "nspid": [int(value) for value in nspid_line.split()[1:]],
     }
 
 
-def _tcp_rows(path: pathlib.Path) -> list[dict[str, object]]:
+def _tcp_rows(
+    path: pathlib.Path, deadline: Deadline | None = None
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()[1:]
     except OSError:
         return rows
     for line in lines:
+        if deadline is not None:
+            deadline.remaining()
         fields = line.split()
         if len(fields) < 10:
             continue
@@ -866,11 +913,15 @@ def _tcp_rows(path: pathlib.Path) -> list[dict[str, object]]:
     return rows
 
 
-def _process_socket_inodes(pid: int) -> set[str]:
+def _process_socket_inodes(
+    pid: int, deadline: Deadline | None = None
+) -> set[str]:
     result: set[str] = set()
     try:
         descriptors = pathlib.Path(f"/proc/{pid}/fd").iterdir()
         for descriptor in descriptors:
+            if deadline is not None:
+                deadline.remaining()
             try:
                 target = os.readlink(descriptor)
             except OSError:
@@ -882,18 +933,27 @@ def _process_socket_inodes(pid: int) -> set[str]:
     return result
 
 
-def reserved_service_snapshot(port: int = RESERVED_SERVICE_PORT) -> dict[str, object]:
+def reserved_service_snapshot(
+    deadline: Deadline, port: int = RESERVED_SERVICE_PORT
+) -> dict[str, object]:
     listener_rows = [
         row
         for table in (pathlib.Path("/proc/net/tcp"), pathlib.Path("/proc/net/tcp6"))
-        for row in _tcp_rows(table)
+        for row in _tcp_rows(table, deadline)
         if row["local_port"] == port and row["state"] == "0A"
     ]
     listener_inodes = {str(row["inode"]) for row in listener_rows}
     owners: list[dict[str, object]] = []
-    for proc in sorted(pathlib.Path("/proc").glob("[0-9]*"), key=lambda path: int(path.name)):
+    processes: list[pathlib.Path] = []
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            deadline.remaining()
+            if entry.name.isdigit():
+                processes.append(pathlib.Path(entry.path))
+    for proc in sorted(processes, key=lambda path: int(path.name)):
+        deadline.remaining()
         pid = int(proc.name)
-        owned = sorted(listener_inodes & _process_socket_inodes(pid))
+        owned = sorted(listener_inodes & _process_socket_inodes(pid, deadline))
         if not owned:
             continue
         try:
@@ -925,16 +985,16 @@ def reserved_service_snapshot(port: int = RESERVED_SERVICE_PORT) -> dict[str, ob
 
 
 def candidate_reserved_connections(
-    pid: int, port: int = RESERVED_SERVICE_PORT
+    pid: int, deadline: Deadline, port: int = RESERVED_SERVICE_PORT
 ) -> list[dict[str, object]]:
-    owned = _process_socket_inodes(pid)
+    owned = _process_socket_inodes(pid, deadline)
     return [
         row
         for table in (
             pathlib.Path(f"/proc/{pid}/net/tcp"),
             pathlib.Path(f"/proc/{pid}/net/tcp6"),
         )
-        for row in _tcp_rows(table)
+        for row in _tcp_rows(table, deadline)
         if str(row["inode"]) in owned
         and row["state"] != "0A"
         and (row["local_port"] == port or row["remote_port"] == port)
@@ -1305,7 +1365,7 @@ def run_parallel_lifecycle(
                 "compute_apps": apps,
                 "compute_apps_raw": raw_apps,
                 "reserved_service_connections": candidate_reserved_connections(
-                    server.pid
+                    server.pid, deadline
                 ),
             }
             samples.write(json.dumps(sample, sort_keys=True) + "\n")
@@ -1719,6 +1779,7 @@ def run_maintenance(
     request: dict[str, object],
     evidence: Evidence,
     deadline: Deadline,
+    expected_mapping: dict[str, str],
 ) -> None:
     set_all_devices(server, False, deadline)
     status, _, body = server.api.request(
@@ -1730,6 +1791,20 @@ def run_maintenance(
             f"all-disabled generation was not rejected as maintenance: {status} {text}"
         )
     _, devices = server.api.json("GET", "/api/devices")
+    maintenance_rows = devices.get("devices", [])
+    maintenance_mapping = {
+        str(device.get("id")): str(device.get("nvml_uuid"))
+        for device in maintenance_rows
+    }
+    if (
+        len(maintenance_rows) != 2
+        or maintenance_mapping != expected_mapping
+        or any(
+            device.get("admin_state") != "disabled"
+            for device in maintenance_rows
+        )
+    ):
+        raise RuntimeError("maintenance snapshot is not the exact disabled inventory")
     evidence.json(
         "all-disabled-maintenance",
         {
@@ -1751,6 +1826,7 @@ def start_selector_server(
     label: str,
     gpus: str | None,
     expected_uuids: set[str],
+    qualification_mapping: dict[str, str],
     deadline: Deadline,
     cuda_visible_devices: str | None = None,
     empty_gpu_env: bool = False,
@@ -1776,6 +1852,15 @@ def start_selector_server(
             for device in payload["devices"]
             if device.get("admin_state") != "startup_excluded"
         }
+        observed = {
+            str(device["id"]): str(device["nvml_uuid"])
+            for device in payload.get("devices", [])
+        }
+        if len(payload.get("devices", [])) != 2 or observed != qualification_mapping:
+            raise RuntimeError(
+                f"selector {label} omitted or changed qualification inventory: "
+                f"{observed!r}"
+            )
         if selected != expected_uuids:
             raise RuntimeError(
                 f"selector {label} selected {sorted(selected)!r}, "
@@ -1806,6 +1891,9 @@ def run_selector_matrix(
     deadline: Deadline,
 ) -> None:
     all_set = set(expected_uuids)
+    qualification_mapping = {
+        stable_ids_by_uuid[gpu_uuid]: gpu_uuid for gpu_uuid in expected_uuids
+    }
     first_uuid, second_uuid = expected_uuids[:2]
     results = [
         start_selector_server(
@@ -1815,6 +1903,7 @@ def run_selector_matrix(
             label="empty",
             gpus=None,
             expected_uuids=all_set,
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
             empty_gpu_env=True,
         ),
@@ -1825,6 +1914,7 @@ def run_selector_matrix(
             label="all",
             gpus="all",
             expected_uuids=all_set,
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
         ),
         start_selector_server(
@@ -1834,6 +1924,7 @@ def run_selector_matrix(
             label="ordinal-one",
             gpus="1",
             expected_uuids={second_uuid},
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
         ),
         start_selector_server(
@@ -1843,6 +1934,7 @@ def run_selector_matrix(
             label="stable-id",
             gpus=stable_ids_by_uuid[first_uuid],
             expected_uuids={first_uuid},
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
         ),
         start_selector_server(
@@ -1852,6 +1944,7 @@ def run_selector_matrix(
             label="nvidia-uuid",
             gpus=second_uuid,
             expected_uuids={second_uuid},
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
         ),
         start_selector_server(
@@ -1861,6 +1954,7 @@ def run_selector_matrix(
             label="none",
             gpus="none",
             expected_uuids=set(),
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
         ),
         start_selector_server(
@@ -1870,6 +1964,7 @@ def run_selector_matrix(
             label="reordered-stable",
             gpus=stable_ids_by_uuid[first_uuid],
             expected_uuids={first_uuid},
+            qualification_mapping=qualification_mapping,
             deadline=deadline,
             cuda_visible_devices=f"{second_uuid},{first_uuid}",
         ),
@@ -1942,6 +2037,17 @@ def run_selector_matrix(
             "stdout": command.stdout,
             "stderr": command.stderr,
             "argv": contract_argv,
+            "environment": {
+                key: contract_env.get(key)
+                for key in (
+                    "HOME",
+                    "TMPDIR",
+                    "XDG_CACHE_HOME",
+                    "XDG_CONFIG_HOME",
+                    "XDG_DATA_HOME",
+                    "MOLD_HOST",
+                )
+            },
             "hardware_prefix": common_hex_prefix(list(stable_ids_by_uuid.values())),
             "hardware_claimed": False,
         },
@@ -2107,7 +2213,7 @@ def main() -> int:
     primary_pid = None
     error_message = None
     expected = args.expected_gpu_uuid
-    binary_sha = sha256(args.binary)
+    binary_sha = sha256(args.binary, deadline)
     version = "unavailable"
     source_commit = "0" * 40
     request: dict[str, object] = default_request(args.model or "unavailable")
@@ -2118,7 +2224,7 @@ def main() -> int:
     models_before: list[dict[str, object]] | None = None
     live_service_before: dict[str, object] | None = None
     try:
-        live_service_before = reserved_service_snapshot()
+        live_service_before = reserved_service_snapshot(deadline)
         evidence.json("live-service-before", live_service_before)
         models_before = models_tree_manifest(args.models_dir, deadline)
         evidence.json("models-tree-before", models_before)
@@ -2241,6 +2347,9 @@ def main() -> int:
         stable_by_uuid = {
             device["nvml_uuid"]: device["id"] for device in api_devices
         }
+        initial_mapping = {
+            str(device["id"]): str(device["nvml_uuid"]) for device in api_devices
+        }
         checks["both_devices_discovered"] = check(
             "passed",
             "exact expected UUIDs are enabled in devices, status, resources, and queue plan",
@@ -2309,7 +2418,7 @@ def main() -> int:
             ["queued-cancellation"],
         )
 
-        run_maintenance(server, request, evidence, deadline)
+        run_maintenance(server, request, evidence, deadline, initial_mapping)
         checks["all_disabled_maintenance"] = check(
             "passed",
             "all devices disabled cleanly and generation failed with maintenance error",
@@ -2318,11 +2427,9 @@ def main() -> int:
 
         # Persist one disabled preference across an exact-process restart.
         first = stable_ids[0]
-        initial_mapping = {
-            str(device["id"]): str(device["nvml_uuid"]) for device in api_devices
-        }
         disabled_uuid = initial_mapping[first]
         old_pid = server.pid
+        old_process_identity = server.process_identity
         status, body = server.api.json(
             "PATCH",
             f"/api/devices/{urllib.parse.quote(first, safe='')}",
@@ -2356,6 +2463,7 @@ def main() -> int:
         )
         server.start(deadline)
         new_pid = server.pid
+        new_process_identity = server.process_identity
         if new_pid == old_pid:
             raise RuntimeError("candidate restart reused the same process PID")
         _, restarted = server.api.json("GET", "/api/devices")
@@ -2390,6 +2498,20 @@ def main() -> int:
             )(server.api.json("GET", "/api/devices")[1]),
             timeout=deadline.remaining(30),
         )
+        restored_mapping = {
+            str(device["id"]): str(device["nvml_uuid"])
+            for device in restored["devices"]
+        }
+        if (
+            len(restored["devices"]) != 2
+            or restored_mapping != initial_mapping
+            or any(
+                device.get("desired_enabled") is not True
+                or device.get("admin_state") != "enabled"
+                for device in restored["devices"]
+            )
+        ):
+            raise RuntimeError("restored inventory is not exactly enabled")
         evidence.json(
             "restart-persistence",
             {
@@ -2400,6 +2522,8 @@ def main() -> int:
                 "disabled_uuid": disabled_uuid,
                 "before_mapping": initial_mapping,
                 "after_mapping": restarted_mapping,
+                "old_process_identity": old_process_identity,
+                "new_process_identity": new_process_identity,
                 "persisted_devices": restarted,
                 "restored_devices": restored,
             },
@@ -2444,7 +2568,11 @@ def main() -> int:
             f"/api/devices/{urllib.parse.quote(target, safe='')}",
             {"enabled": False},
         )
-        if patch_status != 409:
+        if (
+            patch_status != 409
+            or patch_body.get("code") != "DEVICE_LIFECYCLE_MODE_CONFLICT"
+            or "authoritative scheduler V2" not in patch_body.get("error", "")
+        ):
             raise RuntimeError(
                 f"legacy lifecycle mutation was not fenced: {patch_status} {patch_body}"
             )
@@ -2453,8 +2581,10 @@ def main() -> int:
             {
                 "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
                 "server_pid": server.pid,
+                "process_identity": server.process_identity,
                 "device_mapping": legacy_mapping,
                 "snapshot": legacy,
+                "patch_target": target,
                 "patch_status": patch_status,
                 "patch_body": patch_body,
             },
@@ -2528,7 +2658,7 @@ def main() -> int:
                 )
         if live_service_before is not None:
             try:
-                live_service_after = reserved_service_snapshot()
+                live_service_after = reserved_service_snapshot(deadline)
                 if not evidence.contains("live-service-after"):
                     evidence.json("live-service-after", live_service_after)
                 if live_service_after == live_service_before:

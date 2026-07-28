@@ -10,7 +10,9 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import posixpath
 import re
+import stat
 import struct
 import sys
 import zlib
@@ -97,6 +99,45 @@ def sha256(path: pathlib.Path) -> str:
 
 def fail(message: str) -> None:
     raise ValueError(message)
+
+
+def canonical_path(
+    label: str,
+    value: object,
+    *,
+    require_exists: bool = False,
+    require_directory: bool = False,
+    require_regular: bool = False,
+    require_char_device: bool = False,
+) -> pathlib.Path:
+    if not isinstance(value, str) or not value.startswith("/"):
+        fail(f"{label} must be an absolute path")
+    if "\x00" in value or (value != "/" and "//" in value):
+        fail(f"{label} has empty or ambiguous path components")
+    components = [] if value == "/" else value.split("/")[1:]
+    if any(component in {"", ".", ".."} for component in components):
+        fail(f"{label} is not a normalized lexical path")
+    if posixpath.normpath(value) != value:
+        fail(f"{label} is not a canonical lexical path")
+    path = pathlib.Path(value)
+    current = pathlib.Path("/")
+    for component in components:
+        current /= component
+        if current.is_symlink():
+            fail(f"{label} contains a symlink alias: {current}")
+    if require_exists and not path.exists():
+        fail(f"{label} does not exist")
+    if require_directory and not path.is_dir():
+        fail(f"{label} is not a directory")
+    if require_regular and (
+        not path.is_file() or not stat.S_ISREG(path.stat().st_mode)
+    ):
+        fail(f"{label} is not a regular file")
+    if require_char_device and (
+        not path.exists() or not stat.S_ISCHR(path.stat().st_mode)
+    ):
+        fail(f"{label} is not an actual character device")
+    return path
 
 
 def validate_against_schema(report: object) -> None:
@@ -276,10 +317,12 @@ def load_evidence(
         label = item["label"]
         if not isinstance(label, str) or not label or label in paths:
             fail(f"duplicate or invalid evidence label: {label!r}")
-        path = pathlib.Path(item["path"])
-        if not path.is_absolute():
-            path = report_path.parent / path
-        path = path.resolve()
+        path = canonical_path(
+            f"evidence {label} path",
+            item["path"],
+            require_exists=True,
+            require_regular=True,
+        )
         try:
             path.relative_to(root)
         except ValueError:
@@ -415,31 +458,87 @@ def validate_sandbox_argv(
         fail(f"{label} Bubblewrap option ordering/count is not canonical")
     if len(binds) != 2:
         fail(f"{label} must expose exactly one runtime and its /tmp")
-    runtime = pathlib.Path(binds[0][1]).resolve()
+    runtime_source = canonical_path(
+        f"{label} runtime bind source",
+        binds[0][1],
+        require_exists=True,
+        require_directory=True,
+    )
+    runtime_destination = canonical_path(
+        f"{label} runtime bind destination", binds[0][2]
+    )
+    tmp_source = canonical_path(
+        f"{label} temporary bind source",
+        binds[1][1],
+        require_exists=True,
+        require_directory=True,
+    )
+    tmp_destination = canonical_path(
+        f"{label} temporary bind destination", binds[1][2]
+    )
+    runtime = runtime_source
     if (
-        pathlib.Path(binds[0][2]).resolve() != runtime
-        or pathlib.Path(binds[1][1]).resolve() != runtime / "tmp"
-        or binds[1][2] != "/tmp"
+        binds[0][1] != binds[0][2]
+        or runtime_destination != runtime
+        or tmp_source != runtime / "tmp"
+        or tmp_destination != pathlib.Path("/tmp")
     ):
         fail(f"{label} writable mounts do not match the isolated runtime")
-    if len(directories) != len(set(directories)) or not set(directories) <= {
+    canonical_directories = [
+        str(
+            canonical_path(
+                f"{label} device directory",
+                directory,
+                require_exists=True,
+                require_directory=True,
+            )
+        )
+        for directory in directories
+    ]
+    if len(canonical_directories) != len(set(canonical_directories)) or not set(
+        canonical_directories
+    ) <= {
         "/dev/nvidia-caps",
         "/dev/dri",
     }:
         fail(f"{label} creates unexpected device directories")
     for _, source, destination in device_binds:
-        if source != destination or not (
-            source.startswith("/dev/nvidia") or source.startswith("/dev/dri/")
-        ):
+        source_path = canonical_path(
+            f"{label} device source",
+            source,
+            require_exists=True,
+            require_char_device=True,
+        )
+        destination_path = canonical_path(f"{label} device destination", destination)
+        allowed = (
+            source_path.parent == pathlib.Path("/dev")
+            and source_path.name.startswith("nvidia")
+        ) or source_path.parent in {
+            pathlib.Path("/dev/nvidia-caps"),
+            pathlib.Path("/dev/dri"),
+        }
+        if source != destination or source_path != destination_path or not allowed:
             fail(f"{label} exposes an unexpected host device")
     if len(tmpfs) > 1 or any(
-        not re.fullmatch(r"/run/user/[0-9]+", destination) for destination in tmpfs
+        not re.fullmatch(
+            r"/run/user/[0-9]+",
+            str(canonical_path(f"{label} runtime mask", destination)),
+        )
+        for destination in tmpfs
     ):
         fail(f"{label} masks an unexpected runtime path")
     if candidate_path is not None:
         if separator + 1 >= len(argv):
             fail(f"{label} Bubblewrap argv lacks the candidate command")
-        if pathlib.Path(argv[separator + 1]).resolve() != candidate_path:
+        candidate_command = canonical_path(
+            f"{label} candidate command",
+            argv[separator + 1],
+            require_exists=True,
+            require_regular=True,
+        )
+        if candidate_command != candidate_path or argv[separator + 1] != str(
+            candidate_path
+        ):
             fail(f"{label} Bubblewrap argv does not execute the exact candidate")
 
 
@@ -474,12 +573,63 @@ def validate_isolation_environment(
         "MOLD_OUTPUT_DIR": runtime / "output",
     }
     for key, expected_path in expected_paths.items():
-        if pathlib.Path(str(value.get(key))).resolve() != expected_path.resolve():
+        observed_path = canonical_path(
+            f"{label} environment {key}",
+            value.get(key),
+            require_exists=key
+            in {
+                "TMPDIR",
+                "XDG_CACHE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "CUDA_CACHE_PATH",
+                "HF_HOME",
+                "MOLD_HOME",
+                "MOLD_OUTPUT_DIR",
+            },
+        )
+        if observed_path != expected_path:
             fail(f"{label} environment {key} is not the exact isolated path")
         try:
-            expected_path.resolve().relative_to(evidence_root)
+            expected_path.relative_to(evidence_root)
         except ValueError:
             fail(f"{label} runtime escapes the evidence directory")
+
+
+def validate_probe_environment(
+    label: str,
+    value: object,
+    *,
+    inherited_home: str,
+    runtime: pathlib.Path,
+) -> None:
+    required_keys = {
+        "HOME",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "MOLD_HOST",
+    }
+    if not isinstance(value, dict) or set(value) != required_keys:
+        fail(f"{label} environment is not the exact recorded probe environment")
+    if value["HOME"] != inherited_home or value["MOLD_HOST"] is not None:
+        fail(f"{label} inherited HOME or host target is invalid")
+    expected = {
+        "TMPDIR": runtime / "tmp",
+        "XDG_CACHE_HOME": runtime / "cache" / "xdg",
+        "XDG_CONFIG_HOME": runtime / "config",
+        "XDG_DATA_HOME": runtime / "data",
+    }
+    for key, expected_path in expected.items():
+        observed = canonical_path(
+            f"{label} environment {key}",
+            value[key],
+            require_exists=True,
+            require_directory=True,
+        )
+        if observed != expected_path:
+            fail(f"{label} environment {key} is not the exact probe path")
 
 
 def sandbox_runtime(argv: list[str]) -> pathlib.Path:
@@ -487,7 +637,12 @@ def sandbox_runtime(argv: list[str]) -> pathlib.Path:
     options = argv[:separator]
     for index in range(len(options) - 2):
         if options[index] == "--bind" and options[index + 1] == options[index + 2]:
-            return pathlib.Path(options[index + 1]).resolve()
+            return canonical_path(
+                "Bubblewrap runtime",
+                options[index + 1],
+                require_exists=True,
+                require_directory=True,
+            )
     fail("Bubblewrap argv lacks its exact writable runtime mount")
 
 
@@ -503,6 +658,7 @@ def validate_process_identity(
     binary_path: pathlib.Path,
     binary_sha256: str,
 ) -> dict:
+    binary_stat = binary_path.stat()
     if not isinstance(value, dict):
         fail(f"{label} process identity is missing")
     if (
@@ -513,12 +669,81 @@ def validate_process_identity(
         or value.get("start_ticks") <= 0
         or not isinstance(value.get("executable_device"), int)
         or not isinstance(value.get("executable_inode"), int)
+        or value.get("executable_device") != binary_stat.st_dev
+        or value.get("executable_inode") != binary_stat.st_ino
         or not re.fullmatch(r"pid:\[[0-9]+\]", str(value.get("pid_namespace")))
         or not isinstance(value.get("nspid"), list)
         or len(value["nspid"]) < 2
         or value["nspid"][0] != pid
+        or any(
+            not isinstance(namespace_pid, int) or namespace_pid <= 0
+            for namespace_pid in value["nspid"]
+        )
+        or value["nspid"][-1] == pid
     ):
         fail(f"{label} process identity is not exact PID/start/executable/namespace bound")
+    canonical_path(
+        f"{label} process executable",
+        value["executable"],
+        require_exists=True,
+        require_regular=True,
+    )
+    return value
+
+
+def validate_live_service_snapshot(label: str, value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {"port", "listeners", "owners"}:
+        fail(f"{label} live-service snapshot has an invalid shape")
+    if value["port"] != 7680 or not isinstance(value["listeners"], list) or not isinstance(
+        value["owners"], list
+    ):
+        fail(f"{label} live-service snapshot has invalid listener fields")
+    listener_inodes: set[str] = set()
+    for row in value["listeners"]:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {"family", "local_port", "remote_port", "state", "inode"}
+            or row["family"] not in {"tcp", "tcp6"}
+            or row["local_port"] != 7680
+            or row["remote_port"] != 0
+            or row["state"] != "0A"
+            or not isinstance(row["inode"], str)
+            or not row["inode"].isdigit()
+            or row["inode"] in listener_inodes
+        ):
+            fail(f"{label} live-service listener row is invalid")
+        listener_inodes.add(row["inode"])
+    owned_inodes: set[str] = set()
+    for row in value["owners"]:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {"pid", "start_ticks", "executable", "socket_inodes"}
+            or not isinstance(row["pid"], int)
+            or row["pid"] <= 0
+            or not isinstance(row["start_ticks"], int)
+            or row["start_ticks"] <= 0
+            or not isinstance(row["socket_inodes"], list)
+        ):
+            fail(f"{label} live-service owner row is invalid")
+        canonical_path(f"{label} live-service executable", row["executable"])
+        if any(
+            not isinstance(inode, str) or not inode.isdigit()
+            for inode in row["socket_inodes"]
+        ):
+            fail(f"{label} live-service owner socket inode is invalid")
+        row_inodes = set(row["socket_inodes"])
+        if (
+            len(row_inodes) != len(row["socket_inodes"])
+            or not row_inodes
+            or not row_inodes <= listener_inodes
+            or row_inodes & owned_inodes
+        ):
+            fail(f"{label} live-service owner/socket relationship is invalid")
+        owned_inodes.update(row_inodes)
+    if bool(listener_inodes) != bool(value["owners"]) or owned_inodes != listener_inodes:
+        fail(f"{label} live-service listeners are not exactly owner-bound")
     return value
 
 
@@ -538,7 +763,12 @@ def validate_passing_evidence(
     if inventory != report["host"]["devices"]:
         fail("typed nvidia inventory does not exactly match report host devices")
 
-    request_path = pathlib.Path(report["request"]["path"]).resolve()
+    request_path = canonical_path(
+        "request path",
+        report["request"]["path"],
+        require_exists=True,
+        require_regular=True,
+    )
     if request_path != paths["normalized-request"]:
         fail("request.path is not the normalized-request evidence path")
     if sha256(request_path) != report["request"]["sha256"]:
@@ -558,10 +788,20 @@ def validate_passing_evidence(
         fail("passing qualification requires exact model artifacts")
     if not artifact_roots:
         fail("passing qualification requires resolved companion artifact roots")
-    models_dir = pathlib.Path(report["isolation"]["models_dir"]).resolve()
+    models_dir = canonical_path(
+        "models_dir",
+        report["isolation"]["models_dir"],
+        require_exists=True,
+        require_directory=True,
+    )
     resolved_roots: list[pathlib.Path] = []
     for raw_root in artifact_roots:
-        artifact_root = pathlib.Path(raw_root).resolve()
+        artifact_root = canonical_path(
+            "artifact root",
+            raw_root,
+            require_exists=True,
+            require_directory=True,
+        )
         try:
             artifact_root.relative_to(models_dir)
         except ValueError:
@@ -579,13 +819,26 @@ def validate_passing_evidence(
         key=str,
     )
     reported_paths = sorted(
-        (pathlib.Path(artifact["path"]).resolve() for artifact in artifacts),
+        (
+            canonical_path(
+                "artifact path",
+                artifact["path"],
+                require_exists=True,
+                require_regular=True,
+            )
+            for artifact in artifacts
+        ),
         key=str,
     )
     if actual_paths != reported_paths:
         fail("reported artifacts are not the complete resolved companion inventory")
     for artifact in artifacts:
-        path = pathlib.Path(artifact["path"]).resolve()
+        path = canonical_path(
+            "artifact path",
+            artifact["path"],
+            require_exists=True,
+            require_regular=True,
+        )
         try:
             path.relative_to(models_dir)
         except ValueError:
@@ -607,21 +860,32 @@ def validate_passing_evidence(
     source = require_evidence_version("source-provenance", values["source-provenance"])
     if source.get("commit") != report["source_commit"]:
         fail("source provenance does not match report commit")
+    source_root = canonical_path(
+        "source provenance root",
+        source.get("source_root"),
+        require_exists=True,
+        require_directory=True,
+    )
     version = require_evidence_version("candidate-version", values["candidate-version"])
-    binary_path = pathlib.Path(report["candidate"]["path"]).resolve()
+    binary_path = canonical_path(
+        "candidate path",
+        report["candidate"]["path"],
+        require_exists=True,
+        require_regular=True,
+    )
     validate_sandbox_argv("candidate version", version.get("argv"), binary_path)
     if sandbox_inner(version["argv"]) != [str(binary_path), "version"]:
         fail("candidate version invocation has unexpected inner arguments")
-    version_environment = version.get("environment")
-    if (
-        not isinstance(version_environment, dict)
-        or version_environment.get("HOME") != report["isolation"]["inherited_home"]
-        or version_environment.get("MOLD_HOST") is not None
-    ):
-        fail("candidate version environment is not isolated")
+    validate_probe_environment(
+        "candidate version",
+        version.get("environment"),
+        inherited_home=report["isolation"]["inherited_home"],
+        runtime=sandbox_runtime(version["argv"]),
+    )
     build_identity = version.get("build_identity")
     if (
         version.get("binary_sha256") != report["candidate"]["sha256"]
+        or version.get("binary") != str(binary_path)
         or version.get("version") != report["candidate"]["version"]
         or version.get("sandboxed") is not True
         or build_identity
@@ -721,12 +985,33 @@ def validate_passing_evidence(
     raw_active_uuids: set[str] = set()
     raw_compute_uuids: set[str] = set()
     raw_decisive: list[dict[str, object]] = []
+    raw_times: list[dt.datetime] = []
+    raw_plan_versions: list[int] = []
     for sample in raw_samples:
         if not isinstance(sample, dict) or sample.get("server_pid") != pid:
             fail("raw runtime sample is not bound to the exact candidate PID")
         if sample.get("candidate_identity") != primary_identity:
             fail("raw runtime sample has a different candidate process identity")
-        if sample.get("reserved_service_connections") not in (None, []):
+        try:
+            sampled_at = dt.datetime.fromisoformat(
+                sample["at"].replace("Z", "+00:00")
+            )
+        except (KeyError, AttributeError, ValueError):
+            fail("raw runtime sample has an invalid timestamp")
+        plan_version = (sample.get("queue", {}).get("plan") or {}).get(
+            "plan_version"
+        )
+        if sampled_at.utcoffset() is None:
+            fail("raw runtime sample timestamp lacks a timezone")
+        if (
+            not isinstance(plan_version, int)
+            or isinstance(plan_version, bool)
+            or plan_version < 0
+        ):
+            fail("raw runtime sample omits an exact plan version")
+        raw_times.append(sampled_at)
+        raw_plan_versions.append(plan_version)
+        if sample.get("reserved_service_connections") != []:
             fail("candidate sampled a connection to the reserved live service")
         devices_in_sample = sample.get("devices")
         compute_in_sample = sample.get("compute_apps")
@@ -789,6 +1074,15 @@ def validate_passing_evidence(
                     ],
                 }
             )
+    if any(
+        later <= earlier for earlier, later in zip(raw_times, raw_times[1:])
+    ):
+        fail("raw runtime sample timeline is not strictly increasing")
+    if any(
+        later < earlier
+        for earlier, later in zip(raw_plan_versions, raw_plan_versions[1:])
+    ):
+        fail("raw runtime plan-version timeline regressed")
     if set(parallel.get("observed_active_uuids", [])) != raw_active_uuids:
         fail("parallel active UUID summary does not derive from raw samples")
     if set(parallel.get("observed_compute_uuids", [])) != raw_compute_uuids:
@@ -888,10 +1182,32 @@ def validate_passing_evidence(
         }
         for sample in raw_samples
     ]
-    if not any(all(plan.get(work_id) == lane for work_id, lane in pre.items()) for plan in raw_plans):
+    pre_indices = [
+        index
+        for index, plan in enumerate(raw_plans)
+        if all(plan.get(work_id) == lane for work_id, lane in pre.items())
+    ]
+    post_indices = [
+        index
+        for index, plan in enumerate(raw_plans)
+        if all(plan.get(work_id) == lane for work_id, lane in post.items())
+    ]
+    if not pre_indices:
         fail("disabled lane pre-plan is not present in raw queue samples")
-    if not any(all(plan.get(work_id) == lane for work_id, lane in post.items()) for plan in raw_plans):
+    if not post_indices:
         fail("disabled lane post-plan is not present in raw queue samples")
+    chronological_replan = next(
+        (
+            (pre_index, post_index)
+            for pre_index in pre_indices
+            for post_index in post_indices
+            if post_index > pre_index
+            and raw_plan_versions[post_index] > raw_plan_versions[pre_index]
+        ),
+        None,
+    )
+    if chronological_replan is None:
+        fail("queue replan is not a later, strictly advanced raw plan version")
     for work_id, device_id in post.items():
         output = output_by_work.get(work_id)
         if output is None or output.get("gpu_uuid") != api_mapping.get(device_id):
@@ -1031,16 +1347,24 @@ def validate_passing_evidence(
     maintenance = require_evidence_version(
         "all-disabled-maintenance", values["all-disabled-maintenance"]
     )
+    maintenance_devices = maintenance.get("devices", {}).get("devices", [])
+    maintenance_mapping = {
+        device.get("id"): device.get("nvml_uuid")
+        for device in maintenance_devices
+        if isinstance(device, dict)
+    }
     if (
         maintenance.get("server_pid") != pid
         or maintenance.get("status") not in {409, 503}
         or "maintenance" not in str(maintenance.get("body", "")).lower()
+        or len(maintenance_devices) != 2
+        or maintenance_mapping != api_mapping
         or not all(
             device.get("admin_state") == "disabled"
-            for device in maintenance.get("devices", {}).get("devices", [])
+            for device in maintenance_devices
         )
     ):
-        fail("all-disabled maintenance evidence is invalid")
+        fail("all-disabled maintenance device evidence is invalid")
 
     restart = require_evidence_version("restart-persistence", values["restart-persistence"])
     if (
@@ -1052,28 +1376,93 @@ def validate_passing_evidence(
         or restart.get("disabled_uuid") != api_mapping.get(restart.get("disabled_id"))
     ):
         fail("restart persistence is not exact-PID/stable-ID/UUID bound")
+    restart_old_identity = validate_process_identity(
+        "restart old candidate",
+        restart.get("old_process_identity"),
+        pid=pid,
+        binary_path=binary_path,
+        binary_sha256=report["candidate"]["sha256"],
+    )
+    if restart_old_identity != primary_identity:
+        fail("restart old process identity differs from primary evidence")
+    validate_process_identity(
+        "restart new candidate",
+        restart.get("new_process_identity"),
+        pid=restart["new_pid"],
+        binary_path=binary_path,
+        binary_sha256=report["candidate"]["sha256"],
+    )
+    persisted_devices = restart.get("persisted_devices", {}).get("devices", [])
     persisted = {
         device.get("id"): device
-        for device in restart.get("persisted_devices", {}).get("devices", [])
+        for device in persisted_devices
+        if isinstance(device, dict)
     }
-    if persisted.get(restart.get("disabled_id"), {}).get("desired_enabled") is not False:
+    if (
+        len(persisted_devices) != 2
+        or {stable_id: row.get("nvml_uuid") for stable_id, row in persisted.items()}
+        != api_mapping
+        or persisted.get(restart.get("disabled_id"), {}).get("desired_enabled")
+        is not False
+        or any(
+            row.get("desired_enabled") is not True
+            for stable_id, row in persisted.items()
+            if stable_id != restart.get("disabled_id")
+        )
+    ):
         fail("disabled preference did not persist across restart")
-    if not all(
-        device.get("admin_state") == "enabled"
-        for device in restart.get("restored_devices", {}).get("devices", [])
+    restored_devices = restart.get("restored_devices", {}).get("devices", [])
+    restored_mapping = {
+        device.get("id"): device.get("nvml_uuid")
+        for device in restored_devices
+        if isinstance(device, dict)
+    }
+    if (
+        len(restored_devices) != 2
+        or restored_mapping != api_mapping
+        or not all(
+            device.get("desired_enabled") is True
+            and device.get("admin_state") == "enabled"
+            for device in restored_devices
+        )
     ):
         fail("persisted device was not restored")
 
     legacy = require_evidence_version("legacy-rollback", values["legacy-rollback"])
     legacy_caps = legacy.get("snapshot", {}).get("capabilities", {})
+    legacy_devices = legacy.get("snapshot", {}).get("devices", {}).get("devices", [])
+    legacy_mapping = {
+        device.get("id"): device.get("nvml_uuid")
+        for device in legacy_devices
+        if isinstance(device, dict)
+    }
     if (
         legacy.get("device_mapping") != api_mapping
+        or legacy_mapping != api_mapping
+        or len(legacy_devices) != 2
+        or any(
+            device.get("admin_state") == "startup_excluded"
+            for device in legacy_devices
+        )
+        or legacy.get("patch_target") not in api_mapping
         or legacy.get("patch_status") != 409
+        or legacy.get("patch_body", {}).get("code")
+        != "DEVICE_LIFECYCLE_MODE_CONFLICT"
+        or "authoritative scheduler V2" not in legacy.get("patch_body", {}).get(
+            "error", ""
+        )
         or legacy_caps.get("dispatch", {}).get("active_mode") != "legacy"
         or legacy_caps.get("dispatch", {}).get("v2_authoritative")
         or legacy_caps.get("devices", {}).get("lifecycle")
     ):
         fail("legacy rollback evidence is invalid")
+    validate_process_identity(
+        "legacy candidate",
+        legacy.get("process_identity"),
+        pid=legacy.get("server_pid"),
+        binary_path=binary_path,
+        binary_sha256=report["candidate"]["sha256"],
+    )
 
     selector = require_evidence_version("selector-matrix", values["selector-matrix"])
     scenarios = selector.get("scenarios", [])
@@ -1153,14 +1542,28 @@ def validate_passing_evidence(
         devices_payload = scenario.get("devices")
         if not isinstance(devices_payload, dict):
             fail(f"selector {label} lacks device results")
+        selector_devices = devices_payload.get("devices", [])
+        selector_mapping = {
+            device.get("id"): device.get("nvml_uuid")
+            for device in selector_devices
+            if isinstance(device, dict)
+        }
+        if len(selector_devices) != 2 or selector_mapping != api_mapping:
+            fail(f"selector {label} omitted or changed qualification devices")
         selected = {
             device.get("nvml_uuid")
-            for device in devices_payload.get("devices", [])
+            for device in selector_devices
             if isinstance(device, dict)
             and device.get("admin_state") != "startup_excluded"
         }
         if selected != expected_selected:
             fail(f"selector {label} result UUIDs do not match its input")
+        if any(
+            (device.get("nvml_uuid") in expected_selected)
+            == (device.get("admin_state") == "startup_excluded")
+            for device in selector_devices
+        ):
+            fail(f"selector {label} exclusion states do not match its input")
         argv = scenario["argv"]
         inner = sandbox_inner(argv)
         expected_inner = list(server_base_argv)
@@ -1219,10 +1622,32 @@ def validate_passing_evidence(
         fail("ambiguous selector source contract command is not exact")
     if contract.get("exit_code") != 0 or contract.get("hardware_claimed") is not False:
         fail("ambiguous selector source contract is invalid")
+    if (
+        canonical_path(
+            "ambiguous selector source contract cwd",
+            contract.get("cwd"),
+            require_exists=True,
+            require_directory=True,
+        )
+        != source_root
+    ):
+        fail("ambiguous selector source contract used the wrong source root")
+    validate_probe_environment(
+        "ambiguous selector source contract",
+        contract.get("environment"),
+        inherited_home=report["isolation"]["inherited_home"],
+        runtime=sandbox_runtime(contract["argv"]),
+    )
 
     if values["models-tree-before"] != values["models-tree-after"]:
         fail("models tree changed during qualification")
-    if values["live-service-before"] != values["live-service-after"]:
+    live_before = validate_live_service_snapshot(
+        "live-service-before", values["live-service-before"]
+    )
+    live_after = validate_live_service_snapshot(
+        "live-service-after", values["live-service-after"]
+    )
+    if live_before != live_after:
         fail("reserved live-service PID/listener identity changed")
     for name, labels in CHECK_EVIDENCE.items():
         if set(report["checks"][name]["evidence_labels"]) != labels:
@@ -1289,8 +1714,13 @@ def validate(report_path: pathlib.Path, require_passing: bool) -> dict:
             fail(f"check {name} references unknown evidence labels: {sorted(unknown)}")
 
     candidate = report.get("candidate", {})
-    binary = pathlib.Path(candidate.get("path", ""))
-    if not binary.is_file() or sha256(binary) != candidate.get("sha256"):
+    binary = canonical_path(
+        "candidate path",
+        candidate.get("path"),
+        require_exists=True,
+        require_regular=True,
+    )
+    if sha256(binary) != candidate.get("sha256"):
         fail("candidate binary no longer exists or does not match the report")
     server_pid = candidate.get("server_pid")
     if server_pid is not None and (
@@ -1307,6 +1737,36 @@ def validate(report_path: pathlib.Path, require_passing: bool) -> dict:
         or port == 7680
     ):
         fail("isolation.port must be non-privileged and must not be reserved port 7680")
+    isolation = report["isolation"]
+    canonical_path("inherited HOME", isolation["inherited_home"])
+    models_dir = canonical_path(
+        "isolation models_dir",
+        isolation["models_dir"],
+        require_exists=True,
+        require_directory=True,
+    )
+    runtime_evidence_root = canonical_path(
+        "evidence root",
+        str(report_path) + ".d",
+        require_exists=True,
+        require_directory=True,
+    )
+    for key in ("mold_home", "output_dir", "db_path"):
+        path = canonical_path(
+            f"isolation {key}",
+            isolation[key],
+        )
+        try:
+            path.relative_to(runtime_evidence_root)
+        except ValueError:
+            fail(f"isolation {key} escapes the evidence scope")
+    if models_dir != canonical_path(
+        "request models_dir",
+        isolation["models_dir"],
+        require_exists=True,
+        require_directory=True,
+    ):
+        fail("isolation models_dir is unstable")
 
     qualified = report.get("hardware_qualified")
     all_passed = all(check["status"] == "passed" for check in checks.values())
@@ -1315,6 +1775,24 @@ def validate(report_path: pathlib.Path, require_passing: bool) -> dict:
     if qualified and server_pid is None:
         fail("passing qualification requires the exact candidate server PID")
     if qualified:
+        canonical_path(
+            "isolation mold_home",
+            isolation["mold_home"],
+            require_exists=True,
+            require_directory=True,
+        )
+        canonical_path(
+            "isolation output_dir",
+            isolation["output_dir"],
+            require_exists=True,
+            require_directory=True,
+        )
+        canonical_path(
+            "isolation db_path",
+            isolation["db_path"],
+            require_exists=True,
+            require_regular=True,
+        )
         validate_passing_evidence(report, report_path, paths, values)
     if require_passing and not qualified:
         fail("report is valid failure evidence, not passing hardware qualification")

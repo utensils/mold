@@ -317,6 +317,18 @@ class ReportValidationContracts(unittest.TestCase):
         def isolated_environment(
             runtime: pathlib.Path, *, client: bool = False
         ) -> dict[str, str | None]:
+            for relative in (
+                "tmp",
+                "cache/xdg",
+                "cache/cuda",
+                "cache/huggingface",
+                "config",
+                "data",
+                "home",
+                "output",
+            ):
+                (runtime / relative).mkdir(parents=True, exist_ok=True)
+            (runtime / "mold.db").touch()
             return {
                 "HOME": inherited_home,
                 "TMPDIR": str(runtime / "tmp"),
@@ -332,12 +344,13 @@ class ReportValidationContracts(unittest.TestCase):
             }
 
         def process_identity(pid: int) -> dict[str, object]:
+            binary_stat = binary.stat()
             return {
                 "pid": pid,
                 "start_ticks": 1000 + pid,
                 "executable": str(binary),
-                "executable_device": 1,
-                "executable_inode": 2,
+                "executable_device": binary_stat.st_dev,
+                "executable_inode": binary_stat.st_ino,
                 "binary_sha256": validator.sha256(binary),
                 "pid_namespace": "pid:[1234]",
                 "nspid": [pid, 1],
@@ -441,6 +454,7 @@ class ReportValidationContracts(unittest.TestCase):
             "source-provenance",
             {**versioned, "commit": "a" * 40, "source_root": str(root)},
         )
+        isolated_environment(evidence_root / "probe")
         add(
             "candidate-version",
             {
@@ -455,7 +469,9 @@ class ReportValidationContracts(unittest.TestCase):
                 "environment": {
                     "HOME": inherited_home,
                     "TMPDIR": str(evidence_root / "probe" / "tmp"),
-                    "XDG_CACHE_HOME": str(evidence_root / "probe" / "cache"),
+                    "XDG_CACHE_HOME": str(
+                        evidence_root / "probe" / "cache" / "xdg"
+                    ),
                     "XDG_CONFIG_HOME": str(evidence_root / "probe" / "config"),
                     "XDG_DATA_HOME": str(evidence_root / "probe" / "data"),
                     "MOLD_HOST": None,
@@ -539,6 +555,7 @@ class ReportValidationContracts(unittest.TestCase):
                 ],
                 "queue": {
                     "plan": {
+                        "plan_version": 1,
                         "work_items": [
                             {
                                 "work_id": "w3",
@@ -581,6 +598,7 @@ class ReportValidationContracts(unittest.TestCase):
                 ],
                 "queue": {
                     "plan": {
+                        "plan_version": 2,
                         "work_items": [
                             {
                                 "work_id": "w3",
@@ -620,6 +638,7 @@ class ReportValidationContracts(unittest.TestCase):
                 ],
                 "queue": {
                     "plan": {
+                        "plan_version": 2,
                         "work_items": [
                             {
                                 "work_id": "w4",
@@ -807,8 +826,16 @@ class ReportValidationContracts(unittest.TestCase):
                 "body": "maintenance",
                 "devices": {
                     "devices": [
-                        {"admin_state": "disabled"},
-                        {"admin_state": "disabled"},
+                        {
+                            "id": "cuda:0",
+                            "nvml_uuid": uuids[0],
+                            "admin_state": "disabled",
+                        },
+                        {
+                            "id": "cuda:1",
+                            "nvml_uuid": uuids[1],
+                            "admin_state": "disabled",
+                        },
                     ]
                 },
             },
@@ -824,16 +851,36 @@ class ReportValidationContracts(unittest.TestCase):
                 "disabled_uuid": uuids[0],
                 "before_mapping": mapping,
                 "after_mapping": mapping,
+                "old_process_identity": process_identity(123),
+                "new_process_identity": process_identity(124),
                 "persisted_devices": {
                     "devices": [
-                        {"id": "cuda:0", "desired_enabled": False},
-                        {"id": "cuda:1", "desired_enabled": True},
+                        {
+                            "id": "cuda:0",
+                            "nvml_uuid": uuids[0],
+                            "desired_enabled": False,
+                        },
+                        {
+                            "id": "cuda:1",
+                            "nvml_uuid": uuids[1],
+                            "desired_enabled": True,
+                        },
                     ]
                 },
                 "restored_devices": {
                     "devices": [
-                        {"admin_state": "enabled"},
-                        {"admin_state": "enabled"},
+                        {
+                            "id": "cuda:0",
+                            "nvml_uuid": uuids[0],
+                            "desired_enabled": True,
+                            "admin_state": "enabled",
+                        },
+                        {
+                            "id": "cuda:1",
+                            "nvml_uuid": uuids[1],
+                            "desired_enabled": True,
+                            "admin_state": "enabled",
+                        },
                     ]
                 },
             },
@@ -843,9 +890,14 @@ class ReportValidationContracts(unittest.TestCase):
             {
                 **versioned,
                 "server_pid": 125,
+                "process_identity": process_identity(125),
                 "device_mapping": mapping,
+                "patch_target": "cuda:0",
                 "patch_status": 409,
-                "patch_body": {},
+                "patch_body": {
+                    "code": "DEVICE_LIFECYCLE_MODE_CONFLICT",
+                    "error": "disabling a live GPU requires an authoritative scheduler V2 runtime",
+                },
                 "snapshot": {
                     "capabilities": {
                         "dispatch": {
@@ -853,7 +905,8 @@ class ReportValidationContracts(unittest.TestCase):
                             "v2_authoritative": False,
                         },
                         "devices": {"lifecycle": False},
-                    }
+                    },
+                    "devices": {"devices": api_devices},
                 },
             },
         )
@@ -936,10 +989,26 @@ class ReportValidationContracts(unittest.TestCase):
                 "exit_code": 0,
                 "hardware_claimed": False,
                 "command": "true",
+                "cwd": str(root),
                 "argv": sandbox_argv(
                     ["/bin/bash", "-lc", "true"],
                     evidence_root / "selector-contract-runtime",
                 ),
+                "environment": {
+                    key: value
+                    for key, value in isolated_environment(
+                        evidence_root / "selector-contract-runtime"
+                    ).items()
+                    if key
+                    in {
+                        "HOME",
+                        "TMPDIR",
+                        "XDG_CACHE_HOME",
+                        "XDG_CONFIG_HOME",
+                        "XDG_DATA_HOME",
+                        "MOLD_HOST",
+                    }
+                },
             },
         )
         add("models-tree-before", [])
@@ -1027,6 +1096,29 @@ class ReportValidationContracts(unittest.TestCase):
         }
         report_path.write_text(json.dumps(report), encoding="utf-8")
         return report_path
+
+    def mutate_evidence(self, report_path, label, mutate):
+        report = json.loads(report_path.read_text())
+        item = next(row for row in report["evidence"] if row["label"] == label)
+        evidence_path = pathlib.Path(item["path"])
+        if item["kind"] == "jsonl":
+            payload = [
+                json.loads(line)
+                for line in evidence_path.read_text().splitlines()
+                if line.strip()
+            ]
+        else:
+            payload = json.loads(evidence_path.read_text())
+        mutate(payload)
+        if item["kind"] == "jsonl":
+            evidence_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in payload),
+                encoding="utf-8",
+            )
+        else:
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+        item["sha256"] = validator.sha256(evidence_path)
+        report_path.write_text(json.dumps(report), encoding="utf-8")
 
     def test_fabricated_passing_fixture_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1284,6 +1376,156 @@ class ReportValidationContracts(unittest.TestCase):
             item["sha256"] = validator.sha256(evidence_path)
             path.write_text(json.dumps(report), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "cancellation"):
+                validator.validate(path, require_passing=True)
+
+    def test_device_bind_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+
+            def mutate(payload):
+                separator = payload["argv"].index("--")
+                payload["argv"][separator:separator] = [
+                    "--dev-bind-try",
+                    "/dev/dri/../../home/killswitch",
+                    "/dev/dri/../../home/killswitch",
+                ]
+
+            self.mutate_evidence(path, "primary-command", mutate)
+            with self.assertRaisesRegex(ValueError, "device|normalized|canonical"):
+                validator.validate(path, require_passing=True)
+
+    def test_runtime_symlink_alias_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+            report = json.loads(path.read_text())
+            runtime = pathlib.Path(report["isolation"]["mold_home"]).parent
+            runtime.mkdir(parents=True, exist_ok=True)
+            alias = root / "runtime-alias"
+            alias.symlink_to(runtime)
+
+            def mutate(payload):
+                argv = payload["argv"]
+                index = argv.index("--bind")
+                argv[index + 1] = str(alias)
+                argv[index + 2] = str(alias)
+                next_index = argv.index("--bind", index + 1)
+                argv[next_index + 1] = str(alias / "tmp")
+
+            self.mutate_evidence(path, "primary-command", mutate)
+            with self.assertRaisesRegex(ValueError, "symlink|canonical|normalized"):
+                validator.validate(path, require_passing=True)
+
+    def test_empty_live_service_snapshot_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(path, "live-service-before", lambda value: value.clear())
+            self.mutate_evidence(path, "live-service-after", lambda value: value.clear())
+            with self.assertRaisesRegex(ValueError, "live-service|listener"):
+                validator.validate(path, require_passing=True)
+
+    def test_reversed_runtime_timeline_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(
+                path, "parallel-runtime-samples", lambda value: value.reverse()
+            )
+            with self.assertRaisesRegex(ValueError, "timeline|timestamp|plan"):
+                validator.validate(path, require_passing=True)
+
+    def test_replan_requires_strictly_advanced_plan_version(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+
+            def mutate(payload):
+                for row in payload:
+                    row["queue"]["plan"]["plan_version"] = 1
+
+            self.mutate_evidence(path, "parallel-runtime-samples", mutate)
+            with self.assertRaisesRegex(ValueError, "replan|plan version|advanced"):
+                validator.validate(path, require_passing=True)
+
+    def test_missing_reserved_socket_samples_are_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(
+                path,
+                "parallel-runtime-samples",
+                lambda value: [
+                    row.pop("reserved_service_connections") for row in value
+                ],
+            )
+            with self.assertRaisesRegex(ValueError, "reserved|socket|connection"):
+                validator.validate(path, require_passing=True)
+
+    def test_empty_device_snapshots_are_rejected(self):
+        mutations = (
+            ("all-disabled-maintenance", "devices"),
+            ("restart-persistence", "restored_devices"),
+        )
+        for label, field in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
+                path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+                self.mutate_evidence(
+                    path,
+                    label,
+                    lambda value, field=field: value[field].update(devices=[]),
+                )
+                with self.assertRaisesRegex(ValueError, "device|inventory|mapping"):
+                    validator.validate(path, require_passing=True)
+
+    def test_restart_identity_must_match_candidate_inode(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(
+                path,
+                "restart-persistence",
+                lambda value: value["new_process_identity"].update(
+                    executable_inode=value["new_process_identity"][
+                        "executable_inode"
+                    ]
+                    + 1
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "identity|inode|executable"):
+                validator.validate(path, require_passing=True)
+
+    def test_legacy_patch_body_is_exactly_mode_conflict(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(
+                path,
+                "legacy-rollback",
+                lambda value: value["patch_body"].update(code="CONFLICT"),
+            )
+            with self.assertRaisesRegex(ValueError, "legacy|rollback"):
+                validator.validate(path, require_passing=True)
+
+    def test_selector_contract_environment_cannot_target_service(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            self.mutate_evidence(
+                path,
+                "ambiguous-selector-source-contract",
+                lambda value: value["environment"].update(
+                    MOLD_HOST="http://127.0.0.1:7680"
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "environment|host"):
+                validator.validate(path, require_passing=True)
+
+    def test_selector_cannot_omit_excluded_devices(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+
+            def mutate(payload):
+                scenario = next(
+                    row for row in payload["scenarios"] if row["label"] == "none"
+                )
+                scenario["devices"]["devices"] = []
+
+            self.mutate_evidence(path, "selector-matrix", mutate)
+            with self.assertRaisesRegex(ValueError, "selector|inventory|device"):
                 validator.validate(path, require_passing=True)
 
 
