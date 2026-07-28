@@ -740,6 +740,17 @@ impl QueuePause {
         self.paused.load(Ordering::SeqCst)
     }
 
+    /// Blocking-context variant of [`Self::wait_if_paused`] for the chain
+    /// runner's stage loop (which runs under `spawn_blocking`). Polls at a
+    /// coarse interval — it only ever runs between stages while the queue
+    /// is paused — and returns early when `should_abort` reports true so a
+    /// cancel lands while the queue is held.
+    pub fn wait_if_paused_blocking(&self, should_abort: &dyn Fn() -> bool) {
+        while self.is_paused() && !should_abort() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     /// Park the caller while paused, returning as soon as dispatch is resumed
     /// (immediately when not paused). Registers the wakeup *before* the second
     /// flag check so a concurrent `resume()`'s `notify_waiters()` can't slip
