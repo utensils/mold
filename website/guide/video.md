@@ -84,26 +84,33 @@ transition = "fade"
 fade_frames = 12
 ```
 
-### Web composer
+### Sequences in the apps
 
-The web UI at `/create` has a **Script** mode toggle. Switch to Script mode for a card-based editor where each stage gets its own prompt, frame count, and transition selector. Supports drag-reorder, per-stage prompt expansion, and TOML import/export.
+On web, desktop, and iPhone, multi-clip video is a setting rather than a
+separate page. In Create, set **Output** (beside Model) to **Sequence** and the
+composer becomes a clip rail: clip pills carrying a prompt and frame count,
+joined by seam pills. Seams are named in words — **Smooth**, **Cut**, and
+**Fade 8f** — and a click opens the seam editor with its fade-length stepper.
+LTX-Video has no motion tail, so its seams read **Join clips**. New clips
+default to the selected model's advertised frame count.
 
-### TUI script mode
+Sequences run as durable jobs in the same activity strip as ordinary prints.
+Desktop and web can edit a finished sequence in place: its clips reload onto the
+rail, each pill shows cached (✓) versus re-render (↻), and **Update sequence**
+re-renders only from the earliest changed clip — transition and fade-length
+edits re-stitch with no re-render at all. Every settled sequence job is listed
+in **Library ▸ History ▸ Sequences**, and a sequence print in the Library offers
+**Reuse settings** (start a fresh sequence from the recorded clips) and, on
+desktop and web, **Edit sequence** (re-enter the original job with its cached
+clips). Desktop and web keep TOML import/export for `mold.chain.v1` scripts
+under the composer's file tools.
 
-Press `s` from the main TUI hub to open Script mode. Key bindings:
+### TUI chain composer
 
-| Key       | Action                                 |
-| --------- | -------------------------------------- |
-| `j` / `k` | Navigate stage list                    |
-| `a` / `A` | Add stage after current / at end       |
-| `d`       | Delete current stage (confirm)         |
-| `J` / `K` | Move stage down / up                   |
-| `t`       | Cycle transition (smooth → cut → fade) |
-| `i`       | Edit prompt                            |
-| `f`       | Edit frames                            |
-| `Enter`   | Submit chain                           |
-| `Ctrl-S`  | Save as TOML                           |
-| `Ctrl-O`  | Load TOML                              |
+Press `c` from Create's navigation mode in `mold tui` to author a
+`mold.chain.v1` script with per-stage prompts, frame counts, source images, and
+`smooth` / `cut` / `fade` transitions. See the
+[TUI guide](/guide/tui#chain-composer).
 
 ### Capabilities endpoint
 
@@ -111,16 +118,26 @@ Press `s` from the main TUI hub to open Script mode. Key bindings:
 GET /api/capabilities/chain-limits?model=<name>
 ```
 
-Returns per-model caps used by all composer UIs:
+Returns per-model caps used by every sequence UI:
 
 ```json
 {
   "model": "ltx-2-19b-distilled:fp8",
   "frames_per_clip_cap": 97,
+  "frames_per_clip_recommended": 97,
   "max_stages": 16,
   "max_total_frames": 1552,
   "fade_frames_max": 32,
   "transition_modes": ["smooth", "cut", "fade"],
+  "quantization_family": "ltx2",
+  "supports_audio": true,
   "supports_sequence": true
 }
 ```
+
+`frames_per_clip_recommended` follows the model's own default frame count — 97
+for LTX-2, 25 for LTX-Video — so clients do not have to hardcode one.
+`supports_sequence` is model-specific: a two-stage LTX-2 dev checkpoint reports
+`false` with a `sequence_unsupported_reason`. `GET /api/models` carries the
+matching per-model `default_frames`, `default_fps`, `max_frames`, and
+`frame_step` fields.

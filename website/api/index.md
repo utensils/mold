@@ -19,6 +19,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/chain-jobs/:id/events`              | Durable chain-job SSE events                                                                                      |
 | `POST`   | `/api/chain-jobs/:id/resume`              | Resume a failed, interrupted, or cancelled chain job                                                              |
 | `POST`   | `/api/chain-jobs/:id/retake`              | Retake one chain-job stage                                                                                        |
+| `POST`   | `/api/chain-jobs/:id/amend`               | Replace a chain job's stage list in place, reusing cached clips                                                   |
 | `POST`   | `/api/chain-jobs/:id/cancel`              | Cancel a queued or running chain job                                                                              |
 | `DELETE` | `/api/chain-jobs/:id`                     | Delete a non-running chain job                                                                                    |
 | `POST`   | `/api/chain-jobs/gc`                      | Run chain-job artifact GC                                                                                         |
@@ -594,17 +595,37 @@ data: {"type":"job_ended","id":"6f9c…"}
 
 event: event
 data: {"type":"gallery_removed","filename":"mold-flux-dev-q4-1752300000000.png"}
+
+event: event
+data: {"type":"chain_job_queued","id":"550e8400-…","model":"ltx-2-19b-distilled:fp8","stage_count":3}
+
+event: event
+data: {"type":"chain_job_started","id":"550e8400-…","model":"ltx-2-19b-distilled:fp8"}
+
+event: event
+data: {"type":"chain_job_ended","id":"550e8400-…","state":"completed"}
 ```
 
 Event semantics:
 
-| `type`            | Meaning                                                                                                                                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job_queued`      | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
-| `job_started`     | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
-| `job_ended`       | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
-| `gallery_added`   | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed` | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `type`              | Meaning                                                                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`        | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
+| `job_started`       | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
+| `job_ended`         | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
+| `gallery_added`     | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed`   | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `chain_job_queued`  | A durable chain job entered the queue — created, resumed, retaken, or amended. Carries `id`, `model`, and `stage_count`.                                                                          |
+| `chain_job_started` | The chain runner claimed the job and began rendering stages (`id`, `model`).                                                                                                                      |
+| `chain_job_ended`   | The job settled. `state` is `completed`, `failed`, or `cancelled`. Terminal chain jobs stay listed on `/api/chain-jobs` — this only says the runner is done with it.                              |
+
+The three `chain_job_*` events are additive and deliberately distinct from
+`job_queued` / `job_started` / `job_ended`: chain jobs do not support the
+print-queue affordances (`PATCH`/`DELETE /api/queue/:id`), and older clients
+ignore unknown `type` tags. The ephemeral jobs backing
+`/api/generate/chain` stay silent — only durable `/api/chain-jobs` work is
+announced. Clients that render sequences in a unified activity surface can
+use these instead of polling `GET /api/chain-jobs`.
 
 The stream carries **deltas only** — there is no initial snapshot. Subscribe
 first, then bootstrap current state from `GET /api/queue` and
@@ -803,6 +824,7 @@ Endpoints:
 - `GET /api/chain-jobs/:id/events` — SSE stream; first frame is always a snapshot.
 - `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
 - `POST /api/chain-jobs/:id/retake` — body is `RetakeRequest` (`stage_idx`, `mode`, optional `seed_offset`, optional `prompt`).
+- `POST /api/chain-jobs/:id/amend` — replace the whole stage list in place, reusing cached clips. See below.
 - `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; running jobs stop at the next boundary/progress check.
 - `DELETE /api/chain-jobs/:id` — remove a non-running job and its job directory.
 - `POST /api/chain-jobs/gc` — prune successful ephemeral jobs and completed non-ephemeral job artifacts older than `chain.jobs_artifact_ttl_days`.
@@ -811,6 +833,126 @@ Endpoints:
 Common errors: `503 CHAIN_JOBS_UNAVAILABLE` when the metadata DB is disabled,
 `404 CHAIN_JOB_NOT_FOUND`, and `409 CHAIN_JOB_RUNNING` for mutations that
 cannot safely run while the job is active.
+
+### `POST /api/chain-jobs/:id/amend`
+
+Edits a settled or queued sequence in place instead of creating a new job, so
+clips that did not change are never re-rendered. This is what the Studio
+surfaces call behind **Update sequence**.
+
+The body maps to `mold_core::chain_job::AmendRequest`. `stages` is the
+**complete** edited stage list in canonical order (not a patch) — the same
+`ChainStage` shape `/api/generate/chain` accepts. Everything else is an
+optional chain-level overlay applied over the job's current effective
+request:
+
+```json
+{
+  "stages": [
+    { "prompt": "a cat walks into the autumn forest", "frames": 97 },
+    { "prompt": "the forest opens to a clearing", "frames": 49 },
+    {
+      "prompt": "a spaceship lands",
+      "frames": 97,
+      "transition": "fade",
+      "fade_frames": 12
+    }
+  ],
+  "motion_tail_frames": 8,
+  "fps": 24,
+  "seed": "42",
+  "steps": 8,
+  "guidance": 3.0,
+  "enable_audio": false
+}
+```
+
+`seed` is a full-range `u64` encoded as a decimal **string**, matching the
+rest of the chain wire format. Omitted overlays keep the job's current value.
+
+**Not amendable.** `AmendRequest` carries no other fields, so `model`,
+`width`, `height`, `output_format`, GPU `placement`, `strength`, and the
+`batch_id` / `batch_index` / `batch_count` provenance are inherited from the
+original request and cannot be changed — create a fresh job for those. The
+amended candidate must still pass every create-time gate: `normalise()`,
+the family/audio check, and the durable-job `output_format = "mp4"` rule.
+
+**Response** — `202 Accepted`. The body is the updated `ChainJobSummary`
+flattened, plus `preserved_stages`:
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "state": "queued",
+  "model": "ltx-2-19b-distilled:fp8",
+  "stage_count": 3,
+  "current_stage": 2,
+  "created_at_unix_ms": 1752300000000,
+  "updated_at_unix_ms": 1752300600000,
+  "error": null,
+  "ephemeral": false,
+  "preserved_stages": 2
+}
+```
+
+`preserved_stages` is the count of leading stages whose cached artifacts were
+kept; rendering requeues from that index. The job is requeued and a
+`chain_job_queued` event is published on `/api/events`.
+
+**Invalidation semantics.** The preserved prefix is the longest run of leading
+stages whose render identity is unchanged, clamped to the leading run of
+already-completed stages. A chain-level change to `seed`, `steps`, `guidance`,
+`fps`, or `motion_tail_frames`, or turning `enable_audio` **on**, invalidates
+everything (turning it off preserves every clip — finalize simply ignores the
+audio sidecars). Otherwise a stage is dirty when its `prompt`, `frames`,
+`negative_prompt`, `source_image`, effective per-stage seed, or its
+_smooth-carry_ status changes — where carry means "not the first stage and
+`transition == "smooth"`". Because stage artifacts are stored as **raw,
+untrimmed** segments with every boundary trim and crossfade applied at
+finalize time, `cut` ↔ `fade` toggles and `fade_frames` edits break no prefix
+at all and re-finalize with zero re-renders; `smooth` ↔ (`cut`|`fade`) changes
+the rendered pixels and does break it. Appending clips renders only the new
+ones, and removing trailing clips renders nothing. Jobs written by older
+versions carry baked-in boundaries, so a preserved legacy stage is dropped
+from the prefix when its artifacts cannot serve the new boundary plan.
+
+Each amend is appended to the manifest with the pre-amend **effective**
+request (retakes folded in) and its `preserved_stages`; any pending retakes
+are folded and cleared. `GET /api/chain-jobs/:id` exposes the additive
+`amends` array (`at_unix_ms`, `previous_request_json`, `preserved_stages`).
+
+**Errors:**
+
+- `409 CHAIN_JOB_RUNNING` — the job is rendering; cancel it first.
+- `409 CHAIN_JOB_EPHEMERAL` — the job backs a legacy `/api/generate/chain` shim.
+- `409 CHAIN_JOB_NOT_AMENDABLE` — the job left an amendable state mid-request. Amendable states are `queued`, `interrupted`, `failed`, `cancelled`, and `completed`.
+- `422` — the amended request failed validation (bad frame counts, motion tail ≥ clip frames, too many stages, a non-`mp4` output format, an unsupported family, audio on a checkpoint without an audio path).
+- `404 CHAIN_JOB_NOT_FOUND` — unknown id.
+
+## `/api/models`
+
+`GET /api/models` lists every known model. Each row is a flattened
+`ModelInfoExtended`: identity (`name`, `family`, `hf_repo`, …), the
+`ModelDefaults` block (`default_steps`, `default_guidance`, `default_width`,
+`default_height`, `description`, …), and installation state, all at the top
+level of the object — the defaults are not nested under a `defaults` key.
+Video models additionally advertise their frame semantics there, so clients
+stop hardcoding a frame count that ignores the selected checkpoint:
+
+| Field            | Meaning                                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| `default_frames` | Default frame count for one clip. LTX-2 defaults to 97, LTX-Video to its shipped 25.                          |
+| `default_fps`    | Default frames per second.                                                                                    |
+| `max_frames`     | Ceiling for a single request **without** temporal upscaling — 153 for LTX-2's RoPE budget, 257 for LTX-Video. |
+| `frame_step`     | Valid frame counts are `k · frame_step + 1`; 8 for the LTX families.                                          |
+
+All four are additive and omitted entirely on image models — clients must
+treat their absence as "not a video model" rather than substituting a
+constant. They come from the same manifest defaults and validator constants
+the server enforces, and the server-side validator stays authoritative;
+clients with temporal-upscale support keep their own doubling math on top of
+`max_frames`. `GET /api/capabilities/chain-limits?model=<name>` reports
+`frames_per_clip_recommended` from the same per-model default.
 
 ## `/api/status`
 
@@ -974,6 +1116,59 @@ data: {"image":"<base64>","model":"real-esrgan-x4plus:fp16","scale_factor":4,"wi
 ```
 
 The server caches the upscaler engine between requests — repeated upscales with the same model skip weight loading.
+
+## Saved output metadata
+
+Gallery rows (`GET /api/gallery`, the `image.metadata` object on
+`gallery_added`, and the embedded `mold:parameters` chunk) map to
+`mold_core::OutputMetadata`. Two additive fields record sequence provenance:
+
+- `chain_job_id` — the durable chain job this output was finalized from.
+  Absent for single generations, the ephemeral `/api/generate/chain` shim, and
+  legacy rows.
+- `chain` — structured per-clip provenance, so a sequence is never recorded
+  under clip 1's prompt alone. Absent for single generations and legacy rows.
+
+```json
+{
+  "chain_job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "chain": {
+    "stage_count": 3,
+    "motion_tail_frames": 8,
+    "stages": [
+      {
+        "prompt": "a cat walks into the autumn forest",
+        "frames": 97,
+        "transition": "smooth",
+        "seed": "42"
+      },
+      {
+        "prompt": "the forest opens to a clearing",
+        "frames": 49,
+        "transition": "cut",
+        "seed": "43"
+      },
+      {
+        "prompt": "a spaceship lands",
+        "frames": 97,
+        "transition": "fade",
+        "fade_frames": 12,
+        "seed": "44"
+      }
+    ]
+  }
+}
+```
+
+Each stage carries `prompt`, `frames`, and `transition`; `fade_frames` and the
+effective per-stage `seed` (a full-range `u64` as a decimal string) appear only
+when known. The top-level `prompt` of a multi-clip row holds every distinct
+clip prompt joined one per line, so gallery search matches any clip. The CLI's
+local chain saves write the same `chain` block without a `chain_job_id`.
+
+Studio clients read this block to reload a finished sequence's clips onto the
+Create clip rail (**Reuse settings**); `chain_job_id` is what lets **Edit
+sequence** re-enter the original durable job with its cached clips.
 
 ## Image Output
 
