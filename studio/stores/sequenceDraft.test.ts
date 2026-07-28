@@ -166,6 +166,34 @@ describe("sequence draft store", () => {
     expect(localStorage.getItem(LEGACY_MOBILE_MODE_KEY)).toBeNull();
   });
 
+  it("persists a migrated legacy draft immediately (no-edit session survives)", () => {
+    // migrateLegacy() deletes the legacy keys while `hydrated` is still
+    // false, so the deep watcher alone would never write the new key — a
+    // reload before any edit would lose the migrated draft entirely.
+    localStorage.setItem(
+      LEGACY_WEB_DRAFT_KEY,
+      JSON.stringify({
+        schema: "mold.chain.v1",
+        chain: { model: "ltx-2-19b-distilled:fp8" },
+        stages: [
+          { prompt: "opening", frames: 97 },
+          { prompt: "landing", frames: 33 },
+        ],
+      }),
+    );
+
+    const store = freshStore();
+    store.hydrate();
+    // No edits, no timers — the migrated draft must already be durable.
+    const saved = JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!);
+    expect(saved.clips).toHaveLength(2);
+    expect(saved.clips[0].prompt).toBe("opening");
+
+    const reloaded = freshStore();
+    reloaded.hydrate();
+    expect(reloaded.clips[0]?.prompt).toBe("opening");
+  });
+
   it("tracks an edit session without persisting it", () => {
     const store = freshStore();
     store.hydrate();

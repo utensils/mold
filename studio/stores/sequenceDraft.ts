@@ -160,15 +160,21 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   function hydrate() {
     if (hydrated.value) return;
     const saved = readJson<PersistedDraftV1>(SEQUENCE_DRAFT_KEY);
+    let migrated = false;
     if (saved?.version === 1) {
       applyPersisted(saved);
     } else {
       migrateLegacy();
+      migrated = clips.length > 0 || output.value === "sequence";
     }
     if (clips.length > 0 && !activeClipId.value) {
       activeClipId.value = clips[clips.length - 1]?.id ?? null;
     }
     hydrated.value = true;
+    // migrateLegacy() consumed the legacy keys while `hydrated` was still
+    // false (the watcher won't schedule persistence), so a reload before
+    // any edit would lose the migrated draft — make it durable right away.
+    if (migrated) persistNow();
   }
 
   /** A sequence always has at least two clips (repo invariant). */

@@ -40,6 +40,14 @@ describe("SeamEditor", () => {
     expect(wrapper.emitted("update:transition")?.[0]).toEqual(["cut"]);
   });
 
+  it("contains the radios in a labelled radiogroup (ARIA pattern)", () => {
+    const wrapper = make();
+    const group = wrapper.find("[role=radiogroup]");
+    expect(group.exists()).toBe(true);
+    expect(group.attributes("aria-label")).toBe("Transition");
+    expect(group.findAll("[role=radio]")).toHaveLength(3);
+  });
+
   it("emits apply-all on an alt-modified pick", async () => {
     const wrapper = make();
     const rows = wrapper.findAll("[role=radio]");
