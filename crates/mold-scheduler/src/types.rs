@@ -475,6 +475,7 @@ pub struct PlannerSnapshot {
     pub next_plan_version: u64,
     pub now_ms: u64,
     pub next_replan_at_ms: Option<u64>,
+    pub queue_paused: bool,
     pub host_memory: HostMemorySnapshot,
     pub devices: Vec<DeviceSnapshot>,
     pub work: Vec<WorkSnapshot>,
@@ -494,6 +495,7 @@ impl PlannerSnapshot {
             next_plan_version,
             now_ms,
             next_replan_at_ms: None,
+            queue_paused: false,
             host_memory: HostMemorySnapshot {
                 headroom_bytes: host_headroom_bytes,
                 sample_generation: 0,
@@ -502,6 +504,11 @@ impl PlannerSnapshot {
             devices,
             work,
         }
+    }
+
+    pub fn with_queue_paused(mut self, queue_paused: bool) -> Self {
+        self.queue_paused = queue_paused;
+        self
     }
 }
 

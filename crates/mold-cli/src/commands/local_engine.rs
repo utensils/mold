@@ -457,6 +457,7 @@ impl LocalBatchAdmission {
             next_plan_version: self.plan_version,
             now_ms: 0,
             next_replan_at_ms: None,
+            queue_paused: false,
             host_memory: HostMemorySnapshot {
                 headroom_bytes: self.host_headroom_bytes.saturating_sub(reserved),
                 sample_generation: 1,

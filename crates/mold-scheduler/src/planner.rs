@@ -39,6 +39,37 @@ impl Planner {
     ) -> Result<Plan, PlannerError> {
         validate_snapshot_ids(snapshot)?;
         validate_eligibility_index(snapshot, index)?;
+        if snapshot.queue_paused {
+            let mut work = snapshot.work.iter().collect::<Vec<_>>();
+            work.sort_by(|left, right| work_order(left).cmp(&work_order(right)));
+            return Ok(Plan {
+                plan_version: snapshot.next_plan_version,
+                state_version: snapshot.state_version,
+                created_at_ms: snapshot.now_ms,
+                next_replan_at_ms: snapshot.next_replan_at_ms,
+                immediate_leases: Vec::new(),
+                lanes: Vec::new(),
+                blocked: work
+                    .into_iter()
+                    .map(|work| BlockedWork {
+                        work_id: work.id.clone(),
+                        reason: BlockedReason::QueuePaused,
+                    })
+                    .collect(),
+                warm_waits: Vec::new(),
+                bypass_updates: Vec::new(),
+                reservation: MatchingReservation {
+                    sample_generation: snapshot.host_memory.sample_generation,
+                    ledger_sequence: snapshot.host_memory.ledger_sequence,
+                    total_host_ram_bytes: 0,
+                    items: Vec::new(),
+                },
+                optimization_horizon_length: 0,
+                operation_budget: 0,
+                operations_evaluated: 0,
+                optimizer_state: optimizer_state_for_mode(self.config.mode),
+            });
+        }
         let devices = canonical_devices(&snapshot.devices);
         let device_map = devices
             .iter()
@@ -732,11 +763,7 @@ fn build_lanes(
         .map(|assignment| (assignment.work_id.clone(), assignment.placement.clone()))
         .collect();
 
-    let optimizer_state = match mode {
-        PlanningMode::Optimize => OptimizerState::Optimized,
-        PlanningMode::WatchdogFallback => OptimizerState::WatchdogFallback,
-        PlanningMode::InternalErrorFallback => OptimizerState::InternalErrorFallback,
-    };
+    let optimizer_state = optimizer_state_for_mode(mode);
     if mode != PlanningMode::Optimize {
         return (seed_schedule.lanes, 0, optimizer_state);
     }
@@ -813,6 +840,14 @@ fn build_lanes(
 
     let final_schedule = evaluate_schedule(&schedule_context, &best_mapping, false, true);
     (final_schedule.lanes, operations, optimizer_state)
+}
+
+const fn optimizer_state_for_mode(mode: PlanningMode) -> OptimizerState {
+    match mode {
+        PlanningMode::Optimize => OptimizerState::Optimized,
+        PlanningMode::WatchdogFallback => OptimizerState::WatchdogFallback,
+        PlanningMode::InternalErrorFallback => OptimizerState::InternalErrorFallback,
+    }
 }
 
 fn uniform_seed_is_optimal(

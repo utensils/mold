@@ -78,6 +78,55 @@ fn supports_zero_one_two_eight_sixteen_and_sixty_four_devices() {
 }
 
 #[test]
+fn paused_snapshot_blocks_every_work_item_without_assigning_resources() {
+    let ready = work("ready", 1, vec![candidate("gpu-0", 1)]);
+    let waiting = work("waiting", 0, vec![candidate("gpu-0", 1)]).with_ready(false);
+    let snapshot =
+        snapshot(vec![device("gpu-0")], vec![ready, waiting], 128).with_queue_paused(true);
+
+    let plan = Planner::default()
+        .plan(&snapshot)
+        .expect("valid paused plan");
+
+    assert_eq!(plan.plan_version, snapshot.next_plan_version);
+    assert_eq!(plan.state_version, snapshot.state_version);
+    assert!(plan.immediate_leases.is_empty());
+    assert!(plan.lanes.is_empty());
+    assert!(plan.warm_waits.is_empty());
+    assert!(plan.bypass_updates.is_empty());
+    assert!(plan.reservation.items.is_empty());
+    assert_eq!(plan.reservation.total_host_ram_bytes, 0);
+    assert_eq!(plan.optimization_horizon_length, 0);
+    assert_eq!(plan.operations_evaluated, 0);
+    assert_eq!(
+        plan.blocked
+            .iter()
+            .map(|blocked| (blocked.work_id.as_str(), blocked.reason))
+            .collect::<Vec<_>>(),
+        vec![
+            ("waiting", BlockedReason::QueuePaused),
+            ("ready", BlockedReason::QueuePaused),
+        ]
+    );
+}
+
+#[test]
+fn paused_snapshot_still_rejects_duplicate_work_ids() {
+    let duplicated = work("duplicate", 0, vec![candidate("gpu-0", 1)]);
+    let snapshot = snapshot(
+        vec![device("gpu-0")],
+        vec![duplicated.clone(), duplicated],
+        128,
+    )
+    .with_queue_paused(true);
+
+    assert!(matches!(
+        Planner::default().plan(&snapshot),
+        Err(PlannerError::DuplicateWorkId { .. })
+    ));
+}
+
+#[test]
 fn globally_rematches_a_flexible_job_around_a_specialist() {
     let plan = Planner::default()
         .plan(&snapshot(

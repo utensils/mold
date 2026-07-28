@@ -3232,6 +3232,7 @@ impl Coordinator {
                 next_plan_version: self.plan_version.saturating_add(1),
                 now_ms: monotonic_ms(),
                 next_replan_at_ms: self.dirty.deadline().map(monotonic_deadline_ms),
+                queue_paused: self.state.queue_pause.is_paused(),
                 host_memory: self.memory.snapshot(),
                 devices,
                 work,
@@ -3848,14 +3849,27 @@ impl Coordinator {
         if !self.pending.is_empty() {
             self.reject_terminal_generation_plan_errors();
         }
-        if self.state.queue_pause.is_paused()
-            || (self.pending.is_empty() && self.pending_owner_work.is_empty())
-            || self
+        if self.pending.is_empty() && self.pending_owner_work.is_empty() {
+            let published_work_remains = self
                 .state
-                .gpu_pool
-                .workers
-                .iter()
-                .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+                .scheduled_work
+                .latest_plan()
+                .is_some_and(|plan| !plan.work_items.is_empty());
+            if published_work_remains {
+                // Cancellation or completion can drain the reducer before
+                // the next dispatch turn. Replace the prior authority so a
+                // paused cancellation cannot leave a ghost work item.
+                self.replan_and_publish_with(pass);
+                return Some(self.state_version);
+            }
+            return None;
+        }
+        if self
+            .state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
         {
             return None;
         }
@@ -3908,13 +3922,19 @@ impl Coordinator {
             let _mutation_guard = mutation_fence.lock().await;
             let mut mutation_detected = false;
             self.reconcile_external_mutations(&mut mutation_detected);
-            if self.state.queue_pause.is_paused()
-                || self
-                    .state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+            if self.state.queue_pause.is_paused() {
+                // Pause may race the interval between publication and the
+                // mutation-fenced grant. Replace the now-stale runnable plan
+                // with typed queue-paused blockers before releasing the fence.
+                self.replan_and_publish_with(pass);
+                return Some(self.state_version);
+            }
+            if self
+                .state
+                .gpu_pool
+                .workers
+                .iter()
+                .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
             {
                 return None;
             }
@@ -8022,6 +8042,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paused_queue_publishes_and_clears_exact_work_without_transport() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        let (job, _result_rx) = fake_generation("paused-visible");
+        state
+            .job_registry
+            .register("paused-visible", &job.request.model);
+        queue.submit(job, 1).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("paused-visible")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.state.queue_pause.pause();
+
+        coordinator
+            .dispatch_ready_with(PlanningPass::Admission)
+            .await;
+
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "pause must prevent worker transport"
+        );
+        assert!(coordinator.leases.is_empty());
+        assert!(coordinator.pending.contains_key("paused-visible"));
+        let paused = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("paused pending work must remain observable");
+        let item = paused
+            .work_items
+            .iter()
+            .find(|item| item.work_id == "paused-visible")
+            .expect("paused job must retain its exact scheduler work ID");
+        assert_eq!(item.parent_id, "paused-visible");
+        assert_eq!(item.activity_phase, mold_core::QueueActivityPhase::Blocked);
+        assert_eq!(
+            item.blocked_reason,
+            Some(mold_core::QueueBlockedReason::QueuePaused)
+        );
+        assert_eq!(item.planned_device_id, None);
+
+        let paused_plan_version = paused.plan_version;
+        coordinator
+            .state
+            .job_registry
+            .cancel_queued("paused-visible")
+            .unwrap();
+        coordinator.reconcile_external_mutations(&mut immediate);
+        coordinator
+            .dispatch_ready_with(PlanningPass::Admission)
+            .await;
+        let cancelled = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("cancellation must replace the paused plan");
+        assert!(cancelled.plan_version > paused_plan_version);
+        assert!(
+            cancelled.work_items.is_empty(),
+            "cancelled paused work must not remain as a ghost plan item"
+        );
+        assert!(!coordinator.pending.contains_key("paused-visible"));
+
+        coordinator.state.queue_pause.resume();
+        coordinator
+            .dispatch_ready_with(PlanningPass::Admission)
+            .await;
+        assert_eq!(
+            worker_rx.try_recv().err(),
+            Some(std::sync::mpsc::TryRecvError::Empty),
+            "resuming after cancellation must not transport cancelled work"
+        );
+        assert!(coordinator.leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pause_after_plan_before_grant_replaces_runnable_authority() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        let (job, _result_rx) = fake_generation("pause-race");
+        state
+            .job_registry
+            .register("pause-race", &job.request.model);
+        queue.submit(job, 1).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("pause-race")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+
+        let queue_pause = coordinator.state.queue_pause.clone();
+        let plan_built = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        coordinator.before_grant_hook = Some(BeforeGrantHook {
+            plan_built: plan_built.clone(),
+            resume: resume.clone(),
+        });
+        let dispatch = tokio::spawn(async move {
+            coordinator
+                .dispatch_ready_with(PlanningPass::Admission)
+                .await;
+            coordinator
+        });
+
+        plan_built.notified().await;
+        queue_pause.pause();
+        resume.notify_one();
+        let coordinator = dispatch.await.unwrap();
+
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "a pause racing the grant fence must prevent transport"
+        );
+        assert!(coordinator.leases.is_empty());
+        assert!(coordinator.pending.contains_key("pause-race"));
+        let paused = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("race must replace the runnable plan");
+        let item = paused
+            .work_items
+            .iter()
+            .find(|item| item.work_id == "pause-race")
+            .expect("paused race plan must retain exact work identity");
+        assert_eq!(item.activity_phase, mold_core::QueueActivityPhase::Blocked);
+        assert_eq!(
+            item.blocked_reason,
+            Some(mold_core::QueueBlockedReason::QueuePaused)
+        );
+        assert_eq!(item.planned_device_id, None);
+    }
+
+    #[tokio::test]
     async fn zero_gpu_inventory_keeps_chain_stage_pending_without_fake_device_or_lease() {
         let pool = Arc::new(GpuPool {
             workers: Vec::new().into(),
@@ -11580,6 +11780,7 @@ mod tests {
                     next_plan_version: 1,
                     now_ms: 1_000,
                     next_replan_at_ms: None,
+                    queue_paused: false,
                     host_memory: HostMemorySnapshot {
                         headroom_bytes: 64 << 30,
                         sample_generation: 1,
@@ -11623,6 +11824,7 @@ mod tests {
                     next_plan_version: 2,
                     now_ms: 1_000,
                     next_replan_at_ms: None,
+                    queue_paused: false,
                     host_memory: HostMemorySnapshot {
                         headroom_bytes: 64 << 30,
                         sample_generation: 2,
@@ -11674,6 +11876,7 @@ mod tests {
                 next_plan_version: 1,
                 now_ms: 0,
                 next_replan_at_ms: None,
+                queue_paused: false,
                 host_memory: HostMemorySnapshot {
                     headroom_bytes: 12 << 30,
                     sample_generation: 1,
@@ -11692,6 +11895,7 @@ mod tests {
                 next_plan_version: 2,
                 now_ms: 0,
                 next_replan_at_ms: None,
+                queue_paused: false,
                 host_memory: HostMemorySnapshot {
                     headroom_bytes: 0,
                     sample_generation: 0,
