@@ -24,3 +24,12 @@ export interface PaletteItem {
   section: string;
   label: string;
 }
+
+/** One clip on the sequence rail (ClipRail's generic element constraint). */
+export interface RailClip {
+  id: string;
+  prompt: string;
+  frames: number;
+  transition: import("../lib/seam").SequenceTransition;
+  fadeFrames: number;
+}
