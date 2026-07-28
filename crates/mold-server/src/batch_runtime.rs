@@ -246,42 +246,26 @@ async fn freeze_batch_plan(
         .latest()
         .and_then(|snapshot| snapshot.system_ram.available)
         .unwrap_or(u64::MAX / 4);
-    let preview = state
+    let timing_by_edge = state
         .scheduled_work
-        .preview_placement(
+        .batch_device_profiles(
             execution_request,
             request.batch_size,
             prepared_inputs.clone(),
         )
         .await
-        .map_err(anyhow::Error::msg)?;
-    ensure!(
-        preview.authoritative && preview.outcome == "planned",
-        "authoritative scheduler could not preview batch placement: {}",
-        preview.reason.unwrap_or(preview.outcome)
-    );
-    let generation_stage = preview
-        .stage_candidates
-        .iter()
-        .filter(|stage| stage.copy_index.is_some())
-        .map(|stage| stage.stage_index)
-        .min()
-        .context("batch placement preview has no generation stage")?;
-    let timing_by_edge = preview
-        .stage_candidates
+        .map_err(anyhow::Error::msg)?
         .into_iter()
-        .filter(|stage| stage.stage_index == generation_stage && stage.copy_index.is_some())
-        .map(|stage| {
+        .map(|candidate| {
             (
                 (
-                    stage.candidate.device_id.clone(),
-                    stage
-                        .candidate
+                    candidate.device_id.clone(),
+                    candidate
                         .execution_equivalence_fingerprint
                         .clone()
                         .unwrap_or_default(),
                 ),
-                stage.candidate,
+                candidate,
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -548,12 +532,27 @@ fn completed_record(
     record
 }
 
+struct GrantedBatchChild {
+    lease: BatchChildLease,
+    cancellation: mold_inference::InferenceCancellationToken,
+}
+
+impl From<(BatchChildLease, mold_inference::InferenceCancellationToken)> for GrantedBatchChild {
+    fn from(
+        (lease, cancellation): (BatchChildLease, mold_inference::InferenceCancellationToken),
+    ) -> Self {
+        Self {
+            lease,
+            cancellation,
+        }
+    }
+}
+
 async fn submit_child(
     state: &AppState,
     parent_id: &str,
     request: GenerateRequest,
-    lease: BatchChildLease,
-    cancellation: mold_inference::InferenceCancellationToken,
+    granted: GrantedBatchChild,
     plan: &FrozenBatchPlan,
     ordinal: usize,
     retry: u8,
@@ -561,10 +560,13 @@ async fn submit_child(
     tokio::sync::oneshot::Receiver<Result<GenerationJobResult, String>>,
     std::sync::Arc<tokio::sync::Notify>,
 )> {
-    let id = if lease.child_index == 0 && retry == 0 {
+    let id = if granted.lease.child_index == 0 && retry == 0 {
         parent_id.to_string()
     } else {
-        format!("{parent_id}:child:{}:try:{retry}", lease.child_index + 1)
+        format!(
+            "{parent_id}:child:{}:try:{retry}",
+            granted.lease.child_index + 1
+        )
     };
     let metadata = Box::new(OutputMetadata::from_generate_request(
         &request,
@@ -592,8 +594,8 @@ async fn submit_child(
         result_tx,
         output_dir: None,
         batch_child: Some(BatchChildExecution {
-            lease,
-            cancellation,
+            lease: granted.lease,
+            cancellation: granted.cancellation,
             execution_equivalence_fingerprint: plan.equivalence.clone(),
             prepared_inputs: plan.prepared_inputs.clone(),
         }),
@@ -666,19 +668,9 @@ pub(crate) async fn execute_server_batch(
             .ordinal_by_device
             .get(partition.device_id.as_str())
             .context("adaptive batch plan references an unknown device")?;
-        let (lease, cancellation) = attempt.grant(index)?;
-        match submit_child(
-            state,
-            &parent_id,
-            child,
-            lease.clone(),
-            cancellation,
-            &plan,
-            ordinal,
-            0,
-        )
-        .await
-        {
+        let granted = GrantedBatchChild::from(attempt.grant(index)?);
+        let lease = granted.lease.clone();
+        match submit_child(state, &parent_id, child, granted, &plan, ordinal, 0).await {
             Ok(submitted) => receivers.push((index, lease, ordinal, submitted.0, submitted.1)),
             Err(error) => {
                 let _ = attempt.complete_without_artifact(&lease, ChildCompletion::Cancelled)?;
@@ -753,14 +745,13 @@ pub(crate) async fn execute_server_batch(
                     let disposition = attempt.complete_without_artifact(&lease, completion)?;
                     if disposition == CompletionDisposition::RetryChild {
                         retry = retry.saturating_add(1);
-                        let granted = attempt.grant(index)?;
-                        lease = granted.0;
+                        let granted = GrantedBatchChild::from(attempt.grant(index)?);
+                        lease = granted.lease.clone();
                         let submitted = submit_child(
                             state,
                             &parent_id,
                             children[index].clone(),
-                            lease.clone(),
-                            granted.1,
+                            granted,
                             &plan,
                             ordinal,
                             retry,
@@ -997,13 +988,13 @@ async fn resume_recovered_batch(
             .ordinal_by_device
             .get(partition.device_id.as_str())
             .context("recovered batch plan references an unknown device")?;
-        let (lease, cancellation) = attempt.grant(index)?;
+        let granted = GrantedBatchChild::from(attempt.grant(index)?);
+        let lease = granted.lease.clone();
         match submit_child(
             state,
             parent_id,
             children[index].clone(),
-            lease.clone(),
-            cancellation,
+            granted,
             &plan,
             ordinal,
             0,
@@ -1078,14 +1069,13 @@ async fn resume_recovered_batch(
                     let disposition = attempt.complete_without_artifact(&lease, completion)?;
                     if disposition == CompletionDisposition::RetryChild {
                         retry = retry.saturating_add(1);
-                        let granted = attempt.grant(index)?;
-                        lease = granted.0;
+                        let granted = GrantedBatchChild::from(attempt.grant(index)?);
+                        lease = granted.lease.clone();
                         match submit_child(
                             state,
                             parent_id,
                             children[index].clone(),
-                            lease.clone(),
-                            granted.1,
+                            granted,
                             &plan,
                             ordinal,
                             retry,

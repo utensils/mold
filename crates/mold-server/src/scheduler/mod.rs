@@ -360,6 +360,32 @@ impl ScheduledWorkHandle {
             .map_err(|_| "scheduler placement preview was cancelled".to_string())
     }
 
+    pub async fn batch_device_profiles(
+        &self,
+        request: mold_core::GenerateRequest,
+        parent_size: u32,
+        prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
+    ) -> Result<Vec<mold_core::GenerationPlacementCandidate>, String> {
+        if !self.v2_authoritative {
+            return Err("authoritative scheduler batch profiling is unavailable".to_string());
+        }
+        let Some(tx) = &self.preview_tx else {
+            return Err("scheduler batch profiling channel is unavailable".to_string());
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(PlacementPreviewQuery::BatchDevices {
+            request,
+            parent_size,
+            prepared_inputs,
+            reply_tx,
+        })
+        .await
+        .map_err(|_| "scheduler batch profiling is shutting down".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "scheduler batch profiling was cancelled".to_string())?
+    }
+
     pub async fn submit(&self, work: ScheduledOwnerWork) -> Result<(), String> {
         let Some(tx) = &self.tx else {
             return Err("GPU scheduler is unavailable".to_string());
@@ -389,6 +415,14 @@ pub enum PlacementPreviewQuery {
         copies: u32,
         prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
         reply_tx: tokio::sync::oneshot::Sender<mold_core::GenerationPlacementPreview>,
+    },
+    BatchDevices {
+        request: mold_core::GenerateRequest,
+        parent_size: u32,
+        prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
+        reply_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<mold_core::GenerationPlacementCandidate>, String>,
+        >,
     },
 }
 
@@ -3263,6 +3297,81 @@ impl Coordinator {
         copies: u32,
         prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
     ) -> mold_core::GenerationPlacementPreview {
+        self.placement_preview_dag_for_device(request, copies, prepared_inputs, None)
+    }
+
+    /// Return one exact singleton timing profile for every currently eligible
+    /// generation device without expanding the parent into preview copies.
+    ///
+    /// The public placement preview deliberately caps visualization at 64
+    /// copies. Adaptive batch admission instead needs one arithmetic lane per
+    /// device for arbitrary parent sizes, so it profiles each device against
+    /// one immutable coordinator snapshot and leaves child-count scaling to
+    /// `BatchPartitionPlanner`.
+    fn batch_device_profiles(
+        &self,
+        request: &mold_core::GenerateRequest,
+        parent_size: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+    ) -> anyhow::Result<Vec<mold_core::GenerationPlacementCandidate>> {
+        anyhow::ensure!(parent_size > 0, "batch parent size must be positive");
+        let device_ids = self
+            .device_snapshots()
+            .into_iter()
+            .map(|device| device.id.to_string())
+            .collect::<Vec<_>>();
+        let mut profiles = Vec::with_capacity(device_ids.len());
+        let mut rejection = None;
+        for device_id in device_ids {
+            let preview = self.placement_preview_dag_for_device(
+                request,
+                1,
+                prepared_inputs,
+                Some(&device_id),
+            );
+            if preview.authoritative && preview.outcome == "planned" {
+                let generation_stage = preview
+                    .stage_candidates
+                    .iter()
+                    .filter(|stage| stage.copy_index.is_some())
+                    .map(|stage| stage.stage_index)
+                    .min()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("batch device preview has no generation stage")
+                    })?;
+                if let Some(candidate) = preview
+                    .stage_candidates
+                    .into_iter()
+                    .find(|stage| {
+                        stage.stage_index == generation_stage
+                            && stage.copy_index == Some(0)
+                            && stage.candidate.device_id == device_id
+                    })
+                    .map(|stage| stage.candidate)
+                {
+                    profiles.push(candidate);
+                }
+            } else {
+                rejection.get_or_insert_with(|| {
+                    preview.reason.unwrap_or_else(|| preview.outcome.clone())
+                });
+            }
+        }
+        anyhow::ensure!(
+            !profiles.is_empty(),
+            "authoritative scheduler could not profile batch placement: {}",
+            rejection.unwrap_or_else(|| "no eligible device".to_string())
+        );
+        Ok(profiles)
+    }
+
+    fn placement_preview_dag_for_device(
+        &self,
+        request: &mold_core::GenerateRequest,
+        copies: u32,
+        prepared_inputs: &crate::execution_plan::PreparedExecutionInputs,
+        required_device_id: Option<&str>,
+    ) -> mold_core::GenerationPlacementPreview {
         let empty = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
             version: 1,
             authoritative: true,
@@ -3366,6 +3475,7 @@ impl Coordinator {
         let candidates = plans
             .into_iter()
             .filter(|plan| !failed.contains(&plan.device_ordinal))
+            .filter(|plan| required_device_id.is_none_or(|device_id| plan.device_id == device_id))
             .filter_map(|plan| {
                 let worker = self.state.gpu_pool.worker_by_ordinal(plan.device_ordinal)?;
                 let key = generation_estimate_key(
@@ -4732,6 +4842,17 @@ pub async fn run_scheduler_coordinator(
                                 copies,
                                 &prepared_inputs,
                             );
+                            let _ = reply_tx.send(response);
+                        }
+                        PlacementPreviewQuery::BatchDevices {
+                            request,
+                            parent_size,
+                            prepared_inputs,
+                            reply_tx,
+                        } => {
+                            let response = coordinator
+                                .batch_device_profiles(&request, parent_size, &prepared_inputs)
+                                .map_err(|error| format!("{error:#}"));
                             let _ = reply_tx.send(response);
                         }
                     }
@@ -10527,10 +10648,12 @@ mod tests {
             r#"{"prompt":"","model":"preview-z","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
         )
         .unwrap();
-        let (worker, _worker_rx) = test_worker(0);
-        let stable_id = worker_device_id(&worker);
+        let (worker0, _worker_rx0) = test_worker(0);
+        let (worker1, _worker_rx1) = test_worker(1);
+        let stable_id = worker_device_id(&worker0);
+        let stable_id1 = worker_device_id(&worker1);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker].into(),
+            workers: vec![worker0, worker1].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
@@ -10542,23 +10665,41 @@ mod tests {
         let prepared = crate::variant_dependencies::prepare_local_execution_inputs(
             &config,
             &request,
-            vec![crate::execution_plan::DeviceFact {
+            vec![
+                crate::execution_plan::DeviceFact {
+                    id: stable_id.clone(),
+                    ordinal: 0,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
+                    available_vram_bytes: 24 << 30,
+                },
+                crate::execution_plan::DeviceFact {
+                    id: stable_id1.clone(),
+                    ordinal: 1,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
+                    available_vram_bytes: 24 << 30,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let device_facts = vec![
+            crate::execution_plan::DeviceFact {
                 id: stable_id.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
                 compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
-            }],
-        )
-        .await
-        .unwrap();
-        let device_facts = vec![crate::execution_plan::DeviceFact {
-            id: stable_id.clone(),
-            ordinal: 0,
-            backend: mold_core::GpuBackend::Cuda,
-            compute_capability: Some((8, 6)),
-            available_vram_bytes: 24 << 30,
-        }];
+            },
+            crate::execution_plan::DeviceFact {
+                id: stable_id1.clone(),
+                ordinal: 1,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24 << 30,
+            },
+        ];
         let execution = crate::execution_plan::resolve_execution_plans_with_prepared(
             &config,
             &request,
@@ -10599,8 +10740,23 @@ mod tests {
         );
 
         let preview = coordinator.placement_preview(&request, 1, &prepared);
+        let batch_profiles = coordinator
+            .batch_device_profiles(&request, 65, &prepared)
+            .unwrap();
 
         assert_eq!(preview.outcome, "planned", "{:?}", preview.reason);
+        assert_eq!(
+            batch_profiles.len(),
+            2,
+            "batch profiling must be independent of the public 64-copy preview ceiling"
+        );
+        assert_eq!(
+            batch_profiles
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([stable_id.as_str(), stable_id1.as_str()])
+        );
         assert_eq!(
             preview
                 .candidate
@@ -10688,6 +10844,7 @@ mod tests {
         let (worker0, _worker_rx0) = test_worker(0);
         let (worker1, _worker_rx1) = test_worker(1);
         let stable_id0 = worker_device_id(&worker0);
+        let stable_id1 = worker_device_id(&worker1);
         let pool = Arc::new(GpuPool {
             workers: vec![worker0, worker1].into(),
         });
@@ -10710,7 +10867,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
-                    id: worker_device_id(&coordinator.state.gpu_pool.worker_by_ordinal(1).unwrap()),
+                    id: stable_id1.clone(),
                     ordinal: 1,
                     backend: mold_core::GpuBackend::Cuda,
                     compute_capability: Some((8, 6)),
@@ -10740,8 +10897,19 @@ mod tests {
         drop(config_guard);
 
         let preview = coordinator.placement_preview_dag(&request, 3, &prepared);
+        let batch_profiles = coordinator
+            .batch_device_profiles(&request, 3, &prepared)
+            .unwrap();
 
         assert_eq!(preview.outcome, "planned", "{:?}", preview.reason);
+        assert_eq!(
+            batch_profiles
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([stable_id0.as_str()]),
+            "explicit generation placement must constrain batch device profiling"
+        );
         assert_eq!(preview.stage_candidates.len(), 7);
         let expansion = preview
             .stage_candidates
