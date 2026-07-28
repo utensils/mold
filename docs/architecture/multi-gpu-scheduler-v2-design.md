@@ -1727,14 +1727,20 @@ cannot destroy transaction evidence before joint reconciliation.
 The parent and transaction are one cross-process authority domain. Begin and
 startup recovery acquire gallery bookkeeping, a stable gallery-root lock
 derived from the parent ID, then every generation-scoped attempt lock before
-releasing bookkeeping. Discovery collects names only before those claims; no
-parent/transaction journal read, incomplete-tail heal, archive validation, or
-cleanup happens first. The stable parent pathname is identity-checked,
-no-follow, and never unlinked, and its guard outlives the current transaction
-guard. Contention is nonblocking and parent-scoped, so unrelated parents can
-recover in parallel. Any error at a transaction delta write, flush, file
-fsync, or directory fsync boundary poisons that live transaction; it cannot
-reuse the sequence and only a fresh authoritative recovery may continue.
+releasing bookkeeping. Aggregate claims reject duplicate generations and
+acquire the remaining canonical generation set in ascending order. Their
+partial-attempt collection is created before the bookkeeping guard, so panic
+unwinding releases bookkeeping first; ordinary errors explicitly release
+bookkeeping before dropping any acquired attempt authority because its cleanup
+must reacquire that same guard. Discovery collects names only before those
+claims; no parent/transaction journal read, incomplete-tail heal, archive
+validation, or cleanup happens first. The stable parent pathname is
+identity-checked, no-follow, and never unlinked, and its guard outlives the
+current transaction guard. Contention is nonblocking and parent-scoped, so
+unrelated parents can recover in parallel. Any error at a transaction delta
+write, flush, file fsync, or directory fsync boundary poisons that live
+transaction; it cannot reuse the sequence and only a fresh authoritative
+recovery may continue.
 
 External direct filesystem observers remain outside the logical API guarantee.
 

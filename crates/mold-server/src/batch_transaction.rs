@@ -3198,24 +3198,47 @@ pub(crate) fn claim_parent_and_attempt_authorities(
     generations: &[u64],
 ) -> anyhow::Result<(ParentAuthority, BTreeMap<u64, AttemptAuthority>)> {
     fs::create_dir_all(output_dir)?;
-    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-    let parent = try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
-        BatchParentAuthorityContended {
-            parent_id: parent_id.to_owned(),
-        }
-    })?;
+    let requested_generation_count = generations.len();
+    let generations = generations.iter().copied().collect::<BTreeSet<_>>();
+    ensure!(
+        generations.len() == requested_generation_count,
+        "duplicate batch attempt generation requested for parent {parent_id}"
+    );
+
+    // This collection must be declared before bookkeeping. AttemptAuthority
+    // Drop reacquires gallery bookkeeping to reclaim its current sidecar, so
+    // panic unwinding must release the later bookkeeping guard first.
     let mut attempts = BTreeMap::new();
-    for generation in generations.iter().copied() {
-        let directory = attempt_dir(output_dir, parent_id, generation);
-        let authority =
-            try_claim_attempt_authority(&directory, &bookkeeping)?.ok_or_else(|| {
-                BatchAttemptAuthorityContended {
-                    parent_id: parent_id.to_owned(),
-                    attempt_generation: generation,
-                }
-            })?;
-        attempts.insert(generation, authority);
-    }
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let parent = match (|| -> anyhow::Result<ParentAuthority> {
+        let parent = try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
+            BatchParentAuthorityContended {
+                parent_id: parent_id.to_owned(),
+            }
+        })?;
+        for generation in generations.iter().copied() {
+            let directory = attempt_dir(output_dir, parent_id, generation);
+            let authority =
+                try_claim_attempt_authority(&directory, &bookkeeping)?.ok_or_else(|| {
+                    BatchAttemptAuthorityContended {
+                        parent_id: parent_id.to_owned(),
+                        attempt_generation: generation,
+                    }
+                })?;
+            attempts.insert(generation, authority);
+        }
+        Ok(parent)
+    })() {
+        Ok(parent) => parent,
+        Err(error) => {
+            // Normal error unwinding is explicit as well: dropping a partially
+            // collected AttemptAuthority while bookkeeping is held would
+            // self-deadlock in AttemptAuthority::drop.
+            drop(bookkeeping);
+            drop(attempts);
+            return Err(error);
+        }
+    };
     drop(bookkeeping);
     parent.validate_identity(output_dir, parent_id)?;
     Ok((parent, attempts))
@@ -5635,6 +5658,97 @@ mod tests {
                 return Ok(());
             }
         }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for partial multi-attempt authority contention"]
+    fn partial_attempt_claim_contention_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let parent_id = "partial-claim-parent";
+        fs::create_dir_all(attempt_dir(&output_dir, parent_id, 0)).unwrap();
+        fs::create_dir_all(attempt_dir(&output_dir, parent_id, 1)).unwrap();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(&output_dir).unwrap();
+        let held =
+            try_claim_attempt_authority(&attempt_dir(&output_dir, parent_id, 1), &bookkeeping)
+                .unwrap()
+                .expect("fixture must own the later attempt");
+        drop(bookkeeping);
+        write_process_test_marker("LATER_ATTEMPT_HELD");
+
+        let error =
+            claim_parent_and_attempt_authorities(&output_dir, parent_id, &[0, 1]).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<BatchAttemptAuthorityContended>()
+                .is_some(),
+            "later-generation contention must remain typed: {error:#}"
+        );
+        write_process_test_marker("TYPED_CONTENTION");
+        drop(held);
+    }
+
+    #[test]
+    fn partial_attempt_claim_contention_releases_bookkeeping_before_unwind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::partial_attempt_claim_contention_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        read_process_test_marker(&mut output, "LATER_ATTEMPT_HELD").unwrap();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut output, "TYPED_CONTENTION");
+            result_tx.send(result).unwrap();
+            output
+        });
+        match result_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => result.unwrap(),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = reader.join();
+                panic!(
+                    "partially acquired attempts deadlocked while unwinding under gallery \
+                     bookkeeping: {error}"
+                );
+            }
+        }
+        let mut output = reader.join().unwrap();
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn duplicate_attempt_claim_is_rejected_before_acquiring_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_id = "duplicate-generation-parent";
+        fs::create_dir_all(attempt_dir(dir.path(), parent_id, 0)).unwrap();
+
+        let error = match claim_parent_and_attempt_authorities(dir.path(), parent_id, &[0, 0]) {
+            Ok(_) => panic!("duplicate attempt generations must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate batch attempt generation"),
+            "duplicate rejection must remain actionable: {error:#}"
+        );
+
+        let authority = claim_parent_and_attempt_authorities(dir.path(), parent_id, &[0])
+            .expect("duplicate validation must not leak parent or attempt authority");
+        drop(authority);
     }
 
     fn predecessor_attempt_authority_path(attempt_dir: &Path) -> PathBuf {
