@@ -8,7 +8,7 @@ import {
   watch,
 } from "vue";
 import { requestChoice, toast, undoableAction } from "../lib/toasts";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
 import ControlsAside from "../components/create/ControlsAside.vue";
@@ -18,8 +18,7 @@ import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import { projectResolution } from "../components/create/resolutionProjection";
-import ScriptComposer from "../components/ScriptComposer.vue";
-import ChainJobCard from "../components/ChainJobCard.vue";
+import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
@@ -29,23 +28,45 @@ import RecentGrid from "../components/create/RecentGrid.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
-import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
-import { modelSupportsSequence } from "@studio/lib/sequence";
 import {
-  createChainJob,
+  defaultClipFrames,
+  friendlySequenceError,
+  modelsForOutput,
+  modelSupportsSequence,
+  sequenceMotionTailFrames,
+  type OutputMode,
+} from "@studio/lib/sequence";
+import {
+  buildChainRequest,
+  chainScriptToClips,
+  type SequenceSharedParams,
+} from "@studio/lib/sequenceForm";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { sequenceToVM, type ActivityAction, type ActivityJobVM } from "@studio/lib/activity";
+import type { AmendRequest } from "@studio/lib/api/chainTypes";
+import {
+  ApiHttpError,
+  chainJobStagePreviewUrl,
   deleteGalleryImage,
   expandPrompt,
+  fetchChainLimits,
   fetchPromptHistory,
+  getChainJob,
   imageUrl,
   listGallery,
   upscaleStream,
   type StreamTarget,
 } from "../api";
+import { useChainJobs } from "../composables/useChainJobs";
+import {
+  chainScriptFromWire,
+  sequenceSharedParams,
+} from "../lib/sequenceParams";
 import {
   applyMetadataToForm,
   isQwenImageEditFamily,
@@ -62,7 +83,6 @@ import {
   loadLastSeed,
   storeLastSeed,
 } from "../lib/lastSeed";
-import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
 import { decideGenerateRequestRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
@@ -76,8 +96,6 @@ import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import type { HostRoute } from "../lib/hostRouting";
 import type {
-  ChainRequestWire,
-  ChainStageWire,
   ExpandFormState,
   GalleryImage,
   GenerateRequestWire,
@@ -85,10 +103,6 @@ import type {
   SourceFitPolicy,
   SourceImageState,
 } from "../types";
-import type { ChainScriptToml } from "../lib/chainToml";
-
-type ComposerMode = "single" | "script";
-
 function loadMuted(): boolean {
   try {
     return localStorage.getItem("mold.gallery.muted") !== "false";
@@ -99,6 +113,7 @@ function loadMuted(): boolean {
 
 const form = useGenerateForm();
 const pageRoute = useRoute();
+const router = useRouter();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
@@ -340,42 +355,65 @@ function drawableFitPolicy(
   return policy;
 }
 
-function loadComposerMode(): ComposerMode {
-  try {
-    return localStorage.getItem("mold.composer.mode") === "script"
-      ? "script"
-      : "single";
-  } catch {
-    return "single";
-  }
-}
-const composerMode = ref<ComposerMode>(loadComposerMode());
-function setComposerMode(v: ComposerMode) {
-  composerMode.value = v;
-  try {
-    localStorage.setItem("mold.composer.mode", v);
-  } catch {
-    /* ignore */
-  }
-}
-watch(
-  () => pageRoute.query.mode,
-  (mode) => {
-    if (mode === "sequence") setComposerMode("script");
+// ── Output mode (mockup 1c/3a: a setting, not a place) ────────────────
+// The clip list and output mode live in the shared sequence draft store;
+// shared generation params stay in the live generate form and are read at
+// submit time — the fix for the old stale-inspector sequence bug.
+const draft = useSequenceDraftStore();
+draft.hydrate();
+const sequenceMode = computed(() => draft.output === "sequence");
+const promptBridge = {
+  getPrompt: () => form.state.value.prompt,
+  setPrompt: (v: string) => {
+    form.state.value.prompt = v;
   },
-  { immediate: true },
-);
+};
 
-const expandStageIndex = ref<number | null>(null);
+function setOutput(mode: OutputMode) {
+  if (mode === "sequence" && draft.output !== "sequence") {
+    // Remember the single-mode model so switching back restores it.
+    draft.lastSingleModel = form.state.value.model || null;
+  }
+  draft.setOutput(mode, promptBridge, sequenceDefaultFrames.value);
+}
+
+// Legacy `?mode=sequence` deep links redirect to `?output=sequence`; that
+// query is consumed ONCE (setOutput + strip) so the persisted draft output
+// wins on every later visit. Registered from onMounted — the handler leans
+// on computeds declared further down.
+function queryWithout(
+  query: Record<string, unknown>,
+  key: string,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const next: Record<string, unknown> = { ...query, ...(extra ?? {}) };
+  delete next[key];
+  return next as Record<string, string>;
+}
+
+function consumeOutputQuery(query: Record<string, unknown>) {
+  if (query.mode === "sequence") {
+    void router.replace({
+      query: queryWithout(query, "mode", { output: "sequence" }),
+    });
+    return;
+  }
+  if (query.output === "sequence") {
+    setOutput("sequence");
+    void router.replace({ query: queryWithout(query, "output") });
+  }
+}
+
+const expandClipId = ref<string | null>(null);
 const expandStagePrompt = ref("");
 // The composer's style chip steers the main-prompt expansion as natural
-// language. Chain stages are their own text — the style row never touches them.
+// language. Sequence clips are their own text — the style row never touches
+// them.
 const expandStyleDirective = computed(() =>
-  expandStageIndex.value !== null
+  expandClipId.value !== null
     ? null
     : styleHint(form.state.value.stylePreset ?? ""),
 );
-const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
 // Drawer state (mirrors LibraryPage).
 const selected = ref<GalleryImage | null>(null);
@@ -394,52 +432,152 @@ const stream = useGenerateStream((job) => {
   lastSeedUsed.value = seed;
   storeLastSeed(seed);
 });
-const CHAIN_JOB_STORAGE_KEY = "mold.create.chain-job";
-const CHAIN_JOB_HOST_STORAGE_KEY = "mold.create.chain-job-host";
-function loadSubmittedChainJobId(): string | null {
-  try {
-    return localStorage.getItem(CHAIN_JOB_STORAGE_KEY);
-  } catch {
-    return null;
-  }
+// ── Durable sequence jobs (multi-host, mockup 1c: the chain Jobs list
+//    merges with the activity strip) ────────────────────────────────────
+const chainJobs = useChainJobs();
+
+function hostLabelFor(hostId: string): string {
+  return routing.hosts.value.find((h) => h.id === hostId)?.label ?? hostId;
 }
-const submittedChainJobId = ref<string | null>(loadSubmittedChainJobId());
-const submittedChainJobHostId = ref<string | null>(
-  (() => {
-    try {
-      return localStorage.getItem(CHAIN_JOB_HOST_STORAGE_KEY);
-    } catch {
-      return null;
-    }
-  })(),
-);
-const submittedChainTarget = computed<StreamTarget | undefined>(() => {
-  const hostId = submittedChainJobHostId.value;
-  if (!hostId) return undefined;
-  const host = routing.hosts.value.find((candidate) => candidate.id === hostId);
+
+function hostTargetFor(hostId: string): StreamTarget | undefined {
+  const host = routing.hosts.value.find((h) => h.id === hostId);
   if (!host) return undefined;
-  return {
-    baseUrl: host.url,
-    ...(host.apiKey ? { apiKey: host.apiKey } : {}),
-  };
+  return { baseUrl: host.url, ...(host.apiKey ? { apiKey: host.apiKey } : {}) };
+}
+
+const watchedProgress = computed(() => {
+  const live = chainJobs.state.live;
+  return live.activeStage !== null
+    ? (live.progress[live.activeStage] ?? null)
+    : null;
 });
-const submittedChainJob = useChainJobStream(
-  submittedChainJobId,
-  submittedChainTarget,
-);
-const submittedChainJobDetail = submittedChainJob.detail;
-watch(submittedChainJobId, (id) => {
-  try {
-    if (id) localStorage.setItem(CHAIN_JOB_STORAGE_KEY, id);
-    else {
-      localStorage.removeItem(CHAIN_JOB_STORAGE_KEY);
-      localStorage.removeItem(CHAIN_JOB_HOST_STORAGE_KEY);
-      submittedChainJobHostId.value = null;
+
+const sequenceVMs = computed<ActivityJobVM[]>(() => {
+  const out: ActivityJobVM[] = [];
+  const watched = chainJobs.state.watching;
+  for (const [hostId, hostState] of Object.entries(chainJobs.state.byHost)) {
+    for (const job of hostState.jobs) {
+      const progress =
+        watched && watched.hostId === hostId && watched.jobId === job.id
+          ? watchedProgress.value
+          : null;
+      out.push(
+        sequenceToVM(
+          job,
+          { hostId, hostLabel: hostLabelFor(hostId) },
+          progress,
+        ),
+      );
     }
-  } catch {
-    // Storage is advisory; the durable server job keeps running regardless.
   }
+  return out;
 });
+
+// The watched job's progress renders in the canvas region (the old
+// ChainJobCard's job): stage/step readout plus the latest stage preview.
+const watchedSequenceDetail = computed(() => chainJobs.state.live.detail);
+const watchedSequenceActive = computed(() => {
+  const d = watchedSequenceDetail.value;
+  return !!d && (d.state === "running" || d.state === "queued");
+});
+const sequenceCanvasPercent = computed(() => {
+  const p = watchedProgress.value;
+  return p?.total ? Math.round((p.step / p.total) * 100) : 0;
+});
+const sequenceCanvasStage = computed(() => {
+  const d = watchedSequenceDetail.value;
+  if (!d) return "";
+  const live = chainJobs.state.live;
+  if (live.activeStage !== null) {
+    const p = watchedProgress.value;
+    const step = p ? ` · step ${p.step}/${p.total}` : "";
+    return `Clip ${live.activeStage + 1}/${d.stage_count}${step}`;
+  }
+  return d.state === "queued" ? "Queued" : "Rendering sequence";
+});
+
+// Ported from ChainJobCard: authenticated per-stage previews as blob URLs;
+// the latest previewed stage feeds the canvas.
+const sequencePreviews = ref<Record<number, string>>({});
+let sequencePreviewKey = "";
+function clearSequencePreviews() {
+  for (const url of Object.values(sequencePreviews.value)) {
+    URL.revokeObjectURL(url);
+  }
+  sequencePreviews.value = {};
+}
+watch(
+  () => {
+    const d = watchedSequenceDetail.value;
+    const watched = chainJobs.state.watching;
+    return d && watched
+      ? [
+          watched.hostId,
+          d.id,
+          d.stages
+            .filter((s) => s.has_preview)
+            .map((s) => s.idx)
+            .join(","),
+        ].join(":")
+      : "";
+  },
+  () => {
+    const d = watchedSequenceDetail.value;
+    const watched = chainJobs.state.watching;
+    if (!d || !watched) return;
+    const nextKey = `${watched.hostId}:${d.id}`;
+    if (sequencePreviewKey !== nextKey) {
+      clearSequencePreviews();
+      sequencePreviewKey = nextKey;
+    }
+    const target = hostTargetFor(watched.hostId);
+    for (const stage of d.stages) {
+      if (!stage.has_preview || sequencePreviews.value[stage.idx]) continue;
+      const headers = target?.apiKey
+        ? { "x-api-key": target.apiKey }
+        : undefined;
+      void fetch(chainJobStagePreviewUrl(d.id, stage.idx, target), {
+        ...(headers ? { headers } : {}),
+      })
+        .then(async (response) => {
+          if (!response.ok)
+            throw new Error(`Preview failed: ${response.status}`);
+          const url = URL.createObjectURL(await response.blob());
+          sequencePreviews.value = {
+            ...sequencePreviews.value,
+            [stage.idx]: url,
+          };
+        })
+        .catch(() => {});
+    }
+  },
+);
+const sequencePreviewSrc = computed(() => {
+  const best = Object.entries(sequencePreviews.value)
+    .map(([idx, url]) => [Number(idx), url] as const)
+    .sort((a, b) => b[0] - a[0])[0];
+  return best?.[1];
+});
+
+// Surface the watched sequence's terminal states without a dedicated card.
+watch(
+  () => watchedSequenceDetail.value?.state,
+  (state, prev) => {
+    if (!state || !prev || state === prev) return;
+    if (state === "completed") {
+      toast("info", "Sequence finished.");
+      void refreshGallery();
+    } else if (state === "failed") {
+      toast(
+        "error",
+        friendlySequenceError(
+          watchedSequenceDetail.value?.error ?? "Sequence failed.",
+        ),
+      );
+    }
+  },
+);
 
 async function refreshGallery() {
   try {
@@ -573,12 +711,10 @@ const installedModels = computed(() =>
   models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
 );
 const sequenceModels = computed(() =>
-  installedModels.value.filter((model) => modelSupportsSequence(model)),
+  modelsForOutput(installedModels.value, "sequence"),
 );
 const composerModels = computed(() =>
-  composerMode.value === "script"
-    ? sequenceModels.value
-    : installedModels.value,
+  modelsForOutput(installedModels.value, draft.output),
 );
 const sequenceBrowsePath =
   "/models?tab=discover&type=video&kind=checkpoint&intent=sequence";
@@ -617,9 +753,9 @@ watch(
 // picker and move off an image/two-stage model automatically when a runnable
 // sequence checkpoint is already installed.
 watch(
-  [composerMode, sequenceModels, modelsLoaded],
+  [sequenceMode, sequenceModels, modelsLoaded],
   () => {
-    if (composerMode.value !== "script" || !modelsLoaded.value) return;
+    if (!sequenceMode.value || !modelsLoaded.value) return;
     const current = form.state.value.model;
     if (sequenceModels.value.some((model) => model.name === current)) return;
     const first = sequenceModels.value[0];
@@ -627,6 +763,225 @@ watch(
   },
   { immediate: true },
 );
+
+// Switching back to One shot restores the model that was selected before the
+// Sequence trip (when it is still installed).
+watch(sequenceMode, (isSequence, wasSequence) => {
+  if (isSequence || !wasSequence) return;
+  const name = draft.lastSingleModel;
+  if (!name) return;
+  const model = installedModels.value.find((m) => m.name === name);
+  if (model) form.applyModelDefaults(model);
+});
+
+// ── Sequence submit path (live-form projection) ───────────────────────
+const sequenceMotionTail = computed(() =>
+  sequenceMotionTailFrames({
+    name: form.state.value.model,
+    family: currentFamily.value,
+  }),
+);
+const sequenceDefaultFrames = computed(() =>
+  defaultClipFrames(currentModel.value, null, sequenceMotionTail.value),
+);
+const sharedParams = computed<SequenceSharedParams>(() =>
+  sequenceSharedParams(form.state.value, currentFamily.value),
+);
+const sequenceTarget = computed<StreamTarget | undefined>(
+  () => routing.resolve(form.state.value.model || null)?.target,
+);
+
+// Edit sessions snapshot the shared params at load so shape/detail changes
+// mark every clip as re-rendering in the rail's plan badges.
+const editBaselineShared = ref<string | null>(null);
+const chainLevelDirty = computed(
+  () =>
+    editBaselineShared.value !== null &&
+    editBaselineShared.value !== JSON.stringify(sharedParams.value),
+);
+
+/** Apply a script's chain-level params onto the LIVE form (edit + import). */
+function applySharedToForm(shared: Partial<SequenceSharedParams>) {
+  if (shared.model) {
+    const model = installedModels.value.find((m) => m.name === shared.model);
+    // applyModelDefaults REPLACES state.value — read the form only after.
+    if (model) form.applyModelDefaults(model);
+    else form.state.value.model = shared.model;
+  }
+  const s = form.state.value;
+  if (shared.width != null) s.width = shared.width;
+  if (shared.height != null) s.height = shared.height;
+  if (shared.fps != null) s.fps = shared.fps;
+  if (shared.steps != null) s.steps = shared.steps;
+  if (shared.guidance != null) s.guidance = shared.guidance;
+  if (shared.seed != null && shared.seed !== "") {
+    s.seedMode = "static";
+    s.seed = Number(shared.seed);
+  }
+}
+
+async function onSubmitSequence() {
+  composerError.value = null;
+  const route = routing.resolve(form.state.value.model || null);
+  if (!route) {
+    composerError.value = "The selected sequence host is unavailable.";
+    return;
+  }
+  // Refresh chain limits when stale (30 s cache) — the server still remains
+  // the final authority at submission.
+  await fetchChainLimits(form.state.value.model, route.target).catch(() => {});
+  const req = buildChainRequest(sharedParams.value, draft.clips, {
+    motionTailFrames: sequenceMotionTail.value,
+    enableAudio: draft.enableAudio,
+  });
+
+  const editing = draft.editing;
+  if (editing) {
+    const amendReq: AmendRequest = {
+      stages: req.stages,
+      motion_tail_frames: req.motion_tail_frames ?? null,
+      fps: req.fps ?? null,
+      seed: sharedParams.value.seed.trim() === "" ? null : sharedParams.value.seed,
+      steps: req.steps,
+      guidance: req.guidance,
+      enable_audio: draft.enableAudio ? true : null,
+    };
+    try {
+      await chainJobs.amend(editing.hostId, editing.jobId, amendReq);
+      draft.stopEditing();
+      editBaselineShared.value = null;
+      toast("info", "Sequence updated — unchanged clips stay cached.");
+      return;
+    } catch (error) {
+      if (error instanceof ApiHttpError && error.status === 409) {
+        toast(
+          "error",
+          "That sequence has moved on — submitting your edit as a new sequence.",
+        );
+        // Fall through to create-as-new below.
+      } else {
+        composerError.value =
+          error instanceof Error ? error.message : String(error);
+        return;
+      }
+    }
+  }
+
+  try {
+    await chainJobs.create(route.hostId, req);
+    if (editing) {
+      draft.stopEditing();
+      editBaselineShared.value = null;
+    }
+    toast("info", `Sequence queued on ${route.label}.`);
+  } catch (error) {
+    composerError.value =
+      error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** Load a durable job's effective script into an edit session. */
+async function editSequence(hostId: string, jobId: string) {
+  try {
+    const detail = await getChainJob(jobId, hostTargetFor(hostId));
+    const script = chainScriptFromWire(detail.script);
+    if (!script) throw new Error("This sequence job has no editable script.");
+    const loaded = chainScriptToClips(script);
+    applySharedToForm(loaded.shared);
+    let completedStages = 0;
+    for (const stage of [...detail.stages].sort((a, b) => a.idx - b.idx)) {
+      if (stage.state !== "completed") break;
+      completedStages += 1;
+    }
+    draft.loadFromJob(
+      {
+        jobId,
+        hostId,
+        baseline: loaded.clips.map((clip) => ({ ...clip })),
+        completedStages,
+      },
+      loaded.clips,
+      loaded.enableAudio,
+    );
+    editBaselineShared.value = JSON.stringify(
+      sequenceSharedParams(form.state.value, currentFamily.value),
+    );
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function onDuplicateAsNew() {
+  draft.stopEditing();
+  editBaselineShared.value = null;
+  toast("info", "Detached from the job — Generate now queues a new sequence.");
+}
+
+function onDiscardEdit() {
+  draft.stopEditing();
+  editBaselineShared.value = null;
+  draft.clips.splice(0, draft.clips.length);
+  draft.activeClipId = null;
+  draft.enableAudio = false;
+  draft.ensureClips(sequenceDefaultFrames.value);
+}
+
+function onImportShared(shared: Partial<SequenceSharedParams>) {
+  applySharedToForm(shared);
+}
+
+function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
+  if (vm.kind !== "sequence") return;
+  const fail = (error: unknown) =>
+    toast("error", error instanceof Error ? error.message : String(error));
+  switch (action) {
+    case "watch":
+      chainJobs.watch(vm.hostId, vm.jobId);
+      break;
+    case "cancel":
+      void chainJobs.cancel(vm.hostId, vm.jobId).catch(fail);
+      break;
+    case "resume":
+      void chainJobs.resume(vm.hostId, vm.jobId).catch(fail);
+      break;
+    case "edit":
+      void editSequence(vm.hostId, vm.jobId);
+      break;
+    case "delete":
+      void chainJobs.remove(vm.hostId, vm.jobId).catch(fail);
+      break;
+    case "retake":
+      // The strip never offers retake directly; stage-level retakes live in
+      // the edit flow.
+      break;
+  }
+}
+
+function onClearInactive() {
+  void chainJobs
+    .clearInactive()
+    .then(({ cleared, failed }) => {
+      if (failed > 0) toast("error", `${failed} sequence(s) could not be cleared.`);
+      else if (cleared > 0) toast("info", `Cleared ${cleared} finished sequence(s).`);
+    })
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
+
+function onCleanupDisk() {
+  void chainJobs
+    .gc()
+    .then((outcome) =>
+      toast(
+        "info",
+        `Cleaned up ${outcome.pruned_artifact_dirs} artifact folder(s).`,
+      ),
+    )
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
@@ -1051,49 +1406,6 @@ async function onSubmit(allowStaleQuick = false) {
   }
 }
 
-async function onSubmitScript(script: ChainScriptToml) {
-  const stages: ChainStageWire[] = script.stage.map((s) => ({
-    prompt: s.prompt,
-    frames: s.frames,
-    transition: s.transition,
-    fade_frames: s.fade_frames,
-    negative_prompt: s.negative_prompt,
-    seed_offset: s.seed_offset,
-    source_image: s.source_image_b64 ?? null,
-  }));
-  const req: ChainRequestWire = {
-    model: script.chain.model,
-    stages,
-    motion_tail_frames: script.chain.motion_tail_frames,
-    width: script.chain.width,
-    height: script.chain.height,
-    fps: script.chain.fps,
-    seed: script.chain.seed ?? null,
-    steps: script.chain.steps,
-    guidance: script.chain.guidance,
-    strength: script.chain.strength,
-    output_format: script.chain.output_format,
-    enable_audio: script.chain.enable_audio,
-  };
-  try {
-    const route = routing.resolve(script.chain.model);
-    if (!route) {
-      throw new Error("The selected sequence host is unavailable.");
-    }
-    const { job_id } = await createChainJob(req, route.target);
-    submittedChainJobHostId.value = route.hostId;
-    submittedChainJobId.value = job_id;
-    try {
-      localStorage.setItem(CHAIN_JOB_HOST_STORAGE_KEY, route.hostId);
-    } catch {
-      // The durable job is already running. Storage is recovery convenience,
-      // not part of submission success.
-    }
-  } catch (e) {
-    composerError.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
 // ── Expand (spec §03/§06) ─────────────────────────────────────────────
 function validateExpandedPrompts(
   prompts: readonly string[],
@@ -1159,11 +1471,11 @@ async function onExpand() {
   showExpand.value = true;
 }
 
-function onExpandStage(stageIndex: number, prompt: string) {
+function onExpandClip(clipId: string, prompt: string) {
   const route = resolveSubmitRoute();
   if (route === false) return;
   expandRoute.value = cloneRoute(route);
-  expandStageIndex.value = stageIndex;
+  expandClipId.value = clipId;
   expandStagePrompt.value = prompt;
   showExpand.value = true;
 }
@@ -1187,8 +1499,9 @@ function bakeStyleAndClear() {
 }
 
 function applyExpandedPrompt(v: string) {
-  if (expandStageIndex.value !== null) {
-    scriptComposerRef.value?.setStagePrompt(expandStageIndex.value, v);
+  if (expandClipId.value !== null) {
+    const clip = draft.clips.find((c) => c.id === expandClipId.value);
+    if (clip) clip.prompt = v;
     return;
   }
   prevPrompt.value = form.state.value.prompt;
@@ -1424,6 +1737,12 @@ onMounted(async () => {
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
+  // Legacy/entry query handling — registered here (not at setup top level)
+  // because the handler reads computeds declared later in the file.
+  watch(() => pageRoute.query, consumeOutputQuery, { immediate: true });
+  // Durable sequences: refresh every host's list and reattach the watch to
+  // any tracked in-flight job.
+  void chainJobs.start();
   // Models arrive from the host-routing poll (every machine, not just this
   // one); the watcher above homes the form onto one that's actually installed.
   void routing.refresh();
@@ -1441,6 +1760,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
+  clearSequencePreviews();
   phoneQuery?.removeEventListener?.("change", syncPhone);
   window.removeEventListener("mold:new-print", onNewPrint);
   document.removeEventListener("pointerdown", onTemplatesPointerDown);
@@ -1469,22 +1789,16 @@ onBeforeUnmount(() => {
         </h1>
         <ActivityStrip
           :jobs="stream.jobs.value"
+          :sequences="sequenceVMs"
           @cancel="stream.cancel"
           @dismiss="stream.remove"
           @open="openJob"
+          @sequence-action="onSequenceAction"
+          @clear-inactive="onClearInactive"
+          @cleanup-disk="onCleanupDisk"
         />
 
         <div class="flex items-center gap-2">
-          <SegmentedControl
-            :model-value="composerMode"
-            :options="[
-              { value: 'single', label: 'Single' },
-              { value: 'script', label: 'Sequence' },
-            ]"
-            label="Composer mode"
-            data-test="composer-mode"
-            @update:model-value="setComposerMode"
-          />
           <div class="flex-1" />
           <div ref="templatesHost" class="relative">
             <button
@@ -1510,7 +1824,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-          v-if="composerMode === 'script' && !supportsChain"
+          v-if="sequenceMode && !supportsChain"
           class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
           data-test="chain-unsupported"
         >
@@ -1534,9 +1848,9 @@ onBeforeUnmount(() => {
                   type="button"
                   class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
                   data-test="chain-back-to-single"
-                  @click="setComposerMode('single')"
+                  @click="setOutput('single')"
                 >
-                  back to single
+                  back to one shot
                 </button>
                 <router-link
                   :to="sequenceBrowsePath"
@@ -1550,24 +1864,78 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <template v-else-if="composerMode === 'script'">
-          <CreateModelPicker
-            v-if="isPhone"
-            :models="sequenceModels"
+        <template v-else-if="sequenceMode">
+          <template v-if="isPhone">
+            <CreateModelPicker
+              :models="sequenceModels"
+              :model="form.state.value.model"
+              :browse-to="sequenceBrowsePath"
+              empty-label="No sequence models installed"
+              @select="selectModel"
+            />
+            <!-- Phones lose the right-hand aside, so the Output card (and the
+                 shared settings that drive the sequence) render here. -->
+            <ControlsAside
+              v-model="form.state.value"
+              :family="currentFamily"
+              :adv-count="advCount"
+              :mobile="true"
+              :last-seed="lastSeedUsed"
+              :output="draft.output"
+              :clip-count="draft.clips.length"
+              data-test="phone-sequence-controls"
+              @update:output="setOutput"
+              @open-advanced="openAdvanced"
+              @reset-settings="onResetSettings"
+            />
+          </template>
+          <SequenceComposer
             :model="form.state.value.model"
-            :browse-to="sequenceBrowsePath"
-            empty-label="No sequence models installed"
-            @select="selectModel"
-          />
-          <ScriptComposer
-            ref="scriptComposerRef"
-            :model="form.state.value.model"
-            :width="form.state.value.width"
-            :height="form.state.value.height"
-            :fps="form.state.value.fps ?? 24"
             :family="currentFamily"
-            @submit="onSubmitScript"
-            @expand="(idx: number, p: string) => onExpandStage(idx, p)"
+            :shared="sharedParams"
+            :model-default-frames="currentModel?.default_frames ?? null"
+            :target="sequenceTarget"
+            :chain-level-dirty="chainLevelDirty"
+            @submit="onSubmitSequence"
+            @duplicate-as-new="onDuplicateAsNew"
+            @discard-edit="onDiscardEdit"
+            @expand-clip="onExpandClip"
+            @import-shared="onImportShared"
+          />
+
+          <div
+            v-if="composerError"
+            class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
+            data-test="sequence-submit-error"
+            role="alert"
+          >
+            <div class="flex items-start gap-2">
+              <p class="min-w-0 flex-1">{{ composerError }}</p>
+              <button
+                type="button"
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyErrorMessage(composerError)"
+              >
+                <Icon name="copy" :size="16" />
+              </button>
+            </div>
+          </div>
+
+          <!-- The canvas region stays in sequence mode: the watched job's
+               stage progress and latest clip preview develop here. -->
+          <ResultCanvas
+            v-if="watchedSequenceActive"
+            mode="generating"
+            :progress="sequenceCanvasPercent"
+            :stage="sequenceCanvasStage"
+            :preview-src="sequencePreviewSrc"
+            :progress-fraction="sequenceCanvasPercent / 100"
+            :develop-phase="watchedProgress ? 'developing' : 'latent'"
+            :print-width="form.state.value.width"
+            :print-height="form.state.value.height"
+            data-test="sequence-canvas"
           />
         </template>
 
@@ -1605,6 +1973,9 @@ onBeforeUnmount(() => {
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
+                  :output="draft.output"
+                  :clip-count="draft.clips.length"
+                  @update:output="setOutput"
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
                 />
@@ -1716,14 +2087,6 @@ onBeforeUnmount(() => {
           />
         </template>
 
-        <ChainJobCard
-          v-if="submittedChainJobDetail"
-          :job="submittedChainJobDetail"
-          :target="submittedChainTarget"
-          @updated="submittedChainJob.refresh()"
-          @dismiss="submittedChainJobId = null"
-        />
-
         <section>
           <div class="mb-2 flex items-center justify-between">
             <span class="font-display text-[15px] font-semibold text-rebate"
@@ -1744,13 +2107,9 @@ onBeforeUnmount(() => {
         <CreateModelPicker
           :models="composerModels"
           :model="form.state.value.model"
-          :browse-to="
-            composerMode === 'script' ? sequenceBrowsePath : '/models'
-          "
+          :browse-to="sequenceMode ? sequenceBrowsePath : '/models'"
           :empty-label="
-            composerMode === 'script'
-              ? 'No sequence models installed'
-              : 'No models installed'
+            sequenceMode ? 'No sequence models installed' : 'No models installed'
           "
           @select="selectModel"
         />
@@ -1760,6 +2119,9 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
+          :output="draft.output"
+          :clip-count="draft.clips.length"
+          @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
         />
@@ -1804,7 +2166,7 @@ onBeforeUnmount(() => {
     <ExpandModal
       :open="showExpand"
       :prompt="
-        expandStageIndex !== null ? expandStagePrompt : form.state.value.prompt
+        expandClipId !== null ? expandStagePrompt : form.state.value.prompt
       "
       :expand="form.state.value.expand"
       :current-model="currentModel"
@@ -1815,7 +2177,7 @@ onBeforeUnmount(() => {
       @apply-prompt="applyExpandedPrompt"
       @close="
         showExpand = false;
-        expandStageIndex = null;
+        expandClipId = null;
         expandRoute = null;
       "
     />
