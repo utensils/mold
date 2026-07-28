@@ -42,7 +42,10 @@ pub mod zimage;
 
 pub use batch::{
     batch_execution_capability_for_family, production_batch_capabilities,
-    validate_runtime_batch_capability, FamilyBatchCapability,
+    production_family_capabilities, production_family_capability_for_family,
+    validate_runtime_batch_capability, BackendApplicability, BackendQualification,
+    ComponentPlacementCapability, DeterminismGuarantee, FamilyBatchCapability, MediaKind,
+    QualificationReference, SeedContract, TiledVaeCapability, WorkflowCapabilities,
 };
 pub use engine::{
     with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,

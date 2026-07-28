@@ -793,55 +793,28 @@ pub enum ExecutionPlanError {
 }
 
 pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
-    // Keep this list capability-based and deliberately conservative. Each
-    // `true` corresponds to an implemented engine path, not a scheduler
-    // heuristic. Unknown/catalog families receive no automatic CPU/offload.
-    match family {
-        "flux" => PlacementCapabilities {
-            supports_text_encoder_cpu: true,
-            supports_vae_cpu: false,
-            supports_audio_components_cpu: false,
-            supports_block_offload: true,
-            supports_tiled_vae: true,
-            batch_execution: mold_inference::batch_execution_capability_for_family(family),
-        },
-        "flux2" | "flux.2" | "flux2-klein" => PlacementCapabilities {
-            supports_text_encoder_cpu: true,
-            supports_vae_cpu: true,
-            supports_audio_components_cpu: false,
-            supports_block_offload: true,
-            supports_tiled_vae: true,
-            batch_execution: mold_inference::batch_execution_capability_for_family(family),
-        },
-        "ltx2" | "ltx-2" | "ltx2.3" => PlacementCapabilities {
-            // Gemma CPU execution is tested; the transformer and video VAE
-            // remain on the leased CUDA device.
-            supports_text_encoder_cpu: true,
-            supports_vae_cpu: false,
-            supports_audio_components_cpu: false,
-            // The native runtime consumes MOLD_OFFLOAD as a forced full-
-            // streaming policy even though its factory does not take the
-            // generic FLUX block-offload boolean.
-            supports_block_offload: true,
-            supports_tiled_vae: true,
-            batch_execution: mold_inference::batch_execution_capability_for_family(family),
-        },
-        "z-image" | "qwen-image" | "qwen-image-edit" | "sd3" | "sd3.5" => PlacementCapabilities {
-            supports_text_encoder_cpu: false,
-            supports_vae_cpu: false,
-            supports_audio_components_cpu: false,
-            supports_block_offload: true,
-            supports_tiled_vae: matches!(family, "z-image" | "qwen-image" | "qwen-image-edit"),
-            batch_execution: mold_inference::batch_execution_capability_for_family(family),
-        },
-        _ => PlacementCapabilities {
+    // This is a server-facing projection of the inference factory's one
+    // authoritative, weight-free family registry. Unknown catalog families
+    // fail closed instead of gaining scheduler capabilities by name matching.
+    if let Some(capability) = mold_inference::production_family_capability_for_family(family) {
+        PlacementCapabilities {
+            supports_text_encoder_cpu: capability.placement.text_encoder_cpu,
+            supports_vae_cpu: capability.placement.vae_cpu,
+            supports_audio_components_cpu: capability.placement.audio_components_cpu,
+            supports_block_offload: capability.block_offload,
+            supports_tiled_vae: capability.tiled_vae
+                != mold_inference::TiledVaeCapability::Unsupported,
+            batch_execution: Some(capability.execution),
+        }
+    } else {
+        PlacementCapabilities {
             supports_text_encoder_cpu: false,
             supports_vae_cpu: false,
             supports_audio_components_cpu: false,
             supports_block_offload: false,
             supports_tiled_vae: false,
-            batch_execution: mold_inference::batch_execution_capability_for_family(family),
-        },
+            batch_execution: None,
+        }
     }
 }
 
@@ -3029,18 +3002,29 @@ mod tests {
     #[test]
     fn production_family_planning_uses_the_static_batch_registry_before_load() {
         for entry in mold_inference::production_batch_capabilities() {
+            let expected_tiled = entry.tiled_vae != mold_inference::TiledVaeCapability::Unsupported;
+            let projected = capabilities_for_family(entry.family);
             assert_eq!(
-                capabilities_for_family(entry.family).batch_execution,
+                projected,
+                PlacementCapabilities {
+                    supports_text_encoder_cpu: entry.placement.text_encoder_cpu,
+                    supports_vae_cpu: entry.placement.vae_cpu,
+                    supports_audio_components_cpu: entry.placement.audio_components_cpu,
+                    supports_block_offload: entry.block_offload,
+                    supports_tiled_vae: expected_tiled,
+                    batch_execution: Some(entry.execution),
+                },
+                "{}",
+                entry.family
+            );
+            assert_eq!(
+                projected.batch_execution,
                 Some(entry.execution),
                 "{}",
                 entry.family
             );
             for alias in entry.aliases {
-                assert_eq!(
-                    capabilities_for_family(alias).batch_execution,
-                    Some(entry.execution),
-                    "{alias}"
-                );
+                assert_eq!(capabilities_for_family(alias), projected, "{alias}");
             }
         }
         assert_eq!(capabilities_for_family("unknown").batch_execution, None);

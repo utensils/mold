@@ -4,6 +4,12 @@ The schema and runner define the deferred real RTX 3090 acceptance gate. No
 passing hardware report is checked in, and the runner never provisions cloud
 hardware.
 
+The weight-free engine-family contract and arbitrary-N scheduler simulation
+evidence are tracked separately in the
+[multi-GPU family matrix](./multi-gpu-family-matrix.md). That matrix explicitly
+distinguishes deterministic CI evidence from local-hardware and deferred
+B200/MIG/12 GiB qualification.
+
 Extract the sm86 binary from one exact stable release. Install one image model,
 one video model, and prepare a valid
 `mold.chain.v1` script for that video model, then run:
