@@ -47,7 +47,11 @@ import {
   type SequenceSharedParams,
 } from "@studio/lib/sequenceForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { sequenceToVM, type ActivityAction, type ActivityJobVM } from "@studio/lib/activity";
+import {
+  sequenceToVM,
+  type ActivityAction,
+  type ActivityJobVM,
+} from "@studio/lib/activity";
 import type { AmendRequest } from "@studio/lib/api/chainTypes";
 import {
   ApiHttpError,
@@ -841,7 +845,8 @@ async function onSubmitSequence() {
       stages: req.stages,
       motion_tail_frames: req.motion_tail_frames ?? null,
       fps: req.fps ?? null,
-      seed: sharedParams.value.seed.trim() === "" ? null : sharedParams.value.seed,
+      seed:
+        sharedParams.value.seed.trim() === "" ? null : sharedParams.value.seed,
       steps: req.steps,
       guidance: req.guidance,
       enable_audio: draft.enableAudio ? true : null,
@@ -961,8 +966,10 @@ function onClearInactive() {
   void chainJobs
     .clearInactive()
     .then(({ cleared, failed }) => {
-      if (failed > 0) toast("error", `${failed} sequence(s) could not be cleared.`);
-      else if (cleared > 0) toast("info", `Cleared ${cleared} finished sequence(s).`);
+      if (failed > 0)
+        toast("error", `${failed} sequence(s) could not be cleared.`);
+      else if (cleared > 0)
+        toast("info", `Cleared ${cleared} finished sequence(s).`);
     })
     .catch((error) =>
       toast("error", error instanceof Error ? error.message : String(error)),
@@ -2109,7 +2116,9 @@ onBeforeUnmount(() => {
           :model="form.state.value.model"
           :browse-to="sequenceMode ? sequenceBrowsePath : '/models'"
           :empty-label="
-            sequenceMode ? 'No sequence models installed' : 'No models installed'
+            sequenceMode
+              ? 'No sequence models installed'
+              : 'No models installed'
           "
           @select="selectModel"
         />

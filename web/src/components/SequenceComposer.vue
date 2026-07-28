@@ -27,10 +27,7 @@ import {
   transitionLabel,
   type SequenceStage,
 } from "@studio/lib/sequence";
-import {
-  parseChainScript,
-  serializeChainScript,
-} from "@studio/lib/chainToml";
+import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import { fetchChainLimits, type ChainLimits, type StreamTarget } from "../api";
 import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
@@ -542,10 +539,7 @@ defineExpose({ importTomlText });
       {{ validationErrors[0] }}
     </p>
 
-    <p
-      class="font-mono text-[11px] text-ink-3"
-      data-test="sequence-fit-note"
-    >
+    <p class="font-mono text-[11px] text-ink-3" data-test="sequence-fit-note">
       {{ fitNote }}
     </p>
 

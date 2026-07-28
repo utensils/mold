@@ -15,7 +15,10 @@ import {
 } from "../lib/toasts";
 import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
-import { __testing__ as chainJobsTesting, useChainJobs } from "../composables/useChainJobs";
+import {
+  __testing__ as chainJobsTesting,
+  useChainJobs,
+} from "../composables/useChainJobs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
@@ -23,9 +26,7 @@ import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended } from "../types";
 import type { Job } from "../composables/useGenerateStream";
 
-const routeQuery = vi.hoisted(
-  () => ({ value: {} as Record<string, unknown> }),
-);
+const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 const routerReplaceMock = vi.hoisted(() =>
   vi.fn((to: { query?: Record<string, unknown> }) => {
     routeQuery.value = to.query ?? {};
@@ -193,11 +194,7 @@ const RecentGridStub = defineComponent({
 function enterSequenceMode() {
   const draft = useSequenceDraftStore();
   draft.hydrate();
-  draft.setOutput(
-    "sequence",
-    { getPrompt: () => "", setPrompt: () => {} },
-    97,
-  );
+  draft.setOutput("sequence", { getPrompt: () => "", setPrompt: () => {} }, 97);
   return draft;
 }
 
@@ -1206,11 +1203,13 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit(
-      "sequence-action",
-      "delete",
-      { kind: "sequence", hostId: ORIGIN_HOST_ID, jobId: "failed-job" },
-    );
+    wrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("sequence-action", "delete", {
+        kind: "sequence",
+        hostId: ORIGIN_HOST_ID,
+        jobId: "failed-job",
+      });
     await flushPromises();
 
     expect(deleteChainJobMock).toHaveBeenCalledWith(
@@ -1302,11 +1301,13 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit(
-      "sequence-action",
-      "edit",
-      { kind: "sequence", hostId: ORIGIN_HOST_ID, jobId: "job-9" },
-    );
+    wrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("sequence-action", "edit", {
+        kind: "sequence",
+        hostId: ORIGIN_HOST_ID,
+        jobId: "job-9",
+      });
     await flushPromises();
 
     const draft = useSequenceDraftStore();
@@ -1415,9 +1416,9 @@ describe("CreatePage layout and behavior", () => {
     enterSequenceMode();
     await nextTick();
 
-    expect(
-      wrapper.find("[data-test='phone-sequence-controls']").exists(),
-    ).toBe(true);
+    expect(wrapper.find("[data-test='phone-sequence-controls']").exists()).toBe(
+      true,
+    );
     expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
       true,
     );

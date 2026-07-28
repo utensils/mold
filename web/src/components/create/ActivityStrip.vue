@@ -9,7 +9,11 @@
 import { computed } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
-import { mergeActivity, type ActivityAction, type ActivityJobVM } from "@studio/lib/activity";
+import {
+  mergeActivity,
+  type ActivityAction,
+  type ActivityJobVM,
+} from "@studio/lib/activity";
 import type { Job } from "../../composables/useGenerateStream";
 import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 
@@ -210,9 +214,7 @@ const active = computed(
           >{{ vm.error }}</span
         >
       </span>
-      <span
-        v-if="sequencePercent(vm) !== null"
-        class="activity__pct"
+      <span v-if="sequencePercent(vm) !== null" class="activity__pct"
         >{{ sequencePercent(vm) }}%</span
       >
       <span class="activity__seq-actions">

@@ -42,7 +42,13 @@ const props = withDefaults(
     /** Clips currently parked on the composer rail (sequence caption). */
     clipCount?: number;
   }>(),
-  { advCount: 0, mobile: false, lastSeed: null, output: "single", clipCount: 0 },
+  {
+    advCount: 0,
+    mobile: false,
+    lastSeed: null,
+    output: "single",
+    clipCount: 0,
+  },
 );
 
 const emit = defineEmits<{
@@ -168,13 +174,9 @@ function lockLastSeed() {
         label="Output"
         @update:model-value="emit('update:output', $event as OutputMode)"
       />
-      <p
-        v-if="sequenceMode"
-        class="controls__hint"
-        data-test="output-caption"
-      >
-        {{ clipCount }} clips on the composer rail · switching back keeps clip
-        1 and parks the rest.
+      <p v-if="sequenceMode" class="controls__hint" data-test="output-caption">
+        {{ clipCount }} clips on the composer rail · switching back keeps clip 1
+        and parks the rest.
       </p>
     </div>
 

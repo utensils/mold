@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChainJobDetail, ChainJobSummary } from "@studio/lib/api/chainTypes";
+import type {
+  ChainJobDetail,
+  ChainJobSummary,
+} from "@studio/lib/api/chainTypes";
 import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID, originUrl } from "../lib/hostRegistry";
 import {
@@ -243,15 +246,16 @@ describe("useChainJobs", () => {
 
   it("clears only inactive jobs across every host", async () => {
     const host = addHost({ url: "http://plato:7680", name: "plato" });
-    listChainJobsMock.mockImplementation(async (target?: { baseUrl: string }) =>
-      target?.baseUrl === "http://plato:7680"
-        ? {
-            jobs: [
-              summary({ id: "p-done", state: "completed" }),
-              summary({ id: "p-running", state: "running" }),
-            ],
-          }
-        : { jobs: [summary({ id: "o-failed", state: "failed" })] },
+    listChainJobsMock.mockImplementation(
+      async (target?: { baseUrl: string }) =>
+        target?.baseUrl === "http://plato:7680"
+          ? {
+              jobs: [
+                summary({ id: "p-done", state: "completed" }),
+                summary({ id: "p-running", state: "running" }),
+              ],
+            }
+          : { jobs: [summary({ id: "o-failed", state: "failed" })] },
     );
     const jobs = useChainJobs();
     await jobs.fetchAll();

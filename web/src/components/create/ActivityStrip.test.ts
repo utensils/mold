@@ -59,8 +59,7 @@ function makeSequenceVM(
     updated_at_unix_ms: 10,
     ...overrides,
   };
-  const progress =
-    summary.state === "running" ? { step: 4, total: 8 } : null;
+  const progress = summary.state === "running" ? { step: 4, total: 8 } : null;
   return sequenceToVM(summary, host, progress);
 }
 
@@ -161,7 +160,10 @@ describe("ActivityStrip", () => {
     await wrapper
       .get("[data-test='activity-sequence-chain-1'] [data-action='cancel']")
       .trigger("click");
-    expect(wrapper.emitted("sequence-action")?.[0]).toEqual(["cancel", running]);
+    expect(wrapper.emitted("sequence-action")?.[0]).toEqual([
+      "cancel",
+      running,
+    ]);
 
     const failedRow = wrapper.get("[data-test='activity-sequence-chain-2']");
     expect(failedRow.find("[data-action='resume']").exists()).toBe(true);

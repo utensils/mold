@@ -103,7 +103,8 @@ function loadTracked(): TrackedSequence[] {
     }
     const legacyJob = localStorage.getItem(LEGACY_JOB_KEY);
     if (legacyJob) {
-      const legacyHost = localStorage.getItem(LEGACY_HOST_KEY) ?? ORIGIN_HOST_ID;
+      const legacyHost =
+        localStorage.getItem(LEGACY_HOST_KEY) ?? ORIGIN_HOST_ID;
       if (!entries.some((e) => e.jobId === legacyJob)) {
         entries.push({ hostId: legacyHost, jobId: legacyJob });
       }
@@ -223,7 +224,8 @@ function scheduleWatchPoll(hostId: string, jobId: string) {
   watchPollTimer = setTimeout(() => {
     watchPollTimer = null;
     const current = state.watching;
-    if (!current || current.hostId !== hostId || current.jobId !== jobId) return;
+    if (!current || current.hostId !== hostId || current.jobId !== jobId)
+      return;
     const target = targetFor(hostId) ?? undefined;
     void getChainJob(jobId, target)
       .then((job) => {
@@ -286,10 +288,7 @@ function watch(hostId: string, jobId: string) {
   });
 }
 
-async function create(
-  hostId: string,
-  req: ChainRequestWire,
-): Promise<string> {
+async function create(hostId: string, req: ChainRequestWire): Promise<string> {
   ensureLoaded();
   const target = targetFor(hostId);
   if (!target) throw new Error("That machine is no longer connected.");

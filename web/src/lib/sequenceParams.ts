@@ -7,10 +7,7 @@
  * so what the controls say is what the chain request carries.
  */
 
-import type {
-  ChainScript,
-  ChainScriptStage,
-} from "@studio/lib/api/chainTypes";
+import type { ChainScript, ChainScriptStage } from "@studio/lib/api/chainTypes";
 import type { SequenceSharedParams } from "@studio/lib/sequenceForm";
 import type { ChainScriptWire, GenerateFormState } from "../types";
 
@@ -52,7 +49,9 @@ export function chainScriptFromWire(
     frames: stage.frames,
     ...(stage.transition ? { transition: stage.transition } : {}),
     ...(stage.fade_frames != null ? { fade_frames: stage.fade_frames } : {}),
-    ...(stage.negative_prompt ? { negative_prompt: stage.negative_prompt } : {}),
+    ...(stage.negative_prompt
+      ? { negative_prompt: stage.negative_prompt }
+      : {}),
     ...(stage.source_image ? { source_image_b64: stage.source_image } : {}),
     ...(stage.seed_offset != null
       ? { seed_offset: String(stage.seed_offset) }

@@ -137,7 +137,10 @@ describe("SequenceComposer", () => {
     );
     const store = useSequenceDraftStore();
     store.enableAudio = true;
-    await wrapper.setProps({ model: "ltx-video-distilled", family: "ltx-video" });
+    await wrapper.setProps({
+      model: "ltx-video-distilled",
+      family: "ltx-video",
+    });
     await flushPromises();
     expect(wrapper.find("[data-test='sequence-enable-audio']").exists()).toBe(
       false,
@@ -157,9 +160,7 @@ describe("SequenceComposer", () => {
     const store = useSequenceDraftStore();
     store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
     await flushPromises();
-    expect(wrapper.text()).toContain(
-      "Two-stage dev checkpoints cannot chain.",
-    );
+    expect(wrapper.text()).toContain("Two-stage dev checkpoints cannot chain.");
     expect(
       wrapper.get("[data-test='sequence-generate']").attributes("disabled"),
     ).toBeDefined();
