@@ -63,41 +63,68 @@ function pick(option: SequenceTransition, event: MouseEvent) {
   }
   emit("update:transition", option);
 }
+
+// Roving tabindex — arrow keys move the selection, matching the ARIA radio
+// pattern SegmentedControl uses.
+function onOptionKeydown(event: KeyboardEvent) {
+  const delta =
+    event.key === "ArrowDown" || event.key === "ArrowRight"
+      ? 1
+      : event.key === "ArrowUp" || event.key === "ArrowLeft"
+        ? -1
+        : 0;
+  if (delta === 0) return;
+  event.preventDefault();
+  const index = OPTIONS.indexOf(props.transition);
+  const next = OPTIONS[(index + delta + OPTIONS.length) % OPTIONS.length];
+  if (next) emit("update:transition", next);
+}
 </script>
 
 <template>
   <div class="ms-seam-editor" :class="{ 'ms-seam-editor--large': large }">
     <div v-if="context" class="ms-seam-editor__context">{{ context }}</div>
-    <button
-      v-for="option in OPTIONS"
-      :key="option"
-      type="button"
-      class="ms-seam-editor__row"
-      role="radio"
-      :aria-checked="option === transition"
-      :data-on="option === transition ? 'true' : undefined"
-      @click="pick(option, $event)"
+    <div
+      class="ms-seam-editor__options"
+      role="radiogroup"
+      aria-label="Transition"
     >
-      <span class="ms-seam-editor__diagram" aria-hidden="true">
-        <span v-if="option === 'smooth'" class="ms-seam-editor__line-smooth" />
-        <span v-else-if="option === 'cut'" class="ms-seam-editor__line-cut" />
-        <span v-else class="ms-seam-editor__line-fade" />
-      </span>
-      <span class="ms-seam-editor__text">
-        <span class="ms-seam-editor__label">{{
-          transitionLabel(option, motionTail)
-        }}</span>
-        <span class="ms-seam-editor__desc">{{
-          transitionDescription(option, motionTail)
-        }}</span>
-      </span>
-      <span
-        v-if="option === transition"
-        class="ms-seam-editor__check"
-        aria-hidden="true"
-        >✓</span
+      <button
+        v-for="option in OPTIONS"
+        :key="option"
+        type="button"
+        class="ms-seam-editor__row"
+        role="radio"
+        :aria-checked="option === transition"
+        :data-on="option === transition ? 'true' : undefined"
+        :tabindex="option === transition ? 0 : -1"
+        @click="pick(option, $event)"
+        @keydown="onOptionKeydown"
       >
-    </button>
+        <span class="ms-seam-editor__diagram" aria-hidden="true">
+          <span
+            v-if="option === 'smooth'"
+            class="ms-seam-editor__line-smooth"
+          />
+          <span v-else-if="option === 'cut'" class="ms-seam-editor__line-cut" />
+          <span v-else class="ms-seam-editor__line-fade" />
+        </span>
+        <span class="ms-seam-editor__text">
+          <span class="ms-seam-editor__label">{{
+            transitionLabel(option, motionTail)
+          }}</span>
+          <span class="ms-seam-editor__desc">{{
+            transitionDescription(option, motionTail)
+          }}</span>
+        </span>
+        <span
+          v-if="option === transition"
+          class="ms-seam-editor__check"
+          aria-hidden="true"
+          >✓</span
+        >
+      </button>
+    </div>
 
     <template v-if="transition === 'fade'">
       <div class="ms-seam-editor__divider" />
@@ -141,6 +168,16 @@ function pick(option: SequenceTransition, event: MouseEvent) {
   text-transform: uppercase;
   color: var(--ink-3);
   padding: 4px 8px 6px;
+}
+
+.ms-seam-editor__options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ms-seam-editor--large .ms-seam-editor__options {
+  gap: 8px;
 }
 
 .ms-seam-editor__row {
