@@ -14,6 +14,7 @@ import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -217,6 +218,110 @@ describe("InspectorPanel — reset to model defaults", () => {
     expect(form.steps).toBe(30);
     expect(form.width).toBe(1024);
     expect(form.height).toBe(768);
+  });
+});
+
+describe("InspectorPanel — output", () => {
+  const videoModel: ModelEntry = {
+    name: "ltx-video",
+    family: "ltx-video",
+    downloaded: true,
+    default_width: 1024,
+    default_height: 576,
+    default_steps: 25,
+    default_guidance: 3,
+  } as ModelEntry;
+  const stillModel: ModelEntry = {
+    name: "flux-dev:q8",
+    family: "flux",
+    downloaded: true,
+    default_width: 1024,
+    default_height: 1024,
+    default_steps: 20,
+    default_guidance: 4.5,
+  } as ModelEntry;
+
+  function outputSegments(wrapper: ReturnType<typeof mount>) {
+    return wrapper.get("[data-test='output-mode']").findAll("button[role='radio']");
+  }
+
+  it("renders the Output card between Model and Shape with One shot active", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    const card = wrapper.get("[data-test='output-card']");
+    expect(card.text()).toContain("Output");
+    const segments = outputSegments(wrapper);
+    expect(segments.map((b) => b.text())).toEqual(["One shot", "Sequence"]);
+    expect(segments[0]!.attributes("aria-checked")).toBe("true");
+    // Card order: Model precedes the Output card, which precedes Shape.
+    const html = wrapper.html();
+    expect(html.indexOf("output-card")).toBeGreaterThan(html.indexOf("selected-model-name"));
+    expect(html.indexOf("output-card")).toBeLessThan(html.indexOf(">Shape<"));
+  });
+
+  it("switching to Sequence seeds clips, remembers + swaps the model, and locks batch", async () => {
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = stillModel.name;
+    form.family = stillModel.family;
+    form.prompt = "a cat at dusk";
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    await outputSegments(wrapper)[1]!.trigger("click");
+    await flushPromises();
+
+    const draft = useSequenceDraftStore();
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips).toHaveLength(2);
+    expect(draft.clips[0]!.prompt).toBe("a cat at dusk");
+    // A non-capable model is remembered and swapped for the first capable one.
+    expect(draft.lastSingleModel).toBe("flux-dev:q8");
+    expect(form.model).toBe("ltx-video");
+    // Batch locks to one timeline; the switch-back caption appears.
+    expect(wrapper.text()).toContain("a sequence renders one timeline");
+    expect(wrapper.text()).toContain("switching back keeps clip 1 and parks the rest");
+  });
+
+  it("switching back restores the remembered single model and clip 1's prompt", async () => {
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "the opening clip";
+    draft.lastSingleModel = "flux-dev:q8";
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    await outputSegments(wrapper)[0]!.trigger("click");
+    await flushPromises();
+
+    expect(draft.output).toBe("single");
+    expect(form.model).toBe("flux-dev:q8");
+    expect(form.prompt).toBe("the opening clip");
+    expect(draft.lastSingleModel).toBeNull();
+    // Clips are parked, never erased.
+    expect(draft.clips).toHaveLength(2);
+  });
+
+  it("filters the picker to sequence-capable models while in sequence mode", async () => {
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
+    const options = wrapper.findAll('[data-test="model-option-name"]');
+    expect(options.map((o) => o.text())).toEqual(["ltx-video"]);
+  });
+
+  it("surfaces a frame-rate stepper and hides lock-last-seed in sequence mode", async () => {
+    useSequenceDraftStore().output = "sequence";
+    const form = formFor("ltx-video");
+    const wrapper = mount(InspectorPanel, { props: { form, lastSeed: 77 } });
+    expect(wrapper.find('[data-test="sequence-fps"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("Frame rate");
+    expect(wrapper.find('[data-test="lock-last-seed"]').exists()).toBe(false);
   });
 });
 

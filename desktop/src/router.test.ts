@@ -19,10 +19,16 @@ describe("router — five-destination IA", () => {
     expect(router.currentRoute.value.path).toBe("/create");
   });
 
-  it("authors chains inside Create at /create/chain, still titled Create", () => {
-    const resolved = router.resolve("/create/chain");
-    expect(resolved.name).toBe("chains");
-    expect(resolved.meta.title).toBe("Create");
+  it("folds the retired chain composer route into Create's sequence output", async () => {
+    // Sequence is an Output setting of Create now, not a place — both the
+    // nested /create/chain route and the legacy /chains path deep-link into
+    // Create with the sequence output preselected.
+    for (const legacy of ["/create/chain", "/chains"]) {
+      await router.push(legacy);
+      expect(router.currentRoute.value.path).toBe("/create");
+      expect(router.currentRoute.value.name).toBe("create");
+      expect(router.currentRoute.value.query.output).toBe("sequence");
+    }
   });
 
   it("keeps RunPod as a literal segment under Machines, ahead of host detail", () => {
@@ -41,7 +47,6 @@ describe("router — legacy redirects", () => {
   it.each([
     ["/generate", "/create", "create"],
     ["/gallery", "/library", "library"],
-    ["/chains", "/create/chain", "chains"],
     ["/runpod", "/machines/runpod", "runpod"],
   ])("folds %s into %s", async (from, to, name) => {
     await router.push(from);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   findInstalledModel,
   mergeInstalledModels,
@@ -20,6 +20,17 @@ import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
+import SequenceComposer from "../components/create/SequenceComposer.vue";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useChainJobsStore } from "../stores/chainJobs";
+import { buildChainRequest } from "@studio/lib/sequenceForm";
+import { chainScriptToClips } from "@studio/lib/sequenceForm";
+import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
+import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
+import { countLeadingCompletedStages, normalizeServerChainScript } from "../lib/chainScript";
+import { routeForModel } from "../lib/sequenceRoute";
+import { sequenceParams } from "../lib/sequenceParams";
+import { fetchChainLimits } from "../lib/api/chains";
 import { normalizeTargetHost, readyHostSignature } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -200,6 +211,7 @@ async function pullMissingModel() {
 // back — this view unmounts on every route change.
 const formStore = useGenerateFormStore();
 const form = formStore.form;
+
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
@@ -432,6 +444,228 @@ const quickStaleMessage = computed(() =>
     : "",
 );
 const currentModelLabel = computed(() => modelDisplayNameForId(form.model, installedModels.value));
+
+// ── Output = Sequence (mode is a setting, not a place) ───────────────────────
+const activeRoute = useRoute();
+const draft = useSequenceDraftStore();
+const chains = useChainJobsStore();
+const isSequence = computed(() => draft.output === "sequence");
+const selectedEntry = computed(() => findInstalledModel(installedModels.value, form.model));
+const sequenceCapableModels = computed(() => modelsForOutput(installedModels.value, "sequence"));
+const chainLimits = ref<ChainLimits | null>(null);
+const sequenceSubmitting = ref(false);
+/** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
+const editSharedBaseline = ref<string | null>(null);
+
+const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedEntry.value));
+const sequenceDefaultFrames = computed(() =>
+  defaultClipFrames(selectedEntry.value, chainLimits.value, sequenceMotionTail.value),
+);
+/** No chain-capable video model installed anywhere → guide to Discover. */
+const showSequenceEmpty = computed(
+  () =>
+    isSequence.value && conn.ready && !models.loading && sequenceCapableModels.value.length === 0,
+);
+
+function sharedSnapshot(): string {
+  return JSON.stringify({
+    ...sequenceParams(form, selectedEntry.value),
+    enableAudio: draft.enableAudio,
+    motionTail: sequenceMotionTail.value,
+  });
+}
+const chainLevelDirty = computed(
+  () =>
+    draft.editing !== null &&
+    editSharedBaseline.value !== null &&
+    editSharedBaseline.value !== sharedSnapshot(),
+);
+
+/** `?output=sequence` deep-links (palette, menu, legacy /chains) are consumed
+ * ONCE, then stripped; the persisted draft output wins on ordinary visits. */
+function consumeOutputQuery() {
+  if (activeRoute.query.output !== "sequence") return;
+  if (draft.output !== "sequence") {
+    // Mirror the inspector's model rule, and swap BEFORE seeding clips: a
+    // non-capable selection is remembered and replaced by the first
+    // chain-capable model so setOutput's new clips default their frames
+    // from the effective selection, not the outgoing still model's.
+    const current = selectedEntry.value;
+    if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
+      draft.lastSingleModel = form.model || null;
+      const pick = sequenceCapableModels.value[0];
+      if (pick) formStore.applyModel(pick);
+    }
+    draft.setOutput(
+      "sequence",
+      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+      sequenceDefaultFrames.value,
+    );
+  }
+  void router.replace({ path: "/create" });
+}
+
+let chainLimitsFetch = 0;
+async function loadChainLimits() {
+  const entry = selectedEntry.value;
+  if (!entry) {
+    chainLimits.value = null;
+    return;
+  }
+  const version = ++chainLimitsFetch;
+  try {
+    const target = routeForModel(entry)?.target ?? null;
+    const limits = (await fetchChainLimits(entry.name, target)) as ChainLimits;
+    if (version !== chainLimitsFetch) return;
+    chainLimits.value = limits;
+    if (!limits.supports_audio) draft.enableAudio = false;
+  } catch {
+    if (version === chainLimitsFetch) chainLimits.value = null;
+  }
+}
+
+// Chain limits are per model AND per host — refetch when either moves.
+watch(
+  [isSequence, () => form.model, stickyTarget, () => readyHostSignature(hosts.all)],
+  () => {
+    if (isSequence.value && form.model) void loadChainLimits();
+  },
+  { immediate: true },
+);
+
+// The activity strip lists every connected host's durable jobs.
+watch(
+  () => readyHostSignature(hosts.all),
+  () => void chains.fetchAll(),
+  { immediate: true },
+);
+
+// A finalized sequence lands in the origin host's gallery — refresh so the
+// video appears without a manual reload.
+watch(
+  () => chains.finalizedTick,
+  () => void hostGallery.fetchAll().catch(() => {}),
+);
+
+/** The watched durable job, while it is actually rendering. */
+const watchedSequence = computed(() => {
+  if (!chains.watching) return null;
+  const detail = chains.live.detail;
+  if (!detail) return null;
+  return detail.state === "running" || detail.state === "queued" ? detail : null;
+});
+const watchedSequencePct = computed(() => {
+  const active = chains.live.activeStage;
+  if (active === null) return 0;
+  const progress = chains.live.progress[active];
+  return progress && progress.total > 0 ? (progress.step / progress.total) * 100 : 0;
+});
+
+async function generateSequence() {
+  const entry = selectedEntry.value;
+  if (!entry || sequenceSubmitting.value) return;
+  const hostRoute = routeForModel(entry);
+  if (!hostRoute) {
+    toasts.push("The selected host isn't reachable. Pick another host.", "error");
+    return;
+  }
+  sequenceSubmitting.value = true;
+  try {
+    // Refetch stale limits so frames caps/audio gating match the routed host.
+    if (!chainLimits.value || chainLimits.value.model !== entry.name) {
+      await loadChainLimits();
+    }
+    const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
+      motionTailFrames: sequenceMotionTail.value,
+      enableAudio: draft.enableAudio,
+    });
+    if (draft.editing) {
+      const editing = draft.editing;
+      const amend: AmendRequest = {
+        stages: request.stages,
+        motion_tail_frames: request.motion_tail_frames ?? null,
+        fps: request.fps ?? null,
+        seed: form.seed.trim() === "" ? null : form.seed.trim(),
+        steps: request.steps,
+        guidance: request.guidance,
+        // Always explicit: null means "keep current" server-side, which
+        // would make turning audio OFF impossible through an edit.
+        enable_audio: draft.enableAudio,
+      };
+      try {
+        const outcome = await chains.amend(editing.hostId, editing.jobId, amend);
+        toasts.push(
+          `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
+        );
+        draft.stopEditing();
+        editSharedBaseline.value = null;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          toasts.push(
+            "This sequence changed on its host while you edited. Use Duplicate as new to submit your version.",
+            "error",
+          );
+          return;
+        }
+        throw err;
+      }
+    } else {
+      await chains.create(hostRoute.hostId, request);
+      toasts.push("Sequence queued");
+    }
+  } catch (err) {
+    toasts.push(String(err), "error");
+  } finally {
+    sequenceSubmitting.value = false;
+  }
+}
+
+/** Edit session: submit the current clips as a brand-new job instead. */
+async function duplicateSequenceAsNew() {
+  draft.stopEditing();
+  editSharedBaseline.value = null;
+  await generateSequence();
+}
+
+/** ActivityStrip Edit: load a durable job's effective script into an edit
+ * session — applying its shared params to the form is the explicit action. */
+async function editSequence(payload: { hostId: string; jobId: string }) {
+  try {
+    const detail = await chains.fetchDetail(payload.hostId, payload.jobId);
+    const script = normalizeServerChainScript(detail.script);
+    if (!script) {
+      toasts.push("This job carries no editable script.", "error");
+      return;
+    }
+    const loaded = chainScriptToClips(script);
+    const shared = loaded.shared;
+    if (shared.model) {
+      const entry = findInstalledModel(installedModels.value, shared.model);
+      if (entry) formStore.applyModel(entry);
+      else form.model = shared.model;
+    }
+    if (shared.width != null) form.width = shared.width;
+    if (shared.height != null) form.height = shared.height;
+    if (shared.fps != null) form.fps = shared.fps;
+    if (shared.steps != null) form.steps = shared.steps;
+    if (shared.guidance != null) form.guidance = shared.guidance;
+    form.seed = shared.seed ?? "";
+    draft.loadFromJob(
+      {
+        jobId: payload.jobId,
+        hostId: payload.hostId,
+        baseline: loaded.clips.map((clip) => ({ ...clip })),
+        completedStages: countLeadingCompletedStages(detail.stages),
+      },
+      loaded.clips,
+      loaded.enableAudio,
+    );
+    editSharedBaseline.value = sharedSnapshot();
+    void loadChainLimits();
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
 
 // Availability data is demand-driven: fetch when the set of ready hosts
 // changes. immediate so routing is model-aware on the FIRST Generate click.
@@ -1353,10 +1587,11 @@ watch(
   },
 );
 
-// Menu ▸ Generate / Expand Prompt reuse the composer actions.
+// Menu ▸ Generate / Expand Prompt reuse the composer actions. In sequence
+// output the same intent submits the sequence.
 watch(
   () => ui.generateTick,
-  () => void generate(),
+  () => (isSequence.value ? void generateSequence() : void generate()),
 );
 watch(
   () => ui.expandTick,
@@ -1366,6 +1601,10 @@ watch(
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   void listenForNativeImageDrops();
+  // The persisted sequence draft wins on ordinary visits; a ?output=sequence
+  // deep-link is consumed once and stripped.
+  draft.hydrate();
+  consumeOutputQuery();
 });
 
 onBeforeUnmount(() => {
@@ -1562,6 +1801,21 @@ onBeforeUnmount(() => {
             />
           </div>
 
+          <!-- Watched sequence: denoise progress in the develop chrome -->
+          <div
+            v-else-if="isSequence && watchedSequence"
+            data-test="sequence-develop"
+            class="pointer-events-none flex flex-col items-center justify-center gap-3"
+          >
+            <ProgressRing :value="watchedSequencePct" :size="96" show-label />
+            <span class="edge-code text-safelight">
+              clip {{ (chains.live.activeStage ?? watchedSequence.current_stage) + 1 }}/{{
+                watchedSequence.stage_count
+              }}
+              · developing…
+            </span>
+          </div>
+
           <!-- Empty -->
           <EmptyStateBlock
             v-else
@@ -1628,9 +1882,45 @@ onBeforeUnmount(() => {
           @retry-expansion="retryExpansionAfterPull"
         />
 
-        <ActivityStrip />
+        <ActivityStrip @edit-sequence="editSequence" />
 
+        <!-- Sequence bench replaces the single-print composer in-place -->
+        <EmptyStateBlock
+          v-if="showSequenceEmpty"
+          data-test="sequence-empty"
+          class="shrink-0 py-6"
+          icon="image"
+          headline="Sequences need a video model"
+          guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+        >
+          <template #action>
+            <button
+              type="button"
+              data-test="sequence-browse-models"
+              class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
+              @click="
+                router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
+              "
+            >
+              Browse video models
+            </button>
+          </template>
+        </EmptyStateBlock>
+        <SequenceComposer
+          v-else-if="isSequence"
+          data-test="generate-sequence-composer"
+          class="shrink-0"
+          :form="form"
+          :selected-model="selectedEntry"
+          :chain-limits="chainLimits"
+          :installed-models="installedModels"
+          :submitting="sequenceSubmitting"
+          :chain-level-dirty="chainLevelDirty"
+          @submit="generateSequence"
+          @duplicate="duplicateSequenceAsNew"
+        />
         <ComposerCard
+          v-else
           ref="composerRef"
           data-test="generate-composer"
           class="shrink-0"
@@ -1658,6 +1948,7 @@ onBeforeUnmount(() => {
     <InspectorPanel
       :form="form"
       :last-seed="generation.lastSeedUsed"
+      :chain-limits="chainLimits"
       @append-word="appendPromptWord"
     />
 

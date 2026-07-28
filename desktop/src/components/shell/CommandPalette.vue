@@ -110,10 +110,10 @@ const staticCommands = computed<Command[]>(() => {
       run: () => go("/machines"),
     },
     {
-      id: "nav-chain",
-      title: "Compose chain",
-      keywords: ["chains", "multi-prompt", "storyboard"],
-      run: () => go("/create/chain"),
+      id: "nav-sequence",
+      title: "Create sequence",
+      keywords: ["sequence", "clips", "video"],
+      run: () => go("/create?output=sequence"),
     },
     {
       id: "nav-history",

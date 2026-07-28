@@ -16,11 +16,11 @@ export const router = createRouter({
       component: () => import("./views/GenerateView.vue"),
     },
     {
-      // Multi-prompt chains are authored inside Create; the view is unchanged.
+      // Sequence is an Output setting of Create, not a place — the retired
+      // nested chain-composer route deep-links into Create with the sequence
+      // output preselected (GenerateView consumes the query once).
       path: "/create/chain",
-      name: "chains",
-      meta: { title: "Create" },
-      component: () => import("./views/ChainsView.vue"),
+      redirect: { path: "/create", query: { output: "sequence" } },
     },
     {
       path: "/library",
@@ -66,7 +66,7 @@ export const router = createRouter({
     // "/library", "/history" opens the Library history drawer).
     { path: "/generate", redirect: "/create" },
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
-    { path: "/chains", redirect: "/create/chain" },
+    { path: "/chains", redirect: { path: "/create", query: { output: "sequence" } } },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
     { path: "/jobs", redirect: "/machines" },
     { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },

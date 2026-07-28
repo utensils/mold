@@ -317,11 +317,11 @@ impl ProgressState {
 
 /// Which sub-mode the Create view is in.
 ///
-/// The chain composer is nested under Create (mirroring the desktop's
-/// `/create/chain` route) rather than being a tab of its own. Switching
-/// workspaces does not reset the mode — a chain in progress survives a
-/// round-trip through Library and back; only [`Action::ChainExit`]
-/// returns to Compose.
+/// The chain composer is nested under Create (mirroring the graphical
+/// surfaces, where Sequence is an Output setting of Create) rather than
+/// being a tab of its own. Switching workspaces does not reset the mode —
+/// a chain in progress survives a round-trip through Library and back;
+/// only [`Action::ChainExit`] returns to Compose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CreateMode {
     #[default]

@@ -38,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Desktop Create now makes sequences where you make everything else.** The
+  Single | Sequence switch and the separate chain page are gone: **Output**
+  (One shot | Sequence) is a setting in the Create inspector beside Model.
+  Choosing Sequence turns the composer into a clip rail — clip pills joined
+  by seam pills that name each transition in words, with a click opening the
+  seam editor's teaching rows and fade-length stepper — filters the model
+  picker to sequence-capable video models (auto-picking one and remembering
+  your single-mode model), defaults new clips to the selected model's own
+  frame count, and relabels the button **Generate sequence**. Sequence jobs
+  now share the one Create activity strip with prints (watch, cancel,
+  resume, edit, clear inactive, clean up disk) instead of a separate jobs
+  list, clip prompts survive navigation and restarts, and a finished
+  sequence can be edited in place: clips reload onto the rail, pills show
+  cached ✓ versus re-render ↻ as you edit, and **Update sequence**
+  re-renders only from the earliest changed clip. Legacy `/create/chain`
+  and `/chains` URLs permanently redirect to `/create?output=sequence`, and
+  File → New Chain became **New Sequence**.
 - **Chain jobs now announce their lifecycle on the server event stream.**
   `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
   and `chain_job_ended` events — emitted on durable-job creation, resume,
@@ -56,7 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and force model reloads; and the stage executor held a config snapshot
   from server boot, so a model pulled after startup could fail in a chain
   stage while running fine on the normal queue. Both fixed.
-||||||| b2314878
 - **The shared sequence kit for the unified Create view landed.** A studio
   sequence-draft store persists the clip list (with legacy web/iPhone
   draft-and-mode migration) so clip prompts survive navigation, reloads,

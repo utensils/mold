@@ -124,25 +124,26 @@ surface powers it, so anything the app does maps to a documented endpoint.
   collections likewise select one runnable adapter variant instead of summing
   mutually exclusive adapters and fused checkpoints. A host that accepts a
   pull without returning any queued job is reported as an error. The
-  Chains and video Create empty states deep-link straight to the video
+  sequence and video Create empty states deep-link straight to the video
   catalog.
-- **Chains** (inside Create) — a filmstrip editing bench for multi-stage video
-  (`mold.chain.v1`), reached with the **Single | Sequence** switch in the
-  Create header (also File → New Chain or the ⌘K palette) and sharing Create's
-  header chrome and model picker (video models only; chain-incapable
-  checkpoints appear disabled with the reason): per-stage prompts
-  and frame counts (validated `8n+1`), a syntax-highlighted TOML editor whose
-  Apply round-trips through the same parser as Open .toml,
-  splice transitions (smooth / cut / fade) you click to cycle, a live
-  fits/duration forecast against `/api/capabilities/chain-limits`, TOML
-  import/export, and a durable jobs list with resume, cancel, and retake. Its
-  picker includes video models installed on every connected host; limits,
-  creation, events, previews, and job actions stay routed to the model's host.
-  Sequence mode limits the picker to compatible one-stage/distilled
-  checkpoints, switches to one when available, and otherwise opens Discover
-  with Video + Models filters. Job and action failures stay visible inline;
-  Cancel is guarded while its request is in flight and settled jobs can be
-  dismissed.
+- **Sequences** (inside Create) — multi-clip video is a setting, not a place:
+  switch the inspector's **Output** control to **Sequence** (File → New
+  Sequence and the ⌘K palette land there too) and the composer becomes a clip
+  rail. Clip pills carry per-clip prompts and frame counts (validated `8n+1`,
+  defaulted from the selected model), and the seam pills between them name
+  each transition in words — **Smooth**, **Cut**, or **Fade 8f** (zero-tail
+  joins say **Join clips**) — with a click opening the seam editor's teaching
+  rows and fade-length stepper. A live fits/duration forecast runs against
+  `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
+  and sequence jobs appear in the same activity strip as prints with watch,
+  cancel, resume, and edit. Editing a finished sequence reloads its clips onto
+  the rail, marks which clips stay cached versus re-render as you change
+  things, and **Update sequence** re-renders only from the earliest changed
+  clip. The picker shows sequence-capable video models from every connected
+  host (choosing Sequence auto-picks one and remembers your single-mode model;
+  with none installed the bench deep-links to Discover with Video + Models
+  filters), and limits, creation, events, previews, and job actions stay
+  routed to the model's host. Job and action failures stay visible inline.
 - **History** (the Runs + Prompts drawer inside Library) — a fast, searchable
   list of past prompts from every ready host; ↩ refills the composer, while
   Up/Down recalls the same merged history inline.
