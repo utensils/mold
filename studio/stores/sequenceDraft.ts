@@ -1,0 +1,307 @@
+/**
+ * The durable sequence draft — output mode, the clip list, audio, and the
+ * edit session — shared by desktop, web, and iPhone Create.
+ *
+ * This store exists because every surface lost sequence state its own way:
+ * desktop kept the chain form component-local (every navigation wiped all
+ * clip prompts), web persisted a private script copy that drifted from the
+ * inspector, and the iPhone composer's form died behind a `v-if` on tab
+ * switch. Clips live HERE; shared params (model/shape/detail/seed/fps) stay
+ * in each surface's generate form and are read at submit time.
+ *
+ * Persistence is localStorage on all three surfaces (the iPhone Tauri
+ * webview already trusts localStorage for durable state). Base64 source
+ * payloads are stripped before writing — a 2K PNG base64s to megabytes and
+ * blows quota — the filename is kept for display. `editing` is never
+ * persisted on purpose: an edit session reloads from the durable job.
+ */
+
+import { defineStore } from "pinia";
+import { reactive, ref, watch } from "vue";
+import {
+  newSequenceClip,
+  type SequenceClipForm,
+  type SequenceClipSourceImage,
+} from "../lib/sequenceForm";
+import { chainScriptToClips } from "../lib/sequenceForm";
+import type { OutputMode, SequenceTransition } from "../lib/sequence";
+import type { ChainScript } from "../lib/api/chainTypes";
+
+export const SEQUENCE_DRAFT_KEY = "mold.sequence.draft.v1";
+export const LEGACY_WEB_DRAFT_KEY = "mold.chain.draft.v2";
+export const LEGACY_WEB_MODE_KEY = "mold.composer.mode";
+export const LEGACY_MOBILE_MODE_KEY = "mold.mobile.create-mode.v1";
+
+const PERSIST_DEBOUNCE_MS = 300;
+
+/** Minimal storage surface — `localStorage` in browsers/webviews, an
+ * injected stub in tests (this vitest environment exposes no global). */
+export interface DraftStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+let storageOverride: DraftStorage | null = null;
+
+/** Test hook: inject a storage stub (pass null to restore the browser default). */
+export function setSequenceDraftStorage(storage: DraftStorage | null) {
+  storageOverride = storage;
+}
+
+function draftStorage(): DraftStorage | null {
+  if (storageOverride) return storageOverride;
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export interface SequenceEditSession {
+  jobId: string;
+  hostId: string;
+  /** The loaded job's clips at load time — `stageInvalidation`'s baseline. */
+  baseline: SequenceClipForm[];
+  /** Leading stages the job has actually completed (cache ceiling). */
+  completedStages: number;
+}
+
+interface PersistedClip
+  extends Omit<SequenceClipForm, "sourceImage"> {
+  sourceImage: (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
+}
+
+interface PersistedDraftV1 {
+  version: 1;
+  output: OutputMode;
+  clips: PersistedClip[];
+  enableAudio: boolean;
+  lastSingleModel: string | null;
+}
+
+function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
+  return clips.map((clip) => ({
+    ...clip,
+    sourceImage: clip.sourceImage
+      ? { filename: clip.sourceImage.filename, base64: null }
+      : null,
+  }));
+}
+
+function readJson<T>(key: string): T | null {
+  try {
+    const raw = draftStorage()?.getItem(key) ?? null;
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export const useSequenceDraftStore = defineStore("sequence-draft", () => {
+  const output = ref<OutputMode>("single");
+  const clips = reactive<SequenceClipForm[]>([]);
+  const activeClipId = ref<string | null>(null);
+  const enableAudio = ref(false);
+  const editing = ref<SequenceEditSession | null>(null);
+  const lastSingleModel = ref<string | null>(null);
+  const hydrated = ref(false);
+
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function persistNow() {
+    const draft: PersistedDraftV1 = {
+      version: 1,
+      output: output.value,
+      clips: persistableClips(clips),
+      enableAudio: enableAudio.value,
+      lastSingleModel: lastSingleModel.value,
+    };
+    try {
+      draftStorage()?.setItem(SEQUENCE_DRAFT_KEY, JSON.stringify(draft));
+    } catch {
+      // Quota or private-mode failures must never break composing.
+    }
+  }
+
+  function schedulePersist() {
+    if (!hydrated.value) return;
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(persistNow, PERSIST_DEBOUNCE_MS);
+  }
+
+  function applyPersisted(saved: PersistedDraftV1) {
+    output.value = saved.output;
+    clips.splice(0, clips.length, ...saved.clips.map((clip) => ({ ...clip })));
+    enableAudio.value = saved.enableAudio;
+    lastSingleModel.value = saved.lastSingleModel ?? null;
+  }
+
+  /** One-shot migrations from the pre-unification keys. */
+  function migrateLegacy() {
+    const legacyDraft = readJson<ChainScript>(LEGACY_WEB_DRAFT_KEY);
+    if (legacyDraft?.stages?.length) {
+      const loaded = chainScriptToClips(legacyDraft);
+      clips.splice(0, clips.length, ...loaded.clips);
+      enableAudio.value = loaded.enableAudio;
+      // Deliberately NOT importing the legacy chain-level width/steps/
+      // guidance — those private copies were the stale-inspector bug.
+    }
+    const storage = draftStorage();
+    const webMode = storage?.getItem(LEGACY_WEB_MODE_KEY) ?? null;
+    if (webMode === "script") output.value = "sequence";
+    const mobileMode = storage?.getItem(LEGACY_MOBILE_MODE_KEY) ?? null;
+    if (mobileMode === "sequence") output.value = "sequence";
+    storage?.removeItem(LEGACY_WEB_DRAFT_KEY);
+    storage?.removeItem(LEGACY_WEB_MODE_KEY);
+    storage?.removeItem(LEGACY_MOBILE_MODE_KEY);
+  }
+
+  function hydrate() {
+    if (hydrated.value) return;
+    const saved = readJson<PersistedDraftV1>(SEQUENCE_DRAFT_KEY);
+    if (saved?.version === 1) {
+      applyPersisted(saved);
+    } else {
+      migrateLegacy();
+    }
+    if (clips.length > 0 && !activeClipId.value) {
+      activeClipId.value = clips[clips.length - 1]?.id ?? null;
+    }
+    hydrated.value = true;
+  }
+
+  /** A sequence always has at least two clips (repo invariant). */
+  function ensureClips(defaultFrames: number) {
+    while (clips.length < 2) clips.push(newSequenceClip(defaultFrames));
+    if (!activeClipId.value) activeClipId.value = clips[0]?.id ?? null;
+  }
+
+  function addClip(defaultFrames: number) {
+    const clip = newSequenceClip(defaultFrames);
+    clips.push(clip);
+    activeClipId.value = clip.id;
+    return clip;
+  }
+
+  function removeClip(id: string) {
+    if (clips.length <= 2) return;
+    const idx = clips.findIndex((clip) => clip.id === id);
+    if (idx < 0) return;
+    clips.splice(idx, 1);
+    if (activeClipId.value === id) {
+      activeClipId.value = clips[Math.min(idx, clips.length - 1)]?.id ?? null;
+    }
+  }
+
+  function moveClip(id: string, toIndex: number) {
+    const from = clips.findIndex((clip) => clip.id === id);
+    if (from < 0) return;
+    const clamped = Math.max(0, Math.min(toIndex, clips.length - 1));
+    const [clip] = clips.splice(from, 1);
+    if (clip) clips.splice(clamped, 0, clip);
+  }
+
+  function setTransition(
+    id: string,
+    transition: SequenceTransition,
+    fadeFrames?: number,
+  ) {
+    const clip = clips.find((c) => c.id === id);
+    if (!clip) return;
+    clip.transition = transition;
+    if (fadeFrames != null) clip.fadeFrames = fadeFrames;
+  }
+
+  /** ⌥-click in the seam editor: apply one transition to every seam. */
+  function applyTransitionToAllSeams(
+    transition: SequenceTransition,
+    fadeFrames?: number,
+  ) {
+    clips.forEach((clip, idx) => {
+      if (idx === 0) return;
+      clip.transition = transition;
+      if (fadeFrames != null) clip.fadeFrames = fadeFrames;
+    });
+  }
+
+  /**
+   * Output is a setting, not a place. Switching to Sequence seeds clip 1
+   * from the single prompt (when clip 1 is blank); switching back hands
+   * clip 1's prompt to the single form. Clips are PARKED in both
+   * directions — never erased (mockup: "switching back keeps clip 1 and
+   * parks the rest").
+   */
+  function setOutput(
+    mode: OutputMode,
+    bridge: { getPrompt: () => string; setPrompt: (value: string) => void },
+    defaultFrames: number,
+  ) {
+    if (mode === output.value) return;
+    if (mode === "sequence") {
+      ensureClips(defaultFrames);
+      const first = clips[0];
+      const prompt = bridge.getPrompt().trim();
+      if (first && !first.prompt.trim() && prompt) first.prompt = prompt;
+      activeClipId.value = clips[0]?.id ?? null;
+    } else {
+      const first = clips[0];
+      if (first?.prompt.trim()) bridge.setPrompt(first.prompt);
+    }
+    output.value = mode;
+  }
+
+  /** Load a durable job's effective script into an edit session. */
+  function loadFromJob(
+    session: SequenceEditSession,
+    loadedClips: SequenceClipForm[],
+    loadedEnableAudio: boolean,
+  ) {
+    clips.splice(0, clips.length, ...loadedClips);
+    enableAudio.value = loadedEnableAudio;
+    editing.value = session;
+    output.value = "sequence";
+    activeClipId.value = clips[0]?.id ?? null;
+  }
+
+  function stopEditing() {
+    editing.value = null;
+  }
+
+  function reset() {
+    clips.splice(0, clips.length);
+    activeClipId.value = null;
+    enableAudio.value = false;
+    editing.value = null;
+    output.value = "single";
+  }
+
+  // Sync flush so the debounce timer arms on the mutation itself (the
+  // callback only re-arms a setTimeout — cheap enough for every keystroke).
+  watch(
+    [output, clips, enableAudio, lastSingleModel],
+    () => schedulePersist(),
+    { deep: true, flush: "sync" },
+  );
+
+  return {
+    output,
+    clips,
+    activeClipId,
+    enableAudio,
+    editing,
+    lastSingleModel,
+    hydrated,
+    hydrate,
+    ensureClips,
+    addClip,
+    removeClip,
+    moveClip,
+    setTransition,
+    applyTransitionToAllSeams,
+    setOutput,
+    loadFromJob,
+    stopEditing,
+    reset,
+  };
+});

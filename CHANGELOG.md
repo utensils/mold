@@ -56,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and force model reloads; and the stage executor held a config snapshot
   from server boot, so a model pulled after startup could fail in a chain
   stage while running fine on the normal queue. Both fixed.
+||||||| b2314878
+- **The shared sequence kit for the unified Create view landed.** A studio
+  sequence-draft store persists the clip list (with legacy web/iPhone
+  draft-and-mode migration) so clip prompts survive navigation, reloads,
+  and mode switches on every surface; shared builders read the LIVE
+  inspector values at submit time; and the new seam components — a
+  text-first seam pill between clips, a teaching seam editor with a fade
+  length stepper, and the clip rail with drag-to-reorder — implement the
+  Mold Studio seam design. Transition labels are now **Smooth**, **Cut**,
+  and **Fade** everywhere (LTX-Video's zero-overlap joins still say **Join
+  clips**), replacing Continue motion / Crossfade.
 - **Sequence outputs now carry full per-clip provenance.** Gallery rows for
   multi-clip videos record a structured `chain` block — every clip's prompt,
   frames, transition, fade length, and effective seed — plus the durable

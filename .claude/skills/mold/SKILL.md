@@ -526,7 +526,7 @@ table, no scanner, no scrape); unknown sort values return 422.
 Sequence-mode browse links enter this view with Video + Models filters. Web,
 desktop, and iPhone Create pickers contain only sequence-capable installed
 models and select one when available. A new Sequence starts with two required clip
-descriptions, uses Continue motion / Cut / Crossfade for context-capable
+descriptions, uses Smooth / Cut / Fade seam labels for context-capable
 LTX-2 and Join clips for LTX-Video's zero-tail fallback, and keeps frame
 choices strictly above the active motion tail. Seed, source, audio, and TOML tools stay under
 progressive disclosure. Durable sequence creation, events, previews, and

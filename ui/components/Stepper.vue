@@ -14,6 +14,8 @@ const props = withDefaults(
     max: number;
     /** Accessible name for the control. */
     label?: string;
+    /** Optional value renderer (e.g. fade frames show "8f"). */
+    format?: (value: number) => string;
   }>(),
   {},
 );
@@ -68,7 +70,9 @@ function onKeydown(event: KeyboardEvent) {
     >
       −
     </button>
-    <span class="ms-stepper__value" aria-hidden="true">{{ modelValue }}</span>
+    <span class="ms-stepper__value" aria-hidden="true">{{
+      format ? format(modelValue) : modelValue
+    }}</span>
     <button
       type="button"
       class="ms-stepper__btn"

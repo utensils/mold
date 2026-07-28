@@ -147,7 +147,7 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
 
     expect(w.findAll('[data-test="stage-card"]')).toHaveLength(2);
     expect(w.get('[data-test="script-summary"]').text()).toContain("2 clips");
-    expect(w.text()).toContain("Continue motion");
+    expect(w.text()).toContain("Smooth");
     expect(w.get('[data-test="script-generate"]').text()).toBe(
       "Generate sequence",
     );
