@@ -2835,6 +2835,13 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_reports_queue_controls_available() {
+        // `server_batch` is intentionally gated by the process-global
+        // `MOLD_OUTPUT_DIR` override. Serialize this positive assertion with
+        // tests that temporarily disable output through that environment
+        // variable.
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         let mut state = AppState::for_tests();
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
