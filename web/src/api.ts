@@ -23,6 +23,10 @@ import type {
   QueueListing,
 } from "./types";
 import { postSseJsonStream, type StreamError } from "./lib/apiStream";
+import type {
+  AmendRequest as AmendRequestWire,
+  AmendResponse as AmendResponseWire,
+} from "@studio/lib/api/chainTypes";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
@@ -174,16 +178,23 @@ export async function reorderQueueJob(
 const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();
 const CHAIN_LIMITS_TTL_MS = 30_000;
 
-export async function fetchChainLimits(model: string): Promise<ChainLimits> {
+export async function fetchChainLimits(
+  model: string,
+  target?: StreamTarget,
+): Promise<ChainLimits> {
   const now = Date.now();
-  const cached = chainLimitsCache.get(model);
+  // Limits are per model AND per host — a remote's checkpoint may chain
+  // where the origin's doesn't.
+  const key = `${targetBase(target)}|${model}`;
+  const cached = chainLimitsCache.get(key);
   if (cached && now - cached.at < CHAIN_LIMITS_TTL_MS) return cached.value;
   const res = await fetch(
-    `${base}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}`,
+    `${targetBase(target)}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}`,
+    { headers: targetHeaders(target) },
   );
   if (!res.ok) throw new Error(`chain-limits fetch failed: ${res.status}`);
   const value: ChainLimits = await res.json();
-  chainLimitsCache.set(model, { value, at: now });
+  chainLimitsCache.set(key, { value, at: now });
   return value;
 }
 
@@ -323,10 +334,23 @@ export async function generateChainStream(
   });
 }
 
+/** HTTP failure that keeps the status reachable — amend conflict handling
+ * (409 → create-as-new fallback) branches on it. */
+export class ApiHttpError extends Error {
+  constructor(
+    label: string,
+    public readonly status: number,
+    body: string,
+  ) {
+    super(`${label} failed: ${status} ${body}`.trim());
+    this.name = "ApiHttpError";
+  }
+}
+
 async function requireJson<T>(res: Response, label: string): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${label} failed: ${res.status} ${text}`.trim());
+    throw new ApiHttpError(label, res.status, text);
   }
   return (await res.json()) as T;
 }
@@ -346,8 +370,12 @@ export async function createChainJob(
   return requireJson<CreateChainJobResponse>(res, "POST /api/chain-jobs");
 }
 
-export async function listChainJobs(): Promise<ChainJobListing> {
-  const res = await fetch(`${base}/api/chain-jobs`);
+export async function listChainJobs(
+  target?: StreamTarget,
+): Promise<ChainJobListing> {
+  const res = await fetch(`${targetBase(target)}/api/chain-jobs`, {
+    headers: targetHeaders(target),
+  });
   return requireJson<ChainJobListing>(res, "GET /api/chain-jobs");
 }
 
@@ -403,10 +431,14 @@ export async function cancelChainJob(
   return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/cancel`);
 }
 
-export async function deleteChainJob(id: string): Promise<void> {
-  const res = await fetch(`${base}/api/chain-jobs/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
+export async function deleteChainJob(
+  id: string,
+  target?: StreamTarget,
+): Promise<void> {
+  const res = await fetch(
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}`,
+    { method: "DELETE", headers: targetHeaders(target) },
+  );
   if (!res.ok && res.status !== 204) {
     const text = await res.text().catch(() => "");
     throw new Error(
@@ -415,11 +447,40 @@ export async function deleteChainJob(id: string): Promise<void> {
   }
 }
 
-export async function gcChainJobs(): Promise<{
+/** POST /api/chain-jobs/:id/amend — full edited stage list; the server
+ * recomputes the preserved prefix and re-renders only dirty stages. A 409
+ * (`ApiHttpError.status`) means the job has moved on and the edit must be
+ * created as a new sequence instead. */
+export async function amendChainJob(
+  id: string,
+  req: AmendRequestWire,
+  target?: StreamTarget,
+): Promise<AmendResponseWire> {
+  const res = await fetch(
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/amend`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...targetHeaders(target),
+      },
+      body: JSON.stringify(req),
+    },
+  );
+  return requireJson<AmendResponseWire>(
+    res,
+    `POST /api/chain-jobs/${id}/amend`,
+  );
+}
+
+export async function gcChainJobs(target?: StreamTarget): Promise<{
   swept_ephemeral_jobs: number;
   pruned_artifact_dirs: number;
 }> {
-  const res = await fetch(`${base}/api/chain-jobs/gc`, { method: "POST" });
+  const res = await fetch(`${targetBase(target)}/api/chain-jobs/gc`, {
+    method: "POST",
+    headers: targetHeaders(target),
+  });
   return requireJson(res, "POST /api/chain-jobs/gc");
 }
 
