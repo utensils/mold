@@ -275,8 +275,31 @@ impl JobRegistry {
         let Some(parent) = parents.get_mut(parent_id) else {
             return false;
         };
+        if parent.cancel.is_cancelled() {
+            return false;
+        }
         parent.children.insert(child_id.to_string());
         true
+    }
+
+    pub fn unregister_batch_child(&self, parent_id: &str, child_id: &str) {
+        if let Some(parent) = self
+            .batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(parent_id)
+        {
+            parent.children.remove(child_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn batch_child_count(&self, parent_id: &str) -> Option<usize> {
+        self.batch_parents
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(parent_id)
+            .map(|parent| parent.children.len())
     }
 
     /// Close cancellation admission immediately before durable commit. The
@@ -1040,6 +1063,28 @@ mod tests {
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].id, "parent");
         assert_eq!(snapshot.entries[0].state, JobLifecycle::Running);
+    }
+
+    #[test]
+    fn cancelled_parent_rejects_late_child_registration() {
+        let reg = JobRegistry::new();
+        let cancel = reg.register_batch_parent("parent");
+        cancel.cancel();
+        assert!(!reg.register_batch_child("parent", "late"));
+        assert_eq!(reg.batch_child_count("parent"), Some(0));
+    }
+
+    #[test]
+    fn completed_batch_children_are_pruned_from_parent_authority() {
+        let reg = JobRegistry::new();
+        reg.register_batch_parent("parent");
+        for index in 0..10_000 {
+            let child = format!("child-{index}");
+            assert!(reg.register_batch_child("parent", &child));
+            assert_eq!(reg.batch_child_count("parent"), Some(1));
+            reg.unregister_batch_child("parent", &child);
+        }
+        assert_eq!(reg.batch_child_count("parent"), Some(0));
     }
 
     #[tokio::test]

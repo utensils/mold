@@ -269,9 +269,35 @@ impl DurableBatchAttempt {
         record: mold_db::GenerationRecord,
         bytes: &[u8],
     ) -> anyhow::Result<CompletionDisposition> {
+        let preview = self.parent.preview_staged_completion(lease)?;
+        if matches!(
+            preview,
+            CompletionDisposition::StaleDeletePrivateArtifact
+                | CompletionDisposition::ClosedAttemptDeletePrivateArtifact
+                | CompletionDisposition::AttemptFencedDeletePrivateArtifact
+        ) {
+            return self.stage_and_accept(lease, bytes);
+        }
         self.transaction
             .update_child_record_for_lease(lease, record)?;
         self.stage_and_accept(lease, bytes)
+    }
+
+    pub fn stage_video_auxiliaries(
+        &mut self,
+        lease: &BatchChildLease,
+        thumbnail: &[u8],
+        gif_preview: &[u8],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(
+                self.parent.preview_staged_completion(lease)?,
+                CompletionDisposition::Accepted | CompletionDisposition::AttemptPrepared
+            ),
+            "video auxiliaries cannot stage for a stale or closed child lease"
+        );
+        self.transaction
+            .stage_video_auxiliaries_for_lease(lease, thumbnail, gif_preview)
     }
 
     pub fn complete_without_artifact(
@@ -381,6 +407,7 @@ fn reconcile_receipts(
             parent.child_is_succeeded(*child_index),
             "accepted receipt does not correspond to reducer success"
         );
+        transaction.verify_auxiliary_receipts_for_child(*child_index, actual.lease_generation)?;
     }
 
     let mut report = BatchAttemptReconciliation {
@@ -1296,6 +1323,57 @@ mod tests {
         assert!(!staged.exists());
         assert_eq!(recovered.parent.state(), BatchParentState::Running);
         recovered.transaction.staging_path(0).unwrap();
+    }
+
+    #[test]
+    fn recovery_fails_closed_on_corrupt_auxiliary_bound_to_accepted_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.mp4", 0, 2), record("two.mp4", 1, 2)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        bridge
+            .stage_video_auxiliaries(&lease, b"thumbnail", b"preview")
+            .unwrap();
+        bridge.stage_and_accept(&lease, b"video").unwrap();
+        let thumbnail = bridge.transaction().staged_video_thumbnail_path(0).unwrap();
+        std::fs::write(&thumbnail, b"corrupt").unwrap();
+        drop(bridge);
+
+        let error = DurableBatchAttempt::recover(dir.path(), "parent").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("auxiliary changed"),
+            "unexpected accepted-auxiliary recovery error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn stale_or_cancelled_lease_cannot_write_video_auxiliaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("one.mp4", 0, 1)],
+        )
+        .unwrap();
+        bridge.start().unwrap();
+        let (lease, _) = bridge.grant(0).unwrap();
+        bridge.request_cancel().unwrap();
+        bridge
+            .complete_without_artifact(&lease, ChildCompletion::Cancelled)
+            .unwrap();
+        let thumbnail = bridge.transaction().staged_video_thumbnail_path(0).unwrap();
+
+        assert!(bridge
+            .stage_video_auxiliaries(&lease, b"late-thumbnail", b"late-preview")
+            .is_err());
+        assert!(!thumbnail.exists());
     }
 
     #[test]

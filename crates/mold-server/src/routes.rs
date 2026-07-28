@@ -28,6 +28,9 @@ fn submit_error_to_api(e: SubmitError) -> ApiError {
         SubmitError::Full { pending, capacity } => {
             ApiError::queue_full(format!("generation queue is full ({pending}/{capacity})"))
         }
+        SubmitError::Cancelled => {
+            ApiError::inference("generation cancelled before queue admission")
+        }
         SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
     }
 }
@@ -891,16 +894,22 @@ async fn generate(
             )
         })?;
         let authority = crate::batch_runtime::register_server_batch(&state);
-        let completed = crate::batch_runtime::execute_server_batch(
-            &state,
+        let completed = crate::batch_runtime::spawn_server_batch(
+            state.clone(),
             authority,
             req,
             output_dir,
-            SseCompletionPayload::Full,
+            crate::batch_runtime::ServerBatchDelivery::Json,
         )
         .await
+        .map_err(|_| ApiError::internal("server batch supervisor exited without a result"))?
         .map_err(|error| ApiError::inference(format!("server batch failed: {error:#}")))?;
-        return Ok(batch_generate_response(completed.response));
+        let crate::batch_runtime::CompletedServerBatch::Json(response) = completed else {
+            return Err(ApiError::internal(
+                "server batch supervisor returned the wrong delivery shape",
+            ));
+        };
+        return Ok(batch_generate_response(response));
     }
 
     tracing::info!(
@@ -1676,22 +1685,36 @@ async fn generate_stream(
             id: parent_id,
         }));
         let state_clone = state.clone();
+        let result_rx = crate::batch_runtime::spawn_server_batch(
+            state_clone,
+            authority,
+            req,
+            output_dir,
+            crate::batch_runtime::ServerBatchDelivery::Sse(completion_payload),
+        );
         tokio::spawn(async move {
-            match crate::batch_runtime::execute_server_batch(
-                &state_clone,
-                authority,
-                req,
-                output_dir,
-                completion_payload,
-            )
-            .await
-            {
-                Ok(completed) => {
-                    let _ = tx.send(SseMessage::BatchComplete(Box::new(completed.event)));
-                }
-                Err(error) => {
+            match result_rx.await {
+                Ok(completed) => match completed {
+                    Ok(completed) => {
+                        if let crate::batch_runtime::CompletedServerBatch::Sse(event) = completed {
+                            let _ = tx.send(SseMessage::BatchComplete(Box::new(event)));
+                        } else {
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                message:
+                                    "server batch supervisor returned the wrong delivery shape"
+                                        .to_string(),
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                            message: format!("server batch failed: {error:#}"),
+                        }));
+                    }
+                },
+                Err(_) => {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: format!("server batch failed: {error:#}"),
+                        message: "server batch supervisor exited without a result".to_string(),
                     }));
                 }
             }

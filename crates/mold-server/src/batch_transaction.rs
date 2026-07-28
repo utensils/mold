@@ -452,6 +452,18 @@ enum BatchJournalEvent {
     ManifestSnapshot {
         manifest: BatchAttemptManifest,
     },
+    ChildRecordUpdated {
+        child_index: usize,
+        lease_generation: u64,
+        record: Box<GenerationRecord>,
+    },
+    ChildAuxiliaryStaged {
+        receipt: BatchAuxiliaryReceipt,
+    },
+    ChildAuxiliariesCleared {
+        child_index: usize,
+        lease_generation: u64,
+    },
     ChildStaged {
         receipt: BatchChildReceipt,
     },
@@ -467,11 +479,30 @@ enum BatchJournalEvent {
     CleanupStarted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BatchAuxiliaryKind {
+    ThumbnailPng,
+    PreviewGif,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchAuxiliaryReceipt {
+    child_index: usize,
+    lease_generation: u64,
+    kind: BatchAuxiliaryKind,
+    checksum_sha256: String,
+    size_bytes: u64,
+}
+
 #[derive(Clone, Debug)]
 struct BatchJournalReplay {
     manifest: BatchAttemptManifest,
     manifest_history: Vec<BatchAttemptManifest>,
     staged_receipts: BTreeMap<usize, BatchChildReceipt>,
+    record_lease_generations: BTreeMap<usize, u64>,
+    auxiliary_receipts: BTreeMap<(usize, BatchAuxiliaryKind), BatchAuxiliaryReceipt>,
+    cleared_auxiliary_leases: BTreeSet<(usize, u64)>,
     published_children: BTreeSet<usize>,
     post_publish_snapshot: bool,
     metadata_committed: bool,
@@ -584,6 +615,9 @@ pub struct BatchTransaction {
     reconstructed_from_journal: bool,
     journal_needs_heal: bool,
     staged_receipts: BTreeMap<usize, BatchChildReceipt>,
+    record_lease_generations: BTreeMap<usize, u64>,
+    auxiliary_receipts: BTreeMap<(usize, BatchAuxiliaryKind), BatchAuxiliaryReceipt>,
+    cleared_auxiliary_leases: BTreeSet<(usize, u64)>,
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
@@ -1135,6 +1169,9 @@ impl BatchTransaction {
             reconstructed_from_journal: false,
             journal_needs_heal: false,
             staged_receipts: BTreeMap::new(),
+            record_lease_generations: BTreeMap::new(),
+            auxiliary_receipts: BTreeMap::new(),
+            cleared_auxiliary_leases: BTreeSet::new(),
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -1251,6 +1288,151 @@ impl BatchTransaction {
         Ok(self.attempt_dir.join("staging").join(&child.staging_name))
     }
 
+    fn auxiliary_staging_path(&self, child_index: usize, suffix: &str) -> anyhow::Result<PathBuf> {
+        let child = self
+            .manifest
+            .children
+            .get(child_index)
+            .context("batch child index out of range")?;
+        Ok(self
+            .attempt_dir
+            .join("staging")
+            .join(format!("{}.{suffix}", child.staging_name)))
+    }
+
+    fn auxiliary_path(
+        &self,
+        child_index: usize,
+        kind: BatchAuxiliaryKind,
+    ) -> anyhow::Result<PathBuf> {
+        self.auxiliary_staging_path(
+            child_index,
+            match kind {
+                BatchAuxiliaryKind::ThumbnailPng => "thumbnail.png",
+                BatchAuxiliaryKind::PreviewGif => "preview.gif",
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn staged_video_thumbnail_path(
+        &self,
+        child_index: usize,
+    ) -> anyhow::Result<PathBuf> {
+        self.auxiliary_path(child_index, BatchAuxiliaryKind::ThumbnailPng)
+    }
+
+    /// Persist optional video auxiliaries under private attempt authority.
+    /// They become public cache entries only after the central gallery
+    /// manifest is committed.
+    pub(crate) fn stage_video_auxiliaries_for_lease(
+        &mut self,
+        lease: &BatchChildLease,
+        thumbnail: &[u8],
+        gif_preview: &[u8],
+    ) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            self.manifest.state == BatchManifestState::Staging
+                && lease.parent_id == self.manifest.parent_id
+                && lease.attempt_generation == self.manifest.attempt_generation,
+            "video auxiliaries do not belong to this staging attempt"
+        );
+        for (kind, bytes) in [
+            (BatchAuxiliaryKind::ThumbnailPng, thumbnail),
+            (BatchAuxiliaryKind::PreviewGif, gif_preview),
+        ] {
+            if bytes.is_empty() {
+                continue;
+            }
+            let key = (lease.child_index, kind);
+            let path = self.auxiliary_path(lease.child_index, kind)?;
+            if let Some(existing) = self.auxiliary_receipts.get(&key) {
+                ensure!(
+                    existing.lease_generation == lease.lease_generation
+                        && existing.size_bytes == bytes.len() as u64
+                        && existing.checksum_sha256 == checksum_bytes(bytes)
+                        && checksum_file(&path)? == existing.checksum_sha256,
+                    "video auxiliary retry changed a durable staged receipt"
+                );
+                continue;
+            }
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            let receipt = BatchAuxiliaryReceipt {
+                child_index: lease.child_index,
+                lease_generation: lease.lease_generation,
+                kind,
+                checksum_sha256: checksum_bytes(bytes),
+                size_bytes: bytes.len() as u64,
+            };
+            self.append_journal(BatchJournalEvent::ChildAuxiliaryStaged {
+                receipt: receipt.clone(),
+            })?;
+            self.auxiliary_receipts.insert(key, receipt);
+        }
+        sync_dir(&self.attempt_dir.join("staging"))
+    }
+
+    fn clear_auxiliaries(&mut self, child_index: usize) -> anyhow::Result<usize> {
+        let receipts = self
+            .auxiliary_receipts
+            .range(
+                (child_index, BatchAuxiliaryKind::ThumbnailPng)
+                    ..=(child_index, BatchAuxiliaryKind::PreviewGif),
+            )
+            .map(|(key, receipt)| (*key, receipt.clone()))
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for ((_, kind), _) in &receipts {
+            match fs::remove_file(self.auxiliary_path(child_index, *kind)?) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Also remove deterministic paths which were durably written but
+        // crashed before their receipt append.
+        for kind in [
+            BatchAuxiliaryKind::ThumbnailPng,
+            BatchAuxiliaryKind::PreviewGif,
+        ] {
+            if receipts.iter().any(|((_, seen), _)| *seen == kind) {
+                continue;
+            }
+            match fs::remove_file(self.auxiliary_path(child_index, kind)?) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if removed > 0 {
+            sync_dir(&self.attempt_dir.join("staging"))?;
+        }
+        if !receipts.is_empty() {
+            let lease_generation = receipts[0].1.lease_generation;
+            ensure!(
+                receipts
+                    .iter()
+                    .all(|(_, receipt)| receipt.lease_generation == lease_generation),
+                "video auxiliary receipts span multiple child leases"
+            );
+            self.append_journal(BatchJournalEvent::ChildAuxiliariesCleared {
+                child_index,
+                lease_generation,
+            })?;
+            self.auxiliary_receipts
+                .retain(|(index, _), _| *index != child_index);
+            self.cleared_auxiliary_leases
+                .insert((child_index, lease_generation));
+        }
+        Ok(removed)
+    }
+
     /// Replace result-dependent metadata after inference but before the exact
     /// child lease gains a durable staging receipt.
     pub(crate) fn update_child_record_for_lease(
@@ -1268,20 +1450,30 @@ impl BatchTransaction {
                 && lease.attempt_generation == self.manifest.attempt_generation,
             "child lease does not belong to this transaction attempt"
         );
-        let child = self
-            .manifest
-            .children
-            .get_mut(lease.child_index)
-            .context("batch child index out of range")?;
-        ensure!(
-            child.checksum_sha256.is_none()
-                && !self.staged_receipts.contains_key(&lease.child_index),
-            "staged child record is immutable"
-        );
-        record.filename.clone_from(&child.final_name);
+        let final_name = {
+            let child = self
+                .manifest
+                .children
+                .get(lease.child_index)
+                .context("batch child index out of range")?;
+            ensure!(
+                child.checksum_sha256.is_none()
+                    && !self.staged_receipts.contains_key(&lease.child_index),
+                "staged child record is immutable"
+            );
+            child.final_name.clone()
+        };
+        record.filename = final_name;
         record.output_dir = self.output_dir.to_string_lossy().into_owned();
-        child.record = record;
-        self.persist_manifest()
+        self.append_journal(BatchJournalEvent::ChildRecordUpdated {
+            child_index: lease.child_index,
+            lease_generation: lease.lease_generation,
+            record: Box::new(record.clone()),
+        })?;
+        self.manifest.children[lease.child_index].record = record;
+        self.record_lease_generations
+            .insert(lease.child_index, lease.lease_generation);
+        Ok(())
     }
 
     /// Write one private child artifact, fsync it, and journal its checksum.
@@ -1335,6 +1527,12 @@ impl BatchTransaction {
                 &self.manifest.children[lease.child_index],
             )?,
         };
+        ensure!(
+            self.record_lease_generations
+                .get(&lease.child_index)
+                .is_none_or(|generation| *generation == lease.lease_generation),
+            "staged child lease does not match its result metadata update"
+        );
         self.append_journal(BatchJournalEvent::ChildStaged {
             receipt: receipt.clone(),
         })?;
@@ -1360,6 +1558,7 @@ impl BatchTransaction {
             .get(&child_index)
             .cloned()
             .context("batch child has no staged receipt")?;
+        let aux_removed = self.clear_auxiliaries(child_index)?;
         let path = self.staging_path(child_index)?;
         match fs::remove_file(&path) {
             Ok(()) => sync_dir(path.parent().expect("staging path has parent"))?,
@@ -1377,6 +1576,9 @@ impl BatchTransaction {
         child.record.file_size_bytes = None;
         child.record.file_mtime_ms = None;
         self.staged_receipts.remove(&child_index);
+        if aux_removed > 0 {
+            sync_dir(path.parent().expect("staging path has parent"))?;
+        }
         Ok(())
     }
 
@@ -1387,6 +1589,7 @@ impl BatchTransaction {
             if self.staged_receipts.contains_key(&child_index) {
                 continue;
             }
+            removed += self.clear_auxiliaries(child_index)?;
             let path = self.staging_path(child_index)?;
             match fs::remove_file(&path) {
                 Ok(()) => removed += 1,
@@ -1666,12 +1869,11 @@ impl BatchTransaction {
         let mut authority_manifest = self.manifest.clone();
         authority_manifest.state = BatchManifestState::Committed;
         self.persist_committed_archive_manifest_value(&authority_manifest)?;
-        // Hard-link publication shares inode ctime with private staging.
-        // Remove the private link before capturing stable final-file facts,
-        // while retaining the attempt manifest as recovery evidence until
-        // central authority is durable.
-        self.cleanup_private_staging();
-        self.inject_commit_crash(CommitFailpoint::PrivateStagingCleaned);
+        // Hard-link publication shares inode ctime with private primary
+        // staging. Remove only those private links before capturing stable
+        // final-file facts; receipted auxiliaries remain private until the
+        // central gallery authority is durable.
+        self.cleanup_private_primary_staging()?;
         gate.record_committed_manifest(
             &self.output_dir,
             &authority_manifest,
@@ -1679,6 +1881,15 @@ impl BatchTransaction {
                 .as_ref()
                 .context("gallery bookkeeping authority released before publication")?,
         )?;
+        // Cache sidecars are never visible before the central gallery
+        // authority. Projection is idempotent so recovery can retry after a
+        // crash between authority commit and private-attempt cleanup.
+        self.publish_video_auxiliary_cache()?;
+        // Hard-link publication shares inode ctime with private staging.
+        // Remove every private primary/auxiliary only after both gallery
+        // authority and cache projection are complete.
+        self.cleanup_private_staging();
+        self.inject_commit_crash(CommitFailpoint::PrivateStagingCleaned);
         // The checksummed filesystem authority is now durable. Cross-process
         // readers may observe the complete batch while SQLite is projected
         // below, so do not hold the machine-wide namespace lock over DB I/O.
@@ -1711,6 +1922,95 @@ impl BatchTransaction {
         Ok(())
     }
 
+    fn publish_video_auxiliary_cache(&self) -> anyhow::Result<()> {
+        for ((child_index, kind), receipt) in &self.auxiliary_receipts {
+            let source = self.auxiliary_path(*child_index, *kind)?;
+            let bytes = fs::read(&source).with_context(|| {
+                format!("reading receipted batch auxiliary {}", source.display())
+            })?;
+            ensure!(
+                bytes.len() as u64 == receipt.size_bytes
+                    && checksum_bytes(&bytes) == receipt.checksum_sha256,
+                "receipted batch auxiliary changed: {}",
+                source.display()
+            );
+            let destination = self.auxiliary_cache_path(*child_index, *kind)?;
+            atomic_write_bytes(&destination, &bytes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_auxiliary_receipts_for_child(
+        &self,
+        child_index: usize,
+        lease_generation: u64,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !self
+                .cleared_auxiliary_leases
+                .contains(&(child_index, lease_generation)),
+            "accepted child lease had its video auxiliary receipts cleared"
+        );
+        for ((_, kind), receipt) in self.auxiliary_receipts.range(
+            (child_index, BatchAuxiliaryKind::ThumbnailPng)
+                ..=(child_index, BatchAuxiliaryKind::PreviewGif),
+        ) {
+            ensure!(
+                receipt.lease_generation == lease_generation,
+                "video auxiliary receipt belongs to the wrong accepted child lease"
+            );
+            let path = self.auxiliary_path(child_index, *kind)?;
+            let verified_path = if path.is_file() {
+                path
+            } else {
+                ensure!(
+                    self.output_dir
+                        .join(&self.manifest.children[child_index].final_name)
+                        .is_file(),
+                    "receipted batch auxiliary is missing: {}",
+                    path.display()
+                );
+                self.auxiliary_cache_path(child_index, *kind)?
+            };
+            let metadata = fs::metadata(&verified_path).with_context(|| {
+                format!(
+                    "receipted batch auxiliary projection is missing: {}",
+                    verified_path.display()
+                )
+            })?;
+            ensure!(
+                metadata.is_file()
+                    && metadata.len() == receipt.size_bytes
+                    && checksum_file(&verified_path)? == receipt.checksum_sha256,
+                "receipted batch auxiliary changed: {}",
+                verified_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn auxiliary_cache_path(
+        &self,
+        child_index: usize,
+        kind: BatchAuxiliaryKind,
+    ) -> anyhow::Result<PathBuf> {
+        let child = self
+            .manifest
+            .children
+            .get(child_index)
+            .context("batch auxiliary child index out of range")?;
+        let mold_dir = mold_core::Config::mold_dir().unwrap_or_else(|| PathBuf::from(".mold"));
+        Ok(match kind {
+            BatchAuxiliaryKind::ThumbnailPng => mold_dir
+                .join("cache")
+                .join("thumbnails")
+                .join(format!("{}.png", child.final_name)),
+            BatchAuxiliaryKind::PreviewGif => mold_dir.join("cache").join("previews").join(
+                mold_core::media_paths::preview_gif_filename(&child.final_name),
+            ),
+        })
+    }
+
     #[cfg(test)]
     fn inject_commit_error(&mut self, point: CommitFailpoint) -> anyhow::Result<()> {
         if self.commit_failpoint == Some(point) {
@@ -1737,7 +2037,7 @@ impl BatchTransaction {
     fn inject_commit_crash(&mut self, _point: CommitFailpoint) {}
 
     fn verify_all_staged(&self) -> anyhow::Result<()> {
-        for child in &self.manifest.children {
+        for (child_index, child) in self.manifest.children.iter().enumerate() {
             let expected = child
                 .checksum_sha256
                 .as_deref()
@@ -1748,6 +2048,11 @@ impl BatchTransaction {
                 "staged child checksum changed: {}",
                 path.display()
             );
+            let lease_generation = self
+                .staged_receipts
+                .get(&child_index)
+                .map_or(0, |receipt| receipt.lease_generation);
+            self.verify_auxiliary_receipts_for_child(child_index, lease_generation)?;
         }
         Ok(())
     }
@@ -1882,6 +2187,28 @@ impl BatchTransaction {
             }
         }
         let _ = sync_dir(&self.attempt_dir);
+    }
+
+    fn cleanup_private_primary_staging(&self) -> anyhow::Result<()> {
+        let staging = self.attempt_dir.join("staging");
+        for child in &self.manifest.children {
+            match fs::remove_file(staging.join(&child.staging_name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match sync_dir(&staging) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn archive_committed_attempt(&mut self, retain_manifest: bool) -> anyhow::Result<()> {
@@ -2030,6 +2357,9 @@ impl BatchTransaction {
             reconstructed_from_journal,
             journal_needs_heal,
             staged_receipts: replay.staged_receipts,
+            record_lease_generations: replay.record_lease_generations,
+            auxiliary_receipts: replay.auxiliary_receipts,
+            cleared_auxiliary_leases: replay.cleared_auxiliary_leases,
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -2178,6 +2508,9 @@ impl BatchJournalReplay {
             manifest_history: vec![manifest.clone()],
             manifest,
             staged_receipts: BTreeMap::new(),
+            record_lease_generations: BTreeMap::new(),
+            auxiliary_receipts: BTreeMap::new(),
+            cleared_auxiliary_leases: BTreeSet::new(),
             published_children: BTreeSet::new(),
             post_publish_snapshot: false,
             metadata_committed: false,
@@ -2194,6 +2527,9 @@ impl BatchJournalReplay {
         Self {
             manifest_history: vec![manifest.clone()],
             staged_receipts: BTreeMap::new(),
+            record_lease_generations: BTreeMap::new(),
+            auxiliary_receipts: BTreeMap::new(),
+            cleared_auxiliary_leases: BTreeSet::new(),
             published_children: if committed {
                 (0..manifest.children.len()).collect()
             } else {
@@ -2297,6 +2633,101 @@ impl BatchJournalReplay {
             BatchJournalEvent::ManifestSnapshot { manifest } => {
                 self.apply_manifest_snapshot(output_dir, attempt_dir, manifest)
             }
+            BatchJournalEvent::ChildRecordUpdated {
+                child_index,
+                lease_generation,
+                record,
+            } => {
+                ensure!(
+                    self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.state == BatchManifestState::Staging,
+                    "ChildRecordUpdated is outside a v2 staging attempt"
+                );
+                let child = self
+                    .manifest
+                    .children
+                    .get_mut(*child_index)
+                    .context("ChildRecordUpdated child index is out of range")?;
+                ensure!(
+                    child.checksum_sha256.is_none()
+                        && !self.staged_receipts.contains_key(child_index),
+                    "ChildRecordUpdated follows an accepted staging receipt"
+                );
+                ensure!(
+                    record.filename == child.final_name
+                        && Path::new(&record.output_dir) == output_dir,
+                    "ChildRecordUpdated changed reserved output identity"
+                );
+                child.record = *record.clone();
+                self.record_lease_generations
+                    .insert(*child_index, *lease_generation);
+                ensure!(
+                    self.auxiliary_receipts
+                        .iter()
+                        .filter(|((index, _), _)| index == child_index)
+                        .all(|(_, receipt)| receipt.lease_generation == *lease_generation),
+                    "ChildRecordUpdated lease does not match staged video auxiliaries"
+                );
+                Ok(())
+            }
+            BatchJournalEvent::ChildAuxiliaryStaged { receipt } => {
+                ensure!(
+                    self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.state == BatchManifestState::Staging
+                        && receipt.child_index < self.manifest.children.len()
+                        && !self.staged_receipts.contains_key(&receipt.child_index),
+                    "ChildAuxiliaryStaged is outside an unstaged v2 child"
+                );
+                ensure!(
+                    receipt.size_bytes <= i64::MAX as u64
+                        && receipt.checksum_sha256.len() == 64
+                        && receipt
+                            .checksum_sha256
+                            .bytes()
+                            .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) }),
+                    "ChildAuxiliaryStaged receipt is invalid"
+                );
+                ensure!(
+                    self.record_lease_generations
+                        .get(&receipt.child_index)
+                        .is_none_or(|generation| *generation == receipt.lease_generation),
+                    "ChildAuxiliaryStaged lease does not match result metadata"
+                );
+                ensure!(
+                    self.auxiliary_receipts
+                        .insert((receipt.child_index, receipt.kind), receipt.clone())
+                        .is_none(),
+                    "ChildAuxiliaryStaged duplicates an existing kind"
+                );
+                Ok(())
+            }
+            BatchJournalEvent::ChildAuxiliariesCleared {
+                child_index,
+                lease_generation,
+            } => {
+                ensure!(
+                    self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.state == BatchManifestState::Staging
+                        && *child_index < self.manifest.children.len()
+                        && self
+                            .auxiliary_receipts
+                            .keys()
+                            .any(|(index, _)| index == child_index),
+                    "ChildAuxiliariesCleared has no staged auxiliary receipts"
+                );
+                ensure!(
+                    self.auxiliary_receipts
+                        .iter()
+                        .filter(|((index, _), _)| index == child_index)
+                        .all(|(_, receipt)| receipt.lease_generation == *lease_generation),
+                    "ChildAuxiliariesCleared spans the wrong child lease"
+                );
+                self.auxiliary_receipts
+                    .retain(|(index, _), _| index != child_index);
+                self.cleared_auxiliary_leases
+                    .insert((*child_index, *lease_generation));
+                Ok(())
+            }
             BatchJournalEvent::ChildStaged { receipt } => {
                 ensure!(
                     self.manifest.version == MANIFEST_VERSION
@@ -2320,6 +2751,21 @@ impl BatchJournalReplay {
                 ensure!(
                     receipt.record_identity_sha256 == immutable_record_identity(child)?,
                     "ChildStaged immutable record identity changed"
+                );
+                ensure!(
+                    self.record_lease_generations
+                        .get(&receipt.child_index)
+                        .is_none_or(|generation| *generation == receipt.lease_generation),
+                    "ChildStaged lease generation does not match ChildRecordUpdated"
+                );
+                ensure!(
+                    self.auxiliary_receipts
+                        .iter()
+                        .filter(|((index, _), _)| *index == receipt.child_index)
+                        .all(|(_, auxiliary)| {
+                            auxiliary.lease_generation == receipt.lease_generation
+                        }),
+                    "ChildStaged lease generation does not match video auxiliaries"
                 );
                 ensure!(
                     receipt.checksum_sha256.len() == 64
@@ -5408,6 +5854,26 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
             .create_new(true)
             .open(&temp)?;
         file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        sync_dir(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().context("cache path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".batch-cache.tmp-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         sync_dir(parent)
@@ -9686,6 +10152,162 @@ mod tests {
             journal_bytes < 1_000_000,
             "per-child staging rewrote the full manifest: {journal_bytes} bytes"
         );
+    }
+
+    #[test]
+    fn child_record_updates_append_constant_size_deltas_and_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = (0..64)
+            .map(|index| record(&format!("{index}.png"), index))
+            .collect();
+        let mut transaction =
+            BatchTransaction::begin(dir.path(), "parent", 0, serde_json::json!({}), records)
+                .unwrap();
+        let journal = transaction.attempt_dir.join(JOURNAL_FILE);
+        let before = std::fs::metadata(&journal).unwrap().len();
+
+        for child_index in 0..64 {
+            let lease = BatchChildLease {
+                parent_id: "parent".to_string(),
+                child_index,
+                attempt_generation: 0,
+                lease_generation: 1,
+            };
+            let mut updated = record(&format!("{child_index}.png"), child_index as u64);
+            updated.generation_time_ms = Some(10_000 + child_index as i64);
+            transaction
+                .update_child_record_for_lease(&lease, updated)
+                .unwrap();
+        }
+
+        let growth = std::fs::metadata(&journal).unwrap().len() - before;
+        assert!(
+            growth < 512_000,
+            "child record updates rewrote the N-child manifest: {growth} bytes"
+        );
+        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
+        drop(transaction);
+        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
+        assert_eq!(
+            loaded.manifest.children[63].record.generation_time_ms,
+            Some(10_063)
+        );
+    }
+
+    fn auxiliary_fixture(
+        directory: &Path,
+    ) -> (BatchTransaction, BatchChildLease, PathBuf, PathBuf) {
+        let parent_id = format!("aux-{}", uuid::Uuid::new_v4());
+        let filename = format!("{parent_id}.mp4");
+        let transaction = BatchTransaction::begin(
+            directory,
+            &parent_id,
+            0,
+            serde_json::json!({}),
+            vec![record(&filename, 0)],
+        )
+        .unwrap();
+        let lease = BatchChildLease {
+            parent_id,
+            child_index: 0,
+            attempt_generation: 0,
+            lease_generation: 1,
+        };
+        let thumbnail = transaction
+            .auxiliary_cache_path(0, BatchAuxiliaryKind::ThumbnailPng)
+            .unwrap();
+        let preview = transaction
+            .auxiliary_cache_path(0, BatchAuxiliaryKind::PreviewGif)
+            .unwrap();
+        (transaction, lease, thumbnail, preview)
+    }
+
+    #[test]
+    fn video_auxiliaries_are_private_and_removed_on_rollback() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut transaction, lease, thumbnail, preview) = auxiliary_fixture(directory.path());
+        transaction
+            .stage_video_auxiliaries_for_lease(&lease, b"png-private", b"gif-private")
+            .unwrap();
+        assert!(!thumbnail.exists());
+        assert!(!preview.exists());
+        assert_eq!(transaction.auxiliary_receipts.len(), 2);
+
+        transaction.rollback_private_attempt().unwrap();
+        assert!(!thumbnail.exists());
+        assert!(!preview.exists());
+    }
+
+    #[test]
+    fn corrupt_receipted_video_auxiliary_fails_closed_before_prepare() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut transaction, lease, _, _) = auxiliary_fixture(directory.path());
+        transaction
+            .stage_video_auxiliaries_for_lease(&lease, b"png-original", b"gif-original")
+            .unwrap();
+        transaction.stage_bytes_for_lease(&lease, b"video").unwrap();
+        let thumbnail = transaction
+            .auxiliary_path(0, BatchAuxiliaryKind::ThumbnailPng)
+            .unwrap();
+        fs::write(&thumbnail, b"corrupt").unwrap();
+
+        let error = transaction.mark_prepared().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("auxiliary changed"),
+            "unexpected corruption error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn recovery_removes_receipted_auxiliaries_without_a_primary_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut transaction, lease, _, _) = auxiliary_fixture(directory.path());
+        transaction
+            .stage_video_auxiliaries_for_lease(&lease, b"png-orphan", b"gif-orphan")
+            .unwrap();
+        let thumbnail = transaction
+            .auxiliary_path(0, BatchAuxiliaryKind::ThumbnailPng)
+            .unwrap();
+        let preview = transaction
+            .auxiliary_path(0, BatchAuxiliaryKind::PreviewGif)
+            .unwrap();
+        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
+        drop(transaction);
+
+        let mut recovered = BatchTransaction::load(directory.path(), &manifest_path).unwrap();
+        assert_eq!(recovered.auxiliary_receipts.len(), 2);
+        assert_eq!(recovered.remove_unreceipted_staging().unwrap(), 2);
+        assert!(recovered.auxiliary_receipts.is_empty());
+        assert!(!thumbnail.exists());
+        assert!(!preview.exists());
+
+        drop(recovered);
+        let replayed = BatchTransaction::load(directory.path(), &manifest_path).unwrap();
+        assert!(replayed.auxiliary_receipts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn committed_video_auxiliaries_project_exactly_after_gallery_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut transaction, lease, thumbnail, preview) = auxiliary_fixture(directory.path());
+        let _ = fs::remove_file(&thumbnail);
+        let _ = fs::remove_file(&preview);
+        transaction
+            .stage_video_auxiliaries_for_lease(&lease, b"png-committed", b"gif-committed")
+            .unwrap();
+        transaction.stage_bytes_for_lease(&lease, b"video").unwrap();
+        transaction.mark_prepared().unwrap();
+        assert!(!thumbnail.exists());
+        assert!(!preview.exists());
+
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&thumbnail).unwrap(), b"png-committed");
+        assert_eq!(fs::read(&preview).unwrap(), b"gif-committed");
+        fs::remove_file(thumbnail).unwrap();
+        fs::remove_file(preview).unwrap();
     }
 
     #[test]

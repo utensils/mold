@@ -99,13 +99,19 @@ pub struct GenerationJobResult {
 pub struct QueueHandle {
     job_tx: tokio::sync::mpsc::Sender<GenerationJob>,
     pending_count: Arc<AtomicUsize>,
+    capacity_notify: Arc<tokio::sync::Notify>,
+    capacity_waiter: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Reason a `QueueHandle::submit` attempt failed.
 #[derive(Debug)]
 pub enum SubmitError {
     /// Queue is at capacity — caller should return 503 with `Retry-After`.
-    Full { pending: usize, capacity: usize },
+    Full {
+        pending: usize,
+        capacity: usize,
+    },
+    Cancelled,
     /// Receiving end is gone (server shutting down).
     Shutdown,
 }
@@ -115,6 +121,8 @@ impl QueueHandle {
         Self {
             job_tx,
             pending_count: Arc::new(AtomicUsize::new(0)),
+            capacity_notify: Arc::new(tokio::sync::Notify::new()),
+            capacity_waiter: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -134,6 +142,7 @@ impl QueueHandle {
         }
         if self.job_tx.send(job).await.is_err() {
             self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            self.capacity_notify.notify_waiters();
             return Err(SubmitError::Shutdown);
         }
         #[cfg(feature = "metrics")]
@@ -144,12 +153,65 @@ impl QueueHandle {
         Ok(prev)
     }
 
+    /// Wait for shared queue capacity without converting temporary occupancy
+    /// into a terminal batch failure. Cancellation before transport drops the
+    /// unsubmitted job and releases any reserved counter slot.
+    pub async fn submit_when_available(
+        &self,
+        job: GenerationJob,
+        capacity: usize,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<usize, SubmitError> {
+        let mut job = Some(job);
+        let waiter = self.capacity_waiter.lock();
+        tokio::pin!(waiter);
+        let _waiter = tokio::select! {
+            guard = &mut waiter => guard,
+            _ = cancellation.cancelled() => return Err(SubmitError::Cancelled),
+        };
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(SubmitError::Cancelled);
+            }
+            let notified = self.capacity_notify.notified();
+            let previous = self.pending_count.fetch_add(1, Ordering::SeqCst);
+            if previous < capacity {
+                let send = self
+                    .job_tx
+                    .send(job.take().expect("batch queue job submitted once"));
+                tokio::pin!(send);
+                return tokio::select! {
+                    result = &mut send => {
+                        if result.is_err() {
+                            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                            self.capacity_notify.notify_waiters();
+                            Err(SubmitError::Shutdown)
+                        } else {
+                            Ok(previous)
+                        }
+                    }
+                    _ = cancellation.cancelled() => {
+                        self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                        self.capacity_notify.notify_waiters();
+                        Err(SubmitError::Cancelled)
+                    }
+                };
+            }
+            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            tokio::select! {
+                _ = notified => {}
+                _ = cancellation.cancelled() => return Err(SubmitError::Cancelled),
+            }
+        }
+    }
+
     pub fn decrement(&self) {
         let _ = self
             .pending_count
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
                 Some(pending.saturating_sub(1))
             });
+        self.capacity_notify.notify_one();
     }
 
     pub fn pending(&self) -> usize {
@@ -738,6 +800,27 @@ impl AppState {
 mod tests {
     use super::*;
 
+    fn queue_job(id: &str) -> GenerationJob {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "queue",
+            "model": "flux-dev:q8",
+            "width": 64,
+            "height": 64,
+            "steps": 1
+        }))
+        .unwrap();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        GenerationJob {
+            id: id.to_string(),
+            request,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+            batch_child: None,
+        }
+    }
+
     #[test]
     fn models_disk_cache_serves_last_good_and_single_flights_refreshes() {
         let cache = ModelsDiskCache::default();
@@ -847,6 +930,77 @@ mod tests {
         handle.decrement();
 
         assert_eq!(handle.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn waitable_submission_backpressures_on_unrelated_occupancy() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = QueueHandle::new(tx);
+        handle.submit(queue_job("ordinary"), 1).await.unwrap();
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let waiting = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                handle
+                    .submit_when_available(queue_job("batch"), 1, &cancellation)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            handle.pending(),
+            1,
+            "waiting must not reserve over capacity"
+        );
+
+        assert_eq!(rx.recv().await.unwrap().id, "ordinary");
+        handle.decrement();
+        assert_eq!(waiting.await.unwrap().unwrap(), 0);
+        assert_eq!(rx.recv().await.unwrap().id, "batch");
+        assert_eq!(handle.pending(), 1);
+    }
+
+    #[tokio::test]
+    async fn waitable_submission_is_fifo_and_cancellation_releases_its_turn() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = QueueHandle::new(tx);
+        handle.submit(queue_job("occupied"), 1).await.unwrap();
+
+        let first_cancel = tokio_util::sync::CancellationToken::new();
+        let first = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = first_cancel.clone();
+            async move {
+                handle
+                    .submit_when_available(queue_job("first"), 1, &cancellation)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .submit_when_available(
+                        queue_job("second"),
+                        1,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        first_cancel.cancel();
+        assert!(matches!(first.await.unwrap(), Err(SubmitError::Cancelled)));
+        assert_eq!(handle.pending(), 1);
+
+        assert_eq!(rx.recv().await.unwrap().id, "occupied");
+        handle.decrement();
+        assert_eq!(second.await.unwrap().unwrap(), 0);
+        assert_eq!(rx.recv().await.unwrap().id, "second");
     }
 
     #[test]
