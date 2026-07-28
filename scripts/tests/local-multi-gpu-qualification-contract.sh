@@ -19,6 +19,7 @@ help_text="$("$runner" --help)"
 for option in \
   --binary \
   --models-dir \
+  --model-artifact \
   --request \
   --expected-gpu-uuid \
   --port \
@@ -40,14 +41,20 @@ grep -Fq 'MOLD_DISPATCH_MODE' "$runner"
 grep -Fq 'CUDA_VISIBLE_DEVICES' "$runner"
 grep -Fq -- '--ro-bind' "$runner"
 grep -Fq 'bwrap' "$runner"
+grep -Fq 'local-2x-rtx3090-sm86' "$runner"
+grep -Fq 'port 7680 is reserved' "$runner"
 
 python3 -m py_compile "$runner" "$validator"
 
 jq -e '
-  .properties.schema_version.const == "mold.local.multi-gpu.qualification.v1"
+  .properties.schema_version.const == "mold.local.multi-gpu.qualification.v2"
+  and .properties.qualification_profile.const == "local-2x-rtx3090-sm86"
   and .properties.hardware_qualified.type == "boolean"
   and .properties.candidate.required == ["path", "sha256", "version", "server_pid"]
   and .properties.host.properties.expected_gpu_uuids.minItems == 2
+  and .properties.request.properties.job_count.minimum == 4
+  and (.properties.request.required | index("artifacts")) != null
+  and (.properties.evidence.items.required | index("kind")) != null
   and (.properties.checks.required | index("both_devices_discovered")) != null
   and (.properties.checks.required | index("both_devices_executed")) != null
   and (.properties.checks.required | index("busy_disable_drained")) != null
@@ -64,5 +71,9 @@ jq -e '
 
 python3 "$runner" --self-test
 python3 "$repo_root/scripts/tests/local_multi_gpu_qualification_test.py"
+
+grep -Fq 'scripts/qualify-local-multi-gpu.py' "$repo_root/.github/workflows/ci.yml"
+grep -Fq 'scripts/validate-local-multi-gpu-report.py' "$repo_root/.github/workflows/ci.yml"
+grep -Fq 'local-multi-gpu-qualification-contract.sh' "$repo_root/.github/workflows/ci.yml"
 
 echo "local multi-GPU qualification contract passed"

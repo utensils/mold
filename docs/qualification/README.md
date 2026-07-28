@@ -120,17 +120,26 @@ reproducible evidence workflow, not a cryptographic attestation service.
 The distribution runner above proves one sm86 artifact on one selected device
 at a time. It does not prove multi-GPU scheduling or lifecycle behavior.
 `scripts/qualify-local-multi-gpu.py` is the separate candidate-binary gate for
-the local two-card development host.
+the named `local-2x-rtx3090-sm86` development-host profile. A passing report
+requires exactly two `NVIDIA GeForce RTX 3090` devices, exactly 24576 MiB per
+device, compute capability 8.6, and the two expected NVIDIA UUIDs.
 
-The runner refuses an occupied alternate port and never stops, restarts, or
-connects to the normal `:7680` service. It binds only loopback and creates an
+The runner rejects port `7680`, refuses an occupied alternate port, and never
+stops, restarts, or connects to the normal service. It binds only loopback and creates an
 isolated `MOLD_HOME`, `MOLD_DB_PATH`, `MOLD_OUTPUT_DIR`, gallery, and server
-log tree beside the report. The candidate runs inside a Bubblewrap mount
-namespace with the host root and `--models-dir` read-only; only its private
-runtime tree and `/tmp` overlay are writable. A before/after
+log tree beside the report. Every candidate invocation, including `version`
+and `gpu list --json`, runs through the same Bubblewrap mount namespace with
+the host root, real home, source tree, and `--models-dir` read-only; only its
+private runtime tree and `/tmp` overlay are writable. Session-bus and agent
+environment variables are not inherited. A before/after
 path/type/mode/size/mtime manifest is an additional mutation tripwire.
 Bubblewrap is therefore a required host tool. Do not point `--report` into a
 temporary directory if the evidence needs to be retained.
+
+`--timeout-seconds` is one absolute campaign deadline. The runner terminates
+whole subprocess groups on expiry, always stops the private candidate, performs
+the post-run model-tree comparison, and writes failure evidence when a campaign
+step fails.
 
 Prepare a request that is slow enough for the runner to observe both active
 workers and disable one while it is busy. Keep `batch_size` at one; the runner
@@ -156,6 +165,8 @@ Run the exact final CUDA candidate on an unused alternate port:
 scripts/qualify-local-multi-gpu.py \
   --binary ./target/release/mold \
   --models-dir /home/killswitch/.mold/models \
+  --model-artifact /home/killswitch/.mold/models/sd15/model.safetensors \
+  --model-artifact /home/killswitch/.mold/models/sd15/vae.safetensors \
   --request ./local-2x3090-request.json \
   --expected-gpu-uuid GPU-44f80ce5-23fc-a5dd-ac4e-133142952997 \
   --expected-gpu-uuid GPU-ba027fc5-7915-8d58-6738-b7eaafe427b4 \
@@ -163,18 +174,26 @@ scripts/qualify-local-multi-gpu.py \
   --report ./local-2x3090-qualification.json
 ```
 
+Repeat `--model-artifact` for every weight, encoder, tokenizer, VAE, LoRA, or
+other component used by the selected request. Each file must be a regular file
+below `--models-dir`; its exact path, size, and SHA-256 are bound into both the
+report and typed evidence. Omission means the resulting campaign is not a
+complete artifact qualification and must not be accepted.
+
 The required evidence includes:
 
-- exact `nvidia-smi` inventory and exact candidate PID observations on both
-  UUIDs while distinct work IDs are active;
+- exact `nvidia-smi` inventory and same-sample exact-candidate-PID observations
+  on both UUIDs while distinct bound work IDs are active;
 - `/api/devices`, legacy `/api/status`, `/api/resources`, `/api/queue`, and
   `mold gpu list --json` projections;
-- successful outputs carrying at least two distinct `x-mold-gpu` ordinals;
+- decoded exact-dimension PNG outputs bound to unique work IDs, returned seeds,
+  ordinals, and the corresponding exact GPU UUIDs;
 - busy disable returning `202`/`draining`, plan-version advance away from that
   lane, drain completion, and re-enable;
-- paused queued cancellation without inference, all-disabled maintenance
-  rejection, persisted desired enablement across restart, and legacy-mode
-  mutation fencing;
+- paused queued cancellation with a typed terminal SSE event, no matching
+  active work, and no output-tree change; all-disabled maintenance rejection;
+  exact old/new PID plus stable-ID/UUID persistence across restart; and
+  legacy-mode mutation fencing;
 - missing/empty/all/none/ordinal/stable-ID/NVIDIA-UUID/unmatched selector
   behavior plus stable-ID resolution under reversed `CUDA_VISIBLE_DEVICES`.
 
@@ -191,7 +210,12 @@ scripts/validate-local-multi-gpu-report.py \
   ./local-2x3090-qualification.json
 ```
 
-The validator reopens and hashes the exact candidate and every evidence file,
-requires the exact expected UUID inventory, and requires every gate to pass.
+The validator reopens and hashes the exact candidate, normalized request,
+selected model artifacts, decoded outputs, and every typed evidence file. It
+requires the exact named hardware profile and independently derives every gate
+from the API/PID/work-ID/UUID/ordinal evidence; reported `status` strings are
+not accepted as proof. Evidence paths must remain unique and confined to the
+report's adjacent `.d` directory. This is reproducible, internally
+tamper-evident evidence, not a remote cryptographic attestation.
 Use `--allow-failure` only when inspecting a valid failed run; it does not
 convert that run into hardware qualification.

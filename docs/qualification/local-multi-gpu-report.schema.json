@@ -1,11 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/local-multi-gpu-qualification-v1.json",
+  "$id": "https://utensils.io/mold/schemas/local-multi-gpu-qualification-v2.json",
   "title": "Mold local multi-GPU qualification report",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "qualification_profile",
+    "source_commit",
     "started_at",
     "finished_at",
     "hardware_qualified",
@@ -18,7 +20,12 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "mold.local.multi-gpu.qualification.v1"
+      "const": "mold.local.multi-gpu.qualification.v2"
+    },
+    "qualification_profile": { "const": "local-2x-rtx3090-sm86" },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
     },
     "started_at": { "type": "string", "format": "date-time" },
     "finished_at": { "type": "string", "format": "date-time" },
@@ -47,7 +54,6 @@
         },
         "devices": {
           "type": "array",
-          "minItems": 2,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -96,12 +102,16 @@
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256", "model", "job_count"],
+      "required": ["path", "sha256", "model", "job_count", "artifacts"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/sha256" },
         "model": { "type": "string", "minLength": 1 },
-        "job_count": { "type": "integer", "minimum": 2 }
+        "job_count": { "type": "integer", "minimum": 4 },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        }
       }
     },
     "checks": {
@@ -140,11 +150,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["label", "path", "sha256"],
+        "required": ["label", "path", "sha256", "kind"],
         "properties": {
           "label": { "type": "string", "minLength": 1 },
           "path": { "type": "string", "minLength": 1 },
-          "sha256": { "$ref": "#/$defs/sha256" }
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "kind": { "enum": ["json", "jsonl", "text", "png"] }
         }
       }
     }
@@ -176,6 +187,16 @@
             "properties": {
               "server_pid": { "type": "integer", "minimum": 1 }
             }
+          },
+          "host": {
+            "properties": {
+              "devices": { "minItems": 2 }
+            }
+          },
+          "request": {
+            "properties": {
+              "artifacts": { "minItems": 1 }
+            }
           }
         }
       }
@@ -189,6 +210,16 @@
     "gpu_uuid": {
       "type": "string",
       "pattern": "^GPU-[0-9A-Fa-f-]{36}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
     },
     "check": {
       "type": "object",
