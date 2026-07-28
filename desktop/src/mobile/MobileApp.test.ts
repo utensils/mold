@@ -62,6 +62,7 @@ import MobileApp from "./MobileApp.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 installMemoryLocalStorage();
 
@@ -3835,6 +3836,79 @@ describe("MobileApp gallery", () => {
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
     expect(wrapper.get("[role='alert']").text()).toContain("Couldn’t load models from Remote");
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+  });
+
+  it("reuses a sequence print as a clip rail on the Create tab", async () => {
+    // iPhone gets Reuse only: the rail reloads from `metadata.chain`, no edit
+    // session, and the composer lands on Create with clip 1's prompt (never
+    // the newline join the print records as `metadata.prompt`).
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      supports_sequence: true,
+    } as ModelEntry;
+    const sequencePrint: GalleryImage = {
+      ...print,
+      filename: "sequence.mp4",
+      metadata: {
+        ...print.metadata,
+        model: sequenceModel.name,
+        prompt: "a harbour at dawn\nthe boats leave",
+        chain_job_id: "job-9",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 0,
+          stages: [
+            { prompt: "a harbour at dawn", frames: 25, transition: "smooth" },
+            { prompt: "the boats leave", frames: 33, transition: "cut" },
+          ],
+        },
+      },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([sequencePrint]);
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const pinia = createPinia();
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    const draft = useSequenceDraftStore(pinia);
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
+      "a harbour at dawn",
+      "the boats leave",
+    ]);
+    expect(draft.editing).toBeNull();
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {
