@@ -203,6 +203,17 @@ class RunnerPureContracts(unittest.TestCase):
             ])
             self.assertEqual(command[-2:], ["/candidate/mold", "version"])
 
+    def test_device_node_collection_excludes_symlink_aliases(self):
+        with tempfile.TemporaryDirectory() as raw:
+            alias = pathlib.Path(raw) / "render-alias"
+            alias.symlink_to("/dev/null")
+
+            selected = runner.direct_char_device_nodes(
+                [pathlib.Path("/dev/null"), alias]
+            )
+
+            self.assertEqual(selected, [pathlib.Path("/dev/null")])
+
     def test_process_group_timeout_is_bounded(self):
         started = time.monotonic()
         with self.assertRaisesRegex(TimeoutError, "deadline"):

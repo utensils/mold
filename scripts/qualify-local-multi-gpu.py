@@ -188,6 +188,13 @@ def sandbox_environment(
     return env
 
 
+def direct_char_device_nodes(paths: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Return direct character-device paths, never symlink aliases."""
+    return [
+        path for path in paths if not path.is_symlink() and path.is_char_device()
+    ]
+
+
 def sandbox_command(runtime_dir: pathlib.Path, inner_command: list[str]) -> list[str]:
     command = [
         "bwrap",
@@ -213,17 +220,13 @@ def sandbox_command(runtime_dir: pathlib.Path, inner_command: list[str]) -> list
         str(runtime_dir / "tmp"),
         "/tmp",
     ]
-    device_nodes = [
-        path
-        for path in pathlib.Path("/dev").glob("nvidia*")
-        if path.is_char_device()
-    ]
+    device_nodes = direct_char_device_nodes(
+        list(pathlib.Path("/dev").glob("nvidia*"))
+    )
     for subtree in (pathlib.Path("/dev/nvidia-caps"), pathlib.Path("/dev/dri")):
         if subtree.is_dir():
             command.extend(["--dir", str(subtree)])
-            device_nodes.extend(
-                path for path in subtree.rglob("*") if path.is_char_device()
-            )
+            device_nodes.extend(direct_char_device_nodes(list(subtree.rglob("*"))))
     for node in device_nodes:
         if node.is_char_device():
             command.extend(["--dev-bind-try", str(node), str(node)])
