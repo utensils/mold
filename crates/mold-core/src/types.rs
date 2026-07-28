@@ -854,7 +854,7 @@ pub struct ModelInfo {
     pub hf_repo: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelDefaults {
     #[schema(example = 4)]
     pub default_steps: u32,
@@ -866,6 +866,26 @@ pub struct ModelDefaults {
     pub default_height: u32,
     #[schema(example = "FLUX Schnell Q8 — fast 4-step generation")]
     pub description: String,
+    /// Default video frame count (additive; absent for image models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 97)]
+    pub default_frames: Option<u32>,
+    /// Default video FPS (additive; absent for image models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 24)]
+    pub default_fps: Option<u32>,
+    /// Maximum frames a single request may ask for WITHOUT temporal
+    /// upscaling (additive; absent for image models). Clients with
+    /// temporal-upscale support keep their own doubling math; the server
+    /// validator remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 153)]
+    pub max_frames: Option<u32>,
+    /// Valid frame counts are `k * frame_step + 1` (additive; absent for
+    /// image models). 8 for the LTX families.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 8)]
+    pub frame_step: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -983,6 +1003,55 @@ impl std::ops::Deref for ModelInfoExtended {
 }
 
 #[cfg(test)]
+mod model_defaults_frame_tests {
+    use super::ModelDefaults;
+
+    /// Old wire shape (no frame fields) must keep parsing, and the new
+    /// fields must default to None and be omitted from serialized output —
+    /// image models never advertise frame semantics.
+    #[test]
+    fn model_defaults_frame_fields_roundtrip_and_default_to_none() {
+        let legacy = r#"{
+            "default_steps": 4,
+            "default_guidance": 3.5,
+            "default_width": 1024,
+            "default_height": 1024,
+            "description": "flux schnell"
+        }"#;
+        let parsed: ModelDefaults = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.default_frames, None);
+        assert_eq!(parsed.default_fps, None);
+        assert_eq!(parsed.max_frames, None);
+        assert_eq!(parsed.frame_step, None);
+
+        let out = serde_json::to_value(&parsed).unwrap();
+        assert!(out.get("default_frames").is_none());
+        assert!(out.get("default_fps").is_none());
+        assert!(out.get("max_frames").is_none());
+        assert!(out.get("frame_step").is_none());
+
+        let video = ModelDefaults {
+            default_frames: Some(97),
+            default_fps: Some(24),
+            max_frames: Some(153),
+            frame_step: Some(8),
+            ..parsed
+        };
+        let out = serde_json::to_value(&video).unwrap();
+        assert_eq!(out["default_frames"], 97);
+        assert_eq!(out["default_fps"], 24);
+        assert_eq!(out["max_frames"], 153);
+        assert_eq!(out["frame_step"], 8);
+
+        let back: ModelDefaults = serde_json::from_value(out).unwrap();
+        assert_eq!(back.default_frames, Some(97));
+        assert_eq!(back.default_fps, Some(24));
+        assert_eq!(back.max_frames, Some(153));
+        assert_eq!(back.frame_step, Some(8));
+    }
+}
+
+#[cfg(test)]
 mod model_display_name_tests {
     use super::{ModelDefaults, ModelInfo, ModelInfoExtended};
 
@@ -1002,6 +1071,7 @@ mod model_display_name_tests {
                 default_width: 1024,
                 default_height: 1024,
                 description: description.to_string(),
+                ..Default::default()
             },
             downloaded: true,
             disk_usage_bytes: None,

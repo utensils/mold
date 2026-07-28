@@ -387,6 +387,7 @@ mod tests {
                 default_width: 1024,
                 default_height: 1024,
                 description: "test".to_string(),
+                ..Default::default()
             },
             downloaded: false,
             disk_usage_bytes: None,

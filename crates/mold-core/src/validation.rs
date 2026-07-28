@@ -29,6 +29,26 @@ pub fn family_supports_lora(family: &str) -> bool {
 /// RoPE normalization and collapses output into random-color noise.
 pub const LTX2_MAX_FRAMES: u32 = 153;
 
+/// Global frame ceiling applied to every video request regardless of family.
+pub const MAX_FRAMES_GLOBAL: u32 = 257;
+
+/// Per-family single-request frame ceiling WITHOUT temporal upscaling — the
+/// value `/api/models` advertises as `max_frames`. Must stay in agreement
+/// with `validate_generate_request`'s rejections, which consume this helper.
+pub fn max_frames_for_family(family: &str) -> Option<u32> {
+    match family {
+        "ltx2" => Some(LTX2_MAX_FRAMES),
+        "ltx-video" => Some(MAX_FRAMES_GLOBAL),
+        _ => None,
+    }
+}
+
+/// Frame-count grid for a family: valid counts are `k * step + 1`. The value
+/// `/api/models` advertises as `frame_step`; the validator consumes it.
+pub fn frame_step_for_family(family: &str) -> Option<u32> {
+    matches!(family, "ltx2" | "ltx-video").then_some(8)
+}
+
 fn megapixel_limit_label() -> String {
     format!("{:.1}MP", MAX_PIXELS as f64 / 1_000_000.0)
 }
@@ -409,13 +429,15 @@ pub fn validate_generate_request_with_family(
         if frames == 0 {
             return Err("frames must be >= 1".to_string());
         }
-        if matches!(family, Some("ltx-video" | "ltx2")) && frames > 1 && (frames - 1) % 8 != 0 {
-            return Err(format!(
-                "frames ({frames}) must be 8n+1 for current LTX-Video / LTX-2 models (e.g. 9, 17, 25, 33, 41, 49, …)"
-            ));
+        if let Some(step) = family.and_then(frame_step_for_family) {
+            if frames > 1 && (frames - 1) % step != 0 {
+                return Err(format!(
+                    "frames ({frames}) must be {step}n+1 for current LTX-Video / LTX-2 models (e.g. 9, 17, 25, 33, 41, 49, …)"
+                ));
+            }
         }
-        if frames > 257 {
-            return Err(format!("frames ({frames}) must be <= 257"));
+        if frames > MAX_FRAMES_GLOBAL {
+            return Err(format!("frames ({frames}) must be <= {MAX_FRAMES_GLOBAL}"));
         }
         // LTX-2 transformers ship `positional_embedding_max_pos: [20, 2048, 2048]`
         // — exceeding 20 latent frames wraps RoPE into an untrained region and
@@ -1198,6 +1220,39 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("8n+1"), "got: {err}");
         assert!(err.contains("LTX-Video / LTX-2"), "got: {err}");
+    }
+
+    /// The helper values are what /api/models advertises as max_frames /
+    /// frame_step; they must agree with what the validator enforces so the
+    /// wire contract can't drift from the actual rejection rules.
+    #[test]
+    fn frame_constraint_helpers_match_validator_behavior() {
+        assert_eq!(max_frames_for_family("ltx2"), Some(LTX2_MAX_FRAMES));
+        assert_eq!(max_frames_for_family("ltx-video"), Some(257));
+        assert_eq!(max_frames_for_family("flux"), None);
+        assert_eq!(max_frames_for_family("sdxl"), None);
+        assert_eq!(frame_step_for_family("ltx2"), Some(8));
+        assert_eq!(frame_step_for_family("ltx-video"), Some(8));
+        assert_eq!(frame_step_for_family("flux"), None);
+
+        // One grid step past the advertised ltx-video cap must be rejected,
+        // and the rejection must quote the same cap the wire advertises.
+        let cap = max_frames_for_family("ltx-video").unwrap();
+        let mut req = valid_req();
+        req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(cap + 8); // stays on the 8n+1 grid so only the cap trips
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains(&cap.to_string()), "got: {err}");
+
+        // Same agreement for the ltx2 no-temporal-upscale ceiling.
+        let cap = max_frames_for_family("ltx2").unwrap();
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(cap + 8);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains(&cap.to_string()), "got: {err}");
     }
 
     #[test]
