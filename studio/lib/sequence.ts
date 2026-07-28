@@ -147,6 +147,27 @@ export function modelsForOutput<M extends SequenceModel>(
   return models.filter((model) => modelSupportsSequence(model));
 }
 
+/** Frame rate used when nothing else is known — older servers and image
+ * models omit the additive `/api/models.default_fps`. */
+export const DEFAULT_VIDEO_FPS = 24;
+
+/**
+ * Frame rate for a selected video model: the model's own server-advertised
+ * default (`/api/models.default_fps` — LTX-Video ships 30, LTX-2 24), then
+ * whatever the form already holds, then the 24-fps fallback.
+ *
+ * Every surface applies this on model selection exactly as it applies
+ * `default_steps` / `default_guidance`, so the sequence composer's duration
+ * note, the Advanced video summary, and the submitted request all agree with
+ * the model. Governs one-shot video and sequences alike.
+ */
+export function defaultVideoFps(
+  model: { default_fps?: number | null } | null | undefined,
+  current?: number | null,
+): number {
+  return model?.default_fps ?? current ?? DEFAULT_VIDEO_FPS;
+}
+
 /**
  * Default frames for a NEW clip: the model's own server-advertised default
  * (`/api/models.default_frames` — LTX-2 ships 97, LTX-Video 25), then the

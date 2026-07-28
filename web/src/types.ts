@@ -256,6 +256,9 @@ export interface ModelInfoExtended extends ModelDefaults {
   /** Model's own default frame count (`/api/models`, additive) — LTX-2
    * ships 97, LTX-Video 25; absent on older servers and image models. */
   default_frames?: number | null;
+  /** Model's own default frame rate (`/api/models`, additive) — LTX-Video
+   * ships 30, LTX-2 24; absent on older servers and image models. */
+  default_fps?: number | null;
 }
 
 export interface GpuInfo {
