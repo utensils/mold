@@ -317,7 +317,18 @@ fn shim_build_response_and_cleanup(
     };
     let (filename, output_metadata) = if let Some(dir) = output_dir {
         let _gallery_writer = state.gallery_publication_gate.blocking_write();
-        let metadata = req.stitched_output_metadata(actual_format, frame_count);
+        // The ephemeral shim job dir is deleted right after this response is
+        // assembled, so a job id would dangle — record stage seeds only.
+        let stage_seeds: Vec<u64> = manifest
+            .stage_status
+            .iter()
+            .map(|stage| stage.seed)
+            .collect();
+        let provenance = mold_core::chain::ChainProvenance {
+            chain_job_id: None,
+            stage_seeds: Some(&stage_seeds),
+        };
+        let metadata = req.stitched_output_metadata(actual_format, frame_count, Some(&provenance));
         let filename = save_video_to_dir(
             &dir,
             &bytes,
@@ -1769,6 +1780,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
         let handle = crate::chain_job_runner::spawn_runner(deps);
         let mut state = AppState::for_tests();

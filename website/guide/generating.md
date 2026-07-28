@@ -109,7 +109,8 @@ Advanced options remain in the mobile sheet so the primary flow stays compact.
 
 For a multi-prompt video, switch Create from **Single** to **Sequence**. Mold
 starts with two clips, requires a description for each, and presents joins as
-**Continue motion**, **Cut**, or **Crossfade**. The summary shows the stitched
+**Smooth**, **Cut**, or **Fade** (LTX-Video's zero-overlap joins say **Join
+clips**). The summary shows the stitched
 duration before you generate. **Sequence tools** contains TOML import/export
 and other script-oriented controls. On a multi-machine web setup, the durable
 job and its live progress stay on the machine selected by **Run on**.

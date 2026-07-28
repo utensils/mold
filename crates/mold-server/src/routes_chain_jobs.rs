@@ -86,6 +86,8 @@ pub async fn create_chain_job(
     }
     let job_id = uuid::Uuid::new_v4().to_string();
     let jobs_root = jobs_root()?;
+    let model = req.model.clone();
+    let stage_count = req.stages.len() as u32;
     crate::chain_job_runner::create_job_with_params(
         db,
         &jobs_root,
@@ -99,6 +101,13 @@ pub async fn create_chain_job(
     .map_err(|e| ApiError::internal(format!("failed to create chain job: {e:#}")))?;
 
     handle.kick();
+    state
+        .events
+        .publish(mold_core::ServerEvent::ChainJobQueued {
+            id: job_id.clone(),
+            model,
+            stage_count,
+        });
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateChainJobResponse { job_id }),
@@ -325,6 +334,13 @@ pub async fn resume_chain_job(
     let updated = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
+    state
+        .events
+        .publish(mold_core::ServerEvent::ChainJobQueued {
+            id: id.clone(),
+            model: updated.model.clone(),
+            stage_count: updated.stage_count,
+        });
     Ok((
         StatusCode::ACCEPTED,
         Json(summary_for_row(
@@ -372,6 +388,13 @@ pub async fn retake_chain_job(
         }
     })?;
     handle.kick();
+    state
+        .events
+        .publish(mold_core::ServerEvent::ChainJobQueued {
+            id: id.clone(),
+            model: updated.model.clone(),
+            stage_count: updated.stage_count,
+        });
     Ok((
         StatusCode::ACCEPTED,
         Json(summary_for_row(
@@ -861,6 +884,7 @@ mod tests {
         let mut request = req(OutputFormat::Mp4);
         request.model = "route-chain-test".into();
 
+        let mut events_rx = state.events.subscribe();
         let (_status, Json(body)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(State(state), Json(request)))
         })
@@ -870,6 +894,14 @@ mod tests {
         let row = chain_jobs::get_job(db_ref, &body.job_id).unwrap().unwrap();
         let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
         assert!(!manifest.ephemeral);
+
+        // Creation announces the job on the server-wide event stream so the
+        // unified activity surface sees it without polling /api/chain-jobs.
+        let event = events_rx.try_recv().expect("chain_job_queued published");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "chain_job_queued");
+        assert_eq!(wire["id"], body.job_id.as_str());
+        assert_eq!(wire["stage_count"].as_u64(), Some(row.stage_count as u64));
     }
 
     #[tokio::test]
@@ -982,6 +1014,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
         let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));
 

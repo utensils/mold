@@ -490,6 +490,14 @@ fn installed_catalog_models(
             .as_ref()
             .and_then(|cfg| cfg.default_guidance)
             .unwrap_or(defaults.guidance);
+        let frames = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_frames)
+            .or(defaults.frames);
+        let fps = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_fps)
+            .or(defaults.fps);
 
         let description = sidecar
             .description
@@ -507,6 +515,10 @@ fn installed_catalog_models(
                 default_height: h,
                 default_steps: steps,
                 default_guidance: guidance,
+                default_frames: frames,
+                default_fps: fps,
+                max_frames: mold_core::validation::max_frames_for_family(&sidecar.family),
+                frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
                 description,
             },
             info: ModelInfo {
@@ -1518,6 +1530,12 @@ mod tests {
         let state = AppState::for_tests();
         let video_only = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(video_only[0].supports_audio, Some(false));
+        // Catalog sidecars have no manifest, so frame defaults come from the
+        // family runtime defaults and the family constraint helpers.
+        assert_eq!(video_only[0].defaults.default_frames, Some(97));
+        assert_eq!(video_only[0].defaults.default_fps, Some(24));
+        assert_eq!(video_only[0].defaults.max_frames, Some(153));
+        assert_eq!(video_only[0].defaults.frame_step, Some(8));
 
         write_safetensors_with_keys(
             &primary,

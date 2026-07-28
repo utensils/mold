@@ -57,6 +57,8 @@ impl VideoMetadata {
             temporal_upscale: None,
             frames: Some(self.frames),
             fps: Some(self.fps),
+            chain_job_id: None,
+            chain: None,
             version: mold_core::build_info::version_string(),
         }
     }

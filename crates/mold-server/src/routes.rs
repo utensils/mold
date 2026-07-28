@@ -283,6 +283,8 @@ use crate::queue::clean_error_message;
         mold_core::chain_job::StageState,
         mold_core::chain_job::RetakeMode,
         mold_core::chain_job::GcOutcome,
+        mold_core::chain::ChainStageMetadata,
+        mold_core::chain::ChainOutputMetadata,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -3369,7 +3371,7 @@ async fn capabilities_chain_limits(
     };
 
     let resolved = mold_core::manifest::resolve_model_name(&raw_model);
-    let (family, quant, supports_audio) =
+    let (family, quant, supports_audio, default_frames) =
         if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
             let quant = resolved
                 .split_once(':')
@@ -3377,7 +3379,13 @@ async fn capabilities_chain_limits(
                 .unwrap_or_default();
             let family = manifest.family.clone();
             let supports_audio = crate::chain_limits::family_supports_audio(&family);
-            (family, quant, supports_audio)
+            let default_frames = state
+                .config
+                .read()
+                .await
+                .resolved_model_config(&resolved)
+                .effective_frames();
+            (family, quant, supports_audio, default_frames)
         } else {
             // Installed live-catalog models retain opaque `cv:` / `hf:` ids and
             // therefore cannot be found in the built-in manifest. Resolve them
@@ -3395,7 +3403,12 @@ async fn capabilities_chain_limits(
             let supports_audio = entry
                 .supports_audio
                 .unwrap_or_else(|| crate::chain_limits::family_supports_audio(&family));
-            (family, String::new(), supports_audio)
+            (
+                family,
+                String::new(),
+                supports_audio,
+                entry.defaults.default_frames,
+            )
         };
 
     if crate::chain_limits::family_cap(&family).is_none() {
@@ -3403,7 +3416,8 @@ async fn capabilities_chain_limits(
     }
 
     // TODO(sub-project D): pass live free VRAM from AppState.
-    let mut limits = crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0);
+    let mut limits =
+        crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0, default_frames);
     limits.supports_audio = supports_audio;
     Json(limits).into_response()
 }

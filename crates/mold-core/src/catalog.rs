@@ -26,6 +26,10 @@ pub fn build_model_catalog(
                 default_guidance: model_cfg.effective_guidance(),
                 default_width: model_cfg.effective_width(config),
                 default_height: model_cfg.effective_height(config),
+                default_frames: model_cfg.effective_frames(),
+                default_fps: model_cfg.effective_fps(),
+                max_frames: crate::validation::max_frames_for_family(&manifest.family),
+                frame_step: crate::validation::frame_step_for_family(&manifest.family),
                 description: model_cfg
                     .description
                     .unwrap_or_else(|| manifest.name.clone()),
@@ -73,6 +77,10 @@ pub fn build_model_catalog(
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
         let size_gb = size_gb_f64 as f32;
+        let family = model_cfg
+            .family
+            .clone()
+            .unwrap_or_else(|| "flux".to_string());
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -81,6 +89,10 @@ pub fn build_model_catalog(
                 default_guidance: model_cfg.effective_guidance(),
                 default_width: model_cfg.effective_width(config),
                 default_height: model_cfg.effective_height(config),
+                default_frames: model_cfg.effective_frames(),
+                default_fps: model_cfg.effective_fps(),
+                max_frames: crate::validation::max_frames_for_family(&family),
+                frame_step: crate::validation::frame_step_for_family(&family),
                 description: model_cfg
                     .description
                     .clone()
@@ -88,10 +100,7 @@ pub fn build_model_catalog(
             },
             info: ModelInfo {
                 name: name.clone(),
-                family: model_cfg
-                    .family
-                    .clone()
-                    .unwrap_or_else(|| "flux".to_string()),
+                family,
                 size_gb,
                 is_loaded: loaded_model.is_some_and(|loaded| engine_is_loaded && loaded == name),
                 last_used: None,
@@ -179,6 +188,47 @@ mod tests {
             // would otherwise fail the size-match fallback).
             crate::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
+    }
+
+    /// Video models must advertise their manifest frame defaults and the
+    /// family frame constraints so clients stop hardcoding 25 frames; image
+    /// models must omit all four fields.
+    #[test]
+    fn build_model_catalog_emits_video_frame_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = Config::default();
+        let catalog = build_model_catalog(&config, None, false);
+
+        let ltx2 = catalog
+            .iter()
+            .find(|model| model.family == "ltx2")
+            .expect("an ltx2 manifest model should exist");
+        assert_eq!(ltx2.defaults.default_frames, Some(97));
+        assert_eq!(ltx2.defaults.default_fps, Some(24));
+        assert_eq!(
+            ltx2.defaults.max_frames,
+            Some(153),
+            "no-temporal-upscale RoPE ceiling",
+        );
+        assert_eq!(ltx2.defaults.frame_step, Some(8));
+
+        let ltx_video = catalog
+            .iter()
+            .find(|model| model.family == "ltx-video")
+            .expect("an ltx-video manifest model should exist");
+        assert_eq!(ltx_video.defaults.default_frames, Some(25));
+        assert_eq!(ltx_video.defaults.default_fps, Some(30));
+        assert_eq!(ltx_video.defaults.max_frames, Some(257));
+        assert_eq!(ltx_video.defaults.frame_step, Some(8));
+
+        let flux = catalog
+            .iter()
+            .find(|model| model.family == "flux")
+            .expect("a flux manifest model should exist");
+        assert_eq!(flux.defaults.default_frames, None);
+        assert_eq!(flux.defaults.default_fps, None);
+        assert_eq!(flux.defaults.max_frames, None);
+        assert_eq!(flux.defaults.frame_step, None);
     }
 
     #[test]
@@ -284,6 +334,7 @@ mod tests {
                     default_width: 1024,
                     default_height: 1024,
                     description: String::new(),
+                    ..Default::default()
                 },
                 downloaded: false,
                 disk_usage_bytes: None,

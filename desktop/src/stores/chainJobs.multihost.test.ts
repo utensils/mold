@@ -35,6 +35,49 @@ beforeEach(() => {
   );
 });
 
+describe("clearInactive", () => {
+  it("deletes every inactive job, resumable included, and keeps running/queued ones", async () => {
+    const { apiFetch } = await import("../lib/api/client");
+    (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const store = useChainJobsStore();
+    store.jobs = [
+      { id: "a", state: "completed" },
+      { id: "b", state: "running" },
+      { id: "c", state: "failed" },
+      { id: "d", state: "queued" },
+      { id: "e", state: "cancelled" },
+    ] as never;
+
+    const outcome = await store.clearInactive();
+
+    expect(outcome).toEqual({ cleared: 3, failed: 0 });
+    expect(store.jobs.map((j) => j.id)).toEqual(["b", "d"]);
+    expect(apiFetch).toHaveBeenCalledWith("/api/chain-jobs/a", { method: "DELETE" });
+    expect(apiFetch).toHaveBeenCalledWith("/api/chain-jobs/c", { method: "DELETE" });
+    expect(apiFetch).toHaveBeenCalledWith("/api/chain-jobs/e", { method: "DELETE" });
+    expect(apiFetch).not.toHaveBeenCalledWith("/api/chain-jobs/b", { method: "DELETE" });
+  });
+
+  it("reports partial failures and refetches to resync", async () => {
+    const { apiFetch } = await import("../lib/api/client");
+    (apiFetch as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue({});
+    apiJson.mockResolvedValue({ jobs: [] });
+    const store = useChainJobsStore();
+    store.jobs = [
+      { id: "a", state: "completed" },
+      { id: "c", state: "failed" },
+    ] as never;
+
+    const outcome = await store.clearInactive();
+
+    expect(outcome.cleared + outcome.failed).toBe(2);
+    expect(outcome.failed).toBe(1);
+    expect(apiJson).toHaveBeenCalledWith("/api/chain-jobs");
+  });
+});
+
 describe("chain jobs on an explicit host", () => {
   it("creates, refreshes, and watches a chain through the same remote target", async () => {
     await useChainJobsStore().create(request, target);

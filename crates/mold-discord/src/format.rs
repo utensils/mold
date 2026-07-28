@@ -1012,6 +1012,7 @@ mod tests {
                 default_width: 1024,
                 default_height: 1024,
                 description: "Fast flux".to_string(),
+                ..Default::default()
             },
             downloaded: true,
             disk_usage_bytes: None,
@@ -1047,6 +1048,7 @@ mod tests {
                     default_width: 1024,
                     default_height: 1024,
                     description: "FLUX Schnell Q8".to_string(),
+                    ..Default::default()
                 },
                 downloaded: true,
                 disk_usage_bytes: None,
@@ -1072,6 +1074,7 @@ mod tests {
                     default_width: 1024,
                     default_height: 1024,
                     description: "FLUX Dev Q4".to_string(),
+                    ..Default::default()
                 },
                 downloaded: false,
                 disk_usage_bytes: None,
@@ -1097,6 +1100,7 @@ mod tests {
                     default_width: 1024,
                     default_height: 1024,
                     description: "Wuerstchen v2".to_string(),
+                    ..Default::default()
                 },
                 downloaded: false,
                 disk_usage_bytes: None,

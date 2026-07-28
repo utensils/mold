@@ -24,8 +24,8 @@ describe("SpliceMark a11y", () => {
   it("gives the cycle button an accessible name reflecting the transition", () => {
     const wrapper = mountMark("smooth");
     const btn = wrapper.get("button");
-    expect(btn.attributes("aria-label")).toContain("Continue motion");
-    expect(wrapper.text()).toContain("Continue motion");
+    expect(btn.attributes("aria-label")).toContain("Smooth");
+    expect(wrapper.text()).toContain("Smooth");
   });
 
   it("labels the fade steppers when the transition is fade", () => {

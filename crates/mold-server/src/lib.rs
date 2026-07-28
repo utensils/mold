@@ -723,7 +723,7 @@ pub async fn run_server(
                 jobs_root,
                 executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
                     state.gpu_pool.clone(),
-                    config_snapshot,
+                    state.config.clone(),
                     state.scheduled_work.clone(),
                     dispatch_mode,
                 )),
@@ -739,6 +739,7 @@ pub async fn run_server(
                 server_events: Some(state.events.clone()),
                 gallery_publication_gate: state.gallery_publication_gate.clone(),
                 dispatch_mode,
+                pause: Some(state.queue_pause.clone()),
             };
             state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
         } else {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import viewSource from "./GenerateView.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
+import modelPickerSource from "../components/create/ModelPicker.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 
 function tagFor(source: string, testId: string): string {
@@ -20,13 +21,13 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
   });
 
-  it("keeps full model names visible in the inspector picker", () => {
-    expect(classesFor(inspectorSource, "selected-model-name")).not.toContain("truncate");
-    expect(classesFor(inspectorSource, "selected-model-name")).toContain("break-all");
-    expect(classesFor(inspectorSource, "model-option-name")).not.toContain("truncate");
-    expect(classesFor(inspectorSource, "model-option-name")).toContain("break-all");
-    expect(classesFor(inspectorSource, "model-availability")).toContain("whitespace-normal");
-    expect(classesFor(inspectorSource, "model-availability")).toContain("break-all");
+  it("keeps full model names visible in the shared model picker", () => {
+    expect(classesFor(modelPickerSource, "selected-model-name")).not.toContain("truncate");
+    expect(classesFor(modelPickerSource, "selected-model-name")).toContain("break-all");
+    expect(classesFor(modelPickerSource, "model-option-name")).not.toContain("truncate");
+    expect(classesFor(modelPickerSource, "model-option-name")).toContain("break-all");
+    expect(classesFor(modelPickerSource, "model-availability")).toContain("whitespace-normal");
+    expect(classesFor(modelPickerSource, "model-availability")).toContain("break-all");
   });
 
   it("keeps Advanced in the settings inspector instead of mounting an overlay drawer", () => {

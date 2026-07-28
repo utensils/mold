@@ -16,6 +16,9 @@ vi.mock("../../lib/ipc", () => ({
   },
 }));
 
+const { routerPush } = vi.hoisted(() => ({ routerPush: vi.fn() }));
+vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
+
 beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => (document.body.innerHTML = ""));
 
@@ -43,6 +46,22 @@ function addRemote(id = "hal9000-7680", label = "hal9000") {
 }
 
 describe("CreateHeader", () => {
+  it("surfaces the composer mode switch with Single active", () => {
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    const segments = wrapper.get("[data-test='composer-mode']").findAll("button[role='radio']");
+    expect(segments.map((b) => b.text())).toEqual(["Single", "Sequence"]);
+    expect(segments[0]!.attributes("aria-checked")).toBe("true");
+  });
+
+  it("opens the chain composer when Sequence is picked", async () => {
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    const segments = wrapper.get("[data-test='composer-mode']").findAll("button[role='radio']");
+    await segments[1]!.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/create/chain");
+  });
+
   it("renders the live summary of shape, dimensions, and steps", () => {
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });

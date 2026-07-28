@@ -495,6 +495,7 @@ mod tests {
             default_width: 1024,
             default_height: 1024,
             description: "test".to_string(),
+            ..Default::default()
         }
     }
 
@@ -565,6 +566,7 @@ mod tests {
             default_width: 512,
             default_height: 512,
             description: "test".to_string(),
+            ..Default::default()
         };
         let req = build_generate_request(BuildParams {
             width: Some(768),
@@ -759,6 +761,7 @@ mod tests {
             default_width: 1024,
             default_height: 1024,
             description: String::new(),
+            ..Default::default()
         }
     }
 

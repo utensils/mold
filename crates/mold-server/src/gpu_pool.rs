@@ -1677,6 +1677,23 @@ impl GpuPool {
         Ok(())
     }
 
+    /// Select a worker for a request, honoring an explicit per-request GPU
+    /// placement when one names a concrete ordinal: the pinned worker wins
+    /// over the load-balancing strategy, and a placement naming a missing
+    /// ordinal (or spanning several GPUs) is an error rather than a silent
+    /// fallback. Without an explicit ordinal, defers to [`Self::select_worker`].
+    pub fn worker_for_placement(
+        &self,
+        model_name: &str,
+        placement: Option<&DevicePlacement>,
+        estimated_vram: u64,
+    ) -> Result<Option<Arc<GpuWorker>>, String> {
+        match self.resolve_explicit_placement_gpu(placement)? {
+            Some(ordinal) => Ok(self.worker_by_ordinal(ordinal)),
+            None => Ok(self.select_worker(model_name, estimated_vram)),
+        }
+    }
+
     /// Find a non-degraded worker that already has this model loaded on GPU.
     /// If multiple workers have it, prefer the one with fewer in-flight requests.
     pub fn find_loaded(&self, model_name: &str) -> Option<Arc<GpuWorker>> {
@@ -2234,6 +2251,53 @@ mod tests {
             picked.gpu.ordinal, 0,
             "a too-small idle GPU must not win over the warm busy worker"
         );
+    }
+
+    /// Chain stages must honor an explicit per-request GPU placement — the
+    /// runner previously threaded `placement` into every stage request and
+    /// then ignored it at worker-selection time, letting consecutive stages
+    /// migrate GPUs and force model reloads.
+    #[test]
+    fn worker_for_placement_pins_explicit_gpu_ordinal() {
+        let (worker0, _rx0) = test_worker(0, 24_000_000_000);
+        let (worker1, _rx1) = test_worker(1, 48_000_000_000);
+        let pool = GpuPool {
+            workers: vec![worker0, worker1].into(),
+        };
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::gpu(0),
+                ..AdvancedPlacement::default()
+            }),
+        };
+
+        // Explicit placement wins even though worker 1 has more headroom.
+        let picked = pool
+            .worker_for_placement("ltx-2-19b-distilled:fp8", Some(&placement), 8_000_000_000)
+            .unwrap()
+            .expect("worker must be selected");
+        assert_eq!(picked.gpu.ordinal, 0);
+
+        // No placement → normal strategy still applies.
+        let auto = pool
+            .worker_for_placement("ltx-2-19b-distilled:fp8", None, 8_000_000_000)
+            .unwrap()
+            .expect("worker must be selected");
+        assert!(auto.gpu.ordinal <= 1);
+
+        // A placement naming a missing ordinal is an error, not a silent
+        // fallback.
+        let missing = DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::gpu(7),
+                ..AdvancedPlacement::default()
+            }),
+        };
+        assert!(pool
+            .worker_for_placement("ltx-2-19b-distilled:fp8", Some(&missing), 8_000_000_000)
+            .is_err());
     }
 
     #[test]

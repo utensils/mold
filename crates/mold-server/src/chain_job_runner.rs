@@ -100,12 +100,25 @@ pub struct RunnerDeps {
     pub output_dir: Option<PathBuf>,
     /// Server-wide `GET /api/events` broadcast (distinct from the
     /// chain-scoped `events: JobEventBus` above) so finalized chain outputs
-    /// emit `gallery_added`. `None` in unit tests that don't assert on it.
+    /// emit `gallery_added` and chain lifecycle emits `chain_job_*`.
+    /// `None` in unit tests that don't assert on it.
     pub server_events: Option<Arc<crate::events::EventBroadcaster>>,
     pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
     /// Rollout boundary: only V2 may publish chain stages into the unified
     /// scheduler. Legacy/observe retain the bounded direct-acquisition shim.
     pub dispatch_mode: crate::dispatch_mode::DispatchMode,
+    /// `POST /api/queue/pause` gate, shared with the generation queue. The
+    /// runner holds before claiming a job and between stages; a running
+    /// stage always finishes. `None` in unit tests that don't exercise it.
+    pub pause: Option<Arc<crate::queue::QueuePause>>,
+}
+
+/// Publish a server-wide event when the broadcast is wired (it is `None`
+/// only in unit tests).
+fn publish_server_event(deps: &RunnerDeps, event: mold_core::ServerEvent) {
+    if let Some(events) = deps.server_events.as_ref() {
+        events.publish(event);
+    }
 }
 
 pub(crate) struct CreateJobParams {
@@ -901,6 +914,12 @@ async fn run_legacy_loop(
             }
         }
 
+        // Honor POST /api/queue/pause before claiming new chain work; the
+        // per-stage gate in execute_job covers a pause that lands mid-job.
+        if let Some(pause) = deps.pause.as_ref() {
+            pause.wait_if_paused().await;
+        }
+
         let mut ran_job = false;
         if let Some(db) = deps.db.as_ref() {
             let job = match next_queued_job(db) {
@@ -1289,6 +1308,13 @@ fn execute_job_inner(
             other.as_str()
         ),
     }
+    publish_server_event(
+        deps,
+        mold_core::ServerEvent::ChainJobStarted {
+            id: job.id.clone(),
+            model: job.model.clone(),
+        },
+    );
     let run_result = (|| -> anyhow::Result<()> {
         let mut manifest = {
             let _guard = deps.job_locks.blocking_lock(&job.id);
@@ -1356,6 +1382,12 @@ fn execute_job_inner(
         }
 
         while stage_idx < manifest.stage_status.len() as u32 {
+            // Hold between stages while the queue is paused; the poll's
+            // abort hook lets a cancel land during the hold and be acted
+            // on by the check just below.
+            if let Some(pause) = deps.pause.as_ref() {
+                pause.wait_if_paused_blocking(&|| deps.cancel.is_cancelled(&job.id));
+            }
             if deps.cancel.is_cancelled(&job.id) {
                 if let Err(err) = set_cancelled(db, deps, &job.id) {
                     fail_job(db, deps, &job.id, None, format!("{err:#}"))?;
@@ -1681,6 +1713,13 @@ fn execute_job_inner(
             ChainJobEvent::StateChanged {
                 state: ChainJobState::Completed,
                 error: None,
+            },
+        );
+        publish_server_event(
+            deps,
+            mold_core::ServerEvent::ChainJobEnded {
+                id: job.id.clone(),
+                state: ChainJobState::Completed,
             },
         );
         deps.cancel.unregister(&job.id);
@@ -2082,7 +2121,25 @@ fn finalize_job(
     if !manifest.ephemeral {
         if let Some(output_dir) = deps.output_dir.as_ref() {
             let _gallery_writer = deps.gallery_publication_gate.blocking_write();
-            let metadata = effective.stitched_output_metadata(OutputFormat::Mp4, frame_count);
+            let stage_seeds: Vec<u64> = manifest
+                .stage_status
+                .iter()
+                .map(|stage| stage.seed)
+                .collect();
+            let provenance = mold_core::chain::ChainProvenance {
+                chain_job_id: Some(&job.id),
+                stage_seeds: Some(&stage_seeds),
+            };
+            let metadata = effective.stitched_output_metadata(
+                OutputFormat::Mp4,
+                frame_count,
+                Some(&provenance),
+            );
+            let generation_time_ms: u64 = manifest
+                .stage_status
+                .iter()
+                .filter_map(|stage| stage.generation_time_ms)
+                .sum();
             let gallery_filename = chain_gallery_filename(&job.id, take);
             save_video_to_dir_named(
                 output_dir,
@@ -2090,7 +2147,7 @@ fn finalize_job(
                 &video_bytes,
                 OutputFormat::Mp4,
                 &metadata,
-                None,
+                (generation_time_ms > 0).then_some(generation_time_ms as i64),
                 Some(db),
                 deps.server_events.as_deref(),
                 &deps.gallery_publication_gate,
@@ -2303,7 +2360,11 @@ pub fn apply_retake(
 
 pub struct ProductionStageExecutor {
     gpu_pool: Arc<GpuPool>,
-    config: mold_core::Config,
+    /// The live `AppState.config` handle — NOT a startup snapshot. A
+    /// snapshot made models pulled after boot invisible to chain stages
+    /// (stale `ModelPaths` resolution and no activation hint) even though
+    /// the normal queue ran them fine.
+    config: Arc<tokio::sync::RwLock<mold_core::Config>>,
     scheduled_work: crate::scheduler::ScheduledWorkHandle,
     dispatch_mode: crate::dispatch_mode::DispatchMode,
 }
@@ -2311,7 +2372,7 @@ pub struct ProductionStageExecutor {
 impl ProductionStageExecutor {
     pub fn new(
         gpu_pool: Arc<GpuPool>,
-        config: mold_core::Config,
+        config: Arc<tokio::sync::RwLock<mold_core::Config>>,
         scheduled_work: crate::scheduler::ScheduledWorkHandle,
         dispatch_mode: crate::dispatch_mode::DispatchMode,
     ) -> Self {
@@ -2352,18 +2413,26 @@ impl ProductionStageExecutor {
             std::env::var("MOLD_OFFLOAD").ok().as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
+        let config = self.fresh_config();
         crate::execution_plan::resolve_execution_plans(
-            &self.config,
+            &config,
             stage_req,
             &devices,
             offload_requested,
         )
     }
+
+    /// Clone the current config. Blocking-read is safe here: stage rendering
+    /// always runs under `spawn_blocking`.
+    fn fresh_config(&self) -> mold_core::Config {
+        self.config.blocking_read().clone()
+    }
 }
 
 impl StageExecutor for ProductionStageExecutor {
     fn freeze_model(&self, model: &str) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
-        crate::execution_plan::freeze_chain_model(&self.config, model).map_err(anyhow::Error::new)
+        let config = self.fresh_config();
+        crate::execution_plan::freeze_chain_model(&config, model).map_err(anyhow::Error::new)
     }
 
     fn render_stage(
@@ -2375,6 +2444,7 @@ impl StageExecutor for ProductionStageExecutor {
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
         cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome> {
+        let config = self.fresh_config();
         let Some(in_flight) = claim_worker_for_stage(
             &self.gpu_pool,
             model,
@@ -2387,7 +2457,7 @@ impl StageExecutor for ProductionStageExecutor {
         let worker = in_flight.worker().clone();
         let _in_flight = in_flight;
         let _active = WorkerActiveGenerationGuard::new(worker.clone(), model, &stage_req.prompt)?;
-        let hint = model_manager::family_for_model_sync(model, &self.config).map(|family| {
+        let hint = model_manager::family_for_model_sync(model, &config).map(|family| {
             model_manager::ActivationHint {
                 width: stage_req.width,
                 height: stage_req.height,
@@ -2401,7 +2471,7 @@ impl StageExecutor for ProductionStageExecutor {
         let prep = gpu_worker::run_stage_blocking(
             &worker,
             model,
-            &self.config,
+            &config,
             hint,
             move |engine| -> anyhow::Result<StageRenderOutcome> {
                 let renderer = engine.as_chain_renderer().ok_or_else(|| {
@@ -2471,7 +2541,7 @@ impl StageExecutor for ProductionStageExecutor {
                 device_ordinal: preferred_ordinal,
             });
         }
-        let mut frozen_config = self.config.clone();
+        let mut frozen_config = self.fresh_config();
         let cache_key = frozen_model
             .and_then(|frozen| {
                 (!frozen.runtime_model_id.is_empty()).then_some(frozen.runtime_model_id.clone())
@@ -2643,6 +2713,13 @@ fn fail_job(
                 error: Some(error),
             },
         );
+        publish_server_event(
+            deps,
+            mold_core::ServerEvent::ChainJobEnded {
+                id: job_id.to_string(),
+                state: ChainJobState::Failed,
+            },
+        );
         deps.cancel.unregister(job_id);
     }
     Ok(())
@@ -2679,6 +2756,13 @@ fn set_cancelled(db: &MetadataDb, deps: &RunnerDeps, job_id: &str) -> anyhow::Re
             ChainJobEvent::StateChanged {
                 state: ChainJobState::Cancelled,
                 error: None,
+            },
+        );
+        publish_server_event(
+            deps,
+            mold_core::ServerEvent::ChainJobEnded {
+                id: job_id.to_string(),
+                state: ChainJobState::Cancelled,
             },
         );
         deps.cancel.unregister(job_id);
@@ -3178,7 +3262,6 @@ impl Drop for LegacyChainWaitRegistration {
         }
     }
 }
-
 struct WorkerInFlightGuard {
     worker: Arc<GpuWorker>,
 }
@@ -3783,6 +3866,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         }
     }
 
@@ -3967,6 +4051,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -4681,6 +4766,235 @@ mod tests {
         assert!(job_dir.join("final/output-2.mp4").exists());
     }
 
+    /// The stage executor must read the LIVE config, not a startup
+    /// snapshot — a snapshot made models pulled after boot invisible to
+    /// chain stages (stale ModelPaths, no activation hint) even though the
+    /// normal queue ran them fine.
+    #[test]
+    fn chain_stage_executor_reads_live_config() {
+        let shared = Arc::new(tokio::sync::RwLock::new(mold_core::Config::default()));
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        let executor = ProductionStageExecutor::new(
+            Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![].into(),
+            }),
+            shared.clone(),
+            crate::scheduler::ScheduledWorkHandle::new(scheduled_tx),
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        assert!(executor.fresh_config().models.is_empty());
+
+        shared.blocking_write().models.insert(
+            "pulled-after-boot".into(),
+            mold_core::ModelConfig::default(),
+        );
+        assert!(
+            executor
+                .fresh_config()
+                .models
+                .contains_key("pulled-after-boot"),
+            "a model added after executor construction must be visible",
+        );
+    }
+
+    /// The runner must publish server-wide chain lifecycle events (started,
+    /// ended) so the unified activity surface can track chain jobs over
+    /// `GET /api/events` without polling `/api/chain-jobs`.
+    #[test]
+    fn runner_publishes_chain_started_and_ended_server_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55EVENTS", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let broadcaster = crate::events::EventBroadcaster::new();
+        let mut rx = broadcaster.subscribe();
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.server_events = Some(broadcaster);
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let mut got = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            got.push(serde_json::to_value(&event).unwrap());
+        }
+        assert!(
+            got.iter().any(|event| event["type"] == "chain_job_started"
+                && event["id"] == "01JBR55EVENTS"
+                && event["model"] == req.model),
+            "expected chain_job_started, got: {got:?}",
+        );
+        assert!(
+            got.iter().any(|event| event["type"] == "chain_job_ended"
+                && event["id"] == "01JBR55EVENTS"
+                && event["state"] == "completed"),
+            "expected chain_job_ended completed, got: {got:?}",
+        );
+    }
+
+    /// `POST /api/queue/pause` must also hold the chain runner: no stage
+    /// starts while paused, and rendering proceeds after resume.
+    #[test]
+    fn runner_holds_between_stages_while_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55PAUSE", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let pause = crate::queue::QueuePause::new();
+        pause.pause();
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.pause = Some(pause.clone());
+        let deps = Arc::new(deps);
+
+        let thread_deps = deps.clone();
+        let thread_row = row.clone();
+        let handle = std::thread::spawn(move || execute_job(&thread_deps, &thread_row, 0));
+
+        std::thread::sleep(Duration::from_millis(250));
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(
+            manifest
+                .stage_status
+                .iter()
+                .all(|stage| stage.state != StageState::Completed),
+            "no stage may render while the queue is paused",
+        );
+
+        pause.resume();
+        handle.join().unwrap().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(
+            manifest
+                .stage_status
+                .iter()
+                .all(|stage| stage.state == StageState::Completed),
+            "all stages render after resume",
+        );
+    }
+
+    /// A cancel must land while the runner is holding for a paused queue —
+    /// the hold polls the cancel flag instead of blocking blindly.
+    #[test]
+    fn cancel_lands_while_runner_is_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55PCANCEL", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let pause = crate::queue::QueuePause::new();
+        pause.pause();
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.pause = Some(pause.clone());
+        let deps = Arc::new(deps);
+
+        let thread_deps = deps.clone();
+        let thread_row = row.clone();
+        let handle = std::thread::spawn(move || execute_job(&thread_deps, &thread_row, 0));
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(deps.cancel.request("01JBR55PCANCEL"));
+        handle.join().unwrap().unwrap();
+
+        let job = chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), "01JBR55PCANCEL")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.state,
+            ChainJobState::Cancelled,
+            "cancel settles the job even though the queue never resumed",
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(manifest
+            .stage_status
+            .iter()
+            .all(|stage| stage.state != StageState::Completed));
+    }
+
+    /// The durable finalize path must record the gallery row with the
+    /// summed per-stage generation time (previously None), the chain job
+    /// id, the joined distinct clip prompts, and the structured chain
+    /// block carrying each stage's effective seed.
+    #[test]
+    fn finalize_records_summed_generation_time_and_chain_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        req.stages[0].prompt = "opening clip".into();
+        req.stages[1].prompt = "second clip".into();
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55PROV", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let gallery_dir = dir.path().join("gallery");
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(gallery_dir);
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let expected_time: u64 = manifest
+            .stage_status
+            .iter()
+            .filter_map(|stage| stage.generation_time_ms)
+            .sum();
+        assert!(expected_time > 0, "fake executor reports stage times");
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let rows = db.list(None).unwrap();
+        assert_eq!(rows.len(), 1, "finalize saves exactly one gallery row");
+        let rec = &rows[0];
+        assert_eq!(rec.generation_time_ms, Some(expected_time as i64));
+        assert_eq!(rec.metadata.chain_job_id.as_deref(), Some("01JBR55PROV"));
+        assert_eq!(rec.metadata.prompt, "opening clip\nsecond clip");
+        let chain = rec.metadata.chain.as_ref().expect("chain block recorded");
+        assert_eq!(chain.stage_count, 2);
+        assert_eq!(chain.stages[0].prompt, "opening clip");
+        assert_eq!(
+            chain.stages[0].seed.as_deref(),
+            Some(manifest.stage_status[0].seed.to_string().as_str()),
+            "effective per-stage seeds recorded as decimal strings",
+        );
+        assert_eq!(
+            chain.stages[1].seed.as_deref(),
+            Some(manifest.stage_status[1].seed.to_string().as_str()),
+        );
+    }
+
     #[test]
     fn completed_fade_successor_is_reencoded_after_previous_stage_changes_boundary() {
         let dir = tempfile::tempdir().unwrap();
@@ -4984,6 +5298,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -5076,6 +5391,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -5130,6 +5446,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -5796,6 +6113,7 @@ mod tests {
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+            pause: None,
         };
         let handle = spawn_runner(deps);
 
@@ -5883,6 +6201,7 @@ mod tests {
                 gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
                 ),
                 dispatch_mode: crate::dispatch_mode::DispatchMode::V2,
+                pause: None,
             };
             let handle = spawn_runner(deps);
             handle.kick();
@@ -5959,7 +6278,7 @@ mod tests {
         let (scheduled_tx, mut scheduled_rx) = tokio::sync::mpsc::channel(2);
         let executor = Arc::new(ProductionStageExecutor::new(
             pool.clone(),
-            config,
+            Arc::new(tokio::sync::RwLock::new(config)),
             crate::scheduler::ScheduledWorkHandle::new(scheduled_tx),
             crate::dispatch_mode::DispatchMode::V2,
         ));
@@ -5971,7 +6290,7 @@ mod tests {
             .collect::<Vec<_>>();
         for request in &stage_requests {
             assert_eq!(request.enable_audio, Some(true));
-            let plans = executor.candidate_plans(request).unwrap();
+            let plans = tokio::task::block_in_place(|| executor.candidate_plans(request)).unwrap();
             assert_eq!(plans.len(), 2);
             for plan in plans {
                 assert_eq!(

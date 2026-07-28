@@ -78,6 +78,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent runtime EWMA. Cold and warm planning therefore add the matching
   setup disposition exactly once instead of learning it into every run.
 - **Durable video chains now schedule one leased stage at a time.** In scheduler V2 mode, every parent is a resumable actor with persisted `mold.chain-execution.v1` authority (`Dormant → Ready → Submitted → Leased → Checkpointing → Finalizing → Settled`) and attempt-fenced `(parent, generation, stage, work)` identity. Different chains can occupy different GPUs concurrently without a fixed parent cap, each stage releases its lease before the next checkpoint becomes ready, and the previous GPU is only a deterministic locality preference. Job creation freezes canonical absolute companion paths behind an immutable runtime model identity, so restart-time config, environment, or catalog-sidecar changes cannot silently substitute artifacts. Queued and active cancellation use the F0 attempt token and settle as typed cancelled outcomes, LTX-2 and LTX-Video poll cooperative denoise safe points, invalidated plans re-resolve the same stage with bounded backoff, and starvation bypasses guarantee progress under continuous ordinary arrivals. `GET /api/queue` exposes internal stages additively under `plan.work_items` without changing legacy positions or PATCH behavior. `legacy` and `observe` retain the compatibility path for rollback.
+- **Chain jobs now announce their lifecycle on the server event stream.**
+  `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
+  and `chain_job_ended` events — emitted on durable-job creation, resume,
+  and retake, when the runner claims a job, and when it settles — so clients
+  can track sequences in a unified activity surface without polling
+  `/api/chain-jobs`. Ephemeral legacy-shim jobs stay silent, and old clients
+  ignore the unknown event types.
+- **Pausing the queue now also holds the chain runner.** `POST
+  /api/queue/pause` previously only stopped print dispatch while a running
+  sequence kept claiming GPU stage after stage; the runner now holds before
+  claiming new chain work and between stages (the running stage always
+  finishes), and a cancel still lands while held.
+- **Chain stages now honor explicit GPU placement and see live config.**
+  A sequence submitted with a `gpu:N` placement previously had it silently
+  ignored at worker-selection time, letting consecutive stages migrate GPUs
+  and force model reloads; and the stage executor held a config snapshot
+  from server boot, so a model pulled after startup could fail in a chain
+  stage while running fine on the normal queue. Both fixed.
+- **The shared sequence kit for the unified Create view landed.** A studio
+  sequence-draft store persists the clip list (with legacy web/iPhone
+  draft-and-mode migration) so clip prompts survive navigation, reloads,
+  and mode switches on every surface; shared builders read the LIVE
+  inspector values at submit time; and the new seam components — a
+  text-first seam pill between clips, a teaching seam editor with a fade
+  length stepper, and the clip rail with drag-to-reorder — implement the
+  Mold Studio seam design. Transition labels are now **Smooth**, **Cut**,
+  and **Fade** everywhere (LTX-Video's zero-overlap joins still say **Join
+  clips**), replacing Continue motion / Crossfade.
+- **Sequence outputs now carry full per-clip provenance.** Gallery rows for
+  multi-clip videos record a structured `chain` block — every clip's prompt,
+  frames, transition, fade length, and effective seed — plus the durable
+  `chain_job_id` on the chain-jobs path, instead of filing the whole sequence
+  under clip 1's prompt alone. Rows with distinct clip prompts store them
+  joined one-per-line so gallery search matches any clip, durable sequence
+  rows finally record their total generation time, and the CLI's local chain
+  saves carry the same block. All fields are additive; existing rows and
+  older clients are unaffected.
+- **`/api/models` now advertises per-model frame semantics.** Video models
+  carry additive `default_frames`, `default_fps`, `max_frames` (the
+  no-temporal-upscale single-request ceiling: 153 for LTX-2's RoPE budget,
+  257 for LTX-Video), and `frame_step` (valid counts are `k·step+1`; 8 for
+  the LTX families) sourced from the same manifest defaults and validator
+  constants the server enforces; image models omit all four. Chain limits'
+  `frames_per_clip_recommended` now follows the model's own default frame
+  count instead of the family cap — LTX-2 recommends 97 per clip while
+  LTX-Video recommends its shipped 25 — so clients can stop hardcoding a
+  25-frame default that ignored the selected model.
 - **iPhone Create now supports explicit multi-clip video sequences.** The
   touch-native Single / Sequence switch starts with two required clips,
   filters to compatible installed video models, keeps duration and seed tools

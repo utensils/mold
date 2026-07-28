@@ -508,8 +508,8 @@ fn encode_local_frames(
 
 /// Shared epilogue: write the stitched video to stdout/file/gallery and
 /// emit a terminal preview if requested. `req` is the normalised chain
-/// request — `stages[0]` supplies the prompt/source image recorded in the
-/// gallery metadata row.
+/// request — the gallery metadata row joins the distinct clip prompts and
+/// carries the structured per-clip chain block.
 fn encode_and_save(
     req: &ChainRequest,
     video: &VideoData,
@@ -556,15 +556,13 @@ fn encode_and_save(
                 video.fps,
             );
 
-            // Persist to the gallery metadata DB. Build a synthetic
-            // GenerateRequest so the existing record_local_save helper can
-            // infer dimensions/seed/steps/etc. without a dedicated chain
-            // row schema.
-            let synth = req.synthetic_generate_request(video.format, video.frames, video.fps);
-            crate::metadata_db::record_local_save(
+            // Persist to the gallery metadata DB with the structured
+            // per-clip provenance block (no durable job id on the local
+            // render path).
+            let metadata = req.stitched_output_metadata(video.format, video.frames, None);
+            crate::metadata_db::record_local_save_metadata(
                 std::path::Path::new(filename),
-                &synth,
-                req.seed.unwrap_or(base_seed),
+                metadata,
                 elapsed_ms,
                 video.format,
                 Some((video.width, video.height)),

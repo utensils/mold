@@ -703,6 +703,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         temporal_upscale: None,
         frames: row.get::<_, Option<i64>>(20)?.map(|n| n as u32),
         fps: row.get::<_, Option<i64>>(21)?.map(|n| n as u32),
+        chain_job_id: None,
+        chain: None,
         version: row.get(22)?,
     };
     let source_s: String = row.get(26)?;
@@ -841,6 +843,8 @@ mod tests {
             temporal_upscale: None,
             frames: None,
             fps: None,
+            chain_job_id: None,
+            chain: None,
             version: "0.8.1".into(),
         }
     }

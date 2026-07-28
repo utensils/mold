@@ -11,6 +11,15 @@ pub async fn send_native_notification(
     #[cfg(target_os = "macos")]
     {
         let _ = app;
+        // UNUserNotificationCenter aborts the process with an uncatchable
+        // NSInternalInconsistencyException ("bundleProxyForCurrentProcess is
+        // nil") when the binary runs outside an .app bundle — i.e. `tauri dev`.
+        if macos_bundle_identifier().is_none() {
+            tracing::warn!(
+                "skipping native notification: not running from an app bundle (dev mode)"
+            );
+            return Ok(false);
+        }
         tauri::async_runtime::spawn_blocking(move || {
             send_macos_notification(&title, body.as_deref())
         })
@@ -24,6 +33,16 @@ pub async fn send_native_notification(
         let _ = (app, title, body);
         Ok(false)
     }
+}
+
+/// Some(id) only when the process runs from a real .app bundle; None for bare
+/// binaries (dev builds, test harnesses), where UserNotifications cannot work.
+#[cfg(target_os = "macos")]
+fn macos_bundle_identifier() -> Option<String> {
+    use objc2_foundation::NSBundle;
+    NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -85,12 +104,20 @@ fn send_macos_notification(title: &str, body: Option<&str>) -> Result<(), String
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::wait_for_callback;
+    use super::{macos_bundle_identifier, wait_for_callback};
 
     #[test]
     fn callback_wait_returns_the_delivered_value() {
         let (sender, receiver) = std::sync::mpsc::channel();
         sender.send(true).unwrap();
         assert!(wait_for_callback(receiver, "testing").unwrap());
+    }
+
+    /// The test binary runs bare from target/, exactly like `tauri dev` — the
+    /// environment where UNUserNotificationCenter throws an uncatchable
+    /// NSInternalInconsistencyException. The guard must detect it.
+    #[test]
+    fn bare_binary_has_no_bundle_identity() {
+        assert!(macos_bundle_identifier().is_none());
     }
 }
