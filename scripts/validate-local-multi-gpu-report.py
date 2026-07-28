@@ -211,6 +211,18 @@ def validate_hardware_profile(
             fail("qualification device is not compute capability 8.6")
 
 
+def embedded_git_sha_matches_source(embedded: object, source_commit: object) -> bool:
+    if not isinstance(embedded, str) or not isinstance(source_commit, str):
+        return False
+    if len(source_commit) != 40 or not COMMIT_RE.fullmatch(source_commit):
+        return False
+    return (
+        7 <= len(embedded) <= len(source_commit)
+        and bool(re.fullmatch(r"[0-9a-f]+", embedded))
+        and source_commit.startswith(embedded)
+    )
+
+
 def validate_png(path: pathlib.Path, width: int, height: int) -> None:
     data = path.read_bytes()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
@@ -948,7 +960,9 @@ def validate_passing_evidence(
         fail("initial API projection must be an object")
     if initial.get("status", {}).get("hostname") != report["host"]["hostname"]:
         fail("server status hostname does not match report host identity")
-    if initial.get("status", {}).get("git_sha") != report["source_commit"]:
+    if not embedded_git_sha_matches_source(
+        initial.get("status", {}).get("git_sha"), report["source_commit"]
+    ):
         fail("candidate embedded git SHA does not match source provenance")
     api_devices = initial.get("devices", {}).get("devices", [])
     api_mapping = {

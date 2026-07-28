@@ -515,6 +515,20 @@ def git_source_commit(source_root: pathlib.Path, deadline: Deadline) -> str:
     return commit
 
 
+def embedded_git_sha_matches_source(embedded: object, source_commit: object) -> bool:
+    if not isinstance(embedded, str) or not isinstance(source_commit, str):
+        return False
+    if len(source_commit) != 40 or any(
+        char not in "0123456789abcdef" for char in source_commit
+    ):
+        return False
+    return (
+        7 <= len(embedded) <= len(source_commit)
+        and all(char in "0123456789abcdef" for char in embedded)
+        and source_commit.startswith(embedded)
+    )
+
+
 def run_candidate_probe(
     *,
     binary: pathlib.Path,
@@ -2401,7 +2415,9 @@ def main() -> int:
         server.start(deadline)
         primary_pid = server.pid
         initial = api_snapshot(server.api)
-        if initial["status"].get("git_sha") != source_commit:
+        if not embedded_git_sha_matches_source(
+            initial["status"].get("git_sha"), source_commit
+        ):
             raise RuntimeError(
                 "candidate embedded git SHA does not match the exact source commit"
             )

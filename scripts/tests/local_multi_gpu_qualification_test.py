@@ -101,6 +101,22 @@ class RunnerPureContracts(unittest.TestCase):
             runner.validate_qualification_port(7680)
         runner.validate_qualification_port(17681)
 
+    def test_embedded_git_sha_must_be_exact_source_prefix(self):
+        source = "b65deba7af3a38e46681dbe5c8e19ffb63f1e672"
+        for embedded in ("b65deba7", source):
+            self.assertTrue(runner.embedded_git_sha_matches_source(embedded, source))
+            self.assertTrue(validator.embedded_git_sha_matches_source(embedded, source))
+        for embedded in (
+            "",
+            "b65deb",
+            "deadbeef",
+            "B65DEBA7",
+            source + "0",
+            "unknown",
+        ):
+            self.assertFalse(runner.embedded_git_sha_matches_source(embedded, source))
+            self.assertFalse(validator.embedded_git_sha_matches_source(embedded, source))
+
     def test_sandbox_environment_is_allowlisted_and_home_stays_read_only(self):
         with tempfile.TemporaryDirectory() as raw:
             runtime = pathlib.Path(raw)
