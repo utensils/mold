@@ -56,6 +56,7 @@ CHECK_NAMES = (
     "selector_matrix",
     "client_projection",
     "models_tree_unchanged",
+    "live_service_unchanged",
 )
 ENV_ALLOWLIST = {
     "HOME",
@@ -88,6 +89,10 @@ class Deadline:
         value = self.expires - time.monotonic()
         if value <= 0:
             raise TimeoutError("qualification deadline expired")
+        return value if maximum is None else min(value, maximum)
+
+    def remaining_or_zero(self, maximum: float | None = None) -> float:
+        value = max(0.0, self.expires - time.monotonic())
         return value if maximum is None else min(value, maximum)
 
 
@@ -167,11 +172,17 @@ def sandbox_command(runtime_dir: pathlib.Path, inner_command: list[str]) -> list
     command = [
         "bwrap",
         "--die-with-parent",
+        "--unshare-user",
+        "--disable-userns",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
         "--ro-bind",
         "/",
         "/",
-        "--dev-bind",
-        "/dev",
+        "--dev",
         "/dev",
         "--proc",
         "/proc",
@@ -182,6 +193,20 @@ def sandbox_command(runtime_dir: pathlib.Path, inner_command: list[str]) -> list
         str(runtime_dir / "tmp"),
         "/tmp",
     ]
+    device_nodes = [
+        path
+        for path in pathlib.Path("/dev").glob("nvidia*")
+        if path.is_char_device()
+    ]
+    for subtree in (pathlib.Path("/dev/nvidia-caps"), pathlib.Path("/dev/dri")):
+        if subtree.is_dir():
+            command.extend(["--dir", str(subtree)])
+            device_nodes.extend(
+                path for path in subtree.rglob("*") if path.is_char_device()
+            )
+    for node in device_nodes:
+        if node.is_char_device():
+            command.extend(["--dev-bind-try", str(node), str(node)])
     user_runtime = pathlib.Path("/run/user") / str(os.getuid())
     if user_runtime.is_dir():
         command.extend(["--tmpfs", str(user_runtime)])
@@ -207,16 +232,21 @@ def run_process_group(
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=deadline.remaining())
+        remaining = deadline.remaining()
+        stdout, stderr = process.communicate(timeout=max(0.001, remaining - 2.0))
     except subprocess.TimeoutExpired:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
         try:
-            process.communicate(timeout=5)
+            process.communicate(timeout=deadline.remaining_or_zero(1))
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=5)
+            try:
+                process.communicate(timeout=deadline.remaining_or_zero())
+            except subprocess.TimeoutExpired:
+                process.stdout.close()
+                process.stderr.close()
         raise TimeoutError(f"command exceeded qualification deadline: {command!r}")
     return subprocess.CompletedProcess(
         command, process.returncode, stdout=stdout, stderr=stderr
@@ -350,9 +380,13 @@ def common_hex_prefix(stable_ids: list[str]) -> str | None:
     return prefix or None
 
 
-def models_tree_manifest(root: pathlib.Path) -> list[dict[str, object]]:
+def models_tree_manifest(
+    root: pathlib.Path, deadline: Deadline | None = None
+) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+        if deadline is not None:
+            deadline.remaining()
         stat = path.lstat()
         row: dict[str, object] = {
             "path": str(path.relative_to(root)),
@@ -377,10 +411,10 @@ def collect_model_artifacts(
     models_dir: pathlib.Path,
     paths: list[pathlib.Path],
     deadline: Deadline | None = None,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[str]]:
     root = models_dir.resolve()
-    artifacts: list[dict[str, object]] = []
-    seen: set[pathlib.Path] = set()
+    supplied_files: set[pathlib.Path] = set()
+    roots: set[pathlib.Path] = set()
     for supplied in paths:
         path = supplied.resolve()
         try:
@@ -389,21 +423,31 @@ def collect_model_artifacts(
             raise ValueError(
                 f"model artifact is outside --models-dir: {path}"
             ) from error
-        if path in seen:
+        if path in supplied_files:
             raise ValueError(f"duplicate model artifact: {path}")
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"model artifact is not a regular file: {path}")
-        seen.add(path)
-        artifacts.append(
-            {
-                "path": str(path),
-                "sha256": sha256(path, deadline),
-                "size": path.stat().st_size,
-            }
-        )
+        supplied_files.add(path)
+        roots.add(path.parent)
+    artifacts: list[dict[str, object]] = []
+    seen: set[pathlib.Path] = set()
+    for artifact_root in sorted(roots, key=str):
+        for path in sorted(artifact_root.rglob("*"), key=str):
+            if deadline is not None:
+                deadline.remaining()
+            if path in seen or not path.is_file() or path.is_symlink():
+                continue
+            seen.add(path)
+            artifacts.append(
+                {
+                    "path": str(path),
+                    "sha256": sha256(path, deadline),
+                    "size": path.stat().st_size,
+                }
+            )
     if not artifacts:
         raise ValueError("--model-artifact must identify every selected model file")
-    return artifacts
+    return artifacts, [str(path) for path in sorted(roots, key=str)]
 
 
 def git_source_commit(source_root: pathlib.Path, deadline: Deadline) -> str:
@@ -561,6 +605,7 @@ class CandidateServer:
         self.empty_gpu_env = empty_gpu_env
         self.process: subprocess.Popen[bytes] | None = None
         self.server_pid: int | None = None
+        self.process_identity: dict[str, object] | None = None
         self.log_handle = None
         self.log_path = evidence.directory / f"{label}-server.log"
         self.home = runtime_dir / "home"
@@ -615,6 +660,29 @@ class CandidateServer:
             overrides["MOLD_GPUS"] = None
         return sandbox_environment(self.runtime_dir, overrides=overrides)
 
+    def recorded_environment(self) -> dict[str, str | None]:
+        env = self.environment()
+        return {
+            key: env.get(key)
+            for key in (
+                "HOME",
+                "TMPDIR",
+                "XDG_CACHE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "CUDA_CACHE_PATH",
+                "HF_HOME",
+                "MOLD_HOME",
+                "MOLD_DB_PATH",
+                "MOLD_OUTPUT_DIR",
+                "MOLD_HOST",
+                "MOLD_DISPATCH_MODE",
+                "MOLD_MDNS",
+                "MOLD_GPUS",
+                "CUDA_VISIBLE_DEVICES",
+            )
+        }
+
     def prepare_runtime(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.home.mkdir(parents=True, exist_ok=True)
@@ -637,18 +705,7 @@ class CandidateServer:
             json.dumps(
                 {
                     "argv": self.command(),
-                    "environment": {
-                        key: self.environment().get(key)
-                        for key in (
-                            "MOLD_HOME",
-                            "MOLD_DB_PATH",
-                            "MOLD_OUTPUT_DIR",
-                            "MOLD_DISPATCH_MODE",
-                            "MOLD_MDNS",
-                            "MOLD_GPUS",
-                            "CUDA_VISIBLE_DEVICES",
-                        )
-                    },
+                    "environment": self.recorded_environment(),
                 },
                 indent=2,
                 sort_keys=True,
@@ -678,6 +735,9 @@ class CandidateServer:
                 )
                 if status == 200:
                     self.server_pid = self._resolve_candidate_pid()
+                    self.process_identity = candidate_process_identity(
+                        self.server_pid, self.binary
+                    )
                     return
                 last_error = f"HTTP {status}"
             except (OSError, RuntimeError) as error:
@@ -685,21 +745,35 @@ class CandidateServer:
             time.sleep(0.2)
         raise TimeoutError(f"{self.label} server did not become ready: {last_error}")
 
-    def stop(self) -> None:
-        if self.process is not None and self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGTERM)
-            try:
-                self.process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait(timeout=10)
-        if self.log_handle is not None:
-            self.log_handle.close()
-            self.log_handle = None
-        if self.log_path.exists() and self.label + "-server-log" not in {
-            item["label"] for item in self.evidence.items
-        }:
-            self.evidence.existing(f"{self.label}-server-log", self.log_path, "text")
+    def stop(self, deadline: Deadline) -> str | None:
+        cleanup_error = None
+        try:
+            if self.process is not None and self.process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                try:
+                    self.process.wait(timeout=deadline.remaining_or_zero(5))
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    try:
+                        self.process.wait(timeout=deadline.remaining_or_zero(2))
+                    except subprocess.TimeoutExpired:
+                        cleanup_error = (
+                            f"{self.label} process group did not exit before the "
+                            "campaign deadline"
+                        )
+        except OSError as error:
+            cleanup_error = f"{self.label} cleanup failed: {error}"
+        finally:
+            if self.log_handle is not None:
+                self.log_handle.close()
+                self.log_handle = None
+            if self.log_path.exists() and self.label + "-server-log" not in {
+                item["label"] for item in self.evidence.items
+            }:
+                self.evidence.existing(f"{self.label}-server-log", self.log_path, "text")
+        return cleanup_error
 
     @property
     def pid(self) -> int:
@@ -740,6 +814,131 @@ class CandidateServer:
 def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
+def candidate_process_identity(
+    pid: int, binary: pathlib.Path
+) -> dict[str, object]:
+    proc = pathlib.Path(f"/proc/{pid}")
+    stat_fields = (proc / "stat").read_text(encoding="utf-8").split()
+    executable = (proc / "exe").resolve()
+    executable_stat = executable.stat()
+    status = (proc / "status").read_text(encoding="utf-8")
+    nspid_line = next(
+        (line for line in status.splitlines() if line.startswith("NSpid:")),
+        None,
+    )
+    if executable != binary.resolve() or nspid_line is None:
+        raise RuntimeError("candidate process identity is incomplete")
+    return {
+        "pid": pid,
+        "start_ticks": int(stat_fields[21]),
+        "executable": str(executable),
+        "executable_device": executable_stat.st_dev,
+        "executable_inode": executable_stat.st_ino,
+        "binary_sha256": sha256(binary),
+        "pid_namespace": os.readlink(proc / "ns" / "pid"),
+        "nspid": [int(value) for value in nspid_line.split()[1:]],
+    }
+
+
+def _tcp_rows(path: pathlib.Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[1:]
+    except OSError:
+        return rows
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10:
+            continue
+        local_port = int(fields[1].split(":")[1], 16)
+        remote_port = int(fields[2].split(":")[1], 16)
+        rows.append(
+            {
+                "family": path.name,
+                "local_port": local_port,
+                "remote_port": remote_port,
+                "state": fields[3],
+                "inode": fields[9],
+            }
+        )
+    return rows
+
+
+def _process_socket_inodes(pid: int) -> set[str]:
+    result: set[str] = set()
+    try:
+        descriptors = pathlib.Path(f"/proc/{pid}/fd").iterdir()
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                result.add(target[8:-1])
+    except OSError:
+        pass
+    return result
+
+
+def reserved_service_snapshot(port: int = RESERVED_SERVICE_PORT) -> dict[str, object]:
+    listener_rows = [
+        row
+        for table in (pathlib.Path("/proc/net/tcp"), pathlib.Path("/proc/net/tcp6"))
+        for row in _tcp_rows(table)
+        if row["local_port"] == port and row["state"] == "0A"
+    ]
+    listener_inodes = {str(row["inode"]) for row in listener_rows}
+    owners: list[dict[str, object]] = []
+    for proc in sorted(pathlib.Path("/proc").glob("[0-9]*"), key=lambda path: int(path.name)):
+        pid = int(proc.name)
+        owned = sorted(listener_inodes & _process_socket_inodes(pid))
+        if not owned:
+            continue
+        try:
+            stat_fields = (proc / "stat").read_text(encoding="utf-8").split()
+            executable = str((proc / "exe").resolve())
+            start_ticks = int(stat_fields[21])
+        except (OSError, IndexError, ValueError):
+            continue
+        owners.append(
+            {
+                "pid": pid,
+                "start_ticks": start_ticks,
+                "executable": executable,
+                "socket_inodes": owned,
+            }
+        )
+    return {
+        "port": port,
+        "listeners": sorted(
+            listener_rows,
+            key=lambda row: (
+                str(row["family"]),
+                int(row["local_port"]),
+                str(row["inode"]),
+            ),
+        ),
+        "owners": owners,
+    }
+
+
+def candidate_reserved_connections(
+    pid: int, port: int = RESERVED_SERVICE_PORT
+) -> list[dict[str, object]]:
+    owned = _process_socket_inodes(pid)
+    return [
+        row
+        for table in (
+            pathlib.Path(f"/proc/{pid}/net/tcp"),
+            pathlib.Path(f"/proc/{pid}/net/tcp6"),
+        )
+        for row in _tcp_rows(table)
+        if str(row["inode"]) in owned
+        and row["state"] != "0A"
+        and (row["local_port"] == port or row["remote_port"] == port)
+    ]
 
 
 def nvidia_inventory(deadline: Deadline) -> tuple[list[dict[str, object]], str]:
@@ -899,7 +1098,7 @@ def run_client_projection(
     api_key: str,
     expected_ids: list[str],
     deadline: Deadline,
-) -> tuple[dict[str, object], str, list[str]]:
+) -> tuple[dict[str, object], str, list[str], dict[str, str | None]]:
     env = server.environment()
     env["MOLD_HOST"] = f"http://127.0.0.1:{port}"
     env["MOLD_API_KEY"] = api_key
@@ -917,7 +1116,23 @@ def run_client_projection(
     ids = [device["id"] for device in payload.get("devices", [])]
     if ids != expected_ids:
         raise RuntimeError(f"CLI projection IDs differ: {ids!r} != {expected_ids!r}")
-    return payload, result.stderr, command
+    recorded = {
+        key: env.get(key)
+        for key in (
+            "HOME",
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "CUDA_CACHE_PATH",
+            "HF_HOME",
+            "MOLD_HOME",
+            "MOLD_DB_PATH",
+            "MOLD_OUTPUT_DIR",
+            "MOLD_HOST",
+        )
+    }
+    return payload, result.stderr, command, recorded
 
 
 def run_parallel_lifecycle(
@@ -1084,10 +1299,14 @@ def run_parallel_lifecycle(
             sample = {
                 "at": utc_now(),
                 "server_pid": server.pid,
+                "candidate_identity": server.process_identity,
                 "devices": devices,
                 "queue": queue_payload,
                 "compute_apps": apps,
                 "compute_apps_raw": raw_apps,
+                "reserved_service_connections": candidate_reserved_connections(
+                    server.pid
+                ),
             }
             samples.write(json.dumps(sample, sort_keys=True) + "\n")
             samples.flush()
@@ -1281,6 +1500,7 @@ def run_parallel_lifecycle(
         "parallel-results",
         {
             "server_pid": server.pid,
+            "candidate_identity": server.process_identity,
             "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
             "results": results,
             "observed_active_uuids": sorted(observed_active_uuids),
@@ -1322,6 +1542,8 @@ def run_queued_cancellation(
     result: dict[str, object] = {}
     resume_status = None
     resume: object = None
+    terminal_observed_at = None
+    resume_at = None
     try:
         status, pause = server.api.json("POST", "/api/queue/pause")
         if status != 200 or not pause.get("paused"):
@@ -1329,10 +1551,10 @@ def run_queued_cancellation(
         paused = True
         _, before = server.api.json("GET", "/api/queue")
         before_ids = {entry["id"] for entry in before.get("entries", [])}
+        stream_request = dict(request)
+        stream_request["prompt"] = f"{request['prompt']} queued cancellation"
 
         def stream():
-            stream_request = dict(request)
-            stream_request["prompt"] = f"{request['prompt']} queued cancellation"
             result["response"] = server.api.request(
                 "POST",
                 "/api/generate/stream",
@@ -1395,14 +1617,23 @@ def run_queued_cancellation(
             raise RuntimeError(
                 f"queued cancellation failed: {cancel_status} {cancel_body}"
             )
+        assert thread is not None
+        thread.join(timeout=deadline.remaining(20))
+        if thread.is_alive():
+            raise RuntimeError("cancelled SSE request did not terminate")
+        response_status, _, response_body = result["response"]
+        stream_text = response_body.decode(errors="replace")
+        typed_cancelled = response_status == 200 and has_typed_cancelled_sse(stream_text)
+        if not typed_cancelled:
+            raise RuntimeError("queued cancellation lacked a typed terminal SSE event")
+        terminal_observed_at = utc_now()
+        _, after_cancel = server.api.json("GET", "/api/queue")
+        _, devices_after_cancel = server.api.json("GET", "/api/devices")
     finally:
         if paused:
             resume_status, resume = server.api.json("POST", "/api/queue/resume")
+            resume_at = utc_now()
 
-    assert thread is not None
-    thread.join(timeout=deadline.remaining(20))
-    if thread.is_alive():
-        raise RuntimeError("cancelled SSE request did not terminate")
     if resume_status != 200 or not isinstance(resume, dict) or resume.get("paused"):
         raise RuntimeError(f"queue resume failed: {resume_status} {resume}")
     _, after = server.api.json("GET", "/api/queue")
@@ -1420,9 +1651,6 @@ def run_queued_cancellation(
     )
     output_after = models_tree_manifest(server.output)
     output_unchanged = output_after == output_before
-    response_status, _, response_body = result["response"]
-    stream_text = response_body.decode(errors="replace")
-    typed_cancelled = response_status == 200 and has_typed_cancelled_sse(stream_text)
     if not typed_cancelled or not never_active or not output_unchanged:
         raise RuntimeError(
             "queued cancellation lacked typed/no-inference/output proof"
@@ -1443,8 +1671,13 @@ def run_queued_cancellation(
             "never_active": never_active,
             "output_tree_unchanged": output_unchanged,
             "queue_was_paused": True,
+            "request": stream_request,
+            "terminal_observed_at": terminal_observed_at,
+            "resume_at": resume_at,
             "queue_before_cancel": queued["queue"],
             "devices_before_cancel": queued["devices"],
+            "queue_after_cancel_before_resume": after_cancel,
+            "devices_after_cancel_before_resume": devices_after_cancel,
             "queue_after": after,
             "devices_after": devices_after,
             "output_tree_before": output_before,
@@ -1550,12 +1783,18 @@ def start_selector_server(
             )
         return {
             "label": label,
+            "selector": gpus,
+            "expected_uuids": sorted(expected_uuids),
             "devices": payload,
             "pid": server.pid,
+            "process_identity": server.process_identity,
             "argv": server.command(),
+            "environment": server.recorded_environment(),
         }
     finally:
-        server.stop()
+        cleanup_error = server.stop(deadline)
+        if cleanup_error:
+            raise RuntimeError(cleanup_error)
 
 
 def run_selector_matrix(
@@ -1660,9 +1899,12 @@ def run_selector_matrix(
     results.append(
         {
             "label": "missing",
+            "selector": "GPU-ffffffff",
+            "expected_uuids": [],
             "exit_code": process.returncode,
             "expected_failure": "did not match",
             "argv": missing_command,
+            "environment": missing.recorded_environment(),
         }
     )
 
@@ -1872,9 +2114,13 @@ def main() -> int:
     request_path = evidence_dir / "normalized-request.json"
     devices: list[dict[str, object]] = []
     model_artifacts: list[dict[str, object]] = []
+    artifact_roots: list[str] = []
     models_before: list[dict[str, object]] | None = None
+    live_service_before: dict[str, object] | None = None
     try:
-        models_before = models_tree_manifest(args.models_dir)
+        live_service_before = reserved_service_snapshot()
+        evidence.json("live-service-before", live_service_before)
+        models_before = models_tree_manifest(args.models_dir, deadline)
         evidence.json("models-tree-before", models_before)
         request_value = (
             json.loads(args.request.read_text(encoding="utf-8"))
@@ -1896,7 +2142,7 @@ def main() -> int:
             encoding="utf-8",
         )
         evidence.existing("normalized-request", request_path, "json")
-        model_artifacts = collect_model_artifacts(
+        model_artifacts, artifact_roots = collect_model_artifacts(
             args.models_dir, args.model_artifact, deadline
         )
         evidence.json(
@@ -1905,6 +2151,7 @@ def main() -> int:
                 "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
                 "model": request.get("model"),
                 "artifacts": model_artifacts,
+                "artifact_roots": artifact_roots,
             },
         )
         source_commit = git_source_commit(args.source_root, deadline)
@@ -1938,6 +2185,24 @@ def main() -> int:
                 "version": version,
                 "sandboxed": True,
                 "argv": version_result.args,
+                "environment": {
+                    key: sandbox_environment(
+                        evidence_dir / "candidate-probe-runtime"
+                    ).get(key)
+                    for key in (
+                        "HOME",
+                        "TMPDIR",
+                        "XDG_CACHE_HOME",
+                        "XDG_CONFIG_HOME",
+                        "XDG_DATA_HOME",
+                        "MOLD_HOST",
+                    )
+                },
+                "build_identity": {
+                    "source_commit": source_commit,
+                    "binary_sha256": binary_sha,
+                    "version": version,
+                },
             },
         )
 
@@ -1957,6 +2222,10 @@ def main() -> int:
         server.start(deadline)
         primary_pid = server.pid
         initial = api_snapshot(server.api)
+        if initial["status"].get("git_sha") != source_commit:
+            raise RuntimeError(
+                "candidate embedded git SHA does not match the exact source commit"
+            )
         evidence.json("initial-api-projection", initial)
         api_devices, stable_ids = validate_initial_projection(initial, expected)
         installed = [
@@ -1978,7 +2247,7 @@ def main() -> int:
             ["nvidia-inventory", "initial-api-projection"],
         )
 
-        cli_payload, cli_stderr, cli_command = run_client_projection(
+        cli_payload, cli_stderr, cli_command, cli_environment = run_client_projection(
             server, args.binary, args.port, api_key, stable_ids, deadline
         )
         evidence.json(
@@ -1989,6 +2258,7 @@ def main() -> int:
                 "gpu_list": cli_payload,
                 "stderr": cli_stderr,
                 "argv": cli_command,
+                "environment": cli_environment,
             },
         )
         checks["client_projection"] = check(
@@ -2072,7 +2342,9 @@ def main() -> int:
             )(server.api.json("GET", "/api/devices")[1]),
             timeout=deadline.remaining(30),
         )
-        server.stop()
+        cleanup_error = server.stop(deadline)
+        if cleanup_error:
+            raise RuntimeError(cleanup_error)
         server = CandidateServer(
             binary=args.binary,
             models_dir=args.models_dir,
@@ -2138,7 +2410,9 @@ def main() -> int:
             ["restart-persistence", "restart-server-log"],
         )
 
-        server.stop()
+        cleanup_error = server.stop(deadline)
+        if cleanup_error:
+            raise RuntimeError(cleanup_error)
         server = CandidateServer(
             binary=args.binary,
             models_dir=args.models_dir,
@@ -2190,7 +2464,9 @@ def main() -> int:
             "legacy mode kept both devices visible but rejected live lifecycle mutation",
             ["legacy-rollback", "legacy-server-log"],
         )
-        server.stop()
+        cleanup_error = server.stop(deadline)
+        if cleanup_error:
+            raise RuntimeError(cleanup_error)
         server = None
 
         physical_order = [
@@ -2217,10 +2493,16 @@ def main() -> int:
         ):
             primary_pid = server.pid
         if server is not None:
-            server.stop()
+            cleanup_error = server.stop(deadline)
+            if cleanup_error:
+                error_message = (
+                    f"{error_message}; RuntimeError: {cleanup_error}"
+                    if error_message
+                    else f"RuntimeError: {cleanup_error}"
+                )
         if models_before is not None:
             try:
-                models_after = models_tree_manifest(args.models_dir)
+                models_after = models_tree_manifest(args.models_dir, deadline)
                 if not evidence.contains("models-tree-after"):
                     evidence.json("models-tree-after", models_after)
                 if models_after == models_before:
@@ -2243,6 +2525,32 @@ def main() -> int:
                     f"{error_message}; model post-check failed: {manifest_error}"
                     if error_message
                     else f"model post-check failed: {manifest_error}"
+                )
+        if live_service_before is not None:
+            try:
+                live_service_after = reserved_service_snapshot()
+                if not evidence.contains("live-service-after"):
+                    evidence.json("live-service-after", live_service_after)
+                if live_service_after == live_service_before:
+                    checks["live_service_unchanged"] = check(
+                        "passed",
+                        "reserved live-service listener PID/start-time identity is unchanged",
+                        ["live-service-before", "live-service-after"],
+                    )
+                else:
+                    live_error = (
+                        "reserved live-service listener identity changed during qualification"
+                    )
+                    error_message = (
+                        f"{error_message}; RuntimeError: {live_error}"
+                        if error_message
+                        else f"RuntimeError: {live_error}"
+                    )
+            except Exception as live_error:
+                error_message = (
+                    f"{error_message}; live-service post-check failed: {live_error}"
+                    if error_message
+                    else f"live-service post-check failed: {live_error}"
                 )
         if error_message and not evidence.contains("qualification-error"):
             evidence.text("qualification-error", error_message + "\n")
@@ -2281,6 +2589,7 @@ def main() -> int:
             "db_path": str(runtime_dir / "mold.db"),
             "output_dir": str(runtime_dir / "output"),
             "models_dir": str(args.models_dir),
+            "inherited_home": os.environ.get("HOME", ""),
             "preexisting_listener_absent": True,
         },
         "request": {
@@ -2289,6 +2598,7 @@ def main() -> int:
             "model": str(request.get("model", "unavailable")),
             "job_count": args.jobs,
             "artifacts": model_artifacts,
+            "artifact_roots": artifact_roots,
         },
         "checks": checks,
         "evidence": evidence.items,

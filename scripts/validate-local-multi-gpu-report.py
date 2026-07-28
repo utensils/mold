@@ -33,6 +33,7 @@ REQUIRED_CHECKS = {
     "selector_matrix",
     "client_projection",
     "models_tree_unchanged",
+    "live_service_unchanged",
 }
 CHECK_EVIDENCE = {
     "both_devices_discovered": {"nvidia-inventory", "initial-api-projection"},
@@ -52,6 +53,7 @@ CHECK_EVIDENCE = {
     },
     "client_projection": {"client-projection", "initial-api-projection"},
     "models_tree_unchanged": {"models-tree-before", "models-tree-after"},
+    "live_service_unchanged": {"live-service-before", "live-service-after"},
 }
 MANDATORY_EVIDENCE = {
     "normalized-request",
@@ -71,6 +73,8 @@ MANDATORY_EVIDENCE = {
     "ambiguous-selector-source-contract",
     "models-tree-before",
     "models-tree-after",
+    "live-service-before",
+    "live-service-after",
     "primary-command",
     "restart-command",
     "legacy-command",
@@ -328,22 +332,194 @@ def validate_sandbox_argv(
 ) -> None:
     if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
         fail(f"{label} sandbox argv is not a string array")
-    if argv[:2] != ["bwrap", "--die-with-parent"]:
-        fail(f"{label} did not use the Bubblewrap launcher")
-    if not any(
-        argv[index : index + 3] == ["--ro-bind", "/", "/"]
-        for index in range(len(argv) - 2)
-    ):
-        fail(f"{label} did not mount the host root read-only")
+    expected_prefix = [
+        "bwrap",
+        "--die-with-parent",
+        "--unshare-user",
+        "--disable-userns",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--ro-bind",
+        "/",
+        "/",
+    ]
+    if argv[: len(expected_prefix)] != expected_prefix:
+        fail(f"{label} did not use the exact read-only-root/PID Bubblewrap prefix")
     try:
         separator = argv.index("--")
     except ValueError:
         fail(f"{label} Bubblewrap argv lacks a command separator")
+    if argv.count("--") != 1:
+        fail(f"{label} Bubblewrap argv has ambiguous command separators")
+    options = argv[:separator]
+    root_mounts = [
+        options[index : index + 3]
+        for index in range(len(options) - 2)
+        if options[index]
+        in {"--ro-bind", "--ro-bind-try", "--bind", "--bind-try"}
+        and options[index + 2] == "/"
+    ]
+    if root_mounts != [["--ro-bind", "/", "/"]]:
+        fail(f"{label} has a writable, duplicate, or ambiguous root mount")
+    if any(option in options for option in ("--overlay", "--tmp-overlay")):
+        fail(f"{label} uses a writable root overlay")
+    if "--dev-bind" in options and any(
+        options[index : index + 3] == ["--dev-bind", "/dev", "/dev"]
+        for index in range(len(options) - 2)
+    ):
+        fail(f"{label} exposes the entire host /dev writable")
+    cursor = len(expected_prefix)
+    stages: list[int] = []
+    binds: list[list[str]] = []
+    directories: list[str] = []
+    device_binds: list[list[str]] = []
+    tmpfs: list[str] = []
+    dev_count = 0
+    proc_count = 0
+    while cursor < separator:
+        option = options[cursor]
+        if option == "--dev" and cursor + 1 < separator:
+            dev_count += 1
+            stages.append(0)
+            if options[cursor + 1] != "/dev":
+                fail(f"{label} uses an unexpected private device mount")
+            cursor += 2
+        elif option == "--proc" and cursor + 1 < separator:
+            proc_count += 1
+            stages.append(1)
+            if options[cursor + 1] != "/proc":
+                fail(f"{label} uses an unexpected proc mount")
+            cursor += 2
+        elif option == "--bind" and cursor + 2 < separator:
+            stages.append(2)
+            binds.append(options[cursor : cursor + 3])
+            cursor += 3
+        elif option == "--dir" and cursor + 1 < separator:
+            stages.append(3)
+            directories.append(options[cursor + 1])
+            cursor += 2
+        elif option == "--dev-bind-try" and cursor + 2 < separator:
+            stages.append(4)
+            device_binds.append(options[cursor : cursor + 3])
+            cursor += 3
+        elif option == "--tmpfs" and cursor + 1 < separator:
+            stages.append(5)
+            tmpfs.append(options[cursor + 1])
+            cursor += 2
+        else:
+            fail(f"{label} uses unsupported or malformed Bubblewrap option {option!r}")
+    if stages != sorted(stages) or dev_count != 1 or proc_count != 1:
+        fail(f"{label} Bubblewrap option ordering/count is not canonical")
+    if len(binds) != 2:
+        fail(f"{label} must expose exactly one runtime and its /tmp")
+    runtime = pathlib.Path(binds[0][1]).resolve()
+    if (
+        pathlib.Path(binds[0][2]).resolve() != runtime
+        or pathlib.Path(binds[1][1]).resolve() != runtime / "tmp"
+        or binds[1][2] != "/tmp"
+    ):
+        fail(f"{label} writable mounts do not match the isolated runtime")
+    if len(directories) != len(set(directories)) or not set(directories) <= {
+        "/dev/nvidia-caps",
+        "/dev/dri",
+    }:
+        fail(f"{label} creates unexpected device directories")
+    for _, source, destination in device_binds:
+        if source != destination or not (
+            source.startswith("/dev/nvidia") or source.startswith("/dev/dri/")
+        ):
+            fail(f"{label} exposes an unexpected host device")
+    if len(tmpfs) > 1 or any(
+        not re.fullmatch(r"/run/user/[0-9]+", destination) for destination in tmpfs
+    ):
+        fail(f"{label} masks an unexpected runtime path")
     if candidate_path is not None:
         if separator + 1 >= len(argv):
             fail(f"{label} Bubblewrap argv lacks the candidate command")
         if pathlib.Path(argv[separator + 1]).resolve() != candidate_path:
             fail(f"{label} Bubblewrap argv does not execute the exact candidate")
+
+
+def validate_isolation_environment(
+    label: str,
+    value: object,
+    *,
+    report: dict,
+    evidence_root: pathlib.Path,
+    runtime: pathlib.Path,
+    client: bool = False,
+) -> None:
+    if not isinstance(value, dict):
+        fail(f"{label} environment evidence is missing")
+    inherited_home = report["isolation"]["inherited_home"]
+    if value.get("HOME") != inherited_home:
+        fail(f"{label} did not preserve the exact inherited HOME")
+    expected_host = (
+        f"http://127.0.0.1:{report['isolation']['port']}" if client else None
+    )
+    if value.get("MOLD_HOST") != expected_host:
+        fail(f"{label} environment targets an unexpected host or reserved service")
+    expected_paths = {
+        "TMPDIR": runtime / "tmp",
+        "XDG_CACHE_HOME": runtime / "cache" / "xdg",
+        "XDG_CONFIG_HOME": runtime / "config",
+        "XDG_DATA_HOME": runtime / "data",
+        "CUDA_CACHE_PATH": runtime / "cache" / "cuda",
+        "HF_HOME": runtime / "cache" / "huggingface",
+        "MOLD_HOME": runtime / "home",
+        "MOLD_DB_PATH": runtime / "mold.db",
+        "MOLD_OUTPUT_DIR": runtime / "output",
+    }
+    for key, expected_path in expected_paths.items():
+        if pathlib.Path(str(value.get(key))).resolve() != expected_path.resolve():
+            fail(f"{label} environment {key} is not the exact isolated path")
+        try:
+            expected_path.resolve().relative_to(evidence_root)
+        except ValueError:
+            fail(f"{label} runtime escapes the evidence directory")
+
+
+def sandbox_runtime(argv: list[str]) -> pathlib.Path:
+    separator = argv.index("--")
+    options = argv[:separator]
+    for index in range(len(options) - 2):
+        if options[index] == "--bind" and options[index + 1] == options[index + 2]:
+            return pathlib.Path(options[index + 1]).resolve()
+    fail("Bubblewrap argv lacks its exact writable runtime mount")
+
+
+def sandbox_inner(argv: list[str]) -> list[str]:
+    return argv[argv.index("--") + 1 :]
+
+
+def validate_process_identity(
+    label: str,
+    value: object,
+    *,
+    pid: int,
+    binary_path: pathlib.Path,
+    binary_sha256: str,
+) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label} process identity is missing")
+    if (
+        value.get("pid") != pid
+        or value.get("executable") != str(binary_path)
+        or value.get("binary_sha256") != binary_sha256
+        or not isinstance(value.get("start_ticks"), int)
+        or value.get("start_ticks") <= 0
+        or not isinstance(value.get("executable_device"), int)
+        or not isinstance(value.get("executable_inode"), int)
+        or not re.fullmatch(r"pid:\[[0-9]+\]", str(value.get("pid_namespace")))
+        or not isinstance(value.get("nspid"), list)
+        or len(value["nspid"]) < 2
+        or value["nspid"][0] != pid
+    ):
+        fail(f"{label} process identity is not exact PID/start/executable/namespace bound")
+    return value
 
 
 def validate_passing_evidence(
@@ -377,9 +553,37 @@ def validate_passing_evidence(
         fail("normalized request lacks integer dimensions")
 
     artifacts = report["request"]["artifacts"]
+    artifact_roots = report["request"]["artifact_roots"]
     if not artifacts:
         fail("passing qualification requires exact model artifacts")
+    if not artifact_roots:
+        fail("passing qualification requires resolved companion artifact roots")
     models_dir = pathlib.Path(report["isolation"]["models_dir"]).resolve()
+    resolved_roots: list[pathlib.Path] = []
+    for raw_root in artifact_roots:
+        artifact_root = pathlib.Path(raw_root).resolve()
+        try:
+            artifact_root.relative_to(models_dir)
+        except ValueError:
+            fail(f"artifact root escapes models_dir: {artifact_root}")
+        if not artifact_root.is_dir():
+            fail(f"artifact root no longer exists: {artifact_root}")
+        resolved_roots.append(artifact_root)
+    actual_paths = sorted(
+        {
+            path.resolve()
+            for artifact_root in resolved_roots
+            for path in artifact_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        },
+        key=str,
+    )
+    reported_paths = sorted(
+        (pathlib.Path(artifact["path"]).resolve() for artifact in artifacts),
+        key=str,
+    )
+    if actual_paths != reported_paths:
+        fail("reported artifacts are not the complete resolved companion inventory")
     for artifact in artifacts:
         path = pathlib.Path(artifact["path"]).resolve()
         try:
@@ -396,6 +600,7 @@ def validate_passing_evidence(
     if (
         artifact_evidence.get("model") != report["request"]["model"]
         or artifact_evidence.get("artifacts") != artifacts
+        or artifact_evidence.get("artifact_roots") != artifact_roots
     ):
         fail("model-artifacts evidence is not exact")
 
@@ -405,10 +610,26 @@ def validate_passing_evidence(
     version = require_evidence_version("candidate-version", values["candidate-version"])
     binary_path = pathlib.Path(report["candidate"]["path"]).resolve()
     validate_sandbox_argv("candidate version", version.get("argv"), binary_path)
+    if sandbox_inner(version["argv"]) != [str(binary_path), "version"]:
+        fail("candidate version invocation has unexpected inner arguments")
+    version_environment = version.get("environment")
+    if (
+        not isinstance(version_environment, dict)
+        or version_environment.get("HOME") != report["isolation"]["inherited_home"]
+        or version_environment.get("MOLD_HOST") is not None
+    ):
+        fail("candidate version environment is not isolated")
+    build_identity = version.get("build_identity")
     if (
         version.get("binary_sha256") != report["candidate"]["sha256"]
         or version.get("version") != report["candidate"]["version"]
         or version.get("sandboxed") is not True
+        or build_identity
+        != {
+            "source_commit": report["source_commit"],
+            "binary_sha256": report["candidate"]["sha256"],
+            "version": report["candidate"]["version"],
+        }
     ):
         fail("candidate version evidence is not sandboxed and binary-bound")
 
@@ -417,6 +638,8 @@ def validate_passing_evidence(
         fail("initial API projection must be an object")
     if initial.get("status", {}).get("hostname") != report["host"]["hostname"]:
         fail("server status hostname does not match report host identity")
+    if initial.get("status", {}).get("git_sha") != report["source_commit"]:
+        fail("candidate embedded git SHA does not match source provenance")
     api_devices = initial.get("devices", {}).get("devices", [])
     api_mapping = {
         device.get("id"): device.get("nvml_uuid")
@@ -459,6 +682,21 @@ def validate_passing_evidence(
 
     client = require_evidence_version("client-projection", values["client-projection"])
     validate_sandbox_argv("client projection", client.get("argv"), binary_path)
+    if sandbox_inner(client["argv"]) != [
+        str(binary_path),
+        "gpu",
+        "list",
+        "--json",
+    ]:
+        fail("client projection invocation has unexpected inner arguments")
+    validate_isolation_environment(
+        "client projection",
+        client.get("environment"),
+        report=report,
+        evidence_root=pathlib.Path(str(report_path) + ".d").resolve(),
+        runtime=sandbox_runtime(client["argv"]),
+        client=True,
+    )
     if client.get("server_pid") != report["candidate"]["server_pid"]:
         fail("client projection is not bound to the primary server PID")
     client_ids = [row.get("id") for row in client.get("gpu_list", {}).get("devices", [])]
@@ -469,29 +707,93 @@ def validate_passing_evidence(
     pid = report["candidate"]["server_pid"]
     if parallel.get("server_pid") != pid:
         fail("parallel evidence is not bound to the exact primary PID")
-    if set(parallel.get("observed_active_uuids", [])) != set(expected):
-        fail("parallel evidence omitted active work on a qualification UUID")
-    if set(parallel.get("observed_compute_uuids", [])) != set(expected):
-        fail("parallel evidence omitted exact-PID compute context on a UUID")
-    decisive = False
-    for sample in parallel.get("decisive_samples", []):
-        active = sample.get("active", [])
-        active_uuids = {row.get("gpu_uuid") for row in active}
-        work_ids = {row.get("work_id") for row in active}
-        compute_uuids = {
-            row.get("gpu_uuid")
-            for row in sample.get("compute_apps", [])
-            if row.get("pid") == pid
-        }
-        if (
-            sample.get("server_pid") == pid
-            and active_uuids == set(expected)
-            and len(work_ids) == 2
-            and active_uuids <= compute_uuids
+    primary_identity = validate_process_identity(
+        "parallel candidate",
+        parallel.get("candidate_identity"),
+        pid=pid,
+        binary_path=binary_path,
+        binary_sha256=report["candidate"]["sha256"],
+    )
+    raw_samples = values["parallel-runtime-samples"]
+    if not isinstance(raw_samples, list) or not raw_samples:
+        fail("parallel runtime samples are empty")
+    raw_bindings: dict[str, str] = {}
+    raw_active_uuids: set[str] = set()
+    raw_compute_uuids: set[str] = set()
+    raw_decisive: list[dict[str, object]] = []
+    for sample in raw_samples:
+        if not isinstance(sample, dict) or sample.get("server_pid") != pid:
+            fail("raw runtime sample is not bound to the exact candidate PID")
+        if sample.get("candidate_identity") != primary_identity:
+            fail("raw runtime sample has a different candidate process identity")
+        if sample.get("reserved_service_connections") not in (None, []):
+            fail("candidate sampled a connection to the reserved live service")
+        devices_in_sample = sample.get("devices")
+        compute_in_sample = sample.get("compute_apps")
+        if not isinstance(devices_in_sample, list) or not isinstance(
+            compute_in_sample, list
         ):
-            decisive = True
-            break
-    if not decisive:
+            fail("raw runtime sample lacks typed device/compute observations")
+        exact_compute = {
+            row.get("gpu_uuid")
+            for row in compute_in_sample
+            if isinstance(row, dict) and row.get("pid") == pid
+        }
+        raw_compute_uuids.update(
+            value for value in exact_compute if isinstance(value, str)
+        )
+        active = [
+            device
+            for device in devices_in_sample
+            if isinstance(device, dict)
+            and device.get("active_work_id")
+            and device.get("activity") not in {"idle", "stopping"}
+        ]
+        for device in active:
+            work_id = device.get("active_work_id")
+            gpu_uuid = device.get("nvml_uuid")
+            if gpu_uuid not in exact_compute:
+                continue
+            if (
+                not isinstance(work_id, str)
+                or not isinstance(gpu_uuid, str)
+                or gpu_uuid not in expected
+            ):
+                fail("raw active work has invalid work-ID/GPU identity")
+            existing = raw_bindings.get(work_id)
+            if existing is not None and existing != gpu_uuid:
+                fail("raw samples move an active work ID across physical GPUs")
+            raw_bindings[work_id] = gpu_uuid
+            raw_active_uuids.add(gpu_uuid)
+        active_projection = [
+            {
+                "device_id": device.get("id"),
+                "gpu_uuid": device.get("nvml_uuid"),
+                "work_id": device.get("active_work_id"),
+            }
+            for device in active
+        ]
+        if (
+            {row["gpu_uuid"] for row in active_projection} == set(expected)
+            and len({row["work_id"] for row in active_projection}) == 2
+            and set(expected) <= exact_compute
+        ):
+            raw_decisive.append(
+                {
+                    "server_pid": pid,
+                    "active": active_projection,
+                    "compute_apps": [
+                        row
+                        for row in compute_in_sample
+                        if isinstance(row, dict) and row.get("pid") == pid
+                    ],
+                }
+            )
+    if set(parallel.get("observed_active_uuids", [])) != raw_active_uuids:
+        fail("parallel active UUID summary does not derive from raw samples")
+    if set(parallel.get("observed_compute_uuids", [])) != raw_compute_uuids:
+        fail("parallel compute UUID summary does not derive from raw samples")
+    if not raw_decisive or parallel.get("decisive_samples") != raw_decisive:
         fail("no same-sample PID/work-ID/UUID execution proof exists")
 
     ordinal_to_uuid = {
@@ -522,6 +824,17 @@ def validate_passing_evidence(
         validate_png(paths[label], width, height)
         if output.get("decoded") != {"decoded": True, "width": width, "height": height}:
             fail(f"parallel output {index} decoded metadata is invalid")
+        expected_prompt = f"{request['prompt']} variation {index}"
+        expected_seed = int(request.get("seed", 0)) + index - 1
+        headers = output.get("headers")
+        if (
+            output.get("prompt") != expected_prompt
+            or output.get("seed") != expected_seed
+            or not isinstance(headers, dict)
+            or headers.get("x-mold-seed-used") != str(expected_seed)
+            or headers.get("x-mold-gpu") != str(output.get("gpu_ordinal"))
+        ):
+            fail(f"parallel output {index} is inconsistent with the request/result headers")
         work_id = output.get("work_id")
         if not isinstance(work_id, str) or not work_id or work_id in work_ids:
             fail("parallel outputs do not have unique exact work IDs")
@@ -533,15 +846,28 @@ def validate_passing_evidence(
             fail("output GPU ordinal does not map to its claimed UUID")
         if execution_bindings.get(work_id) != gpu_uuid:
             fail("output work ID is not bound to exact-PID execution on its UUID")
+        if raw_bindings.get(work_id) != gpu_uuid:
+            fail("output work ID is not present in raw exact-PID/GPU samples")
         output_uuids.add(gpu_uuid)
     if output_uuids != set(expected):
         fail("validated outputs do not cover both exact GPU UUIDs")
+    if set(range(1, report["request"]["job_count"] + 1)) != {
+        output.get("index") for output in outputs
+    }:
+        fail("parallel output indices are not the exact requested sequence")
+    if execution_bindings != {
+        work_id: output["gpu_uuid"] for work_id, output in output_by_work.items()
+    }:
+        fail("execution binding summary contains ghost or missing work IDs")
 
     disabled_id = parallel.get("disabled_id")
+    disabled_uuid = parallel.get("disabled_uuid")
     pre = parallel.get("pre_disable_assignments")
     post = parallel.get("post_disable_assignments")
     if (
-        not isinstance(pre, dict)
+        disabled_id not in api_mapping
+        or disabled_uuid != api_mapping.get(disabled_id)
+        or not isinstance(pre, dict)
         or not pre
         or not isinstance(post, dict)
         or set(pre) != set(post)
@@ -550,15 +876,41 @@ def validate_passing_evidence(
         or any(value == disabled_id for value in post.values())
     ):
         fail("same queued work IDs were not proven to move after disable")
+    raw_plans = [
+        {
+            str(item.get("work_id")): str(item.get("planned_device_id"))
+            for item in (sample.get("queue", {}).get("plan") or {}).get(
+                "work_items", []
+            )
+            if isinstance(item, dict)
+            and item.get("work_id")
+            and item.get("planned_device_id")
+        }
+        for sample in raw_samples
+    ]
+    if not any(all(plan.get(work_id) == lane for work_id, lane in pre.items()) for plan in raw_plans):
+        fail("disabled lane pre-plan is not present in raw queue samples")
+    if not any(all(plan.get(work_id) == lane for work_id, lane in post.items()) for plan in raw_plans):
+        fail("disabled lane post-plan is not present in raw queue samples")
     for work_id, device_id in post.items():
         output = output_by_work.get(work_id)
         if output is None or output.get("gpu_uuid") != api_mapping.get(device_id):
             fail("replanned work output did not execute on its new exact UUID")
     if (
         parallel.get("disable_response", {}).get("status") != 202
-        or parallel.get("disable_response", {}).get("body", {}).get("admin_state")
+        or parallel.get("disable_response", {}).get("body", {}).get("id")
+        != disabled_id
+        or parallel.get("disable_response", {}).get("body", {}).get("nvml_uuid")
+        != disabled_uuid
+        or parallel.get("disable_response", {}).get("body", {}).get(
+            "admin_state"
+        )
         != "draining"
+        or parallel.get("drained", {}).get("id") != disabled_id
+        or parallel.get("drained", {}).get("nvml_uuid") != disabled_uuid
         or parallel.get("drained", {}).get("admin_state") != "disabled"
+        or parallel.get("reenabled", {}).get("id") != disabled_id
+        or parallel.get("reenabled", {}).get("nvml_uuid") != disabled_uuid
         or parallel.get("reenabled", {}).get("admin_state") != "enabled"
     ):
         fail("busy drain/disable/re-enable evidence is incomplete")
@@ -572,11 +924,29 @@ def validate_passing_evidence(
     devices_before = cancellation.get("devices_before_cancel")
     queue_after = cancellation.get("queue_after")
     devices_after = cancellation.get("devices_after")
+    queue_terminal = cancellation.get("queue_after_cancel_before_resume")
+    devices_terminal = cancellation.get("devices_after_cancel_before_resume")
     if not all(
         isinstance(value, dict)
-        for value in (queue_before, devices_before, queue_after, devices_after)
+        for value in (
+            queue_before,
+            devices_before,
+            queue_terminal,
+            devices_terminal,
+            queue_after,
+            devices_after,
+        )
     ):
         fail("queued cancellation lacks typed before/after scheduler evidence")
+    terminal_at = dt.datetime.fromisoformat(
+        cancellation["terminal_observed_at"].replace("Z", "+00:00")
+    )
+    resume_at = dt.datetime.fromisoformat(
+        cancellation["resume_at"].replace("Z", "+00:00")
+    )
+    cancellation_request = cancellation.get("request")
+    expected_cancel_request = dict(request)
+    expected_cancel_request["prompt"] = f"{request['prompt']} queued cancellation"
     before_entries = [
         entry
         for entry in queue_before.get("entries", [])
@@ -611,6 +981,21 @@ def validate_passing_evidence(
     )
     output_before = cancellation.get("output_tree_before")
     output_after = cancellation.get("output_tree_after")
+    terminal_queued = any(
+        entry.get("id") == cancellation_job
+        for entry in queue_terminal.get("entries", [])
+        if isinstance(entry, dict)
+    )
+    terminal_planned = any(
+        item.get("work_id") == cancellation_work
+        for item in (queue_terminal.get("plan") or {}).get("work_items", [])
+        if isinstance(item, dict)
+    )
+    terminal_active = any(
+        device.get("active_work_id") == cancellation_work
+        for device in devices_terminal.get("devices", [])
+        if isinstance(device, dict)
+    )
     if (
         cancellation.get("server_pid") != pid
         or cancellation.get("cancel_status") != 204
@@ -635,6 +1020,11 @@ def validate_passing_evidence(
         or not isinstance(output_before, list)
         or output_after != output_before
         or not has_typed_cancelled_sse(cancellation.get("stream_tail"))
+        or terminal_at > resume_at
+        or cancellation_request != expected_cancel_request
+        or terminal_queued
+        or terminal_planned
+        or terminal_active
     ):
         fail("queued cancellation lacks typed no-inference proof")
 
@@ -686,13 +1076,113 @@ def validate_passing_evidence(
         fail("legacy rollback evidence is invalid")
 
     selector = require_evidence_version("selector-matrix", values["selector-matrix"])
-    for scenario in selector.get("scenarios", []):
+    scenarios = selector.get("scenarios", [])
+    evidence_root = pathlib.Path(str(report_path) + ".d").resolve()
+    physical_order = [
+        str(device["uuid"])
+        for device in sorted(report["host"]["devices"], key=lambda row: int(row["index"]))
+    ]
+    stable_by_uuid = {gpu_uuid: stable_id for stable_id, gpu_uuid in api_mapping.items()}
+    expected_selectors = {
+        "empty": (None, set(expected)),
+        "all": ("all", set(expected)),
+        "ordinal-one": ("1", {physical_order[1]}),
+        "stable-id": (stable_by_uuid[physical_order[0]], {physical_order[0]}),
+        "nvidia-uuid": (physical_order[1], {physical_order[1]}),
+        "none": ("none", set()),
+        "reordered-stable": (
+            stable_by_uuid[physical_order[0]],
+            {physical_order[0]},
+        ),
+    }
+    server_base_argv = [
+        str(binary_path),
+        "serve",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        str(report["isolation"]["port"]),
+        "--models-dir",
+        str(models_dir),
+        "--queue-size",
+        "64",
+        "--log-format",
+        "json",
+    ]
+    for scenario in scenarios:
+        label = scenario.get("label")
         validate_sandbox_argv(
-            f"selector {scenario.get('label')}",
+            f"selector {label}",
             scenario.get("argv"),
             binary_path,
         )
-    labels = {scenario.get("label") for scenario in selector.get("scenarios", [])}
+        validate_isolation_environment(
+            f"selector {label}",
+            scenario.get("environment"),
+            report=report,
+            evidence_root=evidence_root,
+            runtime=sandbox_runtime(scenario["argv"]),
+        )
+        if label == "missing":
+            if (
+                scenario.get("selector") != "GPU-ffffffff"
+                or scenario.get("expected_uuids") != []
+                or not isinstance(scenario.get("exit_code"), int)
+                or scenario.get("exit_code") == 0
+                or "did not match" not in scenario.get("expected_failure", "")
+                or sandbox_inner(scenario["argv"])
+                != [*server_base_argv, "--gpus", "GPU-ffffffff"]
+            ):
+                fail("missing selector scenario is not a typed failure")
+            continue
+        validate_process_identity(
+            f"selector {label}",
+            scenario.get("process_identity"),
+            pid=scenario.get("pid"),
+            binary_path=binary_path,
+            binary_sha256=report["candidate"]["sha256"],
+        )
+        if label not in expected_selectors:
+            fail(f"unknown selector scenario {label!r}")
+        expected_selector, expected_selected = expected_selectors[label]
+        if (
+            scenario.get("selector") != expected_selector
+            or set(scenario.get("expected_uuids", [])) != expected_selected
+        ):
+            fail(f"selector {label} input/expected UUID claim is wrong")
+        devices_payload = scenario.get("devices")
+        if not isinstance(devices_payload, dict):
+            fail(f"selector {label} lacks device results")
+        selected = {
+            device.get("nvml_uuid")
+            for device in devices_payload.get("devices", [])
+            if isinstance(device, dict)
+            and device.get("admin_state") != "startup_excluded"
+        }
+        if selected != expected_selected:
+            fail(f"selector {label} result UUIDs do not match its input")
+        argv = scenario["argv"]
+        inner = sandbox_inner(argv)
+        expected_inner = list(server_base_argv)
+        if expected_selector is not None:
+            expected_inner.extend(["--gpus", expected_selector])
+        if inner != expected_inner:
+            fail(f"selector {label} command has unexpected inner arguments")
+        if expected_selector is None:
+            if "--gpus" in inner or scenario["environment"].get("MOLD_GPUS") != "":
+                fail("empty selector did not exercise the explicit empty environment")
+        else:
+            try:
+                gpu_flag = inner.index("--gpus")
+            except ValueError:
+                fail(f"selector {label} command omits --gpus")
+            if inner[gpu_flag + 1] != expected_selector:
+                fail(f"selector {label} command uses the wrong selector")
+        if label == "reordered-stable":
+            expected_visibility = f"{physical_order[1]},{physical_order[0]}"
+            if scenario["environment"].get("CUDA_VISIBLE_DEVICES") != expected_visibility:
+                fail("reordered selector did not reverse CUDA visibility")
+    labels = {scenario.get("label") for scenario in scenarios}
     required_labels = {
         "empty",
         "all",
@@ -707,7 +1197,7 @@ def validate_passing_evidence(
         fail("selector matrix is incomplete")
     selector_pids = [
         scenario.get("pid")
-        for scenario in selector.get("scenarios", [])
+        for scenario in scenarios
         if scenario.get("label") != "missing"
     ]
     if (
@@ -721,11 +1211,19 @@ def validate_passing_evidence(
         values["ambiguous-selector-source-contract"],
     )
     validate_sandbox_argv("ambiguous selector source contract", contract.get("argv"))
+    if sandbox_inner(contract["argv"]) != [
+        "/bin/bash",
+        "-lc",
+        contract.get("command"),
+    ]:
+        fail("ambiguous selector source contract command is not exact")
     if contract.get("exit_code") != 0 or contract.get("hardware_claimed") is not False:
         fail("ambiguous selector source contract is invalid")
 
     if values["models-tree-before"] != values["models-tree-after"]:
         fail("models tree changed during qualification")
+    if values["live-service-before"] != values["live-service-after"]:
+        fail("reserved live-service PID/listener identity changed")
     for name, labels in CHECK_EVIDENCE.items():
         if set(report["checks"][name]["evidence_labels"]) != labels:
             fail(f"check {name} does not cite its exact mandatory evidence")
@@ -738,6 +1236,23 @@ def validate_passing_evidence(
         if not isinstance(command, dict):
             fail(f"candidate command {label} was not Bubblewrap isolated")
         validate_sandbox_argv(label, command.get("argv"), binary_path)
+        if sandbox_inner(command["argv"]) != server_base_argv:
+            fail(f"candidate command {label} has unexpected inner arguments")
+        validate_isolation_environment(
+            label,
+            command.get("environment"),
+            report=report,
+            evidence_root=evidence_root,
+            runtime=sandbox_runtime(command["argv"]),
+        )
+        environment = command["environment"]
+        if (
+            environment.get("MOLD_HOME") != report["isolation"]["mold_home"]
+            or environment.get("MOLD_DB_PATH") != report["isolation"]["db_path"]
+            or environment.get("MOLD_OUTPUT_DIR")
+            != report["isolation"]["output_dir"]
+        ):
+            fail(f"candidate command {label} does not use the exact isolated paths")
 
 
 def validate(report_path: pathlib.Path, require_passing: bool) -> dict:

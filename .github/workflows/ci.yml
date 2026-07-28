@@ -48,6 +48,7 @@ jobs:
               - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
               - 'scripts/tests/local_multi_gpu_qualification_test.py'
               - 'docs/qualification/local-multi-gpu-report.schema.json'
+              - 'docs/qualification/README.md'
               - '.github/workflows/ci.yml'
             website:
               - 'website/**'

@@ -125,21 +125,34 @@ requires exactly two `NVIDIA GeForce RTX 3090` devices, exactly 24576 MiB per
 device, compute capability 8.6, and the two expected NVIDIA UUIDs.
 
 The runner rejects port `7680`, refuses an occupied alternate port, and never
-stops, restarts, or connects to the normal service. It binds only loopback and creates an
+targets the normal service itself. It binds only loopback and creates an
 isolated `MOLD_HOME`, `MOLD_DB_PATH`, `MOLD_OUTPUT_DIR`, gallery, and server
 log tree beside the report. Every candidate invocation, including `version`
-and `gpu list --json`, runs through the same Bubblewrap mount namespace with
-the host root, real home, source tree, and `--models-dir` read-only; only its
-private runtime tree and `/tmp` overlay are writable. Session-bus and agent
-environment variables are not inherited. A before/after
-path/type/mode/size/mtime manifest is an additional mutation tripwire.
+and `gpu list --json`, runs through the same Bubblewrap mount, PID, and IPC
+policy: the host root and inherited home are read-only, the candidate gets a
+private PID namespace and `/proc`, capabilities are dropped, and only explicit
+NVIDIA device nodes plus its private runtime tree and `/tmp` are writable.
+Session-bus and agent environment variables are not inherited. The network
+namespace is intentionally shared so the parent can call the alternate
+loopback server; Bubblewrap alone therefore does not prevent a hostile binary
+from making TCP requests to host services.
+
+This workflow is for a trusted, exact candidate. It is a mutation and semantic
+consistency tripwire, not a malicious-binary security boundary. The runner
+records the `:7680` listener owners, PIDs, process start times, executables, and
+socket inodes before and after, and samples candidate sockets during the
+parallel workload. Those checks detect replacement/restart and sampled
+connections; they cannot prove that an adversarial candidate never made a
+short-lived request. A before/after path/type/mode/size/mtime model manifest is
+an additional mutation tripwire.
 Bubblewrap is therefore a required host tool. Do not point `--report` into a
 temporary directory if the evidence needs to be retained.
 
 `--timeout-seconds` is one absolute campaign deadline. The runner terminates
-whole subprocess groups on expiry, always stops the private candidate, performs
-the post-run model-tree comparison, and writes failure evidence when a campaign
-step fails.
+whole subprocess groups on expiry and bounds shutdown and the final recursive
+model scan by that same deadline. Cleanup or final-scan failures are recorded
+in durable `hardware_qualified=false` evidence rather than extending the
+campaign silently.
 
 Prepare a request that is slow enough for the runner to observe both active
 workers and disable one while it is busy. Keep `batch_size` at one; the runner
@@ -174,11 +187,12 @@ scripts/qualify-local-multi-gpu.py \
   --report ./local-2x3090-qualification.json
 ```
 
-Repeat `--model-artifact` for every weight, encoder, tokenizer, VAE, LoRA, or
-other component used by the selected request. Each file must be a regular file
-below `--models-dir`; its exact path, size, and SHA-256 are bound into both the
-report and typed evidence. Omission means the resulting campaign is not a
-complete artifact qualification and must not be accepted.
+Use `--model-artifact` to name one anchor file in every resolved model/component
+directory used by the request. The runner recursively inventories and hashes
+every regular file under each anchor's parent directory; the validator
+re-derives that complete companion inventory. This pins those resolved
+directories, but it does not prove that an uninstrumented runtime opened every
+file or that the operator selected every relevant directory.
 
 The required evidence includes:
 
@@ -211,11 +225,21 @@ scripts/validate-local-multi-gpu-report.py \
 ```
 
 The validator reopens and hashes the exact candidate, normalized request,
-selected model artifacts, decoded outputs, and every typed evidence file. It
+resolved companion inventories, decoded outputs, and every typed evidence file. It
 requires the exact named hardware profile and independently derives every gate
 from the API/PID/work-ID/UUID/ordinal evidence; reported `status` strings are
 not accepted as proof. Evidence paths must remain unique and confined to the
-report's adjacent `.d` directory. This is reproducible, internally
-tamper-evident evidence, not a remote cryptographic attestation.
+report's adjacent `.d` directory.
+
+Validation establishes internal semantic consistency of unsigned evidence. The
+source commit, tree context, candidate version, and exact candidate SHA are
+correlated in the report, not proven by reproducible or signed build
+provenance. Evidence hashes detect accidental post-run changes but do not
+authenticate the reporter because a report and its hashes can be regenerated
+together. Consequently `hardware_qualified=true` means the trusted local
+campaign's required observations are semantically consistent; it is not
+cryptographic host, builder, or artifact attestation. The synthetic positive
+fixture in the unit tests exercises validator relationships only and is never
+hardware evidence.
 Use `--allow-failure` only when inspecting a valid failed run; it does not
 convert that run into hardware qualification.

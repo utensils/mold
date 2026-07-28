@@ -87,6 +87,7 @@
         "db_path",
         "output_dir",
         "models_dir",
+        "inherited_home",
         "preexisting_listener_absent"
       ],
       "properties": {
@@ -96,13 +97,21 @@
         "db_path": { "type": "string", "minLength": 1 },
         "output_dir": { "type": "string", "minLength": 1 },
         "models_dir": { "type": "string", "minLength": 1 },
+        "inherited_home": { "type": "string", "minLength": 1 },
         "preexisting_listener_absent": { "const": true }
       }
     },
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256", "model", "job_count", "artifacts"],
+      "required": [
+        "path",
+        "sha256",
+        "model",
+        "job_count",
+        "artifacts",
+        "artifact_roots"
+      ],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/sha256" },
@@ -111,6 +120,10 @@
         "artifacts": {
           "type": "array",
           "items": { "$ref": "#/$defs/artifact" }
+        },
+        "artifact_roots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -128,7 +141,8 @@
         "legacy_rollback",
         "selector_matrix",
         "client_projection",
-        "models_tree_unchanged"
+        "models_tree_unchanged",
+        "live_service_unchanged"
       ],
       "properties": {
         "both_devices_discovered": { "$ref": "#/$defs/check" },
@@ -141,7 +155,8 @@
         "legacy_rollback": { "$ref": "#/$defs/check" },
         "selector_matrix": { "$ref": "#/$defs/check" },
         "client_projection": { "$ref": "#/$defs/check" },
-        "models_tree_unchanged": { "$ref": "#/$defs/check" }
+        "models_tree_unchanged": { "$ref": "#/$defs/check" },
+        "live_service_unchanged": { "$ref": "#/$defs/check" }
       }
     },
     "evidence": {
@@ -195,7 +210,8 @@
           },
           "request": {
             "properties": {
-              "artifacts": { "minItems": 1 }
+              "artifacts": { "minItems": 1 },
+              "artifact_roots": { "minItems": 1 }
             }
           }
         }

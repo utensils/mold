@@ -54,6 +54,21 @@ class RunnerPureContracts(unittest.TestCase):
             model.write_bytes(b"after-longer")
             self.assertNotEqual(before, runner.models_tree_manifest(root))
 
+    def test_artifact_anchor_expands_to_complete_companion_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            models = pathlib.Path(raw)
+            model = models / "selected" / "model.safetensors"
+            companion = models / "selected" / "vae.safetensors"
+            model.parent.mkdir()
+            model.write_bytes(b"model")
+            companion.write_bytes(b"vae")
+            artifacts, roots = runner.collect_model_artifacts(models, [model])
+            self.assertEqual(
+                {row["path"] for row in artifacts},
+                {str(model), str(companion)},
+            )
+            self.assertEqual(roots, [str(model.parent)])
+
     def test_two_rtx3090_profile_is_exact(self):
         uuids = [
             "GPU-44f80ce5-23fc-a5dd-ac4e-133142952997",
@@ -152,6 +167,10 @@ class RunnerPureContracts(unittest.TestCase):
             command = runner.sandbox_command(runtime, ["/candidate/mold", "version"])
             self.assertEqual(command[0], "bwrap")
             self.assertIn("--ro-bind", command)
+            self.assertIn("--unshare-pid", command)
+            self.assertNotIn(["--dev-bind", "/dev", "/dev"], [
+                command[index : index + 3] for index in range(len(command) - 2)
+            ])
             self.assertEqual(command[-2:], ["/candidate/mold", "version"])
 
     def test_process_group_timeout_is_bounded(self):
@@ -237,7 +256,8 @@ class ReportValidationContracts(unittest.TestCase):
         path.write_text(json.dumps(report), encoding="utf-8")
         return path
 
-    def valid_fixture(self, root: pathlib.Path) -> pathlib.Path:
+    def synthetic_semantic_fixture(self, root: pathlib.Path) -> pathlib.Path:
+        """Build invented validator input; this is never hardware evidence."""
         report_path = root / "passing.json"
         evidence_root = pathlib.Path(str(report_path) + ".d")
         evidence_root.mkdir()
@@ -247,6 +267,81 @@ class ReportValidationContracts(unittest.TestCase):
         artifact.write_bytes(b"exact model")
         binary = root / "mold"
         binary.write_bytes(b"candidate")
+        inherited_home = "/home/synthetic"
+        server_inner = [
+            str(binary),
+            "serve",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            "17681",
+            "--models-dir",
+            str(models_dir),
+            "--queue-size",
+            "64",
+            "--log-format",
+            "json",
+        ]
+
+        def sandbox_argv(
+            inner: list[str], runtime: pathlib.Path | None = None
+        ) -> list[str]:
+            runtime = runtime or evidence_root / "primary-runtime"
+            return [
+                "bwrap",
+                "--die-with-parent",
+                "--unshare-user",
+                "--disable-userns",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--new-session",
+                "--cap-drop",
+                "ALL",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--bind",
+                str(runtime),
+                str(runtime),
+                "--bind",
+                str(runtime / "tmp"),
+                "/tmp",
+                "--",
+                *inner,
+            ]
+
+        def isolated_environment(
+            runtime: pathlib.Path, *, client: bool = False
+        ) -> dict[str, str | None]:
+            return {
+                "HOME": inherited_home,
+                "TMPDIR": str(runtime / "tmp"),
+                "XDG_CACHE_HOME": str(runtime / "cache" / "xdg"),
+                "XDG_CONFIG_HOME": str(runtime / "config"),
+                "XDG_DATA_HOME": str(runtime / "data"),
+                "CUDA_CACHE_PATH": str(runtime / "cache" / "cuda"),
+                "HF_HOME": str(runtime / "cache" / "huggingface"),
+                "MOLD_HOME": str(runtime / "home"),
+                "MOLD_DB_PATH": str(runtime / "mold.db"),
+                "MOLD_OUTPUT_DIR": str(runtime / "output"),
+                "MOLD_HOST": "http://127.0.0.1:17681" if client else None,
+            }
+
+        def process_identity(pid: int) -> dict[str, object]:
+            return {
+                "pid": pid,
+                "start_ticks": 1000 + pid,
+                "executable": str(binary),
+                "executable_device": 1,
+                "executable_inode": 2,
+                "binary_sha256": validator.sha256(binary),
+                "pid_namespace": "pid:[1234]",
+                "nspid": [pid, 1],
+            }
         uuids = [
             "GPU-44f80ce5-23fc-a5dd-ac4e-133142952997",
             "GPU-ba027fc5-7915-8d58-6738-b7eaafe427b4",
@@ -335,7 +430,12 @@ class ReportValidationContracts(unittest.TestCase):
         versioned = {"evidence_schema_version": validator.EVIDENCE_SCHEMA_VERSION}
         add(
             "model-artifacts",
-            {**versioned, "model": "sd15:fp16", "artifacts": artifacts},
+            {
+                **versioned,
+                "model": "sd15:fp16",
+                "artifacts": artifacts,
+                "artifact_roots": [str(models_dir)],
+            },
         )
         add(
             "source-provenance",
@@ -349,16 +449,22 @@ class ReportValidationContracts(unittest.TestCase):
                 "binary_sha256": validator.sha256(binary),
                 "version": "mold fixture",
                 "sandboxed": True,
-                "argv": [
-                    "bwrap",
-                    "--die-with-parent",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    str(binary),
-                    "version",
-                ],
+                "argv": sandbox_argv(
+                    [str(binary), "version"], evidence_root / "probe"
+                ),
+                "environment": {
+                    "HOME": inherited_home,
+                    "TMPDIR": str(evidence_root / "probe" / "tmp"),
+                    "XDG_CACHE_HOME": str(evidence_root / "probe" / "cache"),
+                    "XDG_CONFIG_HOME": str(evidence_root / "probe" / "config"),
+                    "XDG_DATA_HOME": str(evidence_root / "probe" / "data"),
+                    "MOLD_HOST": None,
+                },
+                "build_identity": {
+                    "source_commit": "a" * 40,
+                    "binary_sha256": validator.sha256(binary),
+                    "version": "mold fixture",
+                },
             },
         )
         inventory = "\n".join(
@@ -372,6 +478,7 @@ class ReportValidationContracts(unittest.TestCase):
             "devices": {"devices": api_devices},
             "status": {
                 "hostname": "fixture-host",
+                "git_sha": "a" * 40,
                 "gpus": [
                     {"ordinal": 0, "name": "NVIDIA GeForce RTX 3090"},
                     {"ordinal": 1, "name": "NVIDIA GeForce RTX 3090"},
@@ -400,25 +507,134 @@ class ReportValidationContracts(unittest.TestCase):
             {
                 **versioned,
                 "server_pid": 123,
+                "candidate_identity": process_identity(123),
                 "gpu_list": {
                     "devices": [{"id": "cuda:0"}, {"id": "cuda:1"}]
                 },
                 "stderr": "",
-                "argv": [
-                    "bwrap",
-                    "--die-with-parent",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    str(binary),
-                    "gpu",
-                    "list",
-                    "--json",
-                ],
+                "argv": sandbox_argv(
+                    [str(binary), "gpu", "list", "--json"]
+                ),
+                "environment": isolated_environment(
+                    evidence_root / "primary-runtime", client=True
+                ),
             },
         )
-        add("parallel-runtime-samples", [{"server_pid": 123}], "jsonl")
+        raw_samples = [
+            {
+                "at": "2026-07-28T00:00:10Z",
+                "server_pid": 123,
+                "candidate_identity": process_identity(123),
+                "devices": [
+                    {
+                        **api_devices[0],
+                        "activity": "running",
+                        "active_work_id": "w1",
+                    },
+                    {
+                        **api_devices[1],
+                        "activity": "running",
+                        "active_work_id": "w2",
+                    },
+                ],
+                "queue": {
+                    "plan": {
+                        "work_items": [
+                            {
+                                "work_id": "w3",
+                                "planned_device_id": "cuda:0",
+                                "activity_phase": "queued",
+                            },
+                            {
+                                "work_id": "w4",
+                                "planned_device_id": "cuda:0",
+                                "activity_phase": "queued",
+                            },
+                        ]
+                    }
+                },
+                "compute_apps": [
+                    {"pid": 123, "gpu_uuid": uuids[0]},
+                    {"pid": 123, "gpu_uuid": uuids[1]},
+                ],
+                "compute_apps_raw": "",
+                "reserved_service_connections": [],
+            },
+            {
+                "at": "2026-07-28T00:00:20Z",
+                "server_pid": 123,
+                "candidate_identity": process_identity(123),
+                "devices": [
+                    {
+                        **api_devices[0],
+                        "activity": "idle",
+                        "active_work_id": None,
+                        "admin_state": "disabled",
+                        "desired_enabled": False,
+                        "schedulable": False,
+                    },
+                    {
+                        **api_devices[1],
+                        "activity": "running",
+                        "active_work_id": "w3",
+                    },
+                ],
+                "queue": {
+                    "plan": {
+                        "work_items": [
+                            {
+                                "work_id": "w3",
+                                "planned_device_id": "cuda:1",
+                                "activity_phase": "active",
+                            },
+                            {
+                                "work_id": "w4",
+                                "planned_device_id": "cuda:1",
+                                "activity_phase": "queued",
+                            },
+                        ]
+                    }
+                },
+                "compute_apps": [{"pid": 123, "gpu_uuid": uuids[1]}],
+                "compute_apps_raw": "",
+                "reserved_service_connections": [],
+            },
+            {
+                "at": "2026-07-28T00:00:30Z",
+                "server_pid": 123,
+                "candidate_identity": process_identity(123),
+                "devices": [
+                    {
+                        **api_devices[0],
+                        "activity": "idle",
+                        "active_work_id": None,
+                        "admin_state": "disabled",
+                        "desired_enabled": False,
+                        "schedulable": False,
+                    },
+                    {
+                        **api_devices[1],
+                        "activity": "running",
+                        "active_work_id": "w4",
+                    },
+                ],
+                "queue": {
+                    "plan": {
+                        "work_items": [
+                            {
+                                "work_id": "w4",
+                                "planned_device_id": "cuda:1",
+                                "activity_phase": "active",
+                            }
+                        ]
+                    }
+                },
+                "compute_apps": [{"pid": 123, "gpu_uuid": uuids[1]}],
+                "compute_apps_raw": "",
+                "reserved_service_connections": [],
+            },
+        ]
+        add("parallel-runtime-samples", raw_samples, "jsonl")
         output_results = []
         for index in range(1, 5):
             output = evidence_root / f"parallel-output-{index}.png"
@@ -446,7 +662,11 @@ class ReportValidationContracts(unittest.TestCase):
                     "path": str(output),
                     "size": output.stat().st_size,
                     "sha256": validator.sha256(output),
-                    "headers": {},
+                    "headers": {
+                        "content-type": "image/png",
+                        "x-mold-seed-used": str(9 + index),
+                        "x-mold-gpu": str(ordinal),
+                    },
                 }
             )
         add(
@@ -454,6 +674,7 @@ class ReportValidationContracts(unittest.TestCase):
             {
                 **versioned,
                 "server_pid": 123,
+                "candidate_identity": process_identity(123),
                 "results": output_results,
                 "observed_active_uuids": uuids,
                 "observed_compute_uuids": uuids,
@@ -485,12 +706,25 @@ class ReportValidationContracts(unittest.TestCase):
                     "w4": uuids[1],
                 },
                 "disabled_id": "cuda:0",
+                "disabled_uuid": uuids[0],
                 "disable_response": {
                     "status": 202,
-                    "body": {"admin_state": "draining"},
+                    "body": {
+                        "id": "cuda:0",
+                        "nvml_uuid": uuids[0],
+                        "admin_state": "draining",
+                    },
                 },
-                "drained": {"admin_state": "disabled"},
-                "reenabled": {"admin_state": "enabled"},
+                "drained": {
+                    "id": "cuda:0",
+                    "nvml_uuid": uuids[0],
+                    "admin_state": "disabled",
+                },
+                "reenabled": {
+                    "id": "cuda:0",
+                    "nvml_uuid": uuids[0],
+                    "admin_state": "enabled",
+                },
                 "pre_disable_assignments": {
                     "w3": "cuda:0",
                     "w4": "cuda:0",
@@ -517,6 +751,12 @@ class ReportValidationContracts(unittest.TestCase):
                 "output_tree_unchanged": True,
                 "queue_was_paused": True,
                 "stream_tail": 'event: error\ndata: {"error":"cancelled"}\n\n',
+                "request": {
+                    **request,
+                    "prompt": "qualification queued cancellation",
+                },
+                "terminal_observed_at": "2026-07-28T00:00:40Z",
+                "resume_at": "2026-07-28T00:00:41Z",
                 "queue_before_cancel": {
                     "paused": True,
                     "entries": [{"id": "job-cancel", "state": "queued"}],
@@ -531,6 +771,17 @@ class ReportValidationContracts(unittest.TestCase):
                     },
                 },
                 "devices_before_cancel": {
+                    "devices": [
+                        {"active_work_id": None},
+                        {"active_work_id": None},
+                    ]
+                },
+                "queue_after_cancel_before_resume": {
+                    "paused": True,
+                    "entries": [],
+                    "plan": {"work_items": []},
+                },
+                "devices_after_cancel_before_resume": {
                     "devices": [
                         {"active_work_id": None},
                         {"active_work_id": None},
@@ -606,54 +857,76 @@ class ReportValidationContracts(unittest.TestCase):
                 },
             },
         )
-        selector_labels = [
-            "empty",
-            "all",
-            "ordinal-one",
-            "stable-id",
-            "nvidia-uuid",
-            "none",
-            "reordered-stable",
-            "missing",
+        selector_specs = [
+            ("empty", None, set(uuids)),
+            ("all", "all", set(uuids)),
+            ("ordinal-one", "1", {uuids[1]}),
+            ("stable-id", "cuda:0", {uuids[0]}),
+            ("nvidia-uuid", uuids[1], {uuids[1]}),
+            ("none", "none", set()),
+            ("reordered-stable", "cuda:0", {uuids[0]}),
         ]
+        selector_scenarios = []
+        for index, (label, selector_value, selected_uuids) in enumerate(
+            selector_specs
+        ):
+            inner = list(server_inner)
+            if selector_value is not None:
+                inner.extend(["--gpus", selector_value])
+            environment = isolated_environment(
+                evidence_root / "selector-runtimes" / label
+            )
+            if label == "empty":
+                environment["MOLD_GPUS"] = ""
+            if label == "reordered-stable":
+                environment["CUDA_VISIBLE_DEVICES"] = f"{uuids[1]},{uuids[0]}"
+            selector_scenarios.append(
+                {
+                    "label": label,
+                    "selector": selector_value,
+                    "expected_uuids": sorted(selected_uuids),
+                    "pid": 200 + index,
+                    "process_identity": process_identity(200 + index),
+                    "argv": sandbox_argv(
+                        inner, evidence_root / "selector-runtimes" / label
+                    ),
+                    "environment": environment,
+                    "devices": {
+                        "devices": [
+                            {
+                                **device,
+                                "admin_state": (
+                                    "enabled"
+                                    if device["nvml_uuid"] in selected_uuids
+                                    else "startup_excluded"
+                                ),
+                            }
+                            for device in api_devices
+                        ]
+                    },
+                }
+            )
+        selector_scenarios.append(
+            {
+                "label": "missing",
+                "selector": "GPU-ffffffff",
+                "expected_uuids": [],
+                "exit_code": 1,
+                "expected_failure": "did not match",
+                "argv": sandbox_argv(
+                    [*server_inner, "--gpus", "GPU-ffffffff"],
+                    evidence_root / "selector-runtimes" / "missing",
+                ),
+                "environment": isolated_environment(
+                    evidence_root / "selector-runtimes" / "missing"
+                ),
+            }
+        )
         add(
             "selector-matrix",
             {
                 **versioned,
-                "scenarios": [
-                    (
-                        {
-                            "label": label,
-                            "exit_code": 1,
-                            "argv": [
-                                "bwrap",
-                                "--die-with-parent",
-                                "--ro-bind",
-                                "/",
-                                "/",
-                                "--",
-                                str(binary),
-                                "serve",
-                            ],
-                        }
-                        if label == "missing"
-                        else {
-                            "label": label,
-                            "pid": 200 + index,
-                            "argv": [
-                                "bwrap",
-                                "--die-with-parent",
-                                "--ro-bind",
-                                "/",
-                                "/",
-                                "--",
-                                str(binary),
-                                "serve",
-                            ],
-                        }
-                    )
-                    for index, label in enumerate(selector_labels)
-                ],
+                "scenarios": selector_scenarios,
             },
         )
         add(
@@ -662,17 +935,11 @@ class ReportValidationContracts(unittest.TestCase):
                 **versioned,
                 "exit_code": 0,
                 "hardware_claimed": False,
-                "argv": [
-                    "bwrap",
-                    "--die-with-parent",
-                    "--ro-bind",
-                    "/",
-                    "/",
-                    "--",
-                    "/bin/bash",
-                    "-lc",
-                    "true",
-                ],
+                "command": "true",
+                "argv": sandbox_argv(
+                    ["/bin/bash", "-lc", "true"],
+                    evidence_root / "selector-contract-runtime",
+                ),
             },
         )
         add("models-tree-before", [])
@@ -681,21 +948,36 @@ class ReportValidationContracts(unittest.TestCase):
             add(
                 label,
                 {
-                    "argv": [
-                        "bwrap",
-                        "--die-with-parent",
-                        "--ro-bind",
-                        "/",
-                        "/",
-                        "--",
-                        str(binary),
-                        "serve",
-                    ],
-                    "environment": {},
+                    "argv": sandbox_argv(server_inner),
+                    "environment": isolated_environment(
+                        evidence_root / "primary-runtime"
+                    ),
                 },
             )
         add("restart-server-log", "restart\n", "text")
         add("legacy-server-log", "legacy\n", "text")
+        live_service = {
+            "port": 7680,
+            "listeners": [
+                {
+                    "family": "tcp",
+                    "local_port": 7680,
+                    "remote_port": 0,
+                    "state": "0A",
+                    "inode": "42",
+                }
+            ],
+            "owners": [
+                {
+                    "pid": 42,
+                    "start_ticks": 100,
+                    "executable": "/synthetic/live-mold",
+                    "socket_inodes": ["42"],
+                }
+            ],
+        }
+        add("live-service-before", live_service)
+        add("live-service-after", live_service)
         checks = {
             name: {
                 "status": "passed",
@@ -725,10 +1007,11 @@ class ReportValidationContracts(unittest.TestCase):
             "isolation": {
                 "bind": "127.0.0.1",
                 "port": 17681,
-                "mold_home": str(evidence_root / "home"),
-                "db_path": str(evidence_root / "mold.db"),
-                "output_dir": str(evidence_root / "output"),
+                "mold_home": str(evidence_root / "primary-runtime" / "home"),
+                "db_path": str(evidence_root / "primary-runtime" / "mold.db"),
+                "output_dir": str(evidence_root / "primary-runtime" / "output"),
                 "models_dir": str(models_dir),
+                "inherited_home": inherited_home,
                 "preexisting_listener_absent": True,
             },
             "request": {
@@ -737,6 +1020,7 @@ class ReportValidationContracts(unittest.TestCase):
                 "model": "sd15:fp16",
                 "job_count": 4,
                 "artifacts": artifacts,
+                "artifact_roots": [str(models_dir)],
             },
             "checks": checks,
             "evidence": evidence_items,
@@ -763,10 +1047,10 @@ class ReportValidationContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "const|conjunction"):
                 validator.validate(path, require_passing=False)
 
-    def test_typed_passing_fixture_validates_and_raw_tampering_fails(self):
+    def test_synthetic_semantic_fixture_validates_and_raw_tampering_fails(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
-            path = self.valid_fixture(root)
+            path = self.synthetic_semantic_fixture(root)
             validator.validate(path, require_passing=True)
             output = pathlib.Path(str(path) + ".d") / "parallel-output-1.png"
             output.write_bytes(b"tampered")
@@ -776,7 +1060,7 @@ class ReportValidationContracts(unittest.TestCase):
     def test_rehashed_semantic_tampering_still_fails(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
-            path = self.valid_fixture(root)
+            path = self.synthetic_semantic_fixture(root)
             report = json.loads(path.read_text())
             item = next(
                 row
@@ -795,7 +1079,7 @@ class ReportValidationContracts(unittest.TestCase):
     def test_rehashed_cancellation_claim_without_typed_event_fails(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
-            path = self.valid_fixture(root)
+            path = self.synthetic_semantic_fixture(root)
             report = json.loads(path.read_text())
             item = next(
                 row
@@ -814,7 +1098,7 @@ class ReportValidationContracts(unittest.TestCase):
     def test_rehashed_cancellation_claim_with_active_work_fails(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
-            path = self.valid_fixture(root)
+            path = self.synthetic_semantic_fixture(root)
             report = json.loads(path.read_text())
             item = next(
                 row
@@ -835,7 +1119,7 @@ class ReportValidationContracts(unittest.TestCase):
     def test_rehashed_selector_without_read_only_sandbox_fails(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
-            path = self.valid_fixture(root)
+            path = self.synthetic_semantic_fixture(root)
             report = json.loads(path.read_text())
             item = next(
                 row for row in report["evidence"] if row["label"] == "selector-matrix"
@@ -853,6 +1137,153 @@ class ReportValidationContracts(unittest.TestCase):
             item["sha256"] = validator.sha256(evidence_path)
             path.write_text(json.dumps(report), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "sandbox|Bubblewrap|read-only"):
+                validator.validate(path, require_passing=True)
+
+    def test_raw_samples_cannot_be_empty_or_disconnected_from_outputs(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row
+                for row in report["evidence"]
+                if row["label"] == "parallel-runtime-samples"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            evidence_path.write_text("", encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sample|execution|work"):
+                validator.validate(path, require_passing=True)
+
+    def test_nonexistent_disabled_lane_cannot_satisfy_replan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row for row in report["evidence"] if row["label"] == "parallel-results"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            payload["disabled_id"] = "cuda:ghost"
+            payload["pre_disable_assignments"] = {
+                work_id: "cuda:ghost"
+                for work_id in payload["pre_disable_assignments"]
+            }
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "disable|inventory|lane"):
+                validator.validate(path, require_passing=True)
+
+    def test_writable_root_with_post_separator_ro_bind_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row for row in report["evidence"] if row["label"] == "primary-command"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            payload["argv"] = [
+                "bwrap",
+                "--die-with-parent",
+                "--bind",
+                "/",
+                "/",
+                "--",
+                report["candidate"]["path"],
+                "serve",
+                "--ro-bind",
+                "/",
+                "/",
+            ]
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "read-only|writable|root"):
+                validator.validate(path, require_passing=True)
+
+    def test_command_environment_cannot_escape_isolation_or_target_7680(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row for row in report["evidence"] if row["label"] == "primary-command"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            payload["environment"] = {
+                "HOME": "/home/real",
+                "MOLD_HOME": "/home/real/.mold",
+                "MOLD_DB_PATH": "/home/real/.mold/mold.db",
+                "MOLD_OUTPUT_DIR": "/home/real/.mold/output",
+                "MOLD_HOST": "http://127.0.0.1:7680",
+            }
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "environment|isolation|7680|HOME"
+            ):
+                validator.validate(path, require_passing=True)
+
+    def test_ci_filter_tracks_qualification_documentation(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("docs/qualification/README.md", workflow)
+
+    def test_selector_results_must_match_selector_semantics(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row for row in report["evidence"] if row["label"] == "selector-matrix"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            scenario = next(
+                row for row in payload["scenarios"] if row["label"] == "none"
+            )
+            scenario["devices"]["devices"][0]["admin_state"] = "enabled"
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "selector|UUID"):
+                validator.validate(path, require_passing=True)
+
+    def test_live_service_identity_must_be_unchanged(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row
+                for row in report["evidence"]
+                if row["label"] == "live-service-after"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            payload["owners"][0]["start_ticks"] += 1
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "live-service"):
+                validator.validate(path, require_passing=True)
+
+    def test_cancellation_terminal_event_must_precede_resume(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = self.synthetic_semantic_fixture(pathlib.Path(raw))
+            report = json.loads(path.read_text())
+            item = next(
+                row
+                for row in report["evidence"]
+                if row["label"] == "queued-cancellation"
+            )
+            evidence_path = pathlib.Path(item["path"])
+            payload = json.loads(evidence_path.read_text())
+            payload["resume_at"] = "2026-07-28T00:00:39Z"
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            item["sha256"] = validator.sha256(evidence_path)
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cancellation"):
                 validator.validate(path, require_passing=True)
 
 
