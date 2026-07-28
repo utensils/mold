@@ -4663,6 +4663,7 @@ mod tests {
             execution_plan: None,
             prepared_execution_inputs: None,
             lease: None,
+            batch_child: None,
         }
     }
 
@@ -4962,6 +4963,7 @@ mod tests {
                     memory_sample_generation: 0,
                     memory_ledger_sequence: 0,
                 }),
+                batch_child: None,
             })
             .unwrap();
 
@@ -5756,6 +5758,7 @@ mod tests {
                 execution_plan: None,
                 prepared_execution_inputs: None,
                 lease: None,
+                batch_child: None,
             };
             worker
                 .send_grant(LeaseGrant {
@@ -5883,6 +5886,7 @@ mod tests {
                     execution_plan: None,
                     prepared_execution_inputs: None,
                     lease: None,
+                    batch_child: None,
                 })),
                 retry: None,
             })
@@ -6501,6 +6505,7 @@ mod tests {
                     execution_plan: Some(plan),
                     prepared_execution_inputs: None,
                     lease: None,
+                    batch_child: None,
                 })),
                 retry: None,
             })
@@ -7032,6 +7037,7 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
+                    batch_child: None,
                 },
                 1,
             ))
@@ -7059,6 +7065,7 @@ mod tests {
                 execution_plan: None,
                 prepared_execution_inputs: None,
                 lease: Some(fence("generate", 3)),
+                batch_child: None,
             })
             .unwrap();
         drain_lease(&mut event_rx, "generate");
@@ -7203,6 +7210,7 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
+                    batch_child: None,
                 },
                 1,
             )
@@ -7234,6 +7242,7 @@ mod tests {
                 execution_plan: None,
                 prepared_execution_inputs: None,
                 lease: None,
+                batch_child: None,
             },
             &event_tx,
         );
@@ -7287,6 +7296,7 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
+                    batch_child: None,
                 },
                 1,
             )
@@ -7318,6 +7328,7 @@ mod tests {
                     execution_plan: None,
                     prepared_execution_inputs: None,
                     lease: None,
+                    batch_child: None,
                 },
                 &scheduler_tx,
             );
@@ -7349,6 +7360,7 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
+                    batch_child: None,
                 },
                 1,
             )
@@ -7378,6 +7390,7 @@ mod tests {
                     execution_plan: None,
                     prepared_execution_inputs: None,
                     lease: None,
+                    batch_child: None,
                 },
                 &scheduler_tx,
             );
@@ -7541,6 +7554,7 @@ mod tests {
                     progress_tx: None,
                     result_tx: dummy_tx,
                     output_dir: None,
+                    batch_child: None,
                 },
                 1,
             ))

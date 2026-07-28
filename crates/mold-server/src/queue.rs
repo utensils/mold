@@ -2110,6 +2110,7 @@ async fn run_queue_dispatcher_with_tuning(
             execution_plan: None,
             prepared_execution_inputs: None,
             lease: None,
+            batch_child: job.batch_child,
         });
 
         let mut skip: Vec<usize> = if preferred_gpu.is_none() {
@@ -3327,6 +3328,7 @@ mod tests {
             execution_plan: None,
             prepared_execution_inputs: None,
             lease: None,
+            batch_child: None,
         };
         let response = mold_core::GenerateResponse {
             images: Vec::new(),
@@ -4448,6 +4450,7 @@ mod tests {
             execution_plan: None,
             prepared_execution_inputs: None,
             lease: None,
+            batch_child: None,
         };
         worker.send_job(filler_job).unwrap();
 
@@ -4467,6 +4470,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -4514,6 +4518,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         queue.submit(job, 8).await.unwrap();
 
@@ -4592,6 +4597,7 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
+            batch_child: None,
         })
     }
 
@@ -4604,6 +4610,7 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
+            batch_child: None,
         })
     }
 
@@ -4859,6 +4866,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -4929,6 +4937,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -4984,6 +4993,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             job_tx.send(job).await.unwrap();
         }
@@ -5086,6 +5096,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 32).await.unwrap();
         }
@@ -5217,6 +5228,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -5255,6 +5267,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -5302,6 +5315,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -5358,6 +5372,7 @@ mod tests {
                         progress_tx: None,
                         result_tx,
                         output_dir: None,
+                        batch_child: None,
                     },
                     8,
                 )
@@ -5416,6 +5431,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 

@@ -164,11 +164,12 @@ chains, utilities, telemetry, placement, and clients.
 - Sibling seeds use `base_seed.wrapping_add(index)`.
 - `batch_id`, one-based `batch_index`, and `batch_count` already flow through
   request and output metadata.
-- Inference pipelines return one image; queue paths consume the primary image.
-  A raw API request with `batch_size > 1` does not currently provide a real
-  server-side batch.
-- Gallery writes and events are per-output and immediate. There is no parent
-  staging or atomic publish mechanism.
+- Inference pipelines still return one result per engine call. The live F1
+  server route implements raw `batch_size > 1` by scheduling ordered singleton
+  children rather than pretending the engines have native tensor batching.
+- Server-owned parent children stage privately and publish through one gallery
+  barrier plus metadata transaction. Existing client-owned sibling requests
+  retain their independent per-output publication contract.
 
 ### 3.3 Client facts
 
@@ -1399,9 +1400,9 @@ The scheduler recognizes sibling metadata for display and locality but each
 sibling remains independently cancellable and independently publishable.
 There is no parent atomicity retrofit in these phases.
 
-Raw server `batch_size > 1` remains documented as unsupported until phase F.
-Do not build adaptive behavior on the false assumption that engines already
-produce N outputs.
+The live F1 route now accepts raw server `batch_size > 1` only when Scheduler
+V2 is authoritative and gallery output is enabled. It fans the parent into
+singleton engine calls; no engine is falsely treated as returning N outputs.
 
 ### 12.2 Phase F0 — cancellation and transaction substrate
 
@@ -1540,7 +1541,9 @@ The F1 planning foundation implements this boundary without routing a parent:
   and lazy random access use logarithmic completion-threshold searches.
 - The output carries exact contiguous child coverage and the existing
   `PlannedBatchPartition` projection needed by future `BatchChild` work.
-  Production raw batches remain unrouted and `server_batch` remains false.
+  The live F1 integration consumes this projection for raw parent requests.
+  `server_batch` remains false outside authoritative V2 or when atomic gallery
+  output is disabled.
 
 ### 12.4 Determinism
 
@@ -2365,14 +2368,18 @@ F1 then delivers:
 - logical atomic commit/recovery;
 - fenced retry and cancellation.
 
-The static family registry and pure adaptive partition-planner foundation land
-as a non-routing F1 slice. Parent execution, raw-batch dispatch, and capability
-advertisement remain later F1 work. The scalable parent journal, bounded
-reducer window, child staging receipts, and joint startup recovery table also
-land as internal F1 foundations. Neither foundation is connected to raw API
-admission or scheduler dispatch yet; remaining F1 work still owns request
-normalization, planning/execution integration, and the public atomic completion
-contract.
+The live F1 integration connects the static registry, adaptive partition
+planner, bounded parent reducer, and atomic gallery transaction to raw API
+admission and authoritative scheduler dispatch. Blocking parents return typed
+ordered JSON; SSE parents announce one cancellable parent ID and emit exactly
+one `batch_complete` after durable commit. Cancellation and terminal failure
+close sibling authority immediately, while late successes drain without a
+receipt. Startup reconciliation reconstructs unfinished children from the
+versioned normalized request, freshly resolves prepared inputs, and resumes
+only when the exact persisted execution-equivalence fingerprint still
+matches. Missing recovery authority, artifact/config drift, or unavailable
+exact execution durably cancels and rolls back the private attempt; an
+all-staged crash converges commit before serving.
 
 Gates:
 

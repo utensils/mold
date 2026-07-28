@@ -267,6 +267,7 @@ pub struct GpuJob {
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.
     pub lease: Option<crate::scheduler::LeaseFence>,
+    pub batch_child: Option<crate::state::BatchChildExecution>,
 }
 
 pub struct PromptExpansionJob {

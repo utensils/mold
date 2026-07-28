@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod batch_attempt;
 pub mod batch_parent;
+pub mod batch_runtime;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
@@ -631,6 +632,7 @@ pub async fn run_server(
     state.metadata_db = metadata_db;
     state.device_registry = device_registry;
 
+    let mut recovered_live_batches = None;
     // Batch recovery is a serving precondition, including when SQLite is
     // disabled. No router, gallery observer, or generation job producer is started
     // until every durable attempt is either rolled back or rolled forward.
@@ -646,6 +648,14 @@ pub async fn run_server(
                 state.metadata_db.clone(),
             )
             .await?;
+            if report.outcomes.iter().any(|outcome| {
+                matches!(
+                    outcome,
+                    batch_attempt::RecoveredParentOutcome::Resumable { .. }
+                )
+            }) {
+                recovered_live_batches = Some((output_dir.clone(), report.outcomes.clone()));
+            }
             tracing::info!(
                 joint_parents = report.parents_discovered,
                 joint_running = report.running_attempts_retained,
@@ -804,6 +814,21 @@ pub async fn run_server(
             }
         }
     };
+
+    // Recovered live parents are resumed only after their authoritative
+    // dispatch owner is running, but still before the router begins serving.
+    // Exact execution-equivalence drift fails closed into a durable cancelled
+    // parent and private-attempt rollback.
+    if let Some((output_dir, outcomes)) = recovered_live_batches {
+        let report =
+            batch_runtime::resume_recovered_batches(&state, &output_dir, &outcomes).await?;
+        tracing::info!(
+            resumed = report.resumed,
+            committed = report.committed,
+            rolled_back = report.rolled_back,
+            "live batch restart recovery settled"
+        );
+    }
 
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to

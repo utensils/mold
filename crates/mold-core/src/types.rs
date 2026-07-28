@@ -566,6 +566,22 @@ pub struct GenerateResponse {
     pub gpu: Option<usize>,
 }
 
+/// Ordered response for a server-owned atomic batch submitted through
+/// `POST /api/generate` with `batch_size > 1`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchGenerateResponse {
+    pub batch_id: String,
+    pub outputs: Vec<BatchGenerateOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchGenerateOutput {
+    /// One-based stable position in the normalized parent.
+    pub batch_index: u32,
+    pub filename: String,
+    pub response: GenerateResponse,
+}
+
 /// Video output from a video model family.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VideoData {
@@ -2036,6 +2052,14 @@ pub struct SseCompleteEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub metadata: Option<Box<OutputMetadata>>,
+}
+
+/// One atomic server-owned parent completion. Emitted as `batch_complete`
+/// only after every ordered output and metadata row is durably published.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseBatchCompleteEvent {
+    pub batch_id: String,
+    pub outputs: Vec<SseCompleteEvent>,
 }
 
 /// SSE event emitted when an upscale request completes.
@@ -3611,6 +3635,44 @@ mod tests {
         assert!(req.control_image.is_none());
         assert!(req.control_model.is_none());
         assert!((req.control_scale - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
+        let output = |index| SseCompleteEvent {
+            image: String::new(),
+            format: OutputFormat::Png,
+            width: 64,
+            height: 64,
+            original_image: None,
+            original_width: None,
+            original_height: None,
+            seed_used: index,
+            generation_time_ms: 1,
+            model: "flux".into(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            gpu: Some(index as usize),
+            filename: Some(format!("{index}.png")),
+            original_filename: None,
+            metadata: None,
+        };
+        let event = SseBatchCompleteEvent {
+            batch_id: "parent".into(),
+            outputs: vec![output(1), output(2)],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: SseBatchCompleteEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.batch_id, "parent");
+        assert_eq!(decoded.outputs.len(), 2);
+        assert_eq!(decoded.outputs[0].seed_used, 1);
+        assert_eq!(decoded.outputs[1].seed_used, 2);
     }
 
     #[test]

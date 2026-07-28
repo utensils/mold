@@ -1238,6 +1238,39 @@ impl BatchTransaction {
         Ok(self.attempt_dir.join("staging").join(&child.staging_name))
     }
 
+    /// Replace result-dependent metadata after inference but before the exact
+    /// child lease gains a durable staging receipt.
+    pub(crate) fn update_child_record_for_lease(
+        &mut self,
+        lease: &BatchChildLease,
+        mut record: GenerationRecord,
+    ) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            self.manifest.state == BatchManifestState::Staging,
+            "child records can only change while staging"
+        );
+        ensure!(
+            lease.parent_id == self.manifest.parent_id
+                && lease.attempt_generation == self.manifest.attempt_generation,
+            "child lease does not belong to this transaction attempt"
+        );
+        let child = self
+            .manifest
+            .children
+            .get_mut(lease.child_index)
+            .context("batch child index out of range")?;
+        ensure!(
+            child.checksum_sha256.is_none()
+                && !self.staged_receipts.contains_key(&lease.child_index),
+            "staged child record is immutable"
+        );
+        record.filename.clone_from(&child.final_name);
+        record.output_dir = self.output_dir.to_string_lossy().into_owned();
+        child.record = record;
+        self.persist_manifest()
+    }
+
     /// Write one private child artifact, fsync it, and journal its checksum.
     pub fn stage_bytes(&mut self, child_index: usize, bytes: &[u8]) -> anyhow::Result<()> {
         let lease = BatchChildLease {

@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::{delete, get, patch, post, put},
     Json, Router,
@@ -508,6 +508,7 @@ fn sse_message_to_event(msg: SseMessage) -> SseEvent {
     match msg {
         SseMessage::Progress(payload) => serialize_event("progress", &payload),
         SseMessage::Complete(payload) => serialize_event("complete", &payload),
+        SseMessage::BatchComplete(payload) => serialize_event("batch_complete", &payload),
         SseMessage::UpscaleComplete(payload) => serialize_event("complete", &payload),
         SseMessage::Error(payload) => serialize_event("error", &payload),
     }
@@ -599,7 +600,15 @@ async fn prepare_generation(
     // format and can gate on it correctly.
     request.normalise_output_format(resolved_family.as_deref());
 
-    if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
+    let mut singleton_validation;
+    let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
+        singleton_validation = request.clone();
+        singleton_validation.batch_size = 1;
+        &singleton_validation
+    } else {
+        &*request
+    };
+    if let Err(e) = validate_generate_request(validation_request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));
     }
 
@@ -847,19 +856,19 @@ async fn schedule_local_expansion(
     tag = "generation",
     request_body = mold_core::GenerateRequest,
     responses(
-        (status = 200, description = "Generated image bytes", content_type = "image/png"),
+        (status = 200, description = "Singleton requests return generated media bytes with the matching image/video Content-Type; server-owned batches return application/json BatchGenerateResponse"),
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
         (status = 503, description = "Generation queue full"),
     )
 )]
-// The server always produces 1 image per request; batch looping (--batch N)
-// is handled client-side by the CLI, which sends N requests with incrementing seeds.
+// Singleton requests preserve the legacy raw-media response. Raw batch_size>1
+// requests use the authoritative scheduler and return one atomic JSON parent.
 async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -869,6 +878,30 @@ async fn generate(
     );
     let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
+
+    if req.batch_size > 1 {
+        if !state.scheduled_work.v2_authoritative() {
+            return Err(ApiError::validation(
+                "server-owned batches require authoritative scheduler V2",
+            ));
+        }
+        let output_dir = output_dir.ok_or_else(|| {
+            ApiError::validation(
+                "server-owned atomic batches require server gallery output to be enabled",
+            )
+        })?;
+        let authority = crate::batch_runtime::register_server_batch(&state);
+        let completed = crate::batch_runtime::execute_server_batch(
+            &state,
+            authority,
+            req,
+            output_dir,
+            SseCompletionPayload::Full,
+        )
+        .await
+        .map_err(|error| ApiError::inference(format!("server batch failed: {error:#}")))?;
+        return Ok(batch_generate_response(completed.response));
+    }
 
     tracing::info!(
         model = %req.model,
@@ -916,6 +949,7 @@ async fn generate(
         progress_tx: None,
         result_tx,
         output_dir,
+        batch_child: None,
     };
 
     let _position = state
@@ -1009,7 +1043,7 @@ async fn generate(
             } else {
                 img.data
             };
-            Ok((headers, output_data))
+            Ok((headers, output_data).into_response())
         }
         Err(err_msg) => {
             // The multi-GPU dispatcher sends a queue-full error through result_tx
@@ -1022,6 +1056,10 @@ async fn generate(
             }
         }
     }
+}
+
+pub(crate) fn batch_generate_response(response: mold_core::BatchGenerateResponse) -> Response {
+    Json(response).into_response()
 }
 
 fn validate_generate_request(
@@ -1596,7 +1634,7 @@ async fn generate_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let completion_payload = requested_sse_completion_payload(&headers)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
@@ -1612,6 +1650,62 @@ async fn generate_stream(
         ));
     }
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
+
+    if req.batch_size > 1 {
+        if !state.scheduled_work.v2_authoritative() {
+            return Err(ApiError::validation(
+                "server-owned batches require authoritative scheduler V2",
+            ));
+        }
+        let output_dir = output_dir.ok_or_else(|| {
+            ApiError::validation(
+                "server-owned atomic batches require server gallery output to be enabled",
+            )
+        })?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+        if let Some(warning) = dim_warning {
+            let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
+                message: warning,
+            }));
+        }
+        let authority = crate::batch_runtime::register_server_batch(&state);
+        let parent_id = authority.id().to_string();
+        let position = state.job_registry.len();
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
+            position,
+            id: parent_id,
+        }));
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            match crate::batch_runtime::execute_server_batch(
+                &state_clone,
+                authority,
+                req,
+                output_dir,
+                completion_payload,
+            )
+            .await
+            {
+                Ok(completed) => {
+                    let _ = tx.send(SseMessage::BatchComplete(Box::new(completed.event)));
+                }
+                Err(error) => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: format!("server batch failed: {error:#}"),
+                    }));
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+            .map(|message| Ok::<_, Infallible>(sse_message_to_event(message)));
+        return Ok(Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response());
+    }
 
     tracing::info!(
         model = %req.model,
@@ -1657,6 +1751,7 @@ async fn generate_stream(
         progress_tx: Some(tx.clone()),
         result_tx,
         output_dir,
+        batch_child: None,
     };
 
     let position = state
@@ -1707,11 +1802,13 @@ async fn generate_stream(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
-    ))
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response())
 }
 
 // ── /api/models ───────────────────────────────────────────────────────────────
@@ -3001,11 +3098,11 @@ async fn patch_queue_job(
     Ok(Json(entry))
 }
 
-/// Cancel a still-queued generation job. Only queued jobs are cancelable —
-/// once a GPU worker owns the job there is no safe preemption point, so
-/// running jobs return 409. The waiting client observes the cancellation as
-/// a 499 `CANCELLED` error (blocking `POST /api/generate`) or a terminal
-/// SSE `error` event (`POST /api/generate/stream`).
+/// Cancel a still-queued singleton generation or an active server-owned batch
+/// by its public parent ID. Ordinary running jobs return 409 because CUDA work
+/// cannot be safely preempted. A batch cancellation instead closes parent
+/// authority immediately, removes queued siblings, lets running siblings
+/// drain privately, and forbids publication.
 #[utoipa::path(
     delete,
     path = "/api/queue/{id}",
@@ -3083,10 +3180,11 @@ async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse>
     Json(QueuePauseResponse { paused: false })
 }
 
-/// Cancel every still-queued generation job. Running jobs are left untouched
-/// (same rule as `DELETE /api/queue/:id`). Returns the number of jobs
-/// cancelled; each waiting client observes the same cancellation signal as a
-/// single-job cancel.
+/// Cancel every still-queued generation job and close every active
+/// server-owned batch authority. Ordinary running jobs are left untouched;
+/// running batch children drain privately and cannot publish. The returned
+/// count remains the number of queued rows removed, preserving the established
+/// queue API contract.
 #[utoipa::path(
     delete,
     path = "/api/queue",
@@ -3279,7 +3377,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_reorder: true,
             stable_device_pins: true,
             cooperative_cancellation: false,
-            server_batch: false,
+            server_batch: state.scheduled_work.v2_authoritative() && !config.is_output_disabled(),
         },
         devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),

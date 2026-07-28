@@ -2889,6 +2889,7 @@ mod tests {
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
+        assert_eq!(body["queue"]["server_batch"], true);
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
@@ -2951,7 +2952,37 @@ mod tests {
             assert_eq!(body["devices"]["stable_pins"], true, "{label}");
             assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
             assert_eq!(body["devices"]["learned_eta"], false, "{label}");
+            assert_eq!(body["queue"]["server_batch"], false, "{label}");
         }
+    }
+
+    #[tokio::test]
+    async fn raw_batch_never_enters_legacy_single_result_worker() {
+        let app = app_with(MockEngine::ready());
+        let body = serde_json::json!({
+            "prompt": "two cats",
+            "model": "mock-model",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": 2,
+            "output_format": "png"
+        });
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("authoritative scheduler V2"));
     }
 
     /// Clients feature-detect server-side catalog sorting against this
@@ -4576,6 +4607,26 @@ mod tests {
             resp.headers().contains_key("x-mold-seed-used"),
             "response should include x-mold-seed-used header"
         );
+    }
+
+    #[tokio::test]
+    async fn batch_generate_response_uses_json_content_type() {
+        let response = crate::routes::batch_generate_response(mold_core::BatchGenerateResponse {
+            batch_id: "parent-1".to_string(),
+            outputs: Vec::new(),
+        });
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["batch_id"], "parent-1");
+        assert_eq!(body["outputs"], serde_json::json!([]));
     }
 
     // ── /api/generate — engine error ─────────────────────────────────────────

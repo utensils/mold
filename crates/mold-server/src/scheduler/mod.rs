@@ -1317,6 +1317,10 @@ impl Coordinator {
             );
             return;
         }
+        let prepared_inputs = job
+            .batch_child
+            .as_ref()
+            .map(|child| child.prepared_inputs.clone());
         self.pending.insert(
             id,
             PendingGeneration {
@@ -1326,7 +1330,7 @@ impl Coordinator {
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
-                prepared_inputs: None,
+                prepared_inputs,
                 retry_not_before_ms: None,
                 preparation_retry_attempts: 0,
                 preparation_refresh_observation: None,
@@ -2433,6 +2437,20 @@ impl Coordinator {
             offload_requested,
             pending.prepared_inputs.as_ref(),
         );
+        let resolved = resolved.map(|plans| {
+            let Some(expected) = pending
+                .job
+                .batch_child
+                .as_ref()
+                .map(|child| child.execution_equivalence_fingerprint.as_str())
+            else {
+                return plans;
+            };
+            plans
+                .into_iter()
+                .filter(|plan| plan.execution_equivalence_fingerprint.as_str() == expected)
+                .collect()
+        });
         #[cfg(test)]
         if matches!(
             resolved,
@@ -3084,7 +3102,9 @@ impl Coordinator {
                             size: pending.job.request.batch_size,
                         }),
                 );
-                if pending
+                if pending.job.batch_child.is_some() {
+                    work.kind = mold_scheduler::WorkKind::BatchChild;
+                } else if pending
                     .job
                     .request
                     .batch_count
@@ -4847,6 +4867,7 @@ fn gpu_job_from_generation(
         execution_plan,
         prepared_execution_inputs,
         lease: Some(lease),
+        batch_child: job.batch_child,
     }
 }
 
@@ -4865,6 +4886,7 @@ fn generation_and_prepared_from_gpu_job(
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
             output_dir: job.output_dir,
+            batch_child: job.batch_child,
         },
         prepared,
     )
@@ -5874,6 +5896,7 @@ mod tests {
                 progress_tx: None,
                 result_tx,
                 output_dir: None,
+                batch_child: None,
             },
             result_rx,
         )

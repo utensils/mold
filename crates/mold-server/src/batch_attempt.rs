@@ -262,6 +262,45 @@ impl DurableBatchAttempt {
         Ok(disposition)
     }
 
+    pub fn stage_record_and_accept(
+        &mut self,
+        lease: &BatchChildLease,
+        record: mold_db::GenerationRecord,
+        bytes: &[u8],
+    ) -> anyhow::Result<CompletionDisposition> {
+        self.transaction
+            .update_child_record_for_lease(lease, record)?;
+        self.stage_and_accept(lease, bytes)
+    }
+
+    pub fn complete_without_artifact(
+        &mut self,
+        lease: &BatchChildLease,
+        completion: ChildCompletion,
+    ) -> anyhow::Result<CompletionDisposition> {
+        anyhow::ensure!(
+            completion != ChildCompletion::Succeeded,
+            "successful children must enter through stage_and_accept"
+        );
+        self.parent.complete(lease, completion)
+    }
+
+    pub fn request_cancel(&mut self) -> anyhow::Result<CompletionDisposition> {
+        self.parent.request_cancel()
+    }
+
+    pub fn rollback_fenced(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.parent.state() == BatchParentState::Fenced,
+            "batch attempt is not fenced"
+        );
+        self.transaction.rollback_private_attempt()
+    }
+
+    pub fn finalize_fence(&mut self) -> anyhow::Result<()> {
+        self.parent.finalize_fence()
+    }
+
     pub async fn converge_commit(
         &mut self,
         gate: &GalleryPublicationGate,
@@ -584,28 +623,23 @@ pub async fn recover_batches(
                         "closed parent did not fence lost leases"
                     );
                     bridge.transaction.rollback_private_attempt()?;
-                    report.outcomes.push(RecoveredParentOutcome::Fenced {
+                    bridge.parent.finalize_fence()?;
+                    report.outcomes.push(RecoveredParentOutcome::Terminal {
                         parent_id,
                         attempt_generation: generation,
+                        state: bridge.parent.state(),
                     });
                 }
                 RecoveryAction::Rollback => {
-                    let terminal = bridge.parent.state();
                     bridge.transaction.rollback_private_attempt()?;
-                    report
-                        .outcomes
-                        .push(if terminal == BatchParentState::Fenced {
-                            RecoveredParentOutcome::Fenced {
-                                parent_id,
-                                attempt_generation: generation,
-                            }
-                        } else {
-                            RecoveredParentOutcome::Terminal {
-                                parent_id,
-                                attempt_generation: generation,
-                                state: terminal,
-                            }
-                        });
+                    if bridge.parent.state() == BatchParentState::Fenced {
+                        bridge.parent.finalize_fence()?;
+                    }
+                    report.outcomes.push(RecoveredParentOutcome::Terminal {
+                        parent_id,
+                        attempt_generation: generation,
+                        state: bridge.parent.state(),
+                    });
                 }
                 RecoveryAction::AlreadyCommitted => {
                     bridge.transaction.retire_committed_attempt()?;
@@ -660,9 +694,11 @@ pub async fn recover_batches(
                 });
             }
             RecoveryAction::AlreadyFenced => {
-                report.outcomes.push(RecoveredParentOutcome::Fenced {
+                parent.finalize_fence()?;
+                report.outcomes.push(RecoveredParentOutcome::Terminal {
                     parent_id,
                     attempt_generation: generation,
+                    state: parent.state(),
                 });
             }
             RecoveryAction::AlreadyTerminal => {
@@ -1798,11 +1834,11 @@ mod tests {
                     report.outcomes[0],
                     RecoveredParentOutcome::Resumable { .. }
                 )),
-                Case::Cancelling | Case::Failing | Case::Fenced => assert!(matches!(
-                    report.outcomes[0],
-                    RecoveredParentOutcome::Fenced { .. }
-                )),
-                Case::Cancelled | Case::Failed => assert!(matches!(
+                Case::Cancelling
+                | Case::Failing
+                | Case::Fenced
+                | Case::Cancelled
+                | Case::Failed => assert!(matches!(
                     report.outcomes[0],
                     RecoveredParentOutcome::Terminal { .. }
                 )),

@@ -38,6 +38,7 @@ pub struct ActiveGenerationSnapshot {
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
     Complete(Box<mold_core::SseCompleteEvent>),
+    BatchComplete(Box<mold_core::SseBatchCompleteEvent>),
     UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }
@@ -69,6 +70,19 @@ pub struct GenerationJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<GenerationJobResult, String>>,
     /// Pre-resolved output directory for server-side image saving.
     pub output_dir: Option<PathBuf>,
+    /// Server-owned adaptive-batch child authority. Public singleton and
+    /// client-owned prepared siblings leave this absent.
+    pub batch_child: Option<BatchChildExecution>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchChildExecution {
+    pub lease: crate::batch_parent::BatchChildLease,
+    /// Parent-level deterministic execution identity. The coordinator filters
+    /// every later re-resolution through this fence.
+    pub execution_equivalence_fingerprint: String,
+    /// Concrete dependency variants frozen once for the whole parent.
+    pub prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
 }
 
 pub struct GenerationJobResult {
