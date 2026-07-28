@@ -78,6 +78,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draft; `mold.create.chain-job` / `-host` into
   `mold.create.tracked-sequences.v1`), and Import/Export `.toml` keeps
   reading and writing canonical `mold.chain.v1` scripts.
+- **Sequences can now be edited in place with cached clips reused.** New
+  `POST /api/chain-jobs/:id/amend` accepts the full edited stage list (plus
+  optional chain-level `motion_tail_frames` / `fps` / `seed` / `steps` /
+  `guidance` / `enable_audio` overlays) and requeues from the earliest
+  genuinely-dirty clip: editing clip N re-renders N..end only, appending
+  clips renders just the new ones, removing trailing clips or toggling
+  Cut↔Crossfade (or a fade length) re-finalizes with zero re-renders.
+  A clip is invalidated by changes to its prompt, frame count, negative
+  prompt, source image, effective seed, or Smooth↔(Cut/Fade) carry — and
+  everything is invalidated by chain-level seed/steps/guidance/fps/
+  motion-tail changes or turning audio on (turning it off keeps every clip;
+  finalize just ignores the sidecars). Model, resolution, output format,
+  placement, strength, and batch provenance are not amendable — create a
+  fresh job for those. The manifest records each amend with the pre-amend
+  effective request, folding and clearing any pending retakes, and
+  `GET /api/chain-jobs/:id` exposes the additive `amends` history.
+  Underpinning this, stage artifacts switched to RAW untrimmed segments:
+  every boundary trim and crossfade now happens at finalize from the
+  effective script, tail PNGs are always persisted for bit-exact carry, and
+  jobs recorded by older versions still finalize unchanged (their trimmed
+  segments pass through; older mold versions cannot correctly finalize new
+  raw-segment jobs — downgrade is unsupported).
 - **Chain jobs now announce their lifecycle on the server event stream.**
   `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
   and `chain_job_ended` events — emitted on durable-job creation, resume,

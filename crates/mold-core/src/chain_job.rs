@@ -173,12 +173,18 @@ pub struct ChainJobManifest {
     #[serde(default)]
     pub stage_status: Vec<StageStatus>,
     /// Retake amendment history (spec §8.3). The original request stays
-    /// intact for provenance; edits are recorded here.
+    /// intact for provenance; edits are recorded here. An amend folds any
+    /// pending retakes into the rewritten `request_json` and clears this
+    /// list (their content lives on in the amend's request snapshot).
     #[serde(default)]
     pub retakes: Vec<RetakeAmendment>,
     /// Versioned finalize history (spec §8.3).
     #[serde(default)]
     pub finalizes: Vec<FinalizeRecord>,
+    /// Amend history (spec §17): each entry snapshots the pre-amend
+    /// EFFECTIVE request so any preserved stage remains attributable.
+    #[serde(default)]
+    pub amends: Vec<AmendRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +203,13 @@ pub struct StageStatus {
     /// Relative path to the stage's PCM sidecar, when audio was rendered.
     pub audio: Option<String>,
     pub error: Option<String>,
+    /// `true` for stages written under the raw-segment contract (2026-07-28):
+    /// the segment holds every frame the engine emitted (no boundary trims or
+    /// fade blends) and all boundary math is deferred to finalize. `false`
+    /// (the pre-amend default) marks a legacy stage whose segment was trimmed
+    /// and blended at write time and passes through finalize untouched.
+    #[serde(default)]
+    pub raw_segment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -211,6 +224,18 @@ pub struct RetakeAmendment {
     pub old_prompt: Option<String>,
     pub new_prompt: Option<String>,
     pub at_unix_ms: u64,
+}
+
+/// One amend applied to a chain job: the full edited stage list replaced the
+/// request's stages (plus optional chain-level overlays), and rendering
+/// requeued from the earliest genuinely-dirty stage. `previous_request_json`
+/// is the pre-amend EFFECTIVE request (retakes folded in), serialised with
+/// the same canonical JSON encoding as `request_json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AmendRecord {
+    pub at_unix_ms: u64,
+    pub previous_request_json: String,
+    pub preserved_stages: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -249,6 +274,7 @@ impl ChainJobManifest {
                 tail_frames: None,
                 audio: None,
                 error: None,
+                raw_segment: false,
             })
             .collect();
 
@@ -261,6 +287,7 @@ impl ChainJobManifest {
             stage_status,
             retakes: vec![],
             finalizes: vec![],
+            amends: vec![],
         })
     }
 
@@ -558,6 +585,9 @@ pub struct ChainJobDetail {
     pub stages: Vec<ChainJobStageDetail>,
     pub finalizes: Vec<FinalizeRecord>,
     pub retakes: Vec<RetakeAmendment>,
+    /// Amend history (additive; empty for never-amended jobs).
+    #[serde(default)]
+    pub amends: Vec<AmendRecord>,
     /// EFFECTIVE script (original request + retake amendments applied);
     /// provenance stays in `retakes`.
     pub script: crate::chain::ChainScript,
@@ -580,6 +610,39 @@ pub struct RetakeRequest {
     #[serde(default, with = "u64_opt_as_string")]
     pub seed_offset: Option<u64>,
     pub prompt: Option<String>,
+}
+
+/// Body of `POST /api/chain-jobs/:id/amend`: the FULL edited stage list (in
+/// canonical order) replaces the job's stages, plus optional chain-level
+/// overlays (omitted = keep current). NOT amendable — the client must create
+/// a fresh job instead: model, width, height, output_format, placement,
+/// strength, and batch provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AmendRequest {
+    pub stages: Vec<crate::chain::ChainStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_tail_frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Full-range u64, encoded as a decimal string on the wire.
+    #[serde(default, with = "u64_opt_as_string")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_audio: Option<bool>,
+}
+
+/// 202 body of `POST /api/chain-jobs/:id/amend`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AmendResponse {
+    #[serde(flatten)]
+    pub summary: ChainJobSummary,
+    /// Leading stages whose cached artifacts were preserved; rendering
+    /// requeues from this index.
+    pub preserved_stages: u32,
 }
 
 /// Result shape for GC passes; also the JSON body of POST /api/chain-jobs/gc.
@@ -843,6 +906,69 @@ mod tests {
     }
 
     #[test]
+    fn amend_request_round_trips_u64_seed_as_string() {
+        let max = u64::MAX;
+        let json = serde_json::json!({
+            "stages": [
+                {
+                    "prompt": "edited clip",
+                    "frames": 97,
+                    "transition": "cut"
+                }
+            ],
+            "seed": max.to_string(),
+            "steps": 8
+        });
+
+        let req: AmendRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.seed, Some(max));
+        assert_eq!(req.steps, Some(8));
+        assert_eq!(req.motion_tail_frames, None);
+        assert_eq!(req.fps, None);
+        assert_eq!(req.guidance, None);
+        assert_eq!(req.enable_audio, None);
+        assert_eq!(req.stages.len(), 1);
+        assert_eq!(req.stages[0].prompt, "edited clip");
+        assert_eq!(
+            serde_json::to_value(&req).unwrap()["seed"],
+            max.to_string(),
+            "u64 seeds must round-trip as decimal strings"
+        );
+
+        let none: AmendRequest = serde_json::from_value(serde_json::json!({
+            "stages": []
+        }))
+        .unwrap();
+        assert_eq!(none.seed, None);
+    }
+
+    /// Old manifests written before the amend/raw-segment fields existed
+    /// must keep parsing under `mold.chainjob.v1`: `amends` defaults to
+    /// empty and every stage is a legacy (`raw_segment == false`) stage.
+    #[test]
+    fn manifest_amends_and_raw_segment_default_for_v1_toml() {
+        let toml = r#"
+schema = "mold.chainjob.v1"
+job_id = "01JBR55V1"
+created_at_unix_ms = 1
+
+request_json = "{}"
+
+[[stage_status]]
+idx = 0
+state = "completed"
+seed = "42"
+frames_emitted = 97
+segment = "stages/000/segment.mp4"
+tail_frames = 17
+"#;
+        let manifest = ChainJobManifest::from_toml(toml).unwrap();
+        assert!(manifest.amends.is_empty());
+        assert!(!manifest.stage_status[0].raw_segment);
+        assert_eq!(manifest.stage_status[0].state, StageState::Completed);
+    }
+
+    #[test]
     fn chain_job_event_serde_uses_tagged_snapshot_shape() {
         let request = sample_request();
         let manifest =
@@ -874,6 +1000,7 @@ mod tests {
                 .collect(),
             finalizes: vec![],
             retakes: vec![],
+            amends: vec![],
             script: crate::chain::ChainScript::from(&request),
         };
         let value = serde_json::to_value(ChainJobEvent::Snapshot { job: detail }).unwrap();
@@ -1094,6 +1221,7 @@ request_json = "{}"
             }],
             finalizes: vec![],
             retakes: vec![],
+            amends: vec![],
             script: crate::chain::ChainScript::from(&request),
         }
     }

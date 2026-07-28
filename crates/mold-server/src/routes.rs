@@ -210,6 +210,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::chain_job_events,
         crate::routes_chain_jobs::resume_chain_job,
         crate::routes_chain_jobs::retake_chain_job,
+        crate::routes_chain_jobs::amend_chain_job,
         crate::routes_chain_jobs::cancel_chain_job,
         crate::routes_chain_jobs::delete_chain_job,
         crate::routes_chain_jobs::gc_chain_jobs,
@@ -243,6 +244,9 @@ use crate::queue::clean_error_message;
         mold_core::chain_job::ChainJobListing,
         mold_core::chain_job::CreateChainJobResponse,
         mold_core::chain_job::RetakeRequest,
+        mold_core::chain_job::AmendRequest,
+        mold_core::chain_job::AmendResponse,
+        mold_core::chain_job::AmendRecord,
         mold_core::chain_job::ChainJobEvent,
         mold_core::chain_job::FinalizeRecord,
         mold_core::chain_job::RetakeAmendment,
@@ -323,6 +327,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/chain-jobs/:id/retake",
             post(crate::routes_chain_jobs::retake_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/amend",
+            post(crate::routes_chain_jobs::amend_chain_job),
         )
         .route(
             "/api/chain-jobs/:id/cancel",

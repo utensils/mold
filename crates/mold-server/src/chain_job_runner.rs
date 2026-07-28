@@ -9,10 +9,13 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ImageEncoder, RgbImage};
-use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
+use mold_core::chain::{
+    stage_contributed_frames, ChainRequest, ChainStage, TransitionMode, DEFAULT_FADE_FRAMES,
+};
 use mold_core::chain_job::{
-    effective_stage_seed, settled, ChainJobEvent, ChainJobManifest, ChainJobState, FinalizeRecord,
-    GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState, STAGES_DIR,
+    effective_stage_seed, settled, AmendRecord, AmendRequest, ChainJobEvent, ChainJobManifest,
+    ChainJobState, FinalizeRecord, GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode,
+    RetakeRequest, StageState, StageStatus, STAGES_DIR,
 };
 use mold_core::{GenerateRequest, OutputFormat};
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
@@ -30,7 +33,6 @@ use crate::queue::save_video_to_dir;
 use crate::state::QueueHandle;
 
 const EVENT_BUS_CAPACITY: usize = 256;
-const DEFAULT_FADE_FRAMES: u32 = 8;
 const AUDIO_SIDECAR_MAGIC: &[u8; 8] = b"MOLDPCM1";
 pub const EPHEMERAL_GRACE_SECS: u64 = 900;
 
@@ -1304,6 +1306,27 @@ fn execute_stage(
     }
 }
 
+/// Persist one rendered stage under the RAW-segment contract (2026-07-28):
+///
+/// - `segment.mp4` holds every frame the engine emitted — no leading Smooth
+///   trim, no incoming Fade blend, no trailing fade reservation.
+/// - The audio sidecar is the FULL untrimmed track.
+/// - The trailing motion-tail PNGs are ALWAYS written to `tail/` when the
+///   engine produced a tail — even when the next transition isn't Smooth and
+///   even for the last stage. They are the bit-exact carry source for
+///   resume/amend; H.264 decode is lossy, so carry is never derived from the
+///   segment.
+/// - `boundary-in/` / `boundary-out/` are no longer written; they remain
+///   read-only inputs for legacy (`raw_segment == false`) stages.
+///
+/// All boundary trims and blends are deferred to [`finalize_job`], which is
+/// now the single place boundary math happens. The old invariant
+/// `concat(segments) == final` therefore no longer holds for raw stages; an
+/// older mold finalizing a raw-segment job would concatenate untrimmed
+/// segments — downgrade is unsupported (documented in the durable-chain-jobs
+/// design spec). `frames_emitted` keeps its wire meaning (frames this stage
+/// contributes to the final video after boundary accounting) via
+/// [`stage_contributed_frames`].
 fn write_stage_artifacts(
     layout: &JobDirLayout,
     manifest: &mut ChainJobManifest,
@@ -1311,90 +1334,35 @@ fn write_stage_artifacts(
     outcome: &StageOutcome,
     effective: &ChainRequest,
 ) -> anyhow::Result<StageArtifactPaths> {
-    layout.ensure_stage_dirs(stage_idx)?;
+    let stage_dir = layout.stage_dir(stage_idx);
+    std::fs::create_dir_all(&stage_dir).with_context(|| {
+        format!(
+            "creating chain job stage directory '{}'",
+            stage_dir.display()
+        )
+    })?;
     let stage = effective
         .stages
         .get(stage_idx as usize)
         .ok_or_else(|| anyhow!("stage index {stage_idx} out of bounds"))?;
-    let next_transition = effective
-        .stages
-        .get(stage_idx as usize + 1)
-        .map(|s| s.transition);
-    let incoming = stage.transition;
-    let mut frames = outcome.frames.clone();
-    let mut audio = outcome.audio.clone();
-
-    if matches!(incoming, TransitionMode::Smooth) && stage_idx > 0 {
-        let drop = effective.motion_tail_frames as usize;
-        if frames.len() < drop {
-            bail!(
-                "stage {stage_idx} emitted {} frames, cannot drop {drop} smooth carry frames",
-                frames.len()
-            );
-        }
-        frames.drain(0..drop);
-        trim_audio_front(&mut audio, effective.motion_tail_frames, effective.fps)?;
-    }
-
-    if matches!(incoming, TransitionMode::Fade) && stage_idx > 0 {
-        let fade_len = stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
-        let n = fade_len as usize;
-        if frames.len() < n {
-            bail!(
-                "stage {stage_idx} emitted {} frames, cannot apply incoming fade_len {n}",
-                frames.len()
-            );
-        }
-        write_frames_to_dir(&layout.boundary_in_dir(stage_idx), &frames[..n])?;
-        let previous_out = read_frames_from_dir(&layout.boundary_out_dir(stage_idx - 1), n)?;
-        let blended = fade_boundary(&previous_out, &frames, fade_len);
-        for (idx, frame) in blended.into_iter().enumerate() {
-            frames[idx] = frame;
-        }
-        blend_audio_front_from_previous_boundary(
-            layout,
-            stage_idx,
-            &mut audio,
-            fade_len,
-            effective.fps,
-        )?;
-    }
-
-    if matches!(next_transition, Some(TransitionMode::Fade)) {
-        let next = &effective.stages[stage_idx as usize + 1];
-        let fade_len = next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
-        let n = fade_len as usize;
-        if frames.len() < n {
-            bail!(
-                "stage {stage_idx} emitted {} frames, cannot reserve outgoing fade_len {n}",
-                frames.len()
-            );
-        }
-        write_frames_to_dir(
-            &layout.boundary_out_dir(stage_idx),
-            &frames[frames.len() - n..],
-        )?;
-        write_audio_boundary_out(layout, stage_idx, &audio, fade_len, effective.fps)?;
-        frames.truncate(frames.len() - n);
-        trim_audio_back(&mut audio, fade_len, effective.fps)?;
-    }
-
+    let next = effective.stages.get(stage_idx as usize + 1);
+    let frames = &outcome.frames;
     if frames.is_empty() {
-        bail!("stage {stage_idx} produced no frames after boundary handling");
+        bail!("stage {stage_idx} produced no frames");
     }
 
-    let segment_bytes = video_enc::encode_mp4(&frames, effective.fps)
+    let segment_bytes = video_enc::encode_mp4(frames, effective.fps)
         .with_context(|| format!("encoding chain stage {stage_idx} segment"))?;
     write_file(&layout.segment_path(stage_idx), &segment_bytes)?;
 
-    let tail_frames = if matches!(next_transition, Some(TransitionMode::Smooth)) {
+    let tail_frames = if outcome.tail.frames > 0 && !outcome.tail.tail_rgb_frames.is_empty() {
         write_frames_to_dir(&layout.tail_dir(stage_idx), &outcome.tail.tail_rgb_frames)?;
         outcome.tail.frames
     } else {
         0
     };
 
-    let audio_rel = if let Some(track) = audio.as_ref() {
+    let audio_rel = if let Some(track) = outcome.audio.as_ref() {
         write_audio_sidecar(&layout.audio_path(stage_idx), track)?;
         Some(layout.audio_rel(stage_idx))
     } else {
@@ -1403,17 +1371,27 @@ fn write_stage_artifacts(
 
     write_preview_jpeg(&layout.preview_path(stage_idx), frames.last().unwrap())?;
 
+    let contributed = stage_contributed_frames(
+        stage_idx as usize,
+        frames.len() as u32,
+        stage.transition,
+        next.map(|next| next.transition),
+        next.and_then(|next| next.fade_frames),
+        effective.motion_tail_frames,
+    );
+
     let status = manifest
         .stage_status
         .get_mut(stage_idx as usize)
         .ok_or_else(|| anyhow!("manifest missing status for stage {stage_idx}"))?;
     status.state = StageState::Completed;
-    status.frames_emitted = Some(frames.len() as u32);
+    status.frames_emitted = Some(contributed);
     status.generation_time_ms = Some(outcome.generation_time_ms);
     status.segment = Some(layout.segment_rel(stage_idx));
     status.tail_frames = Some(tail_frames);
     status.audio = audio_rel.clone();
     status.error = None;
+    status.raw_segment = true;
 
     manifest.write_atomic(layout.root())?;
 
@@ -1479,6 +1457,13 @@ fn resume_carry_from_disk(
 /// Finalize by joining manifest-relative segment/audio paths only after
 /// manifest validation has rejected absolute paths and `..` components. The
 /// rejection-before-join contract is load-bearing for malicious resume data.
+///
+/// Under the raw-segment contract (see [`write_stage_artifacts`]) this is
+/// the single place boundary math happens: raw stages get their leading
+/// Smooth trim, incoming Fade blend, and trailing fade reservation applied
+/// here from the EFFECTIVE script. Legacy stages (`raw_segment == false`)
+/// pass through exactly as before — their segments were trimmed/blended at
+/// write time — so mixed legacy+raw jobs finalize correctly.
 fn finalize_job(
     deps: &RunnerDeps,
     job: &ChainJobRow,
@@ -1491,6 +1476,7 @@ fn finalize_job(
         .ok_or_else(|| anyhow!("chain job finalizer invoked without metadata DB"))?;
     let effective = effective_request(manifest)?;
     let layout = JobDirLayout::new(job.job_dir.clone());
+    let want_audio = effective.enable_audio == Some(true);
     let total_frames: u32 = manifest
         .stage_status
         .iter()
@@ -1503,22 +1489,131 @@ fn finalize_job(
     let mut audio_samples = Vec::new();
     let mut audio_format: Option<(u32, u16)> = None;
     let mut frame_count = 0u32;
+    // Trailing frames/audio withheld from the previous RAW stage because the
+    // next boundary is Fade: the blend replaces them inside the incoming
+    // stage's leading frames, so they never reach the encoder directly.
+    let mut pending_fade_tail: Option<(Vec<RgbImage>, Option<Vec<f32>>)> = None;
 
-    for stage in &manifest.stage_status {
-        if stage.state != StageState::Completed {
+    for (idx, stage_status) in manifest.stage_status.iter().enumerate() {
+        if stage_status.state != StageState::Completed {
             bail!(
                 "cannot finalize chain job with non-completed stage {}",
-                stage.idx
+                stage_status.idx
             );
         }
-        let segment = stage
+        let stage = effective
+            .stages
+            .get(idx)
+            .ok_or_else(|| anyhow!("effective script missing stage {idx}"))?;
+        let segment = stage_status
             .segment
             .as_ref()
-            .ok_or_else(|| anyhow!("completed stage {} has no segment path", stage.idx))?;
+            .ok_or_else(|| anyhow!("completed stage {} has no segment path", stage_status.idx))?;
         let segment_path = safe_join_manifest_rel(layout.root(), segment)?;
-        let (metadata, frames) =
+        let (metadata, mut frames) =
             mold_inference::ltx2::media::decode_video_frames_from_path(&segment_path)
                 .with_context(|| format!("decoding chain segment '{}'", segment_path.display()))?;
+        let mut audio: Option<NativeAudioTrack> = None;
+        if want_audio {
+            if let Some(audio_rel) = stage_status.audio.as_ref() {
+                let audio_path = safe_join_manifest_rel(layout.root(), audio_rel)?;
+                let track = read_audio_sidecar(&audio_path)?;
+                match audio_format {
+                    None => audio_format = Some((track.sample_rate, track.channels)),
+                    Some((sample_rate, channels))
+                        if sample_rate == track.sample_rate && channels == track.channels => {}
+                    Some((sample_rate, channels)) => {
+                        bail!(
+                            "stage {} audio format {} Hz/{} ch does not match previous {} Hz/{} ch",
+                            stage_status.idx,
+                            track.sample_rate,
+                            track.channels,
+                            sample_rate,
+                            channels
+                        );
+                    }
+                }
+                audio = Some(track);
+            }
+        }
+
+        let incoming_fade_tail = pending_fade_tail.take();
+
+        if stage_status.raw_segment {
+            if idx > 0 {
+                match stage.transition {
+                    TransitionMode::Smooth => {
+                        let drop = effective.motion_tail_frames as usize;
+                        if frames.len() < drop {
+                            bail!(
+                                "stage {idx} segment has {} frames, cannot drop {drop} smooth \
+                                 carry frames at finalize",
+                                frames.len()
+                            );
+                        }
+                        frames.drain(0..drop);
+                        trim_audio_front(&mut audio, effective.motion_tail_frames, effective.fps)?;
+                    }
+                    TransitionMode::Fade => {
+                        let fade_len = stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
+                        let n = fade_len as usize;
+                        if n > 0 {
+                            if frames.len() < n {
+                                bail!(
+                                    "stage {idx} segment has {} frames, cannot blend incoming \
+                                     fade_len {n} at finalize",
+                                    frames.len()
+                                );
+                            }
+                            let (prev_tail, prev_tail_audio) = match incoming_fade_tail {
+                                Some(tail) => tail,
+                                // Legacy predecessor: its pre-fade trailing
+                                // frames/audio live in boundary-out/.
+                                None => legacy_fade_boundary_out(
+                                    &layout,
+                                    idx as u32 - 1,
+                                    n,
+                                    audio.is_some(),
+                                )?,
+                            };
+                            let blended = fade_boundary(&prev_tail, &frames, fade_len);
+                            for (offset, frame) in blended.into_iter().enumerate() {
+                                frames[offset] = frame;
+                            }
+                            if let (Some(track), Some(prev)) =
+                                (audio.as_mut(), prev_tail_audio.as_ref())
+                            {
+                                crossfade_audio_front(track, prev, fade_len, effective.fps)?;
+                            }
+                        }
+                    }
+                    TransitionMode::Cut => {}
+                }
+            }
+            if let Some(next) = effective.stages.get(idx + 1) {
+                if next.transition == TransitionMode::Fade {
+                    let fade_len = next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
+                    let n = fade_len as usize;
+                    if frames.len() < n {
+                        bail!(
+                            "stage {idx} segment has {} frames, cannot reserve outgoing \
+                             fade_len {n} at finalize",
+                            frames.len()
+                        );
+                    }
+                    let tail_frames = frames.split_off(frames.len() - n);
+                    let tail_audio = take_audio_tail(&mut audio, fade_len, effective.fps)?;
+                    pending_fade_tail = Some((tail_frames, tail_audio));
+                }
+            }
+        }
+        // Legacy stages pass through untouched: their segments already carry
+        // the boundary treatment, and a Fade boundary into a raw successor is
+        // served from their persisted boundary-out/ (see the incoming branch
+        // above). A raw predecessor's withheld tail before a legacy Fade
+        // successor is deliberately dropped — the blend was baked into that
+        // successor's segment by `maybe_reencode_next_after_fade`.
+
         if encoder.is_none() {
             encoder = Some(video_enc::Mp4StreamEncoder::new(
                 metadata.width,
@@ -1527,28 +1622,11 @@ fn finalize_job(
             )?);
         }
         let enc = encoder.as_mut().unwrap();
-        for frame in frames {
-            enc.push(&frame)?;
+        for frame in &frames {
+            enc.push(frame)?;
             frame_count += 1;
         }
-        if let Some(audio_rel) = stage.audio.as_ref() {
-            let audio_path = safe_join_manifest_rel(layout.root(), audio_rel)?;
-            let track = read_audio_sidecar(&audio_path)?;
-            match audio_format {
-                None => audio_format = Some((track.sample_rate, track.channels)),
-                Some((sample_rate, channels))
-                    if sample_rate == track.sample_rate && channels == track.channels => {}
-                Some((sample_rate, channels)) => {
-                    bail!(
-                        "stage {} audio format {} Hz/{} ch does not match previous {} Hz/{} ch",
-                        stage.idx,
-                        track.sample_rate,
-                        track.channels,
-                        sample_rate,
-                        channels
-                    );
-                }
-            }
+        if let Some(track) = audio {
             audio_samples.extend_from_slice(&track.interleaved_samples);
         }
     }
@@ -1725,6 +1803,7 @@ pub fn apply_retake(
         status.tail_frames = None;
         status.audio = None;
         status.error = None;
+        status.raw_segment = false;
         let stage_dir = JobDirLayout::new(job_dir.clone()).stage_dir(idx as u32);
         if stage_dir.exists() {
             std::fs::remove_dir_all(&stage_dir).with_context(|| {
@@ -1764,6 +1843,321 @@ pub fn apply_retake(
     chain_jobs::set_current_stage(db, job_id, req.stage_idx, now_i64)?;
 
     chain_jobs::get_job(db, job_id)?.ok_or_else(|| anyhow!("chain job disappeared after retake"))
+}
+
+/// Marker prefix for amend validation failures; the route maps it to 422.
+pub const CHAIN_JOB_AMEND_INVALID: &str = "CHAIN_JOB_AMEND_INVALID";
+
+/// Build the candidate request an amend produces: the job's current
+/// EFFECTIVE request (retakes folded) with `req.stages` REPLACING the stage
+/// list and any provided chain-level overlays applied. The result must still
+/// pass the exact create-time gates (async family validation in the route,
+/// then `normalise()` + the Mp4-only gate inside [`apply_amend`]).
+pub(crate) fn amend_candidate_request(
+    effective: &ChainRequest,
+    req: &AmendRequest,
+) -> ChainRequest {
+    let mut candidate = effective.clone();
+    candidate.stages = req.stages.clone();
+    if let Some(motion_tail_frames) = req.motion_tail_frames {
+        candidate.motion_tail_frames = motion_tail_frames;
+    }
+    if let Some(fps) = req.fps {
+        candidate.fps = fps;
+    }
+    if let Some(seed) = req.seed {
+        candidate.seed = Some(seed);
+    }
+    if let Some(steps) = req.steps {
+        candidate.steps = steps;
+    }
+    if let Some(guidance) = req.guidance {
+        candidate.guidance = guidance;
+    }
+    if let Some(enable_audio) = req.enable_audio {
+        candidate.enable_audio = Some(enable_audio);
+    }
+    candidate
+}
+
+/// Longest preserved prefix of per-stage render identity between the old
+/// effective request and the amended candidate (both normalised).
+///
+/// Chain-level invalidation first: a changed seed/steps/guidance/fps/
+/// motion_tail_frames, or enable_audio flipping OFF→ON, dirties everything
+/// (ON→OFF preserves — finalize just ignores sidecars). Otherwise the prefix
+/// compares `(prompt, frames, negative_prompt, source_image bytes, effective
+/// per-stage seed, uses_carry)` where `uses_carry = idx > 0 && transition ==
+/// Smooth`: Cut↔Fade toggles and fade_frames edits are finalize-only under
+/// raw segments and do NOT break the prefix, while Smooth↔(Cut|Fade) changes
+/// the rendered pixels and does.
+pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> u32 {
+    let old_audio = old.enable_audio.unwrap_or(false);
+    let new_audio = new.enable_audio.unwrap_or(false);
+    if old.seed != new.seed
+        || old.steps != new.steps
+        || old.guidance != new.guidance
+        || old.fps != new.fps
+        || old.motion_tail_frames != new.motion_tail_frames
+        || (!old_audio && new_audio)
+    {
+        return 0;
+    }
+    let old_base = old.seed.unwrap_or(0);
+    let new_base = new.seed.unwrap_or(0);
+    let mut prefix = 0u32;
+    for (idx, (old_stage, new_stage)) in old.stages.iter().zip(new.stages.iter()).enumerate() {
+        let old_carry = idx > 0 && old_stage.transition == TransitionMode::Smooth;
+        let new_carry = idx > 0 && new_stage.transition == TransitionMode::Smooth;
+        if old_stage.prompt != new_stage.prompt
+            || old_stage.frames != new_stage.frames
+            || old_stage.negative_prompt != new_stage.negative_prompt
+            || old_stage.source_image != new_stage.source_image
+            || effective_stage_seed(old_base, old_stage.seed_offset)
+                != effective_stage_seed(new_base, new_stage.seed_offset)
+            || old_carry != new_carry
+        {
+            break;
+        }
+        prefix = idx as u32 + 1;
+    }
+    prefix
+}
+
+/// Can a preserved LEGACY stage's baked-in artifacts serve the amended
+/// boundary plan? Legacy segments carry their boundary treatment from write
+/// time, so any change to the incoming boundary, and most changes around the
+/// outgoing one, force a re-render even though the raw-stage identity prefix
+/// would have kept the stage.
+fn legacy_stage_serves_new_plan(
+    status: &mold_core::chain_job::StageStatus,
+    layout: &JobDirLayout,
+    idx: usize,
+    old: &ChainRequest,
+    new: &ChainRequest,
+) -> bool {
+    let Some(old_stage) = old.stages.get(idx) else {
+        return false;
+    };
+    let Some(new_stage) = new.stages.get(idx) else {
+        return false;
+    };
+    // Incoming boundary: baked into the legacy segment (leading smooth trim
+    // or leading fade blend). A Cut↔Fade toggle or fade-length change here
+    // invalidates the artifact.
+    if idx > 0 {
+        if old_stage.transition != new_stage.transition {
+            return false;
+        }
+        if new_stage.transition == TransitionMode::Fade
+            && old_stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES)
+                != new_stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES)
+        {
+            return false;
+        }
+    }
+    // Outgoing boundary: legacy stages truncated their trailing fade_len for
+    // an old Fade successor and wrote tails only for an old Smooth successor.
+    let old_next_fade = old.stages.get(idx + 1).and_then(|next| {
+        (next.transition == TransitionMode::Fade)
+            .then(|| next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES))
+    });
+    match new.stages.get(idx + 1) {
+        Some(next) if next.transition == TransitionMode::Smooth => {
+            old_next_fade.is_none()
+                && (new.motion_tail_frames == 0
+                    || (status.tail_frames.unwrap_or(0) > 0
+                        && layout.tail_dir(idx as u32).exists()))
+        }
+        Some(next) if next.transition == TransitionMode::Fade => {
+            old_next_fade == Some(next.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES))
+        }
+        // Cut successor or last stage: trailing frames must be intact.
+        _ => old_next_fade.is_none(),
+    }
+}
+
+/// Apply an amend: replace the stage list (plus chain-level overlays), keep
+/// every cached stage up to the earliest genuinely-dirty one, reset the
+/// rest, and requeue. Returns the updated row and the preserved-stage count.
+///
+/// The caller holds the per-job mutation lock (`handle.lock_job`, like
+/// retake) and has already run the async family gate on the same candidate;
+/// this function re-runs the sync gates (`normalise()` + Mp4-only) and CASes
+/// the state so racing writers lose cleanly.
+pub fn apply_amend(
+    db: &MetadataDb,
+    jobs_root: &Path,
+    job_id: &str,
+    req: &AmendRequest,
+) -> anyhow::Result<(ChainJobRow, u32)> {
+    let job = chain_jobs::get_job(db, job_id)?.ok_or_else(|| anyhow!("chain job not found"))?;
+    if job.state == ChainJobState::Running {
+        bail!("CHAIN_JOB_RUNNING");
+    }
+    let job_dir = if job.job_dir.is_absolute() {
+        job.job_dir.clone()
+    } else {
+        jobs_root.join(&job.job_dir)
+    };
+    let mut manifest = ChainJobManifest::read_from_dir(&job_dir)?;
+    if manifest.ephemeral {
+        bail!("CHAIN_JOB_EPHEMERAL");
+    }
+    let allowed_from = [
+        ChainJobState::Queued,
+        ChainJobState::Interrupted,
+        ChainJobState::Failed,
+        ChainJobState::Cancelled,
+        ChainJobState::Completed,
+    ];
+    let old_effective = effective_request(&manifest)?;
+    let candidate = amend_candidate_request(&old_effective, req)
+        .normalise()
+        .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
+    if candidate.output_format != OutputFormat::Mp4 {
+        bail!("{CHAIN_JOB_AMEND_INVALID}: durable chain jobs require output_format = mp4");
+    }
+
+    // Invalidation: longest identity prefix, clamped to the leading run of
+    // completed stages, then shrunk past any legacy stage whose baked-in
+    // artifacts can't serve the new boundary plan.
+    let layout = JobDirLayout::new(job_dir.clone());
+    let mut preserved = preserved_stage_prefix(&old_effective, &candidate);
+    let completed_leading = manifest
+        .stage_status
+        .iter()
+        .take_while(|status| status.state == StageState::Completed)
+        .count() as u32;
+    preserved = preserved.min(completed_leading);
+    for idx in 0..preserved {
+        let status = &manifest.stage_status[idx as usize];
+        if !status.raw_segment
+            && !legacy_stage_serves_new_plan(
+                status,
+                &layout,
+                idx as usize,
+                &old_effective,
+                &candidate,
+            )
+        {
+            preserved = idx;
+            break;
+        }
+    }
+
+    let now = now_ms_u64();
+    let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+    if !chain_jobs::try_transition(
+        db,
+        job_id,
+        &allowed_from,
+        ChainJobState::Queued,
+        None,
+        now_i64,
+    )? {
+        let observed = chain_jobs::get_job(db, job_id)?
+            .map(|row| row.state.as_str().to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        if observed == ChainJobState::Running.as_str() {
+            bail!("CHAIN_JOB_RUNNING");
+        }
+        bail!("chain job is not amendable from current state {observed}");
+    }
+
+    // Manifest rewrite: snapshot the pre-amend EFFECTIVE request, replace
+    // request_json, clear retakes (their content lives on in the snapshot),
+    // keep preserved rows verbatim, append fresh Pending rows, drop trailing
+    // rows.
+    manifest.amends.push(AmendRecord {
+        at_unix_ms: now,
+        previous_request_json: serde_json::to_string(&old_effective)?,
+        preserved_stages: preserved,
+    });
+    manifest.request_json = serde_json::to_string(&candidate)?;
+    manifest.retakes.clear();
+
+    let old_count = manifest.stage_status.len() as u32;
+    let new_count = candidate.stages.len() as u32;
+    let base_seed = candidate.seed.unwrap_or(0);
+    manifest.stage_status.truncate(preserved as usize);
+    for idx in preserved..new_count {
+        let stage = &candidate.stages[idx as usize];
+        manifest.stage_status.push(StageStatus {
+            idx,
+            state: StageState::Pending,
+            seed: effective_stage_seed(base_seed, stage.seed_offset),
+            frames_emitted: None,
+            generation_time_ms: None,
+            segment: None,
+            tail_frames: None,
+            audio: None,
+            error: None,
+            raw_segment: false,
+        });
+    }
+    // Preserved RAW stages keep their artifacts verbatim, but their
+    // contributed-frame accounting follows the NEW boundary plan (a Cut↔Fade
+    // toggle after them changes what they contribute at finalize). Legacy
+    // stages keep their stored values — the compatibility check above
+    // guarantees their baked boundaries still match the plan.
+    for idx in 0..preserved as usize {
+        let recomputed = {
+            let stage = &candidate.stages[idx];
+            let next = candidate.stages.get(idx + 1);
+            stage_contributed_frames(
+                idx,
+                stage.frames,
+                stage.transition,
+                next.map(|next| next.transition),
+                next.and_then(|next| next.fade_frames),
+                candidate.motion_tail_frames,
+            )
+        };
+        let status = &mut manifest.stage_status[idx];
+        if status.raw_segment && status.frames_emitted.is_some() {
+            status.frames_emitted = Some(recomputed);
+        }
+    }
+
+    // Delete invalidated stage dirs; preserved dirs are NEVER renumbered.
+    for idx in preserved..old_count.max(new_count) {
+        let stage_dir = layout.stage_dir(idx);
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).with_context(|| {
+                format!(
+                    "removing amended chain stage directory '{}'",
+                    stage_dir.display()
+                )
+            })?;
+        }
+    }
+    manifest.write_atomic(&job_dir)?;
+
+    // DB index follows the manifest.
+    chain_jobs::set_request_json(db, job_id, &manifest.request_json, now_i64)?;
+    chain_jobs::delete_stages_from(db, job_id, new_count)?;
+    for status in &manifest.stage_status {
+        chain_jobs::upsert_stage(
+            db,
+            &ChainJobStageRow {
+                job_id: job_id.to_string(),
+                stage_idx: status.idx,
+                state: status.state,
+                seed: status.seed,
+                frames_emitted: status.frames_emitted,
+                generation_time_ms: status.generation_time_ms,
+                segment_rel_path: status.segment.clone(),
+                error: status.error.clone(),
+                updated_at_ms: now_i64,
+            },
+        )?;
+    }
+    chain_jobs::update_stage_shape(db, job_id, new_count, preserved, now_i64)?;
+
+    let updated = chain_jobs::get_job(db, job_id)?
+        .ok_or_else(|| anyhow!("chain job disappeared after amend"))?;
+    Ok((updated, preserved))
 }
 
 pub struct ProductionStageExecutor {
@@ -1922,6 +2316,7 @@ fn mark_manifest_stage_failed(
     status.segment = None;
     status.tail_frames = None;
     status.audio = None;
+    status.raw_segment = false;
     manifest.write_atomic(layout.root())?;
     Ok(())
 }
@@ -2162,6 +2557,11 @@ fn build_stage_generate_request(
     }
 }
 
+/// Re-blend a completed LEGACY Fade successor after the stage before it was
+/// re-rendered. Only legacy-artifact successors (`raw_segment == false`) need
+/// this — their leading fade frames were baked at write time against the old
+/// predecessor. Raw successors never do: their blend happens at finalize, so
+/// a retake/amend of stage N with a fade into raw N+1 just re-finalizes.
 fn maybe_reencode_next_after_fade(
     layout: &JobDirLayout,
     manifest: &ChainJobManifest,
@@ -2178,7 +2578,7 @@ fn maybe_reencode_next_after_fade(
     let Some(next_status) = manifest.stage_status.get(next_idx as usize) else {
         return Ok(());
     };
-    if next_status.state != StageState::Completed {
+    if next_status.state != StageState::Completed || next_status.raw_segment {
         return Ok(());
     }
     let fade_len = next_stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
@@ -2195,7 +2595,29 @@ fn maybe_reencode_next_after_fade(
     if frames.len() < n {
         bail!("next stage {next_idx} segment shorter than fade_len {n}");
     }
-    let new_boundary_out = read_frames_from_dir(&layout.boundary_out_dir(stage_idx), n)?;
+    let this_status = manifest
+        .stage_status
+        .get(stage_idx as usize)
+        .ok_or_else(|| anyhow!("manifest missing status for stage {stage_idx}"))?;
+    let new_boundary_out = if this_status.raw_segment {
+        // A raw predecessor keeps its trailing frames inside the raw segment
+        // (finalize truncates them because the next boundary is Fade).
+        let segment_path = safe_join_manifest_rel(
+            layout.root(),
+            this_status
+                .segment
+                .as_ref()
+                .ok_or_else(|| anyhow!("completed stage {stage_idx} has no segment"))?,
+        )?;
+        let (_meta, prev_frames) =
+            mold_inference::ltx2::media::decode_video_frames_from_path(&segment_path)?;
+        if prev_frames.len() < n {
+            bail!("stage {stage_idx} segment shorter than fade_len {n}");
+        }
+        prev_frames[prev_frames.len() - n..].to_vec()
+    } else {
+        read_frames_from_dir(&layout.boundary_out_dir(stage_idx), n)?
+    };
     let raw_boundary_in = read_frames_from_dir(&layout.boundary_in_dir(next_idx), n)?;
     let blended = fade_boundary(&new_boundary_out, &raw_boundary_in, fade_len);
     for (idx, frame) in blended.into_iter().enumerate() {
@@ -2307,86 +2729,74 @@ fn trim_audio_front(
     Ok(())
 }
 
-fn trim_audio_back(
+/// Split off the trailing `frames`-worth of samples (finalize-time outgoing
+/// Fade reservation for raw stages). Returns `None` when the stage has no
+/// audio.
+fn take_audio_tail(
     audio: &mut Option<NativeAudioTrack>,
     frames: u32,
     fps: u32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Vec<f32>>> {
     let Some(track) = audio.as_mut() else {
-        return Ok(());
+        return Ok(None);
     };
     let samples = samples_for_frames(track, frames, fps);
     if track.interleaved_samples.len() < samples {
-        bail!("audio sidecar too short for back trim");
+        bail!("audio sidecar too short for outgoing fade at finalize");
     }
     let keep = track.interleaved_samples.len() - samples;
-    track.interleaved_samples.truncate(keep);
-    Ok(())
+    Ok(Some(track.interleaved_samples.split_off(keep)))
 }
 
-fn write_audio_boundary_out(
-    layout: &JobDirLayout,
-    stage_idx: u32,
-    audio: &Option<NativeAudioTrack>,
+/// Linear crossfade of a raw stage's leading `frames`-worth of samples with
+/// the previous stage's withheld tail samples, in place (finalize-time
+/// incoming Fade for raw stages).
+fn crossfade_audio_front(
+    track: &mut NativeAudioTrack,
+    prev_tail: &[f32],
     frames: u32,
     fps: u32,
 ) -> anyhow::Result<()> {
-    let Some(track) = audio.as_ref() else {
-        return Ok(());
-    };
-    let samples = samples_for_frames(track, frames, fps);
-    if track.interleaved_samples.len() < samples {
-        bail!("audio sidecar too short for boundary-out");
-    }
-    let mut boundary = track.clone();
-    boundary.interleaved_samples =
-        boundary.interleaved_samples[boundary.interleaved_samples.len() - samples..].to_vec();
-    write_audio_sidecar(
-        &layout.boundary_out_dir(stage_idx).join("audio.pcm"),
-        &boundary,
-    )
-}
-
-fn blend_audio_front_from_previous_boundary(
-    layout: &JobDirLayout,
-    stage_idx: u32,
-    audio: &mut Option<NativeAudioTrack>,
-    frames: u32,
-    fps: u32,
-) -> anyhow::Result<()> {
-    let Some(track) = audio.as_mut() else {
-        return Ok(());
-    };
     let samples = samples_for_frames(track, frames, fps);
     if samples == 0 {
         return Ok(());
     }
     if track.interleaved_samples.len() < samples {
-        bail!("audio sidecar too short for boundary-in");
+        bail!("audio sidecar too short for incoming fade at finalize");
     }
-    let mut boundary_in = track.clone();
-    boundary_in.interleaved_samples = track.interleaved_samples[..samples].to_vec();
-    write_audio_sidecar(
-        &layout.boundary_in_dir(stage_idx).join("audio.pcm"),
-        &boundary_in,
-    )?;
-    let previous = read_audio_sidecar(&layout.boundary_out_dir(stage_idx - 1).join("audio.pcm"))?;
-    if previous.sample_rate != track.sample_rate || previous.channels != track.channels {
-        bail!("fade audio boundary format mismatch");
+    if prev_tail.len() < samples {
+        bail!("previous stage fade audio too short at finalize");
     }
-    if previous.interleaved_samples.len() < samples {
-        bail!("previous fade audio boundary too short");
-    }
-    let channels = track.channels as usize;
-    let frame_samples = channels.max(1);
+    let frame_samples = (track.channels as usize).max(1);
     let denom = (samples / frame_samples).max(1) as f32;
-    for sample_idx in 0..samples {
+    for (sample_idx, prior) in prev_tail.iter().enumerate().take(samples) {
         let t = (sample_idx / frame_samples) as f32 / denom;
-        let prior = previous.interleaved_samples[sample_idx];
         let next = track.interleaved_samples[sample_idx];
         track.interleaved_samples[sample_idx] = prior * (1.0 - t) + next * t;
     }
     Ok(())
+}
+
+/// Blend inputs for a Fade boundary whose PREDECESSOR is a legacy stage: the
+/// pre-fade trailing frames/audio live in its `boundary-out/` directory.
+fn legacy_fade_boundary_out(
+    layout: &JobDirLayout,
+    prev_idx: u32,
+    fade_len: usize,
+    want_audio: bool,
+) -> anyhow::Result<(Vec<RgbImage>, Option<Vec<f32>>)> {
+    let frames = read_frames_from_dir(&layout.boundary_out_dir(prev_idx), fade_len)?;
+    let audio = if want_audio {
+        let path = layout.boundary_out_dir(prev_idx).join("audio.pcm");
+        if path.exists() {
+            Some(read_audio_sidecar(&path)?.interleaved_samples)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok((frames, audio))
 }
 
 fn samples_for_frames(track: &NativeAudioTrack, frames: u32, fps: u32) -> usize {
@@ -2711,6 +3121,52 @@ mod tests {
             .unwrap();
         }
         row
+    }
+
+    /// Fabricate a stage persisted under the OLD write-time-trim contract:
+    /// segment already trimmed/blended, boundary dirs populated as the old
+    /// writer would have, `raw_segment = false`.
+    #[allow(clippy::too_many_arguments)]
+    fn write_legacy_stage(
+        layout: &JobDirLayout,
+        manifest: &mut ChainJobManifest,
+        idx: u32,
+        segment_frames: &[RgbImage],
+        fps: u32,
+        tail: Option<&[RgbImage]>,
+        boundary_in: Option<&[RgbImage]>,
+        boundary_out: Option<&[RgbImage]>,
+    ) {
+        layout.ensure_stage_dirs(idx).unwrap();
+        let bytes = video_enc::encode_mp4(segment_frames, fps).unwrap();
+        write_file(&layout.segment_path(idx), &bytes).unwrap();
+        write_preview_jpeg(&layout.preview_path(idx), segment_frames.last().unwrap()).unwrap();
+        if let Some(tail) = tail {
+            write_frames_to_dir(&layout.tail_dir(idx), tail).unwrap();
+        }
+        if let Some(frames) = boundary_in {
+            write_frames_to_dir(&layout.boundary_in_dir(idx), frames).unwrap();
+        }
+        if let Some(frames) = boundary_out {
+            write_frames_to_dir(&layout.boundary_out_dir(idx), frames).unwrap();
+        }
+        let status = &mut manifest.stage_status[idx as usize];
+        status.state = StageState::Completed;
+        status.frames_emitted = Some(segment_frames.len() as u32);
+        status.generation_time_ms = Some(10);
+        status.segment = Some(layout.segment_rel(idx));
+        status.tail_frames = Some(tail.map(|tail| tail.len() as u32).unwrap_or(0));
+        status.audio = None;
+        status.error = None;
+        status.raw_segment = false;
+        manifest.write_atomic(layout.root()).unwrap();
+    }
+
+    fn decoded_frame_count(path: &Path) -> usize {
+        mold_inference::ltx2::media::decode_video_frames_from_path(path)
+            .unwrap()
+            .1
+            .len()
     }
 
     #[test]
@@ -3632,8 +4088,13 @@ mod tests {
         );
     }
 
+    /// Ported from `completed_fade_successor_is_reencoded_after_previous_
+    /// stage_changes_boundary`: under the raw contract only LEGACY fade
+    /// successors are re-encoded (their blend was baked at write time). The
+    /// blend source for a raw predecessor is its raw segment's trailing
+    /// frames, since raw stages no longer write boundary-out/.
     #[test]
-    fn completed_fade_successor_is_reencoded_after_previous_stage_changes_boundary() {
+    fn legacy_fade_successor_is_reencoded_from_raw_predecessor_segment() {
         let dir = tempfile::tempdir().unwrap();
         let job_dir = dir.path().join("job");
         let layout = JobDirLayout::new(job_dir.clone());
@@ -3641,25 +4102,62 @@ mod tests {
         let req = request(vec![TransitionMode::Smooth, TransitionMode::Fade]);
         let mut manifest = ChainJobManifest::new("01JBR55FADE".into(), 1_000, &req).unwrap();
 
+        // Stage 0 rendered under the raw contract; stage 1 is a completed
+        // legacy stage whose pre-blend leading frames live in boundary-in/.
         write_stage_artifacts(&layout, &mut manifest, 0, &outcome(20), &req).unwrap();
-        write_stage_artifacts(&layout, &mut manifest, 1, &outcome(80), &req).unwrap();
+        let legacy_frames: Vec<RgbImage> = (0..9).map(|i| frame(80 + i * 10)).collect();
+        write_legacy_stage(
+            &layout,
+            &mut manifest,
+            1,
+            &legacy_frames,
+            req.fps,
+            None,
+            Some(&legacy_frames[..2]),
+            None,
+        );
         let before = std::fs::read(layout.segment_path(1)).unwrap();
 
-        write_frames_to_dir(&layout.boundary_out_dir(0), &[frame(210), frame(220)]).unwrap();
         maybe_reencode_next_after_fade(&layout, &manifest, 0, &req).unwrap();
 
         let after = std::fs::read(layout.segment_path(1)).unwrap();
         assert_ne!(
             before, after,
-            "changing outgoing fade boundary must re-encode completed successor segment"
+            "legacy fade successor must be re-blended from the raw predecessor's trailing frames"
         );
     }
 
     #[test]
-    fn splice_retake_skips_completed_successors_and_only_reencodes_fade_boundary() {
-        for (next_transition, successor_should_change, id) in [
-            (TransitionMode::Fade, true, "01JBR55SPLICEFADE"),
-            (TransitionMode::Cut, false, "01JBR55SPLICECUT"),
+    fn raw_fade_successor_is_not_reencoded_after_previous_stage_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_dir = dir.path().join("job");
+        let layout = JobDirLayout::new(job_dir.clone());
+        layout.ensure_root().unwrap();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Fade]);
+        let mut manifest = ChainJobManifest::new("01JBR55RAWFADE".into(), 1_000, &req).unwrap();
+
+        write_stage_artifacts(&layout, &mut manifest, 0, &outcome(20), &req).unwrap();
+        write_stage_artifacts(&layout, &mut manifest, 1, &outcome(80), &req).unwrap();
+        let before = std::fs::read(layout.segment_path(1)).unwrap();
+
+        maybe_reencode_next_after_fade(&layout, &manifest, 0, &req).unwrap();
+
+        let after = std::fs::read(layout.segment_path(1)).unwrap();
+        assert_eq!(
+            before, after,
+            "raw successors are blended at finalize, never re-encoded in place"
+        );
+    }
+
+    /// Ported from `splice_retake_skips_completed_successors_and_only_
+    /// reencodes_fade_boundary`: raw successors are never touched in place —
+    /// splice retake renders exactly the target stage and correctness comes
+    /// from the versioned re-finalize.
+    #[test]
+    fn splice_retake_leaves_raw_successors_untouched_and_refinalizes() {
+        for (next_transition, id) in [
+            (TransitionMode::Fade, "01JBR55SPLICEFADE"),
+            (TransitionMode::Cut, "01JBR55SPLICECUT"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let db = db();
@@ -3709,23 +4207,742 @@ mod tests {
                 1,
                 "splice retake must render exactly the target stage for {id}"
             );
-            let after_1 = std::fs::read(layout.segment_path(1)).unwrap();
-            let after_2 = std::fs::read(layout.segment_path(2)).unwrap();
-            let after_3 = std::fs::read(layout.segment_path(3)).unwrap();
-            if successor_should_change {
-                assert_ne!(
-                    before_1, after_1,
-                    "fade successor must be re-encoded at the edited boundary"
-                );
-            } else {
-                assert_eq!(
-                    before_1, after_1,
-                    "cut successor must not be touched by splice retake"
-                );
-            }
-            assert_eq!(before_2, after_2, "stage N+2 must remain untouched");
-            assert_eq!(before_3, after_3, "stage N+3 must remain untouched");
+            assert_eq!(
+                before_1,
+                std::fs::read(layout.segment_path(1)).unwrap(),
+                "raw successor must not be touched by splice retake"
+            );
+            assert_eq!(
+                before_2,
+                std::fs::read(layout.segment_path(2)).unwrap(),
+                "stage N+2 must remain untouched"
+            );
+            assert_eq!(
+                before_3,
+                std::fs::read(layout.segment_path(3)).unwrap(),
+                "stage N+3 must remain untouched"
+            );
+            let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+            assert_eq!(
+                manifest.finalizes.len(),
+                2,
+                "splice retake produces a new take via re-finalize for {id}"
+            );
+            assert!(job_dir.join("final/output-2.mp4").exists());
         }
+    }
+
+    fn amend_with_stages(stages: Vec<ChainStage>) -> AmendRequest {
+        AmendRequest {
+            stages,
+            motion_tail_frames: None,
+            fps: None,
+            seed: None,
+            steps: None,
+            guidance: None,
+            enable_audio: None,
+        }
+    }
+
+    #[test]
+    fn preserved_stage_prefix_matrix() {
+        let base = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+        ]);
+
+        // Prompt edit at stage k invalidates from k.
+        let mut new = base.clone();
+        new.stages[1].prompt = "edited".into();
+        assert_eq!(preserved_stage_prefix(&base, &new), 1, "prompt edit");
+
+        // Per-stage seed change at stage k invalidates from k.
+        let mut new = base.clone();
+        new.stages[2].seed_offset = Some(7);
+        assert_eq!(preserved_stage_prefix(&base, &new), 2, "seed_offset edit");
+
+        // Appending clips preserves every old stage.
+        let mut new = base.clone();
+        new.stages.push(stage("stage 3", TransitionMode::Cut));
+        assert_eq!(preserved_stage_prefix(&base, &new), 3, "append");
+
+        // Removing trailing clips preserves the (shorter) new length.
+        let mut new = base.clone();
+        new.stages.truncate(2);
+        assert_eq!(preserved_stage_prefix(&base, &new), 2, "remove last");
+
+        // Cut↔Fade toggles are finalize-only under raw segments.
+        let mut new = base.clone();
+        new.stages[2].transition = TransitionMode::Fade;
+        assert_eq!(preserved_stage_prefix(&base, &new), 3, "cut→fade toggle");
+
+        // fade_frames edits are finalize-only too.
+        let mut old = base.clone();
+        old.stages[2].transition = TransitionMode::Fade;
+        let mut new = old.clone();
+        new.stages[2].fade_frames = Some(4);
+        assert_eq!(preserved_stage_prefix(&old, &new), 3, "fade_frames edit");
+
+        // Smooth↔(Cut|Fade) changes the rendered pixels (carry).
+        let mut new = base.clone();
+        new.stages[1].transition = TransitionMode::Cut;
+        assert_eq!(preserved_stage_prefix(&base, &new), 1, "smooth→cut");
+
+        // Chain-level render inputs dirty everything.
+        for mutate in [
+            (|req: &mut ChainRequest| req.seed = Some(43)) as fn(&mut ChainRequest),
+            |req| req.steps = 4,
+            |req| req.guidance = 2.0,
+            |req| req.fps = 12,
+            |req| req.motion_tail_frames = 0,
+        ] {
+            let mut new = base.clone();
+            mutate(&mut new);
+            assert_eq!(preserved_stage_prefix(&base, &new), 0, "chain-level edit");
+        }
+
+        // enable_audio ON→OFF preserves (finalize ignores sidecars)…
+        let mut old = base.clone();
+        old.enable_audio = Some(true);
+        let mut new = old.clone();
+        new.enable_audio = Some(false);
+        assert_eq!(preserved_stage_prefix(&old, &new), 3, "audio on→off");
+
+        // …but OFF→ON needs sidecars that were never rendered.
+        let mut new = base.clone();
+        new.enable_audio = Some(true);
+        assert_eq!(preserved_stage_prefix(&base, &new), 0, "audio off→on");
+    }
+
+    #[test]
+    fn amend_preserves_prefix_resets_suffix_and_requeues() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55AMEND", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 3);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let effective = effective_request(&manifest).unwrap();
+        let mut stages = effective.stages.clone();
+        stages[1].prompt = "edited middle".into();
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 1);
+        assert_eq!(updated.state, ChainJobState::Queued);
+        assert_eq!(updated.current_stage, 1);
+        assert_eq!(updated.stage_count, 3);
+        let layout = JobDirLayout::new(job_dir.clone());
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status[0].state, StageState::Completed);
+        assert!(manifest.stage_status[0].raw_segment);
+        assert_eq!(manifest.stage_status[1].state, StageState::Pending);
+        assert_eq!(manifest.stage_status[2].state, StageState::Pending);
+        assert_eq!(manifest.amends.len(), 1);
+        assert_eq!(manifest.amends[0].preserved_stages, 1);
+        assert!(layout.stage_dir(0).exists(), "preserved dir kept");
+        assert!(!layout.stage_dir(1).exists(), "dirty dirs deleted");
+        assert!(!layout.stage_dir(2).exists());
+        let stage_rows = chain_jobs::stages_for_job(db, &row.id).unwrap();
+        assert_eq!(stage_rows[0].state, StageState::Completed);
+        assert_eq!(stage_rows[1].state, StageState::Pending);
+        assert_eq!(stage_rows[2].state, StageState::Pending);
+        assert_eq!(
+            effective_request(&manifest).unwrap().stages[1].prompt,
+            "edited middle"
+        );
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            5,
+            "requeue renders only the invalidated suffix"
+        );
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .finalizes
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn amend_append_renders_only_new_stage_and_refinalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55APPEND", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 2);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages.push(stage("appended clip", TransitionMode::Smooth));
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 2);
+        assert_eq!(updated.stage_count, 3);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            3,
+            "append must render exactly the new stage"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status[2].state, StageState::Completed);
+        assert_eq!(manifest.finalizes.len(), 2);
+        assert!(job_dir.join("final/output-2.mp4").exists());
+    }
+
+    #[test]
+    fn amend_boundary_only_edit_refinalizes_without_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55BOUNDARYA",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        // 9 + 9 cut concat.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-1.mp4")), 18);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages[1].transition = TransitionMode::Fade;
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 2, "cut→fade is a boundary-only amend");
+        assert_eq!(updated.state, ChainJobState::Queued);
+        assert_eq!(updated.current_stage, 2);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            2,
+            "boundary-only amend must not render"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.finalizes.len(), 2, "a new take was finalized");
+        // 9 + (9 - fade 2) with the new fade boundary from cached raw segments.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-2.mp4")), 16);
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
+    #[test]
+    fn amend_shrink_deletes_trailing_db_rows_and_updates_stage_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55SHRINKA", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages.truncate(2);
+
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 2);
+        assert_eq!(updated.stage_count, 2);
+        assert_eq!(updated.current_stage, 2);
+        let stage_rows = chain_jobs::stages_for_job(db, &row.id).unwrap();
+        assert_eq!(
+            stage_rows.iter().map(|s| s.stage_idx).collect::<Vec<_>>(),
+            vec![0, 1],
+            "trailing DB rows removed"
+        );
+        let layout = JobDirLayout::new(job_dir.clone());
+        assert!(!layout.stage_dir(2).exists(), "trailing stage dir removed");
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.stage_status.len(), 2);
+
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            3,
+            "shrink is boundary-only: no renders"
+        );
+        // 9 + (9 - 1 smooth) without the removed third clip.
+        assert_eq!(decoded_frame_count(&job_dir.join("final/output-2.mp4")), 17);
+    }
+
+    #[test]
+    fn amend_folds_prior_retakes_and_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55FOLD", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let retaken = apply_retake(
+            db,
+            dir.path(),
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 1,
+                mode: RetakeMode::Splice,
+                seed_offset: Some(9),
+                prompt: Some("retaken clip".into()),
+            },
+        )
+        .unwrap();
+        execute_job(&deps, &retaken, retaken.current_stage).unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.retakes.len(), 1);
+        let effective = effective_request(&manifest).unwrap();
+        let previous_json = serde_json::to_string(&effective).unwrap();
+        let retaken_seed = manifest.stage_status[1].seed;
+
+        let mut stages = effective.stages.clone();
+        stages.push(stage("third clip", TransitionMode::Cut));
+        let (_updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(
+            preserved, 2,
+            "identity must hold for the retaken stage (folded seed + prompt)"
+        );
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(
+            manifest.retakes.is_empty(),
+            "retakes are folded into the amended request and cleared"
+        );
+        assert_eq!(manifest.amends.len(), 1);
+        assert_eq!(
+            manifest.amends[0].previous_request_json, previous_json,
+            "snapshot is the pre-amend EFFECTIVE request"
+        );
+        let effective = effective_request(&manifest).unwrap();
+        assert_eq!(effective.stages[1].prompt, "retaken clip");
+        assert_eq!(manifest.stage_status[1].seed, retaken_seed);
+    }
+
+    #[test]
+    fn amend_rejects_running_and_ephemeral() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+
+        let running_dir = dir.path().join("running");
+        let running = persist_job(
+            &db,
+            &running_dir,
+            "01JBR55ARUN",
+            &req,
+            ChainJobState::Queued,
+        );
+        assert!(chain_jobs::claim_job(&db, &running.id).unwrap());
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &running.id,
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CHAIN_JOB_RUNNING"), "{err:#}");
+
+        let eph_dir = dir.path().join("eph");
+        let eph = persist_job(&db, &eph_dir, "01JBR55AEPH", &req, ChainJobState::Completed);
+        let mut manifest = ChainJobManifest::read_from_dir(&eph.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&eph.job_dir).unwrap();
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &eph.id,
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CHAIN_JOB_EPHEMERAL"), "{err:#}");
+
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            "missing-job",
+            &amend_with_stages(req.stages.clone()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err:#}");
+    }
+
+    #[test]
+    fn amend_rejects_invalid_stage_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55AINVALID",
+            &req,
+            ChainJobState::Completed,
+        );
+
+        let mut bad_stage = stage("bad", TransitionMode::Smooth);
+        bad_stage.frames = 10; // not 8k+1
+        let err = apply_amend(
+            &db,
+            dir.path(),
+            &row.id,
+            &amend_with_stages(vec![bad_stage]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(CHAIN_JOB_AMEND_INVALID),
+            "validation failures carry the amend-invalid marker, got {err:#}"
+        );
+        assert_eq!(
+            chain_jobs::get_job(&db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed,
+            "invalid amends must not touch job state"
+        );
+    }
+
+    #[test]
+    fn resume_after_amend_reuses_tail_pngs_bit_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55ATAIL", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db_arc = deps.db.clone();
+        let db = db_arc.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages[1].prompt = "edited continuation".into();
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        assert_eq!(preserved, 1);
+
+        // Re-render the invalidated stage with a carry-inspecting executor:
+        // the smooth carry must be the bit-exact tail PNG persisted by the
+        // preserved raw stage (FakeExecutor stage 0 tail pixel = 18).
+        let inspect = Arc::new(CarryInspectExecutor {
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps2 = RunnerDeps {
+            db: db_arc.clone(),
+            jobs_root: dir.path().join("jobs"),
+            executor: inspect.clone(),
+            queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+            events: Arc::new(JobEventBus::new()),
+            cancel: Arc::new(CancelRegistry::new()),
+            job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
+            output_dir: None,
+            server_events: None,
+            pause: None,
+        };
+        execute_job(&deps2, &updated, updated.current_stage).unwrap();
+
+        assert_eq!(
+            inspect.seen.lock().unwrap().as_slice(),
+            &[Some([18, 18, 18])],
+            "amended continuation must re-render from the preserved stage's tail PNGs"
+        );
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
+    #[test]
+    fn write_stage_artifacts_persists_raw_segments_and_always_writes_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_dir = dir.path().join("job");
+        let layout = JobDirLayout::new(job_dir.clone());
+        layout.ensure_root().unwrap();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let mut manifest = ChainJobManifest::new("01JBR55RAW".into(), 1_000, &req).unwrap();
+
+        // 1 audio channel at 8 kHz over fps 8 → 1000 samples per pixel frame.
+        let audio_track = NativeAudioTrack {
+            interleaved_samples: (0..9_000).map(|n| n as f32).collect(),
+            sample_rate: 8_000,
+            channels: 1,
+        };
+        let mut outcome_0 = outcome(20);
+        outcome_0.audio = Some(audio_track.clone());
+        let mut outcome_1 = outcome(80);
+        outcome_1.audio = Some(audio_track);
+
+        write_stage_artifacts(&layout, &mut manifest, 0, &outcome_0, &req).unwrap();
+        write_stage_artifacts(&layout, &mut manifest, 1, &outcome_1, &req).unwrap();
+
+        assert!(manifest.stage_status[0].raw_segment);
+        assert!(manifest.stage_status[1].raw_segment);
+        // Segments are raw: stage 1 keeps all 9 frames even though its
+        // incoming transition is Smooth.
+        assert_eq!(decoded_frame_count(&layout.segment_path(0)), 9);
+        assert_eq!(decoded_frame_count(&layout.segment_path(1)), 9);
+        // Audio sidecars are full untrimmed tracks.
+        assert_eq!(
+            read_audio_sidecar(&layout.audio_path(1))
+                .unwrap()
+                .interleaved_samples
+                .len(),
+            9_000
+        );
+        // frames_emitted keeps the contributed wire meaning.
+        assert_eq!(manifest.stage_status[0].frames_emitted, Some(9));
+        assert_eq!(manifest.stage_status[1].frames_emitted, Some(8));
+        // Tails are ALWAYS written — including for the last stage, whose
+        // next transition doesn't exist.
+        assert!(layout.tail_dir(0).join("000.png").exists());
+        assert!(layout.tail_dir(1).join("000.png").exists());
+        assert_eq!(manifest.stage_status[1].tail_frames, Some(1));
+        // Boundary dirs are no longer written for raw stages.
+        assert!(!layout.boundary_out_dir(0).join("000.png").exists());
+        assert!(!layout.boundary_in_dir(1).join("000.png").exists());
+    }
+
+    #[test]
+    fn write_stage_artifacts_keeps_trailing_frames_before_fade_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_dir = dir.path().join("job");
+        let layout = JobDirLayout::new(job_dir.clone());
+        layout.ensure_root().unwrap();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Fade]);
+        let mut manifest = ChainJobManifest::new("01JBR55RAWOUT".into(), 1_000, &req).unwrap();
+
+        write_stage_artifacts(&layout, &mut manifest, 0, &outcome(20), &req).unwrap();
+
+        // Raw: no trailing fade reservation at write time…
+        assert_eq!(decoded_frame_count(&layout.segment_path(0)), 9);
+        // …but frames_emitted still accounts for the outgoing fade (9 - 2).
+        assert_eq!(manifest.stage_status[0].frames_emitted, Some(7));
+    }
+
+    #[test]
+    fn finalize_trims_smooth_and_blends_fade_from_raw_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Smooth,
+            TransitionMode::Fade,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55RAWFIN", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.finalizes.len(), 1);
+        // 9 + (9 - 1 smooth) - 2 outgoing fade + 9 incoming fade = 24
+        let expected = req.estimated_total_frames();
+        assert_eq!(expected, 24);
+        assert_eq!(
+            decoded_frame_count(&job_dir.join("final/output-1.mp4")) as u32,
+            expected,
+            "raw-segment finalize must apply the boundary plan and match the estimate"
+        );
+        assert_eq!(
+            manifest
+                .stage_status
+                .iter()
+                .map(|stage| stage.frames_emitted.unwrap())
+                .sum::<u32>(),
+            expected,
+            "persisted frames_emitted must sum to the final frame count"
+        );
+    }
+
+    #[test]
+    fn finalize_passes_legacy_trimmed_segments_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55LEGACYFIN",
+            &req,
+            ChainJobState::Queued,
+        );
+        let layout = JobDirLayout::new(job_dir.clone());
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        // Legacy stage 0: full 9 frames, tail persisted for the smooth carry.
+        let stage_0: Vec<RgbImage> = (0..9).map(|i| frame(20 + i)).collect();
+        write_legacy_stage(
+            &layout,
+            &mut manifest,
+            0,
+            &stage_0,
+            req.fps,
+            Some(&[frame(28)]),
+            None,
+            None,
+        );
+        // Legacy stage 1: already trimmed at write time (9 - 1 smooth carry).
+        let stage_1: Vec<RgbImage> = (0..8).map(|i| frame(80 + i)).collect();
+        write_legacy_stage(
+            &layout,
+            &mut manifest,
+            1,
+            &stage_1,
+            req.fps,
+            None,
+            None,
+            None,
+        );
+        for idx in 0..2u32 {
+            let status = &manifest.stage_status[idx as usize];
+            chain_jobs::upsert_stage(
+                &db,
+                &ChainJobStageRow {
+                    job_id: row.id.clone(),
+                    stage_idx: idx,
+                    state: StageState::Completed,
+                    seed: status.seed,
+                    frames_emitted: status.frames_emitted,
+                    generation_time_ms: status.generation_time_ms,
+                    segment_rel_path: status.segment.clone(),
+                    error: None,
+                    updated_at_ms: 1_000,
+                },
+            )
+            .unwrap();
+        }
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            0,
+            "completed legacy stages must not re-render"
+        );
+        assert_eq!(
+            decoded_frame_count(&job_dir.join("final/output-1.mp4")),
+            17,
+            "legacy segments pass through finalize with no further trimming"
+        );
     }
 
     #[test]
