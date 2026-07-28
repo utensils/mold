@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from "vue";
+import { computed, reactive, ref } from "vue";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useToastStore } from "../../stores/toasts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -54,6 +54,20 @@ async function runGc() {
     toasts.push(String(err), "error");
   }
 }
+
+const clearableCount = computed(
+  () => chains.jobs.filter((j) => j.state !== "running" && j.state !== "queued").length,
+);
+
+async function clearFinished() {
+  try {
+    const { cleared, failed } = await chains.clearFinished();
+    if (failed > 0) toasts.push(`Cleared ${cleared}, ${failed} could not be deleted`, "error");
+    else toasts.push(`Cleared ${cleared} job${cleared === 1 ? "" : "s"}`);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
 </script>
 
 <template>
@@ -62,13 +76,23 @@ async function runGc() {
       <span class="edge-code">Jobs</span>
       <div class="border-edge h-px flex-1 border-t" />
       <button
+        v-if="clearableCount > 0"
         type="button"
+        data-test="clear-finished"
         class="edge-code text-ink-3 hover:text-ink active:translate-y-px"
-        title="Garbage-collect"
-        aria-label="Garbage-collect finished jobs"
+        :title="`Delete all ${clearableCount} finished jobs from this list`"
+        @click="clearFinished"
+      >
+        Clear finished
+      </button>
+      <button
+        type="button"
+        data-test="jobs-cleanup"
+        class="edge-code text-ink-3 hover:text-ink active:translate-y-px"
+        title="Sweep ephemeral jobs and prune artifact directories on the host"
         @click="runGc"
       >
-        GC
+        Clean up disk
       </button>
     </div>
 

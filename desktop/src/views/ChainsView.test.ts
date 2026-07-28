@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import type { ModelEntry } from "../lib/api/types";
+import chainsViewSource from "./ChainsView.vue?raw";
 
 const { apiJson, apiJsonTo, sseStream, routerPush } = vi.hoisted(() => ({
   apiJson: vi.fn(),
@@ -182,6 +183,20 @@ describe("ChainsView multi-host video generation", () => {
     expect(dev!.attributes("disabled")).toBeDefined();
     expect(dev!.get("[data-test='model-disabled-reason']").text()).toContain("Two-stage");
     wrapper.unmount();
+  });
+
+  it("keeps fixed rows rigid so a long jobs list can't crush the filmstrip", () => {
+    // Flex children of the h-full overflow-y-auto column shrink to fit the
+    // container before it scrolls — every fixed row needs shrink-0 or a long
+    // jobs list compresses the clip cards into overlapping slivers.
+    const classesFor = (testId: string) =>
+      chainsViewSource
+        .match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0]
+        ?.match(/class="([^"]*)"/s)?.[1] ?? "";
+    expect(classesFor("chain-header")).toContain("shrink-0");
+    expect(classesFor("chain-filmstrip")).toContain("shrink-0");
+    expect(classesFor("chain-footer")).toContain("shrink-0");
+    expect(classesFor("toml-panel")).toContain("shrink-0");
   });
 
   it("keeps the Create header anatomy: title, summary, and mode switch", async () => {

@@ -214,6 +214,16 @@ export const useChainJobsStore = defineStore("chainJobs", {
       await this.fetchJobs();
       this.watch(id);
     },
+    /** Delete every terminal job (anything not running or queued) in one go.
+     *  Partial failures resync from the server rather than guessing. */
+    async clearFinished(): Promise<{ cleared: number; failed: number }> {
+      const finished = this.jobs.filter((j) => j.state !== "running" && j.state !== "queued");
+      const results = await Promise.allSettled(finished.map((j) => this.remove(j.id)));
+      const cleared = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - cleared;
+      if (failed > 0) await this.fetchJobs();
+      return { cleared, failed };
+    },
     async gc(): Promise<GcOutcome> {
       const init = { method: "POST" } satisfies RequestInit;
       const outcome = this.target
