@@ -118,6 +118,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and force model reloads; and the stage executor held a config snapshot
   from server boot, so a model pulled after startup could fail in a chain
   stage while running fine on the normal queue. Both fixed.
+- **iPhone Create now makes sequences in the same flow as stills.** The
+  Single | Sequence mode pair above the form is gone: **Output** (One shot |
+  Sequence) is a segmented field in the Create form stack, directly above the
+  model field, so a sequence is a setting of Create rather than a separate
+  place. Both outputs share one form — the model picker narrows to
+  chain-capable video models in Sequence (auto-picking one, restoring the
+  previous single pick on the way back, and naming the host's reason when a
+  checkpoint can't chain), and size, frame rate, steps, guidance, and seed are
+  the same fields read live at submit time instead of the composer's old
+  private copies that silently drifted from what was on screen. Clip prompts
+  now survive tab switches and relaunches in the shared sequence draft, which
+  also carries the prompt across an Output switch; existing installs migrate
+  out of the retired `mold.mobile.create-mode.v1` key and land back in
+  Sequence. Clips are full-width cards separated by a 44pt seam pill that
+  opens a bottom sheet with the shared seam editor — the iPhone's first
+  fade-length control, clamped to the host's `fade_frames_max` — and new clip
+  durations follow each model's own server-advertised default rather than a
+  fixed 25 frames. Durable sequences stream over SSE (with a 5s poll fallback
+  and a forced re-sync when iOS wakes the webview) instead of a 2s poll, and
+  they appear in the SAME queue list as single prints with Cancel, Resume, and
+  Dismiss. Browsing for a video model from the sequence empty state now lands
+  on Discover with the Video + Models filters applied. API keys remain
+  Keychain-only, and recovery still refuses to reattach unless the saved
+  address and server instance identity both match.
 - **The shared sequence kit for the unified Create view landed.** A studio
   sequence-draft store persists the clip list (with legacy web/iPhone
   draft-and-mode migration) so clip prompts survive navigation, reloads,
