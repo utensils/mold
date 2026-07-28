@@ -4623,6 +4623,7 @@ impl Coordinator {
     }
 
     fn set_queue_paused_and_publish(&mut self, paused: bool) -> Result<bool, String> {
+        let was_paused = self.state.queue_pause.is_paused();
         let changed = if paused {
             self.state.queue_pause.pause()
         } else {
@@ -4631,13 +4632,26 @@ impl Coordinator {
         let mut immediate = false;
         self.reconcile_external_mutations(&mut immediate);
         match self.try_replan_and_publish_with(PlanningPass::Admission) {
-            Ok(()) => Ok(changed),
+            Ok(()) => {
+                if changed {
+                    self.state.events.publish(if paused {
+                        mold_core::ServerEvent::QueuePaused
+                    } else {
+                        mold_core::ServerEvent::QueueResumed
+                    });
+                }
+                Ok(changed)
+            }
             Err(error) => {
-                // A failed resume must fail closed. Restore the paused gate
-                // and make a best-effort paused publication before reporting
-                // the synchronization failure to the route.
-                if !paused && changed {
-                    self.state.queue_pause.pause();
+                // State, plan, event, and acknowledgement form one serialized
+                // transaction. Restore the exact prior gate after either
+                // transition fails, then best-effort republish that authority.
+                if changed {
+                    if was_paused {
+                        self.state.queue_pause.pause();
+                    } else {
+                        self.state.queue_pause.resume();
+                    }
                     self.reconcile_external_mutations(&mut immediate);
                     self.replan_and_publish_with(PlanningPass::Admission);
                 }
@@ -8304,6 +8318,79 @@ mod tests {
         assert!(
             coordinator.state.queue_pause.is_paused(),
             "failed resume must restore the safe paused gate"
+        );
+    }
+
+    #[test]
+    fn failed_pause_plan_publication_restores_unpaused_gate() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.next_plan_error = Some(PlannerError::DuplicateWorkId {
+            work_id: WorkId::new("injected-pause-publication-error"),
+        });
+
+        let error = coordinator
+            .set_queue_paused_and_publish(true)
+            .expect_err("pause must fail when its authority cannot publish");
+
+        assert!(error.contains("could not publish queue pause state"));
+        assert!(
+            !coordinator.state.queue_pause.is_paused(),
+            "failed pause must restore the prior unpaused gate"
+        );
+    }
+
+    #[test]
+    fn scheduler_owned_pause_events_follow_authoritative_transition_order() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut events = state.events.subscribe();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+
+        assert!(coordinator.set_queue_paused_and_publish(true).unwrap());
+        assert!(coordinator.set_queue_paused_and_publish(false).unwrap());
+
+        let mut queue_transitions = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(mold_core::ServerEvent::QueuePaused) => queue_transitions.push(true),
+                Ok(mold_core::ServerEvent::QueueResumed) => queue_transitions.push(false),
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("unexpected event receive failure: {error}"),
+            }
+        }
+        assert_eq!(
+            queue_transitions,
+            vec![true, false],
+            "queue transition events must match serialized plan publication order"
         );
     }
 

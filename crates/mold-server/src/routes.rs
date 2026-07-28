@@ -3185,7 +3185,8 @@ struct QueueCancelAllResponse {
     )
 )]
 async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
-    let changed = if state.scheduled_work.v2_authoritative() {
+    let v2_authoritative = state.scheduled_work.v2_authoritative();
+    let changed = if v2_authoritative {
         state
             .scheduled_work
             .set_queue_paused(true)
@@ -3195,7 +3196,7 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
         let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
         state.queue_pause.pause()
     };
-    if changed {
+    if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueuePaused);
     }
     Ok(Json(QueuePauseResponse { paused: true }))
@@ -3212,7 +3213,8 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
     )
 )]
 async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
-    let changed = if state.scheduled_work.v2_authoritative() {
+    let v2_authoritative = state.scheduled_work.v2_authoritative();
+    let changed = if v2_authoritative {
         state
             .scheduled_work
             .set_queue_paused(false)
@@ -3222,7 +3224,7 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
         let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
         state.queue_pause.resume()
     };
-    if changed {
+    if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
     Ok(Json(QueuePauseResponse { paused: false }))
