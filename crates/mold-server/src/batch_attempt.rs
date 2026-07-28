@@ -771,16 +771,15 @@ pub async fn recover_batches(
             // Gallery files may subsequently be deleted or quarantined and
             // must not make an already-settled parent block server startup.
             TransactionEvidence::Missing
-        } else if archive.is_file() {
-            TransactionEvidence::CommittedArchive
-        } else if central_committed_children(
-            output_dir,
-            &parent_id,
-            generation,
-            parent.total_children(),
-            gate,
-        )?
-        .is_some()
+        } else if archive.is_file()
+            || central_committed_children(
+                output_dir,
+                &parent_id,
+                generation,
+                parent.total_children(),
+                gate,
+            )?
+            .is_some()
         {
             TransactionEvidence::CommittedArchive
         } else {
