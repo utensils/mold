@@ -5690,6 +5690,84 @@ mod tests {
         assert!(limits["sequence_unsupported_reason"].is_null());
     }
 
+    /// The endpoint must recommend the model's manifest default frames
+    /// (25 for LTX-Video, 97 for LTX-2), not the family cap, so clients
+    /// can default new clips to what the model actually ships with.
+    #[tokio::test]
+    async fn chain_limits_recommends_manifest_default_frames() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=ltx-video-0.9.6:bf16")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert_eq!(
+            limits["frames_per_clip_recommended"], 25,
+            "LTX-Video manifests declare frames: 25",
+        );
+
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=ltx-2-19b-distilled:fp8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            limits["frames_per_clip_recommended"], 97,
+            "LTX-2 manifests declare frames: 97",
+        );
+    }
+
+    /// /api/models must carry the additive per-model frame fields for video
+    /// models and omit them for image models.
+    #[tokio::test]
+    async fn models_endpoint_advertises_frame_defaults_for_video_models() {
+        let app = app_empty();
+        let response = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        let ltx2 = models
+            .iter()
+            .find(|m| m["family"] == "ltx2")
+            .expect("an ltx2 model should be listed");
+        assert_eq!(ltx2["default_frames"], 97);
+        assert_eq!(ltx2["default_fps"], 24);
+        assert_eq!(ltx2["max_frames"], 153);
+        assert_eq!(ltx2["frame_step"], 8);
+
+        let flux = models
+            .iter()
+            .find(|m| m["family"] == "flux")
+            .expect("a flux model should be listed");
+        assert!(flux.get("default_frames").is_none());
+        assert!(flux.get("max_frames").is_none());
+        assert!(flux.get("frame_step").is_none());
+    }
+
     #[tokio::test]
     async fn capabilities_chain_limits_rejects_ltx2_two_stage_pipeline_up_front() {
         let app = app_empty();

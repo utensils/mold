@@ -80,13 +80,34 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
 /// `family` is the canonical family string (e.g. "ltx2").
 /// `quant` is the quantization slug ("fp8", "fp16", "q8", ...).
 /// `free_vram_bytes` is the current free VRAM on the primary GPU.
-pub fn compute_limits(model: &str, family: &str, quant: &str, free_vram_bytes: u64) -> ChainLimits {
+/// `default_frames` is the model's own default frame count (manifest or
+/// catalog sidecar) and drives the recommended per-clip frames.
+pub fn compute_limits(
+    model: &str,
+    family: &str,
+    quant: &str,
+    free_vram_bytes: u64,
+    default_frames: Option<u32>,
+) -> ChainLimits {
     let cap = family_cap(family).unwrap_or(97);
-    // Hardware-derived recommended: for distilled LTX-2, 97 is already
-    // the binding constraint. Reserve the derivation scaffolding for
-    // future non-distilled models.
-    let _ = free_vram_bytes; // suppress unused for now; D wires this up
-    let recommended = cap;
+    // Suppress unused for now; sub-project D wires free VRAM up.
+    let _ = free_vram_bytes;
+    // Recommend the model's own default frame count (LTX-Video ships 25,
+    // LTX-2 ships 97) so new clips start at what the model actually runs;
+    // clamp to the family cap and snap down onto the 8n+1 grid. Without a
+    // model default, fall back to the cap (old behavior).
+    let recommended = default_frames
+        .map(|frames| {
+            let clamped = frames.min(cap);
+            if clamped > 1 {
+                clamped - ((clamped - 1) % 8)
+            } else {
+                clamped
+            }
+        })
+        .unwrap_or(cap)
+        .max(9)
+        .min(cap);
 
     const MAX_STAGES: u32 = 16;
     let canonical_model = mold_core::manifest::resolve_model_name(model);
@@ -148,9 +169,40 @@ mod tests {
         assert_eq!(family_cap("sdxl"), None);
     }
 
+    /// The recommended per-clip frames must follow the model's own default
+    /// frame count (LTX-Video ships 25, LTX-2 ships 97) instead of the
+    /// family cap, so new clips default to what the model actually runs.
+    #[test]
+    fn recommended_uses_model_default_frames() {
+        let ltx_video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", 0, Some(25));
+        assert_eq!(ltx_video.frames_per_clip_cap, 97);
+        assert_eq!(ltx_video.frames_per_clip_recommended, 25);
+
+        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, Some(97));
+        assert_eq!(ltx2.frames_per_clip_recommended, 97);
+
+        // No model default → fall back to the family cap (old behavior).
+        let unknown = compute_limits("cv:123", "ltx2", "", 0, None);
+        assert_eq!(unknown.frames_per_clip_recommended, 97);
+
+        // Off-grid defaults snap DOWN onto the 8n+1 grid.
+        let off_grid = compute_limits("cv:456", "ltx-video", "", 0, Some(30));
+        assert_eq!(off_grid.frames_per_clip_recommended, 25);
+
+        // Defaults above the cap clamp to the cap.
+        let oversized = compute_limits("cv:789", "ltx2", "", 0, Some(500));
+        assert_eq!(oversized.frames_per_clip_recommended, 97);
+    }
+
     #[test]
     fn compute_limits_for_distilled() {
-        let lim = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 8_000_000_000);
+        let lim = compute_limits(
+            "ltx-2-19b-distilled:fp8",
+            "ltx2",
+            "fp8",
+            8_000_000_000,
+            None,
+        );
         assert_eq!(lim.frames_per_clip_cap, 97);
         assert_eq!(lim.frames_per_clip_recommended, 97);
         assert_eq!(lim.max_stages, 16);
@@ -185,7 +237,7 @@ mod tests {
 
     #[test]
     fn ltx2_dev_legacy_alias_keeps_two_stage_sequence_gate() {
-        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0);
+        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None);
         assert!(!limits.supports_sequence);
         assert!(limits
             .sequence_unsupported_reason
@@ -204,7 +256,7 @@ mod tests {
     fn compute_limits_for_ltx_video_has_no_audio() {
         // LTX-Video is video-only; the SPA must hide the audio toggle and the
         // chain endpoint will reject `enable_audio: true` upstream regardless.
-        let lim = compute_limits("ltx-video-0.9.7-distilled:fp8", "ltx-video", "fp8", 0);
+        let lim = compute_limits("ltx-video-0.9.7-distilled:fp8", "ltx-video", "fp8", 0, None);
         assert!(
             !lim.supports_audio,
             "ltx-video has no audio path — toggle must stay off",

@@ -10035,6 +10035,7 @@ mod tests {
                 default_width: width,
                 default_height: height,
                 description: desc.to_string(),
+                ..Default::default()
             },
             downloaded: true,
             disk_usage_bytes: None,
@@ -11675,6 +11676,7 @@ mod tests {
                 default_width: 1024,
                 default_height: 1024,
                 description: format!("synthetic {name} fixture"),
+                ..Default::default()
             },
             downloaded,
             disk_usage_bytes: None,

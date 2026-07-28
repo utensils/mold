@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/api/models` now advertises per-model frame semantics.** Video models
+  carry additive `default_frames`, `default_fps`, `max_frames` (the
+  no-temporal-upscale single-request ceiling: 153 for LTX-2's RoPE budget,
+  257 for LTX-Video), and `frame_step` (valid counts are `k·step+1`; 8 for
+  the LTX families) sourced from the same manifest defaults and validator
+  constants the server enforces; image models omit all four. Chain limits'
+  `frames_per_clip_recommended` now follows the model's own default frame
+  count instead of the family cap — LTX-2 recommends 97 per clip while
+  LTX-Video recommends its shipped 25 — so clients can stop hardcoding a
+  25-frame default that ignored the selected model.
 - **iPhone Create now supports explicit multi-clip video sequences.** The
   touch-native Single / Sequence switch starts with two required clips,
   filters to compatible installed video models, keeps duration and seed tools
