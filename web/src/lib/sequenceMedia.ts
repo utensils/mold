@@ -10,7 +10,10 @@ function base(target?: StreamTarget): string {
   return target?.baseUrl?.replace(/\/$/, "") ?? "";
 }
 
-export function sequenceStageMediaPath(jobId: string, stageIdx: number): string {
+export function sequenceStageMediaPath(
+  jobId: string,
+  stageIdx: number,
+): string {
   return `/api/chain-jobs/${encodeURIComponent(jobId)}/stages/${encodeURIComponent(
     String(stageIdx),
   )}/media`;

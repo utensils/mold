@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  sequenceStageMediaPath,
-  sequenceStageMediaUrl,
-} from "./sequenceMedia";
+import { sequenceStageMediaPath, sequenceStageMediaUrl } from "./sequenceMedia";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -18,9 +15,7 @@ describe("sequence stage media", () => {
       sequenceStageMediaUrl("job-1", 0, {
         baseUrl: "http://studio:7680/",
       }),
-    ).resolves.toBe(
-      "http://studio:7680/api/chain-jobs/job-1/stages/0/media",
-    );
+    ).resolves.toBe("http://studio:7680/api/chain-jobs/job-1/stages/0/media");
   });
 
   it("exchanges a durable key for an exact-path stage ticket", async () => {
