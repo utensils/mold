@@ -2277,7 +2277,12 @@ impl BatchTransaction {
 
     #[cfg(test)]
     fn load(output_dir: &Path, manifest_path: &Path) -> anyhow::Result<Self> {
-        Self::load_with_authority(output_dir, manifest_path, AttemptAuthority::Unclaimed)
+        let canonical_output_dir = fs::canonicalize(output_dir)?;
+        Self::load_with_authority(
+            &canonical_output_dir,
+            manifest_path,
+            AttemptAuthority::Unclaimed,
+        )
     }
 
     fn load_with_authority(
@@ -4004,6 +4009,29 @@ fn open_attempt_authority_file(lock_path: &Path) -> anyhow::Result<File> {
 
 #[cfg(unix)]
 fn open_unix_directory_without_symlinks(path: &Path) -> anyhow::Result<File> {
+    #[cfg(target_os = "macos")]
+    let resolved_system_alias;
+    #[cfg(target_os = "macos")]
+    let path = {
+        // macOS exposes these root entries as immutable system aliases into
+        // /private. Walking them with O_NOFOLLOW correctly rejects the
+        // symlink itself, but would also make every tempfile-backed authority
+        // path unusable. Resolve only Apple's fixed root aliases; every
+        // caller-controlled component below them is still opened one by one
+        // with O_NOFOLLOW | O_DIRECTORY.
+        let alias = ["var", "tmp", "etc"].into_iter().find_map(|name| {
+            path.strip_prefix(Path::new("/").join(name))
+                .ok()
+                .map(|suffix| (name, suffix))
+        });
+        if let Some((name, suffix)) = alias {
+            resolved_system_alias = Path::new("/private").join(name).join(suffix);
+            resolved_system_alias.as_path()
+        } else {
+            path
+        }
+    };
+
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -6272,7 +6300,7 @@ mod tests {
             .unwrap();
         let parent_root = attempt_dir.parent().unwrap().parent().unwrap();
         let parent_id = parent_root.file_name().unwrap().to_str().unwrap();
-        let transaction_root = parent_root.parent().unwrap();
+        let transaction_root = fs::canonicalize(parent_root.parent().unwrap()).unwrap();
         let locks = transaction_root.join(LEGACY_ATTEMPT_LOCKS_DIR);
         fs::create_dir_all(&locks).unwrap();
 
