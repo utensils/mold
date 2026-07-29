@@ -107,6 +107,27 @@ describe("ActivityStrip", () => {
     expect(wrapper.emitted("cancel")?.[0]).toEqual(["job-2"]);
   });
 
+  it("opens queued prints and sequences with Space", async () => {
+    const queued = makeJob({ id: "job-2", workStarted: false });
+    const sequence = makeSequenceVM();
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [queued], sequences: [sequence] },
+    });
+
+    await wrapper
+      .get("[data-test='activity-queued-job-2']")
+      .trigger("keydown", { key: " " });
+    expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(queued.id);
+
+    await wrapper
+      .get("[data-test='activity-sequence-chain-1']")
+      .trigger("keydown", { key: " " });
+    expect(wrapper.emitted("sequence-action")?.[0]).toEqual([
+      "watch",
+      sequence,
+    ]);
+  });
+
   it("falls back to the stage line when no percent is available", () => {
     const wrapper = mount(ActivityStrip, {
       props: {
@@ -233,6 +254,10 @@ describe("ActivityStrip", () => {
     expect(
       wrapper.get("[data-test='activity-error-job-1']").text(),
     ).not.toContain("LTX-2 audio output is unavailable");
+    await wrapper
+      .get("[data-test='activity-error-job-1']")
+      .trigger("keydown", { key: " " });
+    expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(failed.id);
     await wrapper.get("[data-test='activity-dismiss-job-1']").trigger("click");
     expect(wrapper.emitted("dismiss")?.[0]).toEqual(["job-1"]);
   });

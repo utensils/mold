@@ -1828,7 +1828,10 @@ function recreateFromGallery(item: GalleryImage) {
 function openJob(job: Job) {
   stream.select?.(job.id);
   setOutput("single");
-  const request = job.request;
+  // Activity's print rows call this path; durable sequence rows use the
+  // sequence-action handoff below. Keep the broad Job request union at the
+  // stream boundary, then restore the complete one-shot wire shape here.
+  const request = job.request as GenerateRequestWire;
   const image = (base64: string, filename: string) => ({
     kind: "upload" as const,
     filename,
@@ -1854,58 +1857,56 @@ function openJob(job: Job) {
   form.state.value.guidance = request.guidance ?? form.state.value.guidance;
   form.state.value.seed = request.seed == null ? null : Number(request.seed);
   form.state.value.seedMode = request.seed == null ? "random" : "static";
-  if ("negative_prompt" in request) {
-    form.state.value.negativePrompt = request.negative_prompt ?? "";
-    form.state.value.scheduler = request.scheduler ?? null;
-    form.state.value.cfgPlus = request.cfg_plus ?? false;
-    form.state.value.batchSize = request.batch_size ?? 1;
-    form.state.value.outputFormat =
-      request.output_format ?? form.state.value.outputFormat;
-    form.state.value.strength = request.strength ?? 0.75;
-    form.state.value.upscaleModel = request.upscale_model ?? "";
-    form.state.value.gifPreview = request.gif_preview ?? false;
-    form.state.value.placement = request.placement ?? null;
-    const source = request.source_image
-      ? image(request.source_image, request.source_image_name || "Source image")
-      : null;
-    form.state.value.imageAttachments = request.edit_images?.length
-      ? request.edit_images.map((base64, index) =>
-          image(base64, index === 0 ? "Target image" : `Reference ${index}`),
-        )
-      : source
-        ? [source]
-        : [];
-    form.state.value.maskImage = request.mask_image
-      ? image(request.mask_image, "Mask")
-      : null;
-    form.state.value.controlImage = request.control_image
-      ? image(request.control_image, "Control image")
-      : null;
-    form.state.value.controlModel = request.control_model ?? "";
-    form.state.value.controlScale = request.control_scale ?? 1;
-    form.state.value.loras = (
-      request.loras ?? (request.lora ? [request.lora] : [])
-    ).map((lora) => ({ ...lora, trainedWords: [] }));
-    form.state.value.frames = request.frames ?? null;
-    form.state.value.fps = request.fps ?? null;
-    form.state.value.enableAudio = request.enable_audio ?? null;
-    form.state.value.audioFile = request.audio_file
-      ? image(request.audio_file, "Audio input")
-      : null;
-    form.state.value.audioFilePath = request.audio_file_path ?? "";
-    form.state.value.sourceVideo = request.source_video
-      ? image(request.source_video, "Video input")
-      : null;
-    form.state.value.sourceVideoPath = request.source_video_path ?? "";
-    form.state.value.keyframes = (request.keyframes ?? []).map((keyframe) => ({
-      frame: keyframe.frame,
-      image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
-    }));
-    form.state.value.pipeline = request.pipeline ?? null;
-    form.state.value.retakeRange = request.retake_range ?? null;
-    form.state.value.spatialUpscale = request.spatial_upscale ?? null;
-    form.state.value.temporalUpscale = request.temporal_upscale ?? null;
-  }
+  form.state.value.negativePrompt = request.negative_prompt ?? "";
+  form.state.value.scheduler = request.scheduler ?? null;
+  form.state.value.cfgPlus = request.cfg_plus ?? false;
+  form.state.value.batchSize = request.batch_size ?? 1;
+  form.state.value.outputFormat =
+    request.output_format ?? form.state.value.outputFormat;
+  form.state.value.strength = request.strength ?? 0.75;
+  form.state.value.upscaleModel = request.upscale_model ?? "";
+  form.state.value.gifPreview = request.gif_preview ?? false;
+  form.state.value.placement = request.placement ?? null;
+  const source = request.source_image
+    ? image(request.source_image, request.source_image_name || "Source image")
+    : null;
+  form.state.value.imageAttachments = request.edit_images?.length
+    ? request.edit_images.map((base64, index) =>
+        image(base64, index === 0 ? "Target image" : `Reference ${index}`),
+      )
+    : source
+      ? [source]
+      : [];
+  form.state.value.maskImage = request.mask_image
+    ? image(request.mask_image, "Mask")
+    : null;
+  form.state.value.controlImage = request.control_image
+    ? image(request.control_image, "Control image")
+    : null;
+  form.state.value.controlModel = request.control_model ?? "";
+  form.state.value.controlScale = request.control_scale ?? 1;
+  form.state.value.loras = (
+    request.loras ?? (request.lora ? [request.lora] : [])
+  ).map((lora) => ({ ...lora, trainedWords: [] }));
+  form.state.value.frames = request.frames ?? null;
+  form.state.value.fps = request.fps ?? null;
+  form.state.value.enableAudio = request.enable_audio ?? null;
+  form.state.value.audioFile = request.audio_file
+    ? image(request.audio_file, "Audio input")
+    : null;
+  form.state.value.audioFilePath = request.audio_file_path ?? "";
+  form.state.value.sourceVideo = request.source_video
+    ? image(request.source_video, "Video input")
+    : null;
+  form.state.value.sourceVideoPath = request.source_video_path ?? "";
+  form.state.value.keyframes = (request.keyframes ?? []).map((keyframe) => ({
+    frame: keyframe.frame,
+    image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
+  }));
+  form.state.value.pipeline = request.pipeline ?? null;
+  form.state.value.retakeRange = request.retake_range ?? null;
+  form.state.value.spatialUpscale = request.spatial_upscale ?? null;
+  form.state.value.temporalUpscale = request.temporal_upscale ?? null;
 }
 
 function closeDrawer() {

@@ -230,6 +230,7 @@ const active = computed(
       tabindex="0"
       @click="emit('sequence-action', 'watch', vm)"
       @keydown.enter.prevent="emit('sequence-action', 'watch', vm)"
+      @keydown.space.prevent="emit('sequence-action', 'watch', vm)"
     >
       <span class="activity__seq-icon" aria-hidden="true">
         <Icon name="video" :size="14" />
@@ -296,6 +297,7 @@ const active = computed(
         tabindex="0"
         @click="emit('open', job)"
         @keydown.enter.prevent="emit('open', job)"
+        @keydown.space.prevent="emit('open', job)"
       >
         <span class="activity__pill-text">
           <span
@@ -327,6 +329,7 @@ const active = computed(
       tabindex="0"
       @click="emit('open', job)"
       @keydown.enter.prevent="emit('open', job)"
+      @keydown.space.prevent="emit('open', job)"
     >
       <span class="activity__error-body">
         <span class="activity__error-prompt">{{ promptFor(job) }}</span>

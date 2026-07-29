@@ -261,6 +261,7 @@ function deleteConfirmed() {
         tabindex="0"
         @click="selectPrint(job)"
         @keydown.enter.prevent="selectPrint(job)"
+        @keydown.space.prevent="selectPrint(job)"
       >
         <span class="ms-activity__pill-text">Queued · {{ job.prompt }}</span>
         <button
@@ -320,6 +321,7 @@ function deleteConfirmed() {
       tabindex="0"
       @click="selectPrintVm(vm)"
       @keydown.enter.prevent="selectPrintVm(vm)"
+      @keydown.space.prevent="selectPrintVm(vm)"
     >
       <span class="ms-activity__state data-mono text-stop">failed</span>
       <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>

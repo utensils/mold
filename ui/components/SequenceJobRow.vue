@@ -76,7 +76,7 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
     :class="{ 'ms-seqrow--dense': dense }"
     data-test="sequence-job-row"
     :data-state="vm.state"
-    role="group"
+    role="button"
     tabindex="0"
     @click="emit('select', vm)"
     @keydown.enter.prevent="emit('select', vm)"

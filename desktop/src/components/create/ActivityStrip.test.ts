@@ -56,6 +56,16 @@ describe("ActivityStrip", () => {
     expect(cancel).toHaveBeenCalledWith(7);
   });
 
+  it("selects queued prints with Space", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued", prompt: "queued one" }];
+    const wrapper = mount(ActivityStrip);
+
+    await wrapper.get("[data-test='activity-queued']").trigger("keydown", { key: " " });
+
+    expect(generation.selectedClientId).toBe(7);
+  });
+
   it("shows accrued RunPod cost for a job routed to a live pod", () => {
     const generation = useGenerationStore();
     generation.jobs = [
@@ -295,6 +305,8 @@ describe("ActivityStrip — present tense", () => {
     const row = wrapper.get("[data-test='activity-print-attention']");
     expect(row.text()).toContain("Open Create for details");
     expect(row.text()).not.toContain("LTX-2 audio output is unavailable.");
+    await row.trigger("keydown", { key: " " });
+    expect(generation.selectedClientId).toBe(1);
     await row.get("[data-test='print-dismiss']").trigger("click");
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
   });
