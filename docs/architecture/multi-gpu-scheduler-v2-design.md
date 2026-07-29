@@ -2170,12 +2170,19 @@ Three distinct claims:
 
 Initial implementation may claim:
 
-- hardware-qualified 1× and 2× RTX 3090;
+- hardware-qualified 1× RTX 3090 only while a passing report and its adjacent
+  evidence directory are retained and
+  `scripts/validate-cuda-qualification-report.py` validates them;
+- hardware-qualified 2× RTX 3090 only while a passing report and its adjacent
+  evidence directory are retained and
+  `scripts/validate-local-multi-gpu-report.py` validates them;
 - simulated 12 GiB, 8×B200, and MIG;
 - designed/simulated up to 64 devices.
 
-It must not claim hardware-qualified B200, real 12 GiB, or MIG until the
-deferred campaigns run.
+No passing RTX 3090 report is currently retained, so the current repository
+does not claim either hardware qualification. It must not claim
+hardware-qualified B200, real 12 GiB, or MIG until the deferred campaigns run
+and a passing report is retained.
 
 ### 16.3 Deferred Lambda campaign
 

@@ -587,10 +587,17 @@ fn device_action_label(
 }
 
 fn short_device_id(id: &str) -> String {
-    if id.len() <= 18 {
+    const MAX_CHARS: usize = 18;
+    const PREFIX_CHARS: usize = 11;
+    const SUFFIX_CHARS: usize = 6;
+
+    if id.chars().count() <= MAX_CHARS {
         id.to_string()
     } else {
-        format!("{}…{}", &id[..11], &id[id.len() - 6..])
+        let prefix = id.chars().take(PREFIX_CHARS).collect::<String>();
+        let mut suffix = id.chars().rev().take(SUFFIX_CHARS).collect::<Vec<_>>();
+        suffix.reverse();
+        format!("{prefix}…{}", suffix.into_iter().collect::<String>())
     }
 }
 
@@ -976,6 +983,31 @@ mod tests {
             "localhost:9999"
         );
         assert_eq!(local_server_label(None, false), "in-process");
+    }
+
+    #[test]
+    fn short_device_id_preserves_ascii_display_contract() {
+        assert_eq!(short_device_id("cuda:0123456789012"), "cuda:0123456789012");
+        assert_eq!(
+            short_device_id("cuda:0123456789abcdef0123456789abcdef"),
+            "cuda:012345…abcdef"
+        );
+    }
+
+    #[test]
+    fn short_device_id_keeps_multibyte_ids_within_character_limit_exact() {
+        let id = "cuda:🦀🦀🦀🦀🦀🦀🦀middle";
+
+        assert_eq!(id.chars().count(), 18);
+        assert_eq!(short_device_id(id), id);
+    }
+
+    #[test]
+    fn short_device_id_truncates_multibyte_suffix_at_character_boundaries() {
+        assert_eq!(
+            short_device_id("cuda:0123456789abcdef🦀🦀"),
+            "cuda:012345…cdef🦀🦀"
+        );
     }
 
     #[test]

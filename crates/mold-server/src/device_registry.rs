@@ -310,9 +310,9 @@ impl DeviceRegistry {
         ))
     }
 
-    /// Foundation for Phase C lifecycle mutation. Phase A has no route that
-    /// calls this method, but DB-disabled mode already behaves correctly:
-    /// changes remain process-local and log that they will not persist.
+    /// Lifecycle mutation routes call this after resolving a stable device ID.
+    /// In DB-disabled mode, changes remain process-local and log that they
+    /// will not persist.
     /// Persist a device preference and return whether its effective value
     /// changed. The write lock spans persistence so concurrent callers cannot
     /// both publish the same logical transition.
