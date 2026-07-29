@@ -9,7 +9,8 @@
 //! strings through the codebase.
 
 use anyhow::{Context, Result};
-use rusqlite::params;
+use mold_core::config::SchedulerSettings;
+use rusqlite::{params, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::db::MetadataDb;
@@ -67,6 +68,11 @@ pub const GENERATE_DEFAULT_NEGATIVE_PROMPT: &str = "generate.default_negative_pr
 pub const GENERATE_EMBED_METADATA: &str = "generate.embed_metadata";
 pub const GENERATE_T5_VARIANT: &str = "generate.t5_variant";
 pub const GENERATE_QWEN3_VARIANT: &str = "generate.qwen3_variant";
+
+// Scheduler — profile-scoped behavior, never machine device identity.
+pub const SCHEDULER_REPLAN_DEBOUNCE_MS: &str = "scheduler.replan_debounce_ms";
+pub const SCHEDULER_REPLAN_MAX_DELAY_MS: &str = "scheduler.replan_max_delay_ms";
+pub const SCHEDULER_WARM_WAIT_MAX_MS: &str = "scheduler.warm_wait_max_ms";
 
 // Chain jobs — durable chain-job retention settings.
 pub const CHAIN_JOBS_ARTIFACT_TTL_DAYS: &str = "chain.jobs_artifact_ttl_days";
@@ -199,6 +205,77 @@ impl<'a> Settings<'a> {
         self.upsert(key, &s, ValueType::Json)
     }
 
+    /// Persist the scheduler's cross-validated timing tuple as one SQLite
+    /// transaction. No reader can observe only part of the tuple.
+    pub(crate) fn set_scheduler_timings_atomic(&self, scheduler: SchedulerSettings) -> Result<()> {
+        let scheduler = scheduler.validate()?;
+        let ts = now_ms();
+        self.db.transact_immediate(|conn| {
+            for (key, value) in [
+                (
+                    SCHEDULER_REPLAN_DEBOUNCE_MS,
+                    i64::from(scheduler.replan_debounce_ms),
+                ),
+                (
+                    SCHEDULER_REPLAN_MAX_DELAY_MS,
+                    i64::from(scheduler.replan_max_delay_ms),
+                ),
+                (
+                    SCHEDULER_WARM_WAIT_MAX_MS,
+                    i64::from(scheduler.warm_wait_max_ms),
+                ),
+            ] {
+                upsert_with_conn(
+                    conn,
+                    &self.profile,
+                    key,
+                    &value.to_string(),
+                    ValueType::Int,
+                    ts,
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Read the scheduler tuple under one connection lock, so a concurrent
+    /// atomic writer cannot produce a hybrid old/new snapshot.
+    pub(crate) fn scheduler_timings(
+        &self,
+        base: SchedulerSettings,
+    ) -> Result<(SchedulerSettings, bool)> {
+        self.db
+            .with_conn(|conn| scheduler_timings_with_conn(conn, &self.profile, base, None))
+    }
+
+    /// Validate the compiled default for `key` against all surviving timing
+    /// rows and delete it in the same transaction. This serializes reset with
+    /// both local and cross-process scheduler writers.
+    pub(crate) fn reset_scheduler_timing_atomic(&self, key: &str) -> Result<bool> {
+        anyhow::ensure!(
+            matches!(
+                key,
+                SCHEDULER_REPLAN_DEBOUNCE_MS
+                    | SCHEDULER_REPLAN_MAX_DELAY_MS
+                    | SCHEDULER_WARM_WAIT_MAX_MS
+            ),
+            "unsupported scheduler timing key: {key}"
+        );
+        self.db.transact_immediate(|conn| {
+            scheduler_timings_with_conn(
+                conn,
+                &self.profile,
+                SchedulerSettings::default(),
+                Some(key),
+            )?;
+            let changed = conn.execute(
+                "DELETE FROM settings WHERE profile = ?1 AND key = ?2",
+                params![&self.profile, key],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
     // ---- getters -------------------------------------------------
 
     pub fn get_str(&self, key: &str) -> Result<Option<String>> {
@@ -280,18 +357,71 @@ impl<'a> Settings<'a> {
     fn upsert(&self, key: &str, value: &str, ty: ValueType) -> Result<()> {
         let ts = now_ms();
         self.db.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(profile, key) DO UPDATE SET
-                    value = excluded.value,
-                    value_type = excluded.value_type,
-                    updated_at_ms = excluded.updated_at_ms",
-                params![&self.profile, key, value, ty.as_str(), ts],
-            )?;
+            upsert_with_conn(conn, &self.profile, key, value, ty, ts)?;
             Ok(())
         })
     }
+}
+
+fn upsert_with_conn(
+    conn: &rusqlite::Connection,
+    profile: &str,
+    key: &str,
+    value: &str,
+    ty: ValueType,
+    timestamp_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(profile, key) DO UPDATE SET
+            value = excluded.value,
+            value_type = excluded.value_type,
+            updated_at_ms = excluded.updated_at_ms",
+        params![profile, key, value, ty.as_str(), timestamp_ms],
+    )?;
+    Ok(())
+}
+
+fn scheduler_timings_with_conn(
+    conn: &rusqlite::Connection,
+    profile: &str,
+    mut candidate: SchedulerSettings,
+    skipped_key: Option<&str>,
+) -> Result<(SchedulerSettings, bool)> {
+    let mut applied = false;
+    for key in [
+        SCHEDULER_REPLAN_DEBOUNCE_MS,
+        SCHEDULER_REPLAN_MAX_DELAY_MS,
+        SCHEDULER_WARM_WAIT_MAX_MS,
+    ] {
+        if skipped_key == Some(key) {
+            continue;
+        }
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE profile = ?1 AND key = ?2",
+                params![profile, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(value) = value else {
+            continue;
+        };
+        let value = value
+            .parse::<i64>()
+            .with_context(|| format!("{key} must be an integer"))?;
+        let value = u32::try_from(value)
+            .with_context(|| format!("{key} must be a non-negative integer"))?;
+        match key {
+            SCHEDULER_REPLAN_DEBOUNCE_MS => candidate.replan_debounce_ms = value,
+            SCHEDULER_REPLAN_MAX_DELAY_MS => candidate.replan_max_delay_ms = value,
+            SCHEDULER_WARM_WAIT_MAX_MS => candidate.warm_wait_max_ms = value,
+            _ => unreachable!("scheduler settings key list is exhaustive"),
+        }
+        applied = true;
+    }
+    Ok((candidate.validate()?, applied))
 }
 
 /// Every profile with at least one settings row, plus [`DEFAULT_PROFILE`]

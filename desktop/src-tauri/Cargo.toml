@@ -57,7 +57,9 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
   "blocking",
+  "stream",
 ] }
+futures-util = "0.3"
 libc = "0.2"
 time = { version = "0.3", features = ["formatting"] }
 flate2 = "1"
@@ -94,7 +96,8 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
 # turn on the native GPU backend for real generation.
-cuda = ["mold-server/cuda"]
+cuda = ["mold-server/cuda", "nvml"]
+nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal"]
 
 [profile.release]

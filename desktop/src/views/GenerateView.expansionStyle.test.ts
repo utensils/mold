@@ -43,6 +43,31 @@ vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
   apiFetchTo: vi.fn(),
 }));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@studio/api/generationPlacement")>();
+  const planned = () =>
+    Promise.resolve({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+  return {
+    ...original,
+    previewGenerationPlacement: planned,
+    previewChainPlacement: planned,
+  };
+});
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt: vi.fn() }));
 vi.mock("../lib/api/catalog", () => ({ startCatalogDownload: vi.fn() }));

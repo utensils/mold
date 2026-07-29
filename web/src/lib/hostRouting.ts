@@ -35,9 +35,12 @@ export interface RoutableHost {
   url: string;
   /** Per-host key, sent as `x-api-key`. Never placed in a URL. */
   apiKey?: string;
+  instanceId?: string;
   status: HostRoutingStatus;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
+  /** Predicted end of this host's current plan. Null on legacy hosts. */
+  predictedCompletionMs?: number | null;
   gpu: RoutableGpu | null;
 }
 
@@ -51,6 +54,22 @@ export interface HostRoute {
   hostId: string;
   label: string;
   target: HostTarget;
+  /** Frozen server-installation identity for same-endpoint replacement fences. */
+  instanceId?: string | null;
+}
+
+export function sameHostRoute(
+  frozen: HostRoute | null,
+  current: HostRoute | null,
+): boolean {
+  if (!frozen) return !current || current.hostId === ORIGIN_HOST_ID;
+  if (!current) return false;
+  return (
+    frozen.hostId === current.hostId &&
+    frozen.target.baseUrl === current.target.baseUrl &&
+    frozen.target.apiKey === current.target.apiKey &&
+    (frozen.instanceId ?? null) === (current.instanceId ?? null)
+  );
 }
 
 function isOrigin(host: { id: string }): boolean {
@@ -62,8 +81,9 @@ function depth(host: RoutableHost): number {
 }
 
 /**
- * Auto routing: the ready host with the shallowest queue wins; unknown depth
- * counts as busiest; this server wins ties. Null when nothing is ready.
+ * Auto routing: when both hosts expose an authoritative plan, predicted
+ * completion wins before raw queue depth. If either host is planless, queue
+ * depth is the deterministic backward-compatible fallback.
  */
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],
@@ -71,8 +91,16 @@ export function pickAutoHost<T extends RoutableHost>(
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
+    const hFinish = h.predictedCompletionMs;
+    const bestFinish = best.predictedCompletionMs;
+    if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
+      return hFinish < bestFinish ? h : best;
     if (depth(h) < depth(best)) return h;
-    if (depth(h) === depth(best) && isOrigin(h) && !isOrigin(best)) return h;
+    if (depth(h) > depth(best)) return best;
+    if (hFinish != null && bestFinish == null) return h;
+    if (hFinish == null && bestFinish != null) return best;
+    if (isOrigin(h) && !isOrigin(best)) return h;
+    if (h.id < best.id) return h;
     return best;
   });
 }
@@ -157,7 +185,12 @@ export function resolveRoute(
   if (!chosen) return null;
   const target: HostTarget = { baseUrl: chosen.url };
   if (chosen.apiKey) target.apiKey = chosen.apiKey;
-  return { hostId: chosen.id, label: chosen.label, target };
+  return {
+    hostId: chosen.id,
+    label: chosen.label,
+    target,
+    instanceId: chosen.instanceId ?? null,
+  };
 }
 
 /** Per-host `/api/models` snapshots, keyed by registry host id. */

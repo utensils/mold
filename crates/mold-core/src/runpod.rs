@@ -121,7 +121,7 @@ pub struct GpuType {
     #[serde(rename = "gpuId", default)]
     pub gpu_id: String,
     #[serde(rename = "memoryInGb", default)]
-    pub memory_in_gb: u32,
+    pub memory_in_gb: Option<u32>,
     #[serde(rename = "secureCloud", default)]
     pub secure_cloud: bool,
     #[serde(rename = "communityCloud", default)]
@@ -130,6 +130,72 @@ pub struct GpuType {
     pub stock_status: Option<String>,
     #[serde(default)]
     pub available: bool,
+}
+
+impl GpuType {
+    /// Provider identity accepted by the Pod API. GraphQL normally supplies
+    /// `id`; older/alternate inventory shapes may supply `gpuId` instead.
+    pub fn authoritative_type_id(&self) -> Option<&str> {
+        self.id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                let gpu_id = self.gpu_id.trim();
+                (!gpu_id.is_empty()).then_some(gpu_id)
+            })
+    }
+
+    /// Allocation identity accepted by the Pod API. Provider IDs remain
+    /// authoritative; display-name inference exists only for legacy inventory
+    /// shapes that omitted both provider identity fields.
+    pub fn allocation_type_id(&self) -> Option<&str> {
+        self.authoritative_type_id().or_else(|| {
+            let legacy_id = legacy_gpu_type_id_from_display_name(&self.display_name);
+            (!legacy_id.is_empty()).then_some(legacy_id)
+        })
+    }
+}
+
+/// Legacy RunPod inventory exposed a human display label without an allocation
+/// ID. Keep this mapping centralized so every launcher makes the same fallback.
+pub fn legacy_gpu_type_id_from_display_name(display_name: &str) -> &str {
+    match display_name.trim() {
+        "RTX 4090" => "NVIDIA GeForce RTX 4090",
+        "RTX 5090" => "NVIDIA GeForce RTX 5090",
+        "RTX 3090" => "NVIDIA GeForce RTX 3090",
+        "L40S" => "NVIDIA L40S",
+        "L40" => "NVIDIA L40",
+        "A100 PCIe" => "NVIDIA A100 80GB PCIe",
+        "A100 SXM" => "NVIDIA A100-SXM4-80GB",
+        "H100 SXM" => "NVIDIA H100 80GB HBM3",
+        "H100 NVL" => "NVIDIA H100 NVL",
+        "RTX A6000" => "NVIDIA RTX A6000",
+        other => other,
+    }
+}
+
+pub fn normalized_gpu_type_identity(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+pub fn canonical_supported_gpu_type_id<'a>(
+    supported_gpu_ids: &'a HashSet<String>,
+    candidate_id: &str,
+) -> Option<&'a str> {
+    let candidate = normalized_gpu_type_identity(candidate_id);
+    if candidate.is_empty() {
+        return None;
+    }
+    supported_gpu_ids
+        .iter()
+        .filter(|supported| normalized_gpu_type_identity(supported) == candidate)
+        .map(String::as_str)
+        .min()
 }
 
 /// One entry from `GET /datacenters`.
@@ -812,24 +878,11 @@ fn truncate_for_error(s: &str) -> String {
 
 /// Map a RunPod GPU `displayName` (e.g. `"RTX 4090"`) to the matching
 /// `ghcr.io/utensils/mold` image tag.
-pub fn image_tag_for_gpu(display_name: &str) -> &'static str {
-    let d = display_name.to_lowercase();
-    if d.contains("5090") || d.contains("rtx pro") || d.contains("blackwell") || d.contains("b200")
-    {
-        "latest-sm120"
-    } else if d.contains("h100")
-        || d.contains("h200")
-        || d.contains("gh200")
-        || d.contains("hopper")
-    {
-        "latest-sm90"
-    } else if d.contains("a100") || d.contains("3090") || d.contains("a40") || d.contains("ampere")
-    {
-        "latest-sm80"
-    } else {
-        // Ada (4090, L40, L40S) and fallback
-        "latest"
-    }
+pub fn image_tag_for_gpu(
+    display_name: &str,
+    version: &str,
+) -> Result<String, crate::cuda_distribution::UnsupportedPublishedImagePlatform> {
+    crate::cuda_distribution::image_tag_for_gpu_name(display_name, version)
 }
 
 /// Ranked preference when auto-picking GPUs. Higher index = more preferred.
@@ -847,18 +900,155 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gpu_type_authority_prefers_id_then_gpu_id_and_rejects_blank_values() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  primary-id  ",
+            "gpuId": "  alternate-id  ",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), Some("primary-id"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "  alternate-id  ",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), Some("alternate-id"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "\t",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), None);
+    }
+
+    #[test]
+    fn gpu_type_allocation_identity_uses_display_only_as_legacy_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "\t",
+            "displayName": "  RTX 5090 "
+        }))
+        .unwrap();
+        assert_eq!(gpu.allocation_type_id(), Some("NVIDIA GeForce RTX 5090"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": " provider-id ",
+            "gpuId": "alternate-id",
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        assert_eq!(gpu.allocation_type_id(), Some("provider-id"));
+    }
+
+    #[test]
+    fn gpu_type_memory_preserves_missing_and_present_zero() {
+        let missing: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        let zero: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "RTX 5090",
+            "memoryInGb": 0
+        }))
+        .unwrap();
+        assert_eq!(missing.memory_in_gb, None);
+        assert_eq!(zero.memory_in_gb, Some(0));
+    }
+
+    #[test]
+    fn supported_gpu_identity_matching_normalizes_case_and_whitespace() {
+        let supported = ["NVIDIA A100-SXM4-80GB".to_string()].into_iter().collect();
+        assert_eq!(
+            canonical_supported_gpu_type_id(&supported, "  nvidia   a100-sxm4-80gb "),
+            Some("NVIDIA A100-SXM4-80GB")
+        );
+        assert!(canonical_supported_gpu_type_id(&supported, " \t ").is_none());
+    }
+
+    #[test]
     fn image_tag_mapping() {
-        assert_eq!(image_tag_for_gpu("RTX 4090"), "latest");
-        assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 4090"), "latest");
-        assert_eq!(image_tag_for_gpu("L40S"), "latest");
-        assert_eq!(image_tag_for_gpu("RTX 5090"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 5090"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("RTX PRO 4500"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("A100 80GB"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("A100 PCIe"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
-        assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("RTX 4090", "latest").unwrap(), "latest");
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA GeForce RTX 4090", "0.10.0").unwrap(),
+            "0.10.0"
+        );
+        assert_eq!(image_tag_for_gpu("L40S", "latest").unwrap(), "latest");
+        assert_eq!(
+            image_tag_for_gpu("RTX 5090", "latest").unwrap(),
+            "latest-sm120"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA GeForce RTX 5090", "0.10.0").unwrap(),
+            "0.10.0-sm120"
+        );
+        assert_eq!(
+            image_tag_for_gpu("RTX PRO 4500", "latest").unwrap(),
+            "latest-sm120"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA B200", "latest").unwrap(),
+            "latest-sm100"
+        );
+        assert!(image_tag_for_gpu("NVIDIA GB200", "0.10.0").is_err());
+        assert_eq!(
+            image_tag_for_gpu("A100 80GB", "latest").unwrap(),
+            "latest-sm80"
+        );
+        assert_eq!(
+            image_tag_for_gpu("A100 PCIe", "latest").unwrap(),
+            "latest-sm80"
+        );
+        assert_eq!(
+            image_tag_for_gpu("RTX 3090", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA A40", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("H100 SXM", "latest").unwrap(),
+            "latest-sm90"
+        );
+        assert_eq!(
+            image_tag_for_gpu("H200 SXM", "latest").unwrap(),
+            "latest-sm90"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA A10", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA RTX A6000", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA A16", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA A2", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA A30", "latest").unwrap(),
+            "latest-sm80"
+        );
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA B300", "latest").unwrap(),
+            "latest-sm100"
+        );
+        assert!(image_tag_for_gpu("NVIDIA GB300", "latest").is_err());
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA Blackwell", "latest").unwrap(),
+            "latest",
+            "generic Blackwell must not guess between incompatible targets"
+        );
     }
 
     #[test]

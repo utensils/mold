@@ -207,12 +207,56 @@ pub(crate) fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str
 /// `None` the inner peak retains the existing 2 GB
 /// `MEMORY_BUDGET_HEADROOM` constant from `estimate_peak_memory` and no
 /// extra is added — equivalent to the pre-Tier-2.3 behavior.
+#[cfg(test)]
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     available_bytes: u64,
     hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    preflight_memory_guard_with_available_on_gpu(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        0,
+        hint,
+    )
+}
+
+pub(crate) fn preflight_memory_guard_with_available_on_gpu(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal);
+    preflight_memory_guard_with_available_and_policy(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        hint,
+        forced_offload,
+        gemma_competes,
+    )
+}
+
+pub(crate) fn preflight_memory_guard_with_available_and_policy(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    hint: Option<ActivationHint>,
+    forced_offload: bool,
+    gemma_competes: bool,
 ) -> Result<(), ApiError> {
     // Streaming-transformer families (LTX-Video / LTX-2) load only a couple
     // of transformer blocks onto GPU at a time via `new_streaming` — the
@@ -228,7 +272,7 @@ pub(crate) fn preflight_memory_guard_with_available(
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
     let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        && forced_offload)
         || large_flux_bf16_should_auto_offload(paths, hint);
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
     let qwen_quantized = qwen_family
@@ -237,7 +281,14 @@ pub(crate) fn preflight_memory_guard_with_available(
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let peak = base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    let peak = base_peak_memory_for_paths(
+        paths,
+        hint,
+        streaming,
+        flux_offload,
+        qwen_quantized,
+        gemma_competes,
+    );
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
@@ -270,6 +321,7 @@ fn base_peak_memory_for_paths(
     streaming: bool,
     flux_offload: bool,
     qwen_quantized: bool,
+    gemma_competes: bool,
 ) -> u64 {
     if streaming {
         // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
@@ -278,7 +330,6 @@ fn base_peak_memory_for_paths(
         // must not reject that recoverable path. Only an explicit same-GPU pin
         // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
         // the runtime will surface that OOM instead of rewriting the request.
-        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
         return streaming_transformer_peak(paths, gemma_competes);
     } else if flux_offload {
         return streaming_transformer_peak(paths, false);
@@ -416,29 +467,44 @@ fn qwen_image_quantized_sequential_peak(paths: &ModelPaths, hint: Option<Activat
 /// Whether preflight should count the LTX-2 Gemma prompt encoder against the
 /// transformer's GPU budget. Auto placement can recover from CUDA OOM by
 /// retrying the prompt path on CPU; explicit same-GPU placement cannot.
-fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
+pub(crate) fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
+    ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
+        mold_inference::runtime_env::value("MOLD_LTX2_GEMMA_DEVICE").as_deref(),
+        mold_inference::runtime_env::value("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").as_deref(),
+        gpu_ordinal,
+    )
+}
+
+fn ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
+    primary: Option<&str>,
+    legacy_force_cpu: Option<&str>,
+    gpu_ordinal: usize,
+) -> bool {
     matches!(
-        mold_inference::device::resolve_ltx2_gemma_device_override(gpu_ordinal),
+        mold_inference::device::resolve_ltx2_gemma_device_override_from_values(
+            primary,
+            legacy_force_cpu,
+            gpu_ordinal,
+        ),
         Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal)) if ordinal == gpu_ordinal
     )
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
 ///
-/// Budgeting strategy on CUDA:
-/// - **No active model on this GPU** — the new load lands in whatever is
-///   currently free, so use `free_vram_bytes(gpu_ordinal)`.
-/// - **Active model present** — the call site unloads it and runs
-///   `cuDevicePrimaryCtxReset_v2`, which releases *every* allocation on the
-///   device (transformer, leftover activation buffers, fragmentation in the
-///   caching pool). The realistic post-reclaim budget is total VRAM, not
-///   `free + recorded active_vram`. Using the latter under-counts whatever
-///   the cache forgot to track (notably the encoder churn during the
-///   previous generation) and produces false rejections.
+/// CUDA uses the current reserve-adjusted free reading plus only the active
+/// model footprint that the caller is about to drop. Driver workspaces,
+/// allocator fragmentation, retained live handles, and external allocations
+/// are deliberately not promoted back to total capacity.
 ///
-/// On macOS (unified memory) we keep the additive `available + active_vram`
-/// budget because Metal has no equivalent device-wide context reset; tensors
-/// freed during `unload()` simply return to the system page cache.
+/// Callers perform a second guard with an actual post-drop sample before
+/// allocating the replacement model. The first pass preserves the old model
+/// when the request is obviously infeasible; the second catches an optimistic
+/// recorded footprint or unrecovered "ghost" VRAM.
+///
+/// On macOS (unified memory) the same additive `available + active_vram`
+/// budget applies because tensors freed during `unload()` return to the
+/// system page cache.
 /// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard(
     model_name: &str,
@@ -447,103 +513,116 @@ pub(crate) fn preflight_memory_guard(
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
-    // CUDA branch: when an active model will be reclaimed via primary-context
-    // reset, the post-reclaim budget is the device total, not free+active.
     #[cfg(feature = "cuda")]
     {
-        if active_vram_bytes > 0 {
-            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return preflight_memory_guard_with_available(model_name, paths, 0, total, hint);
-            }
-        }
-        // Ghost-VRAM case: no active model in our cache, but the device
-        // reports `free` significantly below `total` because cuBLAS / cuDNN /
-        // kernel modules from a previous load are still squatting on
-        // workspace allocations. Reclaim the primary context — we have
-        // nothing live to lose — and re-query before deciding. After reclaim,
-        // re-query through `usable_free_vram_bytes` so the OS reserve
-        // (T2-B) is respected on the post-reclaim reading too.
-        if let (Some(free), Some(total)) = (
-            mold_inference::device::free_vram_bytes(gpu_ordinal),
-            mold_inference::device::total_vram_bytes(gpu_ordinal),
-        ) {
-            const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
-            if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
-                tracing::info!(
-                    gpu = gpu_ordinal,
-                    free_gb = format_args!("{:.1}", free as f64 / 1e9),
-                    total_gb = format_args!("{:.1}", total as f64 / 1e9),
-                    "no active model on this GPU but VRAM is held — reclaiming primary context",
+        let effective_free = authoritative_cuda_available(
+            mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
+        )?;
+        preflight_memory_guard_with_available_on_gpu(
+            model_name,
+            paths,
+            active_vram_bytes,
+            effective_free,
+            gpu_ordinal,
+            hint,
+        )
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        // macOS unified memory: query system memory and add reclaimable footprint.
+        if let Some(available) = mold_inference::device::available_system_memory_bytes() {
+            if available > 0 {
+                return preflight_memory_guard_with_available_on_gpu(
+                    model_name,
+                    paths,
+                    active_vram_bytes,
+                    available,
+                    gpu_ordinal,
+                    hint,
                 );
-                mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
             }
-            let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
-                .unwrap_or_else(|| {
-                    free.saturating_sub(mold_inference::device::reserved_vram_bytes())
-                });
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                effective_free,
-                hint,
-            );
         }
-        // Fallback if total_vram is unavailable: still go through the
-        // reserve-adjusted reading.
-        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                free,
-                hint,
-            );
-        }
-    }
 
-    // macOS unified memory: query system memory and add reclaimable footprint.
-    if let Some(available) = mold_inference::device::available_system_memory_bytes() {
-        if available > 0 {
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                available,
-                hint,
-            );
-        }
+        // No memory info available on this platform — skip the guard.
+        Ok(())
     }
+}
 
-    // No memory info available on this platform — skip the guard.
-    Ok(())
+/// Re-check a load against the driver's actual free-memory reading after the
+/// previous engine and all of its device-backed state have been dropped.
+///
+/// This is the authoritative swap gate. It intentionally passes no
+/// reclaimable active footprint: anything the driver still reports as used is
+/// unavailable pressure, regardless of whether Mold expected the drop to
+/// release it.
+pub(crate) fn preflight_memory_guard_after_drop(
+    model_name: &str,
+    paths: &ModelPaths,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    #[cfg(feature = "cuda")]
+    {
+        let available = authoritative_cuda_available(
+            mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
+        )?;
+        preflight_memory_guard_with_available_on_gpu(
+            model_name,
+            paths,
+            0,
+            available,
+            gpu_ordinal,
+            hint,
+        )
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Metal's unified-memory admission already used available system
+        // memory plus the active engine's reclaimable footprint in the first
+        // guard. A second instantaneous sample after `unload()` can lag page
+        // reclamation and falsely reject a swap.
+        let _ = (model_name, paths, gpu_ordinal, hint);
+        Ok(())
+    }
 }
 
 /// Effective memory budget to use when deciding whether a server engine can
 /// stay eager-loaded or should degrade to load-use-drop sequential mode.
 ///
-/// This mirrors the budget shape in [`preflight_memory_guard`]: CUDA swaps can
-/// reclaim the whole primary context when an active model exists, while Metal
-/// uses unified system memory and adds the active footprint as reclaimable.
+/// This mirrors the budget shape in [`preflight_memory_guard`]: current free
+/// memory plus the explicitly tracked active footprint that will be dropped.
 pub(crate) fn effective_load_available_bytes(
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
-) -> Option<u64> {
+) -> Result<Option<u64>, ApiError> {
     #[cfg(feature = "cuda")]
     {
-        if active_vram_bytes > 0 {
-            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return Some(total);
-            }
-        }
-        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return Some(free);
-        }
+        let free = authoritative_cuda_available(
+            mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
+        )?;
+        Ok(Some(free.saturating_add(active_vram_bytes)))
     }
 
-    mold_inference::device::available_system_memory_bytes()
+    #[cfg(not(feature = "cuda"))]
+    Ok(mold_inference::device::available_system_memory_bytes()
         .filter(|available| *available > 0)
-        .map(|available| available.saturating_add(active_vram_bytes))
+        .map(|available| available.saturating_add(active_vram_bytes)))
+}
+
+#[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
+fn authoritative_cuda_available(
+    sample: Result<u64, mold_inference::device::DeviceMemoryError>,
+) -> Result<u64, ApiError> {
+    sample.map_err(|error| {
+        if error.is_fatal_cuda() {
+            ApiError::internal(error.to_string())
+        } else {
+            ApiError::insufficient_memory(format!(
+                "GPU memory admission blocked because current free VRAM could not be measured: {error}"
+            ))
+        }
+    })
 }
 
 /// Choose the server load strategy for the current memory budget.
@@ -629,18 +708,18 @@ pub(crate) fn select_server_load_strategy_for_device(
     ) {
         (Some(available), Some(total)) => Some(available.min(total)),
         (available, None) => available,
-        (None, Some(total)) => Some(total),
+        (None, Some(_)) => None,
     };
 
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
 
-pub(crate) fn server_offload_enabled_for_paths(
+pub(crate) fn server_offload_enabled_for_paths_with_request(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
+    forced_offload: bool,
 ) -> bool {
-    let forced_offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let transformer_path = transformer_path_lower(paths);
     let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
     let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
@@ -683,14 +762,44 @@ pub(crate) fn server_offload_enabled_for_paths(
     forced_offload || large_flux_bf16_should_auto_offload(paths, hint)
 }
 
+pub(crate) fn server_offload_enabled_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    server_offload_enabled_for_paths_with_request(paths, hint, request_has_lora, forced_offload)
+}
+
 pub(crate) fn request_requires_fresh_engine_for_offload_policy(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
 ) -> bool {
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    request_requires_fresh_engine_for_offload_policy_with_request(
+        paths,
+        hint,
+        request_has_lora,
+        forced_offload,
+    )
+}
+
+pub(crate) fn request_requires_fresh_engine_for_offload_policy_with_request(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+    forced_offload: bool,
+) -> bool {
     request_has_lora
-        && server_offload_enabled_for_paths(paths, hint, false)
-        && !server_offload_enabled_for_paths(paths, hint, true)
+        && server_offload_enabled_for_paths_with_request(paths, hint, false, forced_offload)
+        && !server_offload_enabled_for_paths_with_request(paths, hint, true, forced_offload)
 }
 
 pub(crate) struct GenerationMemoryBudget {
@@ -698,37 +807,74 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) activation_memory_bytes: u64,
     pub(crate) available_memory_bytes: Option<u64>,
     pub(crate) load_strategy: mold_inference::LoadStrategy,
+    pub(crate) block_offload: bool,
+    pub(crate) under_memory_pressure: bool,
     pub(crate) fits_available_memory: Option<bool>,
 }
 
+/// Resolve one generation's memory/load policy against an explicit sampled
+/// free-memory budget.
+///
+/// This is deliberately pure: scheduler candidates pass their own
+/// `DeviceFact::available_vram_bytes`, while legacy diagnostics may pass
+/// `None` when no authoritative sample exists. It never queries device zero
+/// and never substitutes total VRAM for missing free VRAM.
 pub(crate) fn estimate_generation_memory_for_request(
     req: &GenerateRequest,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
+    available_memory_bytes: Option<u64>,
+    forced_offload: bool,
+    request_has_lora: bool,
+    gemma_competes: bool,
 ) -> GenerationMemoryBudget {
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
-        || large_flux_bf16_should_auto_offload(paths, hint);
+    let block_offload = server_offload_enabled_for_paths_with_request(
+        paths,
+        hint,
+        request_has_lora,
+        forced_offload,
+    );
+    let flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit) && block_offload;
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && transformer_path_is_gguf(paths);
-    let base_peak =
-        base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    let base_peak = base_peak_memory_for_paths(
+        paths,
+        hint,
+        streaming,
+        flux_offload,
+        qwen_quantized,
+        gemma_competes,
+    );
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
-    let available = effective_load_available_bytes(0, 0);
-    let load_strategy = select_server_load_strategy_for_budget(paths, available, hint);
-    let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
+    let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
+    let load_strategy = select_server_load_strategy_for_budget(paths, available_memory_bytes, hint);
+    let eager_peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
+            .saturating_add(activation);
+    let under_memory_pressure = available_memory_bytes
+        .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
+    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let fits_available_memory = available_memory_bytes.map(|available| {
+        if qwen_family {
+            peak <= available
+        } else {
+            peak <= available.saturating_mul(9) / 10
+        }
+    });
 
     GenerationMemoryBudget {
         peak_memory_bytes: peak,
         activation_memory_bytes: activation,
-        available_memory_bytes: available,
+        available_memory_bytes,
         load_strategy,
-        fits_available_memory: fits,
+        block_offload,
+        under_memory_pressure,
+        fits_available_memory,
     }
 }
 
@@ -786,4 +932,50 @@ fn request_sensitive_activation_memory(
         .map(|loras| loras.len())
         .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
     activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_gemma_gpu_policy_tracks_the_assigned_worker_ordinal() {
+        assert!(ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("gpu"), None, 1));
+        assert!(ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("gpu"), None, 7));
+        assert!(
+            !ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("cpu"), None, 1)
+        );
+    }
+
+    #[test]
+    fn unavailable_cuda_sample_blocks_admission_with_typed_api_error() {
+        let error = authoritative_cuda_available(Err(
+            mold_inference::device::DeviceMemoryError::Unavailable {
+                operation: "free VRAM query",
+                message: "injected unavailable sample".to_string(),
+            },
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, "INSUFFICIENT_MEMORY");
+        assert!(
+            error.error.contains("admission blocked"),
+            "got: {}",
+            error.error
+        );
+    }
+
+    #[test]
+    fn fatal_cuda_sample_is_not_downgraded_to_memory_pressure() {
+        let error = authoritative_cuda_available(Err(
+            mold_inference::device::DeviceMemoryError::FatalCuda {
+                operation: "device synchronize",
+                message: "CUDA_ERROR_ILLEGAL_ADDRESS".to_string(),
+            },
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error.error.contains("fatal CUDA error"));
+    }
 }

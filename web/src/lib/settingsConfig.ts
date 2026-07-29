@@ -7,6 +7,7 @@ export interface ConfigRow {
   source: ConfigSource;
   profile?: string | null;
   env_var?: string | null;
+  restart_required?: boolean;
 }
 
 export interface ConfigProfiles {
@@ -84,6 +85,9 @@ export interface ConfigSchema {
   max?: number;
   step?: number;
   options?: string[];
+  /** Visible over the live API but only editable before `mold serve` starts. */
+  liveReadOnly?: boolean;
+  needsEngineRestart?: boolean;
 }
 
 export const CONFIG_SECTIONS: ConfigSection[] = [
@@ -105,8 +109,9 @@ export const CONFIG_SCHEMAS: ConfigSchema[] = [
     key: "output_dir",
     section: "Storage & server",
     label: "Output directory",
-    help: "Where finished prints are written on this host.",
+    help: "Where finished prints are written. Startup-only while mold serve is running; stop it, run `mold config set output_dir <path>`, then restart.",
     editor: "text",
+    liveReadOnly: true,
   },
   {
     key: "server_port",
@@ -247,6 +252,36 @@ export const CONFIG_SCHEMAS: ConfigSchema[] = [
     help: "Let the expansion model reason before writing.",
     editor: "toggle",
   },
+  {
+    key: "scheduler.replan_debounce_ms",
+    section: "Advanced",
+    label: "Queue replan debounce",
+    help: "Delay after the latest queue change before globally optimizing the plan.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
+  {
+    key: "scheduler.replan_max_delay_ms",
+    section: "Advanced",
+    label: "Maximum replan delay",
+    help: "Maximum delay from the first unplanned queue change.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
+  {
+    key: "scheduler.warm_wait_max_ms",
+    section: "Advanced",
+    label: "Maximum warm-model wait",
+    help: "Longest beneficial wait for a compatible warm model.",
+    editor: "number",
+    min: 0,
+    max: 30000,
+    needsEngineRestart: true,
+  },
 ];
 
 const SCHEMA_BY_KEY = new Map(
@@ -288,6 +323,7 @@ export function canResetConfig(key: string): boolean {
   if (
     key.startsWith("expand.") ||
     key.startsWith("generate.") ||
+    key.startsWith("scheduler.") ||
     key.startsWith("model_prefs.")
   ) {
     return true;

@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { nextTick, ref } from "vue";
+import { nextTick, reactive, ref } from "vue";
 import type {
   HostCapabilities,
   HostStatus,
@@ -11,12 +11,15 @@ import type {
   QueueEntry,
   ResourceSnapshot,
 } from "../types";
-import { addHost, getHost } from "../lib/hostRegistry";
+import { addHost, getHost, updateHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
+import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 // Mutable fixtures the hostClient mock reads at call time.
 let poll: {
   status: ReturnType<typeof ref<HostStatus | null>>;
+  devices: ReturnType<typeof ref<DeviceInfo[] | null>>;
+  deviceState: ReturnType<typeof ref<DeviceListResponse | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
@@ -39,17 +42,34 @@ const cancelAllHostQueue = vi.fn().mockResolvedValue(undefined);
 const routerPush = vi.fn().mockResolvedValue(undefined);
 const requestConfirm = vi.hoisted(() => vi.fn(async () => true));
 const requestText = vi.hoisted(() => vi.fn(async () => "Render box"));
+const setDeviceEnabled = vi.hoisted(() =>
+  vi.fn(async (_target: unknown, _id: string, enabled: boolean) =>
+    makeDevice(0, {
+      desired_enabled: enabled,
+      admin_state: enabled ? "enabled" : "draining",
+    }),
+  ),
+);
+
+vi.mock("@studio/api/devices", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/devices")>()),
+  setDeviceEnabled,
+}));
+const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
+const hostCapabilitiesCall = vi.hoisted(() => vi.fn());
+const hostQueueCall = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/toasts", () => ({
   toast: vi.fn(),
   requestConfirm,
   requestText,
 }));
+vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
-const routeHolder = { id: "origin" };
+const routeHolder = reactive({ id: "origin" });
 
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ params: { id: routeHolder.id } }),
+  useRoute: () => ({ params: routeHolder }),
   useRouter: () => ({ push: routerPush }),
   RouterLink: {
     name: "RouterLink",
@@ -60,8 +80,10 @@ vi.mock("vue-router", () => ({
 
 vi.mock("../components/machines/hostClient", () => ({
   useHostPoll: () => poll,
-  hostCapabilities: () => Promise.resolve(caps),
-  hostQueue: () => Promise.resolve({ entries: queueEntries }),
+  hostCapabilities: (...args: unknown[]) => hostCapabilitiesCall(...args),
+  hostQueue: (...args: unknown[]) => hostQueueCall(...args),
+  setHostDeviceEnabled: () =>
+    Promise.resolve({ devices: poll.devices.value ?? [], plan_version: 0 }),
   hostModels: () => Promise.resolve(models),
   hostDownloads: () => Promise.resolve(downloadsListing),
   // Wrappers defer reading the vi.fns until call time (the factory is hoisted
@@ -122,6 +144,47 @@ function makeResources(over: Partial<ResourceSnapshot> = {}): ResourceSnapshot {
   };
 }
 
+function makeDevice(
+  ordinal: number,
+  overrides: Partial<DeviceInfo> = {},
+): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
+
 function queued(id: string, position: number): QueueEntry {
   return {
     id,
@@ -133,6 +196,14 @@ function queued(id: string, position: number): QueueEntry {
 }
 
 let wrapper: ReturnType<typeof mount> | null = null;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 async function mountDetail() {
   wrapper = mount(HostDetailPage);
   await flushPromises();
@@ -142,9 +213,21 @@ async function mountDetail() {
 
 beforeEach(() => {
   localStorage.clear();
-  const host = addHost({ url: "192.168.1.20:7680", name: "Studio" });
+  const host = addHost({
+    url: "192.168.1.20:7680",
+    name: "Studio",
+    apiKey: "secret",
+  });
   routeHolder.id = host.id;
-  caps = { queue: { can_reorder: false } };
+  caps = {
+    queue: { can_reorder: false },
+    devices: { available: true, lifecycle: true, restart_enable: false },
+    dispatch: {
+      active_mode: "v2",
+      v2_authoritative: true,
+      observes_v2_decisions: false,
+    },
+  };
   queueEntries = [];
   models = [];
   downloadsListing = { active: null, active_jobs: [], queued: [], history: [] };
@@ -154,11 +237,21 @@ beforeEach(() => {
   pauseHostQueue.mockClear();
   resumeHostQueue.mockClear();
   cancelAllHostQueue.mockClear();
+  setDeviceEnabled.mockClear();
   routerPush.mockClear();
   requestConfirm.mockReset().mockResolvedValue(true);
   requestText.mockReset().mockResolvedValue("Render box");
+  subscribeToDeviceSnapshots.mockClear();
+  hostCapabilitiesCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve(caps));
+  hostQueueCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve({ entries: queueEntries }));
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
+    devices: ref<DeviceInfo[] | null>(null),
+    deviceState: ref<DeviceListResponse | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
     lastSeen: ref<number | null>(Date.now()),
@@ -175,6 +268,185 @@ afterEach(() => {
 });
 
 describe("HostDetailPage — telemetry", () => {
+  it("subscribes with the viewed host key and refreshes authoritative state", async () => {
+    const host = getHost(routeHolder.id)!;
+    updateHost(routeHolder.id, { apiKey: "host-key" });
+    await mountDetail();
+
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+    const [target, _signal, refresh] =
+      subscribeToDeviceSnapshots.mock.calls[0]!;
+    expect(target).toEqual({ baseUrl: host.url, apiKey: "host-key" });
+    refresh();
+    expect(poll.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts queue refresh and SSE without waiting for a stalled capability probe", async () => {
+    hostCapabilitiesCall.mockImplementation(() => new Promise(() => {}));
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+
+    expect(hostQueueCall).toHaveBeenCalledTimes(1);
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+  });
+
+  it("threads the active session signal through interval and SSE reloads", async () => {
+    vi.useFakeTimers();
+    try {
+      wrapper = mount(HostDetailPage);
+      await nextTick();
+      await Promise.resolve();
+      const sessionSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+      const refresh = subscribeToDeviceSnapshots.mock
+        .calls[0]![2] as () => void;
+
+      hostQueueCall.mockClear();
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+
+      hostQueueCall.mockClear();
+      refresh();
+      await Promise.resolve();
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+      expect(sessionSignal.aborted).toBe(false);
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores an older same-host queue response after a newer event refresh", async () => {
+    const older = deferred<{ entries: QueueEntry[] }>();
+    const newer = deferred<{ entries: QueueEntry[] }>();
+    hostQueueCall
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await Promise.resolve();
+
+    newer.resolve({ entries: [queued("newer", 0)] });
+    await flushPromises();
+    older.resolve({ entries: [queued("older", 0)] });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("flux-newer");
+    expect(wrapper.text()).not.toContain("flux-older");
+  });
+
+  it("cancels and rebinds capabilities, queue polling, and SSE on route changes", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "first-key" });
+    const second = addHost({
+      url: "192.168.1.21:7680",
+      name: "Second",
+      apiKey: "second-key",
+    });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    routeHolder.id = second.id;
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: second.id,
+        url: second.url,
+        apiKey: "second-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: second.id, apiKey: "second-key" }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: second.url,
+      apiKey: "second-key",
+    });
+  });
+
+  it("cancels and rebinds the same host when its URL or API key rotates", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "old-key" });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    updateHost(first.id, {
+      url: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+  });
+
+  it("aborts the active host session and SSE subscription on unmount", async () => {
+    const w = await mountDetail();
+    const capabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const queueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+    const sseSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+
+    w.unmount();
+    wrapper = null;
+
+    expect(capabilitySignal.aborted).toBe(true);
+    expect(queueSignal.aborted).toBe(true);
+    expect(sseSignal.aborted).toBe(true);
+  });
+
   it("maps the resource snapshot into the telemetry card", async () => {
     const w = await mountDetail();
     expect(w.get('[data-test="machine-detail-title"]').text()).toBe("Studio");
@@ -300,6 +572,187 @@ describe("HostDetailPage — queue", () => {
     });
     const w = await mountDetail();
     expect(w.find('[data-test="queue-lane"]').exists()).toBe(true);
+  });
+
+  it("preserves non-contiguous schedulable ordinals in queue lane options", async () => {
+    queueEntries = [queued("a", 0)];
+    poll.devices.value = [makeDevice(1), makeDevice(3)];
+
+    const w = await mountDetail();
+    const options = w
+      .get('[data-test="queue-lane"]')
+      .findAll("option")
+      .map((option) => option.attributes("value"));
+
+    expect(options).toEqual(["", "1", "3"]);
+  });
+
+  it("does not build queue lanes from explicitly non-routable workers", async () => {
+    queueEntries = [queued("a", 0)];
+    poll.status.value = makeStatus({
+      gpu_info: {
+        name: "excluded GPU",
+        vram_total_mb: 24576,
+        vram_used_mb: 0,
+      },
+      gpus: [
+        {
+          ordinal: 0,
+          name: "excluded GPU 0",
+          vram_total_bytes: 24_000_000_000,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+        {
+          ordinal: 1,
+          name: "excluded GPU 1",
+          vram_total_bytes: 24_000_000_000,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+    });
+    poll.devices.value = [
+      makeDevice(0, {
+        admin_state: "startup_excluded",
+        desired_enabled: false,
+        schedulable: false,
+      }),
+      makeDevice(1, {
+        admin_state: "disabled",
+        desired_enabled: false,
+        schedulable: false,
+      }),
+    ];
+
+    const w = await mountDetail();
+
+    expect(w.find('[data-test="queue-lane"]').exists()).toBe(false);
+  });
+
+  it("renders all eight devices and their lifecycle states", async () => {
+    poll.devices.value = Array.from({ length: 8 }, (_, ordinal) =>
+      makeDevice(ordinal, {
+        desired_enabled: ordinal < 6,
+        admin_state:
+          ordinal === 5
+            ? "draining"
+            : ordinal === 6
+              ? "disabled"
+              : ordinal === 7
+                ? "starting"
+                : "enabled",
+        schedulable: ordinal < 5,
+      }),
+    );
+
+    const w = await mountDetail();
+
+    expect(w.findAll('[data-test="device-card"]')).toHaveLength(8);
+    expect(w.text()).toContain("Finishing current work");
+    expect(w.text()).toContain("disabled");
+    expect(w.text()).toContain("Starting");
+  });
+
+  it("mutates the owning host with its API key and refreshes device state", async () => {
+    poll.devices.value = [makeDevice(0)];
+    const w = await mountDetail();
+
+    await w.get('[data-test="device-toggle-0"]').trigger("click");
+    await flushPromises();
+
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: expect.any(String),
+        apiKey: "secret",
+      }),
+      "cuda:0",
+      false,
+    );
+    expect(poll.refresh).toHaveBeenCalled();
+  });
+
+  it("does not let an older mutation clear a newer device's busy state", async () => {
+    poll.devices.value = [makeDevice(0), makeDevice(1)];
+    const first = deferred<DeviceInfo>();
+    const second = deferred<DeviceInfo>();
+    setDeviceEnabled.mockImplementation((_target: unknown, id: string) =>
+      id === "cuda:0" ? first.promise : second.promise,
+    );
+    const w = await mountDetail();
+
+    await w.get('[data-test="device-toggle-0"]').trigger("click");
+    await w.get('[data-test="device-toggle-1"]').trigger("click");
+    expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    first.resolve(makeDevice(0, { desired_enabled: false }));
+    await flushPromises();
+    expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    second.resolve(makeDevice(1, { desired_enabled: false }));
+    await flushPromises();
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("gates legacy live controls and offers only restart recovery", async () => {
+    caps = {
+      queue: { can_reorder: false },
+      devices: { available: true, lifecycle: false, restart_enable: true },
+      dispatch: {
+        active_mode: "legacy",
+        v2_authoritative: false,
+        observes_v2_decisions: false,
+      },
+    };
+    poll.devices.value = [
+      makeDevice(0),
+      makeDevice(1, {
+        desired_enabled: false,
+        admin_state: "disabled",
+        schedulable: false,
+      }),
+      makeDevice(2, {
+        desired_enabled: true,
+        restart_required: true,
+        health: "unavailable",
+        schedulable: false,
+        unschedulable_reason: "device_unavailable",
+      }),
+    ];
+    const w = await mountDetail();
+    expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    const recovery = w.get('[data-test="device-toggle-1"]');
+    expect(recovery.text()).toBe("Enable on restart");
+    await recovery.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "cuda:1",
+      true,
+    );
+    const pending = w.get('[data-test="device-toggle-2"]');
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).toContain(
+      "Restart required",
+    );
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).not.toContain(
+      "unavailable",
+    );
   });
 });
 

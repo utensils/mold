@@ -142,6 +142,19 @@ fn validate_cli_batch_for_family(family: Option<&str>, batch: u32) -> Result<()>
     Ok(())
 }
 
+fn validate_batch_stdout(batch: u32, piped: bool, output: &Option<String>) -> Result<()> {
+    if batch > 1 {
+        let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
+        if stdout_output {
+            anyhow::bail!(
+                "--batch with more than 1 output is not supported with stdout output. \
+                 Use --output <path> to save batch outputs to separate files."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Re-derive request defaults after an auto-pull refreshed the model
 /// config. `cli_*` carry the user's explicit flags — `None` means the
 /// field was defaulted at request-build time and must now track the
@@ -415,16 +428,7 @@ pub async fn run(
 
     let piped = is_piped();
 
-    // Reject batch > 1 when output goes to stdout (piped with no --output, or --output -)
-    if batch > 1 {
-        let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
-        if stdout_output {
-            anyhow::bail!(
-                "--batch with more than 1 image is not supported with stdout output. \
-                 Use --output <path> to save batch images to files."
-            );
-        }
-    }
+    validate_batch_stdout(batch, piped, &output)?;
 
     // Default to the source image size for img2img/inpainting when neither
     // dimension was provided. We still normalize to the validation envelope
@@ -670,8 +674,25 @@ pub async fn run(
             last_seed_used = response.seed_used;
             last_model = response.model.clone();
 
-            // Capture video from the last response (video models produce one clip per run)
-            if response.video.is_some() {
+            // Persist every successful clip before the next batch item can
+            // fail. The aggregate retains the last clip only for the common
+            // response shape; it is not the durability boundary.
+            if let Some(video) = response.video.as_ref() {
+                if batch > 1 {
+                    save_and_preview_video(
+                        video,
+                        &output,
+                        model,
+                        batch,
+                        i,
+                        preview,
+                        Some(PersistArgs {
+                            request: &iter_req,
+                            seed_used: response.seed_used,
+                            generation_time_ms: response.generation_time_ms,
+                        }),
+                    )?;
+                }
                 last_video = response.video;
             }
 
@@ -711,62 +732,26 @@ pub async fn run(
     // Output: video or image.
     if let Some(ref video) = response.video {
         // --- Video output ---
-        if piped && output.is_none() {
+        if batch > 1 {
+            // Batch clips were persisted per item before aggregation.
+        } else if piped && output.is_none() {
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(&video.data)?;
             stdout.flush()?;
         } else {
-            let filename = match output {
-                Some(ref path) if path == "-" => {
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&video.data)?;
-                    stdout.flush()?;
-                    None
-                }
-                Some(ref path) => Some(path.clone()),
-                None => Some(default_filename(
-                    model,
-                    mold_core::time::now_epoch_ms_u64(),
-                    video.format.extension(),
-                    1,
-                    0,
-                )),
-            };
-            if let Some(ref filename) = filename {
-                if std::path::Path::new(filename).exists() {
-                    status!("{} Overwriting: {}", theme::icon_alert(), filename);
-                }
-                std::fs::write(filename, &video.data)?;
-                status!(
-                    "{} Saved: {} ({} frames, {}x{}, {} fps)",
-                    theme::icon_done(),
-                    filename.bold(),
-                    video.frames,
-                    video.width,
-                    video.height,
-                    video.fps,
-                );
-                crate::metadata_db::record_local_save(
-                    std::path::Path::new(filename),
-                    &req,
-                    response.seed_used,
-                    response.generation_time_ms,
-                    video.format,
-                    Some((video.width, video.height)),
-                );
-            }
-            if preview {
-                // Show first frame preview (viuer doesn't support animation).
-                // Fallback to the video data itself for GIF/APNG/WebP (decodable
-                // as images) when thumbnail/gif_preview are absent (non-SSE path).
-                if !video.gif_preview.is_empty() {
-                    preview_image(&video.gif_preview);
-                } else if !video.thumbnail.is_empty() {
-                    preview_image(&video.thumbnail);
-                } else {
-                    preview_image(&video.data);
-                }
-            }
+            save_and_preview_video(
+                video,
+                &output,
+                model,
+                1,
+                0,
+                preview,
+                Some(PersistArgs {
+                    request: &req,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }),
+            )?;
         }
     } else {
         // --- Image output ---
@@ -1037,7 +1022,7 @@ async fn generate_remote_blocking(
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
-async fn prepare_local_engine(
+async fn prepare_local_request(
     req: &GenerateRequest,
     config: &Config,
     gpus: Option<String>,
@@ -1051,8 +1036,13 @@ async fn prepare_local_engine(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
-) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
-    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
+) -> Result<(
+    GenerateRequest,
+    mold_core::ModelPaths,
+    Config,
+    super::local_engine::EngineOverrides,
+)> {
+    use super::local_engine::{resolve_or_pull_model, EngineOverrides};
     use mold_core::validate_generate_request;
 
     let model_name = req.model.clone();
@@ -1084,21 +1074,16 @@ async fn prepare_local_engine(
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    let engine = build_local_engine(
-        &model_name,
-        paths,
-        &effective_config,
-        &EngineOverrides {
-            gpus,
-            t5_variant: t5_variant_override,
-            qwen3_variant: qwen3_variant_override,
-            qwen2_variant: qwen2_variant_override,
-            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
-            eager,
-            offload,
-        },
-    )?;
-    Ok((req, engine))
+    let overrides = EngineOverrides {
+        gpus,
+        t5_variant: t5_variant_override,
+        qwen3_variant: qwen3_variant_override,
+        qwen2_variant: qwen2_variant_override,
+        qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+        eager,
+        offload,
+    };
+    Ok((req, paths, effective_config, overrides))
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -1118,7 +1103,9 @@ async fn generate_local(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
-    let (req, mut engine) = prepare_local_engine(
+    let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let output_format = req.output_format.unwrap_or(OutputFormat::Png);
+    generate_local_batch(
         req,
         config,
         gpus,
@@ -1132,23 +1119,178 @@ async fn generate_local(
         cli_height,
         cli_steps,
         cli_guidance,
+        1,
+        base_seed,
+        None,
+        &None,
+        output_format,
+        false,
     )
-    .await?;
+    .await
+}
 
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
-    engine.set_on_progress(Box::new(move |event| {
-        let _ = tx.send(event.into());
-    }));
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+struct LocalOwnerPool {
+    command_txs: std::collections::BTreeMap<
+        usize,
+        std::sync::mpsc::SyncSender<Option<(u32, GenerateRequest)>>,
+    >,
+    workers: tokio::task::JoinSet<()>,
+    progress_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
 
-    let handle = tokio::task::spawn_blocking(move || {
-        engine.load()?;
-        engine.generate(&req)
-    });
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+impl LocalOwnerPool {
+    async fn shutdown_and_join(&mut self) -> Option<anyhow::Error> {
+        // Closing every sender is the shutdown signal. A blocking owner
+        // finishes its current request, observes Disconnected, clears the
+        // progress callback, and drops the engine on that same thread.
+        self.command_txs.clear();
+        let mut first_error = None;
+        while let Some(result) = self.workers.join_next().await {
+            if let Err(error) = result {
+                first_error.get_or_insert_with(|| error.into());
+            }
+        }
+        for render in self.progress_tasks.drain(..) {
+            if let Err(error) = render.await {
+                first_error.get_or_insert_with(|| error.into());
+            }
+        }
+        first_error
+    }
+}
 
-    let render = tokio::spawn(render_progress(rx));
-    let result = handle.await?;
-    let _ = render.await;
-    result
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+impl Drop for LocalOwnerPool {
+    fn drop(&mut self) {
+        // This is the panic/cancellation safety net. Normal and recoverable
+        // error paths call `shutdown_and_join`; Drop still closes the owner
+        // channels before aborting async wrappers. Tokio cannot synchronously
+        // join from Drop, but spawn_blocking owners retain no sender and
+        // therefore exit after their current request.
+        self.command_txs.clear();
+        self.workers.abort_all();
+        for task in &self.progress_tasks {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+fn local_batch_requests(
+    base: &GenerateRequest,
+    batch: u32,
+    base_seed: u64,
+    prompts: Option<&[String]>,
+) -> Vec<GenerateRequest> {
+    (0..batch)
+        .map(|index| {
+            let mut request = base.clone();
+            request.seed = Some(base_seed.wrapping_add(index as u64));
+            request.batch_size = 1;
+            if let Some(prompt) = prompts.and_then(|values| values.get(index as usize)) {
+                request.prompt = prompt.clone();
+            }
+            request
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+#[allow(clippy::too_many_arguments)]
+fn finalize_local_batch_outputs(
+    req: &GenerateRequest,
+    batch_requests: &[GenerateRequest],
+    mut completed: Vec<(u32, GenerateResponse)>,
+    first_error: Option<anyhow::Error>,
+    output: &Option<String>,
+    output_format: OutputFormat,
+    preview: bool,
+    persist_metadata: bool,
+    batch: u32,
+    base_seed: u64,
+) -> Result<GenerateResponse> {
+    completed.sort_by_key(|(index, _)| *index);
+    let successful_items = completed
+        .iter()
+        .map(|(index, _)| (index + 1).to_string())
+        .collect::<Vec<_>>();
+
+    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut last_video: Option<mold_core::VideoData> = None;
+    let mut total_time_ms = 0;
+    let mut last_seed_used = base_seed;
+    let mut last_model = String::new();
+
+    for (i, mut response) in completed {
+        total_time_ms += response.generation_time_ms;
+        last_seed_used = response.seed_used;
+        last_model = response.model.clone();
+        let item_request = batch_requests.get(i as usize).ok_or_else(|| {
+            anyhow::anyhow!("completed local batch item {} is out of range", i + 1)
+        })?;
+
+        if let Some(video) = response.video.as_ref() {
+            if batch > 1 {
+                save_and_preview_video(
+                    video,
+                    output,
+                    &req.model,
+                    batch,
+                    i,
+                    preview,
+                    persist_metadata.then_some(PersistArgs {
+                        request: item_request,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
+            }
+            last_video = response.video.take();
+        }
+
+        for mut img in response.images {
+            img.index = i;
+            if batch > 1 {
+                save_and_preview_image(
+                    &img,
+                    output,
+                    &req.model,
+                    batch,
+                    output_format,
+                    preview,
+                    persist_metadata.then_some(PersistArgs {
+                        request: item_request,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
+            }
+            all_images.push(img);
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error.context(format!(
+            "local batch preserved {} successful output item(s) ({}) with exact per-item prompt/seed provenance",
+            successful_items.len(),
+            if successful_items.is_empty() {
+                "none".to_string()
+            } else {
+                successful_items.join(", ")
+            }
+        )));
+    }
+
+    Ok(GenerateResponse {
+        images: all_images,
+        video: last_video,
+        generation_time_ms: total_time_ms,
+        model: last_model,
+        seed_used: last_seed_used,
+        gpu: None,
+    })
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -1174,7 +1316,12 @@ async fn generate_local_batch(
     output_format: OutputFormat,
     preview: bool,
 ) -> Result<GenerateResponse> {
-    let (base_req, mut engine) = prepare_local_engine(
+    use super::local_engine::{
+        apply_local_engine_env_overrides, build_local_engine_from_plan, plan_local_batch,
+        LocalBatchAdmission, LocalLease,
+    };
+
+    let (base_req, _paths, effective_config, overrides) = prepare_local_request(
         req,
         config,
         gpus,
@@ -1190,102 +1337,247 @@ async fn generate_local_batch(
         cli_guidance,
     )
     .await?;
+    apply_local_engine_env_overrides(
+        overrides.t5_variant.as_deref(),
+        overrides.qwen3_variant.as_deref(),
+        overrides.qwen2_variant.as_deref(),
+        overrides.qwen2_text_encoder_mode.as_deref(),
+    );
+    let local_plan = plan_local_batch(&base_req, &effective_config, &overrides).await?;
+    let mut admission = LocalBatchAdmission::new(
+        &local_plan.candidates,
+        batch as usize,
+        local_plan.host_headroom_bytes,
+    )?;
+    let batch_requests = local_batch_requests(&base_req, batch, base_seed, batch_prompts);
+    let mut planned_items = batch_requests
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, request)| Some((index as u32, request)))
+        .collect::<Vec<_>>();
 
-    engine = tokio::task::spawn_blocking(
-        move || -> Result<Box<dyn mold_inference::InferenceEngine>> {
-            let mut engine = engine;
-            engine.load()?;
-            Ok(engine)
-        },
-    )
-    .await??;
-
-    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-    let mut last_video: Option<mold_core::VideoData> = None;
-    let mut total_time_ms = 0;
-    let mut last_seed_used = base_seed;
-    let mut last_model = String::new();
-
-    for i in 0..batch {
-        let mut iter_req = base_req.clone();
-        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-        iter_req.batch_size = 1;
-
-        // Use per-batch expanded prompt if available
-        if let Some(prompts) = batch_prompts {
-            if let Some(p) = prompts.get(i as usize) {
-                iter_req.prompt = p.clone();
-            }
-        }
-
-        if batch > 1 {
-            status!(
-                "{} Generating image {}/{} (seed: {})",
-                theme::icon_info(),
-                i + 1,
-                batch,
-                iter_req.seed.unwrap(),
-            );
-        }
-
+    enum LocalOwnerEvent {
+        Ready(usize),
+        Completed(usize, u32, GenerateResponse),
+        Failed(usize, u32, anyhow::Error),
+        Crashed(usize, anyhow::Error),
+    }
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LocalOwnerEvent>();
+    let mut command_txs = std::collections::BTreeMap::new();
+    let mut workers = tokio::task::JoinSet::new();
+    let mut progress_tasks = Vec::new();
+    for (ordinal, execution_plan) in &local_plan.execution_plans {
+        let ordinal = *ordinal;
+        let config = effective_config.clone();
+        let execution_plan = execution_plan.clone();
+        let (command_tx, command_rx) =
+            std::sync::mpsc::sync_channel::<Option<(u32, GenerateRequest)>>(1);
+        command_txs.insert(ordinal, command_tx);
+        let event_tx = event_tx.clone();
+        let crash_tx = event_tx.clone();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
-        engine.set_on_progress(Box::new(move |event| {
-            let _ = tx.send(event.into());
-        }));
-
-        let handle = tokio::task::spawn_blocking(
-            move || -> Result<(Box<dyn mold_inference::InferenceEngine>, GenerateResponse)> {
-                let mut engine = engine;
-                let response = engine.generate(&iter_req)?;
-                Ok((engine, response))
-            },
-        );
         let render = tokio::spawn(render_progress(rx));
-        let (mut returned_engine, response) = handle.await??;
-        returned_engine.clear_on_progress(); // drop tx so render_progress can drain and exit
-        let _ = render.await;
-        engine = returned_engine;
+        workers.spawn(async move {
+            let joined = tokio::task::spawn_blocking(move || {
+                // Engine construction, loading, generation, and drop all remain
+                // on this device's one local owner thread.
+                mold_inference::device::init_thread_gpu_ordinal(ordinal);
+                let mut engine = None;
+                let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
+                while let Ok(Some((index, mut request))) = command_rx.recv() {
+                    mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
+                    let result = (|| -> Result<GenerateResponse> {
+                        if engine.is_none() {
+                            let mut created =
+                                build_local_engine_from_plan(&request, &config, &execution_plan)?;
+                            created.set_on_progress(Box::new({
+                                let tx = tx.clone();
+                                move |event| {
+                                    let _ = tx.send(event.into());
+                                }
+                            }));
+                            created.load_for_request(&request)?;
+                            engine = Some(created);
+                        }
+                        engine
+                            .as_mut()
+                            .expect("local engine initialized before generation")
+                            .generate(&request)
+                    })();
+                    match result {
+                        Ok(response) => {
+                            let _ =
+                                event_tx.send(LocalOwnerEvent::Completed(ordinal, index, response));
+                            let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(LocalOwnerEvent::Failed(ordinal, index, error));
+                            break;
+                        }
+                    }
+                }
+                if let Some(engine) = engine.as_mut() {
+                    engine.clear_on_progress();
+                }
+            })
+            .await;
+            if let Err(error) = joined {
+                let _ = crash_tx.send(LocalOwnerEvent::Crashed(ordinal, error.into()));
+            }
+        });
+        progress_tasks.push(render);
+    }
+    drop(event_tx);
+    let mut owners = LocalOwnerPool {
+        command_txs,
+        workers,
+        progress_tasks,
+    };
 
-        total_time_ms += response.generation_time_ms;
-        last_seed_used = response.seed_used;
-        last_model = response.model.clone();
-
-        // Capture video response if present
-        if response.video.is_some() {
-            last_video = response.video;
+    let mut completed = Vec::with_capacity(batch as usize);
+    let mut first_error = None;
+    let mut terminal_items = 0_usize;
+    let mut initial_ready = std::collections::BTreeSet::new();
+    'events: while terminal_items < batch as usize {
+        let Some(event) = event_rx.recv().await else {
+            if first_error.is_none() {
+                first_error = Some(anyhow::anyhow!(
+                    "all local GPU owners exited with batch work unfinished"
+                ));
+            }
+            break;
+        };
+        match event {
+            LocalOwnerEvent::Ready(ordinal) => {
+                if let Err(error) = admission.owner_ready(ordinal) {
+                    first_error = Some(error.context(format!(
+                        "local owner {ordinal} published an invalid ready transition"
+                    )));
+                    break 'events;
+                }
+                initial_ready.insert(ordinal);
+            }
+            LocalOwnerEvent::Completed(ordinal, index, response) => {
+                if let Err(error) = admission.owner_completed(ordinal) {
+                    first_error = Some(error.context(format!(
+                        "local owner {ordinal} completed item {} outside its lease",
+                        index + 1
+                    )));
+                    break 'events;
+                }
+                completed.push((index, response));
+                terminal_items += 1;
+            }
+            LocalOwnerEvent::Failed(ordinal, index, error) => {
+                let _ = admission.owner_failed(ordinal);
+                terminal_items += 1;
+                if first_error.is_none() {
+                    first_error = Some(anyhow::anyhow!(
+                        "local item {} failed on GPU {}: {error:#}",
+                        index + 1,
+                        ordinal
+                    ));
+                }
+            }
+            LocalOwnerEvent::Crashed(ordinal, error) => {
+                initial_ready.insert(ordinal);
+                if admission.owner_failed(ordinal).is_some() {
+                    terminal_items += 1;
+                }
+                if first_error.is_none() {
+                    first_error = Some(anyhow::anyhow!(
+                        "local GPU owner {ordinal} crashed: {error:#}"
+                    ));
+                }
+            }
         }
 
-        for mut img in response.images {
-            img.index = i;
-            // Save and preview each image immediately during batch generation
-            // (single-image mode is handled by the caller's post-loop section)
-            if batch > 1 {
-                save_and_preview_image(
-                    &img,
-                    output,
-                    &req.model,
-                    batch,
-                    output_format,
-                    preview,
-                    Some(PersistArgs {
-                        request: req,
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                    }),
-                )?;
+        // Wait for every owner to publish its initial Ready before the first
+        // admission so batch=1 is selected from the complete device set.
+        if initial_ready.len() < owners.command_txs.len() {
+            continue;
+        }
+        loop {
+            let leases = match admission.lease_ready() {
+                Ok(leases) => leases,
+                Err(error) => {
+                    first_error = Some(error.context("local batch admission invariant failed"));
+                    break 'events;
+                }
+            };
+            if leases.is_empty() {
+                break;
             }
-            all_images.push(img);
+            let mut retry_admission = false;
+            for lease in leases {
+                let Some((index, request)) = planned_items
+                    .get_mut(lease.item_index)
+                    .and_then(Option::take)
+                else {
+                    admission.lease_transport_failed(lease);
+                    retry_admission = true;
+                    if first_error.is_none() {
+                        first_error = Some(anyhow::anyhow!(
+                            "local scheduler leased an unavailable batch item"
+                        ));
+                    }
+                    continue;
+                };
+                if batch > 1 {
+                    status!(
+                        "{} Starting local item {}/{} on GPU {} (seed: {})",
+                        theme::icon_info(),
+                        index + 1,
+                        batch,
+                        lease.ordinal,
+                        request.seed.unwrap(),
+                    );
+                }
+                let returned = match owners.command_txs.get(&lease.ordinal) {
+                    Some(tx) => match tx.send(Some((index, request))) {
+                        Ok(()) => None,
+                        Err(error) => error.0,
+                    },
+                    None => Some((index, request)),
+                };
+                if let Some(returned) = returned {
+                    planned_items[lease.item_index] = Some(returned);
+                    admission.lease_transport_failed(LocalLease {
+                        ordinal: lease.ordinal,
+                        item_index: lease.item_index,
+                    });
+                    retry_admission = true;
+                }
+            }
+            if !retry_admission {
+                break;
+            }
+        }
+        if admission.has_pending() && !admission.has_active() && !admission.has_owners() {
+            if first_error.is_none() {
+                first_error = Some(anyhow::anyhow!(
+                    "no healthy local GPU owner remains for queued batch work"
+                ));
+            }
+            break;
         }
     }
-
-    Ok(GenerateResponse {
-        images: all_images,
-        video: last_video,
-        generation_time_ms: total_time_ms,
-        model: last_model,
-        seed_used: last_seed_used,
-        gpu: None,
-    })
+    if let Some(error) = owners.shutdown_and_join().await {
+        first_error.get_or_insert(error);
+    }
+    finalize_local_batch_outputs(
+        req,
+        &batch_requests,
+        completed,
+        first_error,
+        output,
+        output_format,
+        preview,
+        true,
+        batch,
+        base_seed,
+    )
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
@@ -1347,6 +1639,84 @@ struct PersistArgs<'a> {
     request: &'a GenerateRequest,
     seed_used: u64,
     generation_time_ms: u64,
+}
+
+fn save_and_preview_video(
+    video: &mold_core::VideoData,
+    output: &Option<String>,
+    model: &str,
+    batch: u32,
+    index: u32,
+    preview: bool,
+    persist: Option<PersistArgs<'_>>,
+) -> anyhow::Result<()> {
+    let filename = match output {
+        Some(path) if path == "-" => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&video.data)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        Some(path) if batch == 1 => path.clone(),
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("output");
+            let leaf = format!("{stem}-{index}.{}", video.format.extension());
+            path.parent()
+                .filter(|directory| !directory.as_os_str().is_empty())
+                .map(|directory| directory.join(&leaf))
+                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+                .to_string_lossy()
+                .into_owned()
+        }
+        None => default_filename(
+            model,
+            mold_core::time::now_epoch_ms_u64(),
+            video.format.extension(),
+            batch,
+            index,
+        ),
+    };
+
+    if std::path::Path::new(&filename).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), filename);
+    }
+    std::fs::write(&filename, &video.data)?;
+    status!(
+        "{} Saved: {} ({} frames, {}x{}, {} fps)",
+        theme::icon_done(),
+        filename.bold(),
+        video.frames,
+        video.width,
+        video.height,
+        video.fps,
+    );
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(&filename),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            video.format,
+            Some((video.width, video.height)),
+        );
+    }
+    if preview {
+        // Show first frame preview (viuer doesn't support animation).
+        // Fallback to the video data itself for GIF/APNG/WebP when neither
+        // precomputed preview is available.
+        if !video.gif_preview.is_empty() {
+            preview_image(&video.gif_preview);
+        } else if !video.thumbnail.is_empty() {
+            preview_image(&video.thumbnail);
+        } else {
+            preview_image(&video.data);
+        }
+    }
+    Ok(())
 }
 
 /// Save a single image to disk and optionally preview it inline.
@@ -1717,10 +2087,121 @@ mod tests {
     }
 
     #[test]
+    fn local_batch_requests_freeze_per_item_prompt_and_seed_provenance() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"flux-dev:q4","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first".to_string(), "second".to_string()];
+        let requests = local_batch_requests(&request, 2, 41, Some(&prompts));
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].prompt, "first");
+        assert_eq!(requests[0].seed, Some(41));
+        assert_eq!(requests[1].prompt, "second");
+        assert_eq!(requests[1].seed, Some(42));
+        assert_eq!(requests[0].batch_size, 1);
+        assert_eq!(requests[1].batch_size, 1);
+    }
+
+    #[test]
+    fn partial_local_video_batch_persists_success_before_returning_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let output = Some(temp.path().join("clip.mp4").to_string_lossy().into_owned());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"ltx-video:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first clip".to_string(), "second clip".to_string()];
+        let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
+        let response = GenerateResponse {
+            images: Vec::new(),
+            video: Some(mold_core::VideoData {
+                data: b"successful-video".to_vec(),
+                format: OutputFormat::Mp4,
+                width: 512,
+                height: 512,
+                frames: 9,
+                fps: 24,
+                thumbnail: Vec::new(),
+                gif_preview: Vec::new(),
+                has_audio: false,
+                duration_ms: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+            }),
+            generation_time_ms: 123,
+            model: "ltx-video:bf16".to_string(),
+            seed_used: 91,
+            gpu: Some(0),
+        };
+
+        let error = finalize_local_batch_outputs(
+            &request,
+            &batch_requests,
+            vec![(0, response)],
+            Some(anyhow::anyhow!("local item 2 failed")),
+            &output,
+            OutputFormat::Mp4,
+            false,
+            false,
+            2,
+            91,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            std::fs::read(temp.path().join("clip-0.mp4")).unwrap(),
+            b"successful-video"
+        );
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("local item 2 failed"));
+        assert!(rendered.contains("successful output item(s) (1)"));
+        assert_eq!(batch_requests[0].prompt, "first clip");
+        assert_eq!(batch_requests[0].seed, Some(91));
+    }
+
+    #[tokio::test]
+    async fn local_owner_pool_shutdown_closes_and_joins_owner_threads() {
+        let (command_tx, command_rx) =
+            std::sync::mpsc::sync_channel::<Option<(u32, GenerateRequest)>>(1);
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner_exited = exited.clone();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                while command_rx.recv().is_ok() {}
+                owner_exited.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        });
+        let mut owners = LocalOwnerPool {
+            command_txs: std::collections::BTreeMap::from([(0, command_tx)]),
+            workers,
+            progress_tasks: vec![tokio::spawn(async {})],
+        };
+        assert!(owners.shutdown_and_join().await.is_none());
+        assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
     fn output_dash_is_special() {
         // "--output -" triggers stdout output in both interactive and piped modes
         let path = "-";
         assert_eq!(path, "-");
+    }
+
+    #[test]
+    fn batch_stdout_rejection_is_media_neutral_for_images_and_videos() {
+        for (piped, output) in [(true, None), (false, Some("-".to_string()))] {
+            let error = validate_batch_stdout(2, piped, &output).unwrap_err();
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("more than 1 output"));
+            assert!(rendered.contains("batch outputs"));
+            assert!(!rendered.contains("image"));
+        }
+        validate_batch_stdout(2, true, &Some("clip.mp4".to_string())).unwrap();
+        validate_batch_stdout(1, true, &None).unwrap();
     }
 
     #[test]

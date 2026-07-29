@@ -358,6 +358,20 @@ impl MetadataDb {
         upsert_with_conn(&conn, rec)
     }
 
+    /// Insert or update a set of gallery rows in one SQLite transaction.
+    ///
+    /// Batch publication uses this after every final file has been linked
+    /// into place while the gallery publication writer gate is held. Either
+    /// every child becomes visible to DB-backed gallery listings or none do.
+    pub fn upsert_batch(&self, records: &[GenerationRecord]) -> Result<Vec<i64>> {
+        self.transact(|conn| {
+            records
+                .iter()
+                .map(|record| upsert_with_conn(conn, record))
+                .collect()
+        })
+    }
+
     /// Look up a row by its output directory + filename pair.
     pub fn get(&self, output_dir: &Path, filename: &str) -> Result<Option<GenerationRecord>> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
@@ -530,6 +544,20 @@ impl MetadataDb {
         let r = f(&tx)?;
         tx.commit()?;
         Ok(r)
+    }
+
+    /// Run `f` in an IMMEDIATE transaction. This takes SQLite's writer
+    /// reservation before any reads, for read-validate-write invariants that
+    /// must serialize with other process-local or external writers.
+    pub(crate) fn transact_immediate<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R>,
+    ) -> Result<R> {
+        let mut conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Run `f` against the locked connection. Exposed to sibling modules
@@ -851,6 +879,42 @@ mod tests {
             source: RecordSource::Server,
             metadata_synthetic: false,
         }
+    }
+
+    #[test]
+    fn upsert_batch_commits_every_record_in_one_transaction() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut first = rec();
+        first.filename = "first.png".into();
+        let mut second = rec();
+        second.filename = "second.png".into();
+
+        let ids = db.upsert_batch(&[first, second]).unwrap();
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(db.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn upsert_batch_rolls_back_every_record_when_one_insert_fails() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_second
+                 BEFORE INSERT ON generations
+                 WHEN NEW.filename = 'second.png'
+                 BEGIN SELECT RAISE(ABORT, 'injected batch failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut first = rec();
+        first.filename = "first.png".into();
+        let mut second = rec();
+        second.filename = "second.png".into();
+
+        assert!(db.upsert_batch(&[first, second]).is_err());
+        assert_eq!(db.count().unwrap(), 0);
     }
 
     #[test]

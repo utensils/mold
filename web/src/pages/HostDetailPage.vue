@@ -6,12 +6,14 @@
  * client. Absent metrics render as em dashes and an offline host keeps its
  * last-good data dimmed behind a retry banner (G4).
  */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
@@ -32,6 +34,8 @@ import {
 import { deriveTelemetry } from "../components/machines/machineTelemetry";
 import {
   ORIGIN_HOST_ID,
+  HOSTS_CHANGED_EVENT,
+  HOSTS_STORAGE_KEY,
   getGenerateTargetId,
   getHost,
   removeHost,
@@ -40,104 +44,221 @@ import {
 } from "../lib/hostRegistry";
 import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
+import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
+import { setDeviceEnabled } from "@studio/api/devices";
 
 const route = useRoute();
 const router = useRouter();
-const hostId = String(route.params.id);
-const host = getHost(hostId);
-const isOrigin = hostId === ORIGIN_HOST_ID;
-const hostName = ref(host?.name ?? "");
+const registryRevision = ref(0);
+const hostId = computed(() => String(route.params.id));
+const host = computed(() => {
+  void registryRevision.value;
+  return getHost(hostId.value);
+});
+const isOrigin = computed(() => hostId.value === ORIGIN_HOST_ID);
+const hostName = ref(host.value?.name ?? "");
 
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
+const queuePlan = ref<QueuePlan | null>(null);
+const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
 const downloads = ref<DownloadJobWire[]>([]);
 const targetId = ref(getGenerateTargetId());
 
-const poll = host
-  ? useHostPoll(host, { withResources: true, intervalMs: 4000 })
-  : null;
+const poll = useHostPoll(host, { withResources: true, intervalMs: 4000 });
 
-const online = computed(() => poll?.online.value ?? false);
-const loading = computed(() => poll?.loading.value ?? false);
-const offline = computed(() => !!poll && !loading.value && !online.value);
+const online = computed(() => poll.online.value);
+const loading = computed(() => poll.loading.value);
+const offline = computed(() => !!host.value && !loading.value && !online.value);
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (!poll || loading.value) return "unknown";
+  if (!host.value || loading.value) return "unknown";
   return online.value ? "online" : "offline";
 });
 
 const telemetry = computed(() =>
-  deriveTelemetry(poll?.status.value ?? null, poll?.resources.value ?? null),
+  deriveTelemetry(poll.status.value ?? null, poll.resources.value ?? null),
 );
-const gpuCount = computed(() => {
-  const status = poll?.status.value;
-  if (status?.gpus?.length) return status.gpus.length;
-  return status?.gpu_info ? 1 : 0;
+const gpuOrdinals = computed(() => {
+  const devices = poll.devices.value;
+  if (devices !== null && devices !== undefined)
+    return [
+      ...new Set(
+        devices
+          .filter((device) => device.schedulable && device.ordinal !== null)
+          .map((device) => device.ordinal as number),
+      ),
+    ].sort((a, b) => a - b);
+  const status = poll.status.value;
+  if (status?.gpus != null)
+    return status.gpus
+      .filter((gpu) => gpu.state !== "degraded")
+      .map((gpu) => gpu.ordinal);
+  return status?.gpu_info ? [0] : [];
 });
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
-const isTarget = computed(() => targetId.value === hostId);
-const paused = computed(() => poll?.status.value?.queue_paused === true);
+const isTarget = computed(() => targetId.value === hostId.value);
+const paused = computed(() => poll.status.value?.queue_paused === true);
 
 const address = computed(() => {
-  if (!host) return "";
+  if (!host.value) return "";
   try {
-    return new URL(host.url).host;
+    return new URL(host.value.url).host;
   } catch {
-    return host.url;
+    return host.value.url;
   }
 });
 
 const installed = computed(() => models.value.filter((m) => m.downloaded));
 const modelLabel = (name: string) => modelDisplayNameForId(name, models.value);
 
-async function reloadQueue() {
-  if (!host) return;
+let sessionEpoch = 0;
+let queueRequestGeneration = 0;
+
+function isCurrentSession(
+  entry: NonNullable<typeof host.value>,
+  epoch: number,
+) {
+  const current = host.value;
+  return (
+    epoch === sessionEpoch &&
+    current?.id === entry.id &&
+    current.url === entry.url &&
+    current.apiKey === entry.apiKey
+  );
+}
+
+async function reloadQueue(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  if (!entry) return;
+  const generation = ++queueRequestGeneration;
   try {
-    queue.value = (await hostQueue(host)).entries;
+    const listing = await hostQueue(entry, signal);
+    if (
+      generation === queueRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    ) {
+      queue.value = listing.entries;
+      queuePlan.value = listing.plan ?? null;
+    }
   } catch {
     // Keep the last-good queue; the offline banner covers the failure.
   }
 }
 
-async function reloadModels() {
-  if (!host) return;
+async function onToggleDevice(deviceId: string, enabled: boolean) {
+  const entry = host.value;
+  if (!entry) return;
+  const epoch = sessionEpoch;
+  mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
   try {
-    models.value = await hostModels(host);
+    const accepted = await setDeviceEnabled(
+      { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      deviceId,
+      enabled,
+    );
+    if (isCurrentSession(entry, epoch)) {
+      const devices = (poll.devices.value ?? []).map((device) =>
+        device.id === accepted.id ? accepted : device,
+      );
+      if (!devices.some((device) => device.id === accepted.id)) {
+        devices.push(accepted);
+      }
+      poll.devices.value = devices;
+      poll.deviceState.value = {
+        devices,
+        plan_version: poll.deviceState.value?.plan_version ?? 0,
+      };
+    }
+    await poll.refresh();
+    await reloadQueue();
+  } catch (e) {
+    toast(
+      "error",
+      `Couldn't ${enabled ? "enable" : "disable"} device: ${errMsg(e)}`,
+    );
+  } finally {
+    const next = new Set(mutatingDeviceIds.value);
+    next.delete(deviceId);
+    mutatingDeviceIds.value = next;
+  }
+}
+
+async function onUnpinWork(workId: string) {
+  const entry = host.value;
+  if (!entry) return;
+  try {
+    await setQueueDevicePin(
+      { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      workId,
+      null,
+    );
+    await reloadQueue();
+  } catch (error) {
+    toast("error", `Couldn't use Auto for queued work: ${errMsg(error)}`);
+  }
+}
+
+async function reloadModels(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  if (!entry) return;
+  try {
+    const next = await hostModels(entry, signal);
+    if (isCurrentSession(entry, epoch)) models.value = next;
   } catch {
     /* keep stale */
   }
 }
 
-async function reloadDownloads() {
-  if (!host) return;
+async function reloadDownloads(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  if (!entry) return;
   try {
-    const listing = await hostDownloads(host);
+    const listing = await hostDownloads(entry, signal);
     const active = [
       ...(listing.active ? [listing.active] : []),
       ...(listing.active_jobs ?? []),
       ...listing.queued,
     ];
-    downloads.value = active;
+    if (isCurrentSession(entry, epoch)) downloads.value = active;
   } catch {
     /* keep stale */
   }
 }
 
-async function reloadAll() {
-  await Promise.all([reloadQueue(), reloadModels(), reloadDownloads()]);
+async function reloadAll(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  await Promise.all([
+    reloadQueue(entry, epoch, signal),
+    reloadModels(entry, epoch, signal),
+    reloadDownloads(entry, epoch, signal),
+  ]);
 }
 
 function toggleTarget() {
-  const next = isTarget.value ? ORIGIN_HOST_ID : hostId;
+  const next = isTarget.value ? ORIGIN_HOST_ID : hostId.value;
   setGenerateTargetId(next);
   targetId.value = next;
 }
 
 async function onCancel(id: string) {
-  if (!host) return;
+  const entry = host.value;
+  if (!entry) return;
   try {
-    await cancelQueueJob(host, id);
+    await cancelQueueJob(entry, id);
     await reloadQueue();
   } catch (e) {
     toast("error", `Couldn't cancel job: ${errMsg(e)}`);
@@ -145,10 +266,11 @@ async function onCancel(id: string) {
 }
 
 async function onSetLane(id: string, gpu: number | null) {
-  if (!host) return;
+  const entry = host.value;
+  if (!entry) return;
   try {
-    if (isOrigin) await updateQueueJobTargetGpu(id, gpu);
-    else await setQueueJobLane(host, id, gpu);
+    if (isOrigin.value) await updateQueueJobTargetGpu(id, gpu);
+    else await setQueueJobLane(entry, id, gpu);
     await reloadQueue();
   } catch (e) {
     toast("error", `Couldn't change lane: ${errMsg(e)}`);
@@ -156,10 +278,11 @@ async function onSetLane(id: string, gpu: number | null) {
 }
 
 async function onMove(id: string, position: number) {
-  if (!host) return;
+  const entry = host.value;
+  if (!entry) return;
   try {
-    if (isOrigin) await reorderQueueJob(id, position);
-    else await moveQueueJob(host, id, position);
+    if (isOrigin.value) await reorderQueueJob(id, position);
+    else await moveQueueJob(entry, id, position);
     await reloadQueue();
   } catch (e) {
     toast("error", `Couldn't reorder job: ${errMsg(e)}`);
@@ -167,11 +290,12 @@ async function onMove(id: string, position: number) {
 }
 
 async function onTogglePause() {
-  if (!host) return;
+  const entry = host.value;
+  if (!entry) return;
   try {
-    if (paused.value) await resumeHostQueue(host);
-    else await pauseHostQueue(host);
-    await poll?.refresh();
+    if (paused.value) await resumeHostQueue(entry);
+    else await pauseHostQueue(entry);
+    await poll.refresh();
   } catch (e) {
     toast(
       "error",
@@ -181,7 +305,8 @@ async function onTogglePause() {
 }
 
 async function onCancelAll() {
-  if (!host) return;
+  const entry = host.value;
+  if (!entry) return;
   const accepted = await requestConfirm({
     title: "Cancel all queued jobs?",
     body: `Running work on ${hostName.value} will continue.`,
@@ -190,7 +315,7 @@ async function onCancelAll() {
   });
   if (!accepted) return;
   try {
-    await cancelAllHostQueue(host);
+    await cancelAllHostQueue(entry);
     await reloadQueue();
   } catch (e) {
     toast("error", `Couldn't cancel queued jobs: ${errMsg(e)}`);
@@ -198,7 +323,7 @@ async function onCancelAll() {
 }
 
 async function renameMachine() {
-  if (!host || isOrigin) return;
+  if (!host.value || isOrigin.value) return;
   const next = await requestText({
     title: "Rename machine",
     label: "Machine name",
@@ -206,11 +331,11 @@ async function renameMachine() {
   });
   const name = next?.trim();
   if (!name) return;
-  if (updateHost(hostId, { name })) hostName.value = name;
+  if (updateHost(hostId.value, { name })) hostName.value = name;
 }
 
 async function forgetMachine() {
-  if (!host || isOrigin) return;
+  if (!host.value || isOrigin.value) return;
   const accepted = await requestConfirm({
     title: "Forget this machine?",
     body: `${hostName.value} and its saved API key will be removed from this browser.`,
@@ -218,7 +343,7 @@ async function forgetMachine() {
     danger: true,
   });
   if (!accepted) return;
-  removeHost(hostId);
+  removeHost(hostId.value);
   if (isTarget.value) setGenerateTargetId(ORIGIN_HOST_ID);
   await router.push("/machines");
 }
@@ -233,20 +358,83 @@ function downloadPct(job: DownloadJobWire): number {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let deviceEventsAbort: AbortController | null = null;
+let sessionAbort: AbortController | null = null;
 
-onMounted(async () => {
-  if (!host) return;
-  try {
-    caps.value = await hostCapabilities(host);
-  } catch {
-    /* default controls-off */
-  }
-  await reloadAll();
-  timer = setInterval(() => void reloadAll(), 4000);
+function stopHostSession() {
+  sessionEpoch += 1;
+  queueRequestGeneration += 1;
+  if (timer) clearInterval(timer);
+  timer = null;
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
+  sessionAbort?.abort();
+  sessionAbort = null;
+}
+
+function startHostSession() {
+  stopHostSession();
+  const entry = host.value;
+  const epoch = sessionEpoch;
+  caps.value = null;
+  queue.value = [];
+  queuePlan.value = null;
+  models.value = [];
+  downloads.value = [];
+  hostName.value = entry?.name ?? "";
+  if (!entry) return;
+  sessionAbort = new AbortController();
+  const signal = sessionAbort.signal;
+  void hostCapabilities(entry, signal)
+    .then((nextCaps) => {
+      if (isCurrentSession(entry, epoch) && !signal.aborted) {
+        caps.value = nextCaps;
+      }
+    })
+    .catch(() => {
+      /* default controls-off */
+    });
+  void reloadAll(entry, epoch, signal);
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(
+    { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+    deviceEventsAbort.signal,
+    () => {
+      void poll.refresh();
+      void reloadAll(entry, epoch, signal);
+    },
+  );
+  timer = setInterval(() => void reloadAll(entry, epoch, signal), 4000);
+}
+
+function onHostsChanged() {
+  registryRevision.value += 1;
+}
+
+function onHostStorage(event: StorageEvent) {
+  if (event.key === HOSTS_STORAGE_KEY) onHostsChanged();
+}
+
+onMounted(() => {
+  window.addEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.addEventListener("storage", onHostStorage);
 });
 
+watch(
+  () => {
+    const entry = host.value;
+    return entry
+      ? `${entry.id}\u0000${entry.url}\u0000${entry.apiKey ?? ""}`
+      : `missing:${hostId.value}`;
+  },
+  () => startHostSession(),
+  { immediate: true },
+);
+
 onBeforeUnmount(() => {
-  if (timer) clearInterval(timer);
+  window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.removeEventListener("storage", onHostStorage);
+  stopHostSession();
 });
 </script>
 
@@ -417,10 +605,25 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
+        <CardSurface class="mb-4">
+          <DevicePanel
+            :devices="poll?.devices.value ?? []"
+            :plan="queuePlan"
+            :mutable="
+              caps?.devices?.lifecycle === true &&
+              caps?.dispatch?.v2_authoritative === true
+            "
+            :restart-enable="caps?.devices?.restart_enable === true"
+            show-controls
+            :busy-device-ids="[...mutatingDeviceIds]"
+            @unpin="onUnpinWork"
+            @toggle="onToggleDevice"
+          />
+        </CardSurface>
         <QueueCard
           :entries="queue"
           :models="models"
-          :gpu-count="gpuCount"
+          :gpu-ordinals="gpuOrdinals"
           :can-reorder="canReorder"
           :can-pause="caps?.queue?.can_pause === true"
           :can-cancel-all="caps?.queue?.can_cancel_all === true"

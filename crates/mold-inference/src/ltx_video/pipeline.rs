@@ -835,6 +835,7 @@ impl LtxVideoEngine {
 
 impl crate::engine::InferenceEngine for LtxVideoEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -864,6 +865,19 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("ltx-video")
+            .expect("production LTX-Video batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&ModelPaths> {
@@ -1165,6 +1179,7 @@ impl LtxVideoEngine {
         let denoise_start = Instant::now();
 
         for (step, sigma) in run_sigmas.iter().copied().enumerate() {
+            progress.checkpoint()?;
             let step_start = Instant::now();
             let resolved = &step_schedule[step];
             let batch = latents.dim(0)?;
@@ -1281,8 +1296,10 @@ impl LtxVideoEngine {
                 total: run_sigmas.len(),
                 elapsed: step_start.elapsed(),
             });
+            progress.checkpoint()?;
         }
 
+        progress.checkpoint()?;
         progress.stage_done(stage_name, denoise_start.elapsed());
         unpack_latents(
             &latents,
@@ -1361,7 +1378,7 @@ impl LtxVideoEngine {
         let tier1 = self
             .pending_placement
             .as_ref()
-            .map(|p| p.text_encoders)
+            .map(|p| p.text_encoders.clone())
             .unwrap_or_default();
         let t5_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
         let cached_t5_tokenizer = self
@@ -1384,7 +1401,11 @@ impl LtxVideoEngine {
         let prompt_embeds = t5.encode(&req.prompt, &t5_device, dtype)?;
         let prompt_embeds = prompt_embeds.to_device(&device)?;
         // prompt_embeds: [1, seq_len, 4096] (T5 encoder already adds batch dim)
-        progress.stage_done("Encoding prompt", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Encoding prompt",
+            encode_start.elapsed(),
+        );
 
         // Build attention mask (all ones — no padding for single prompt)
         let prompt_seq_len = prompt_embeds.dim(1)?;
@@ -1412,7 +1433,11 @@ impl LtxVideoEngine {
             let ue = ue.to_device(&device)?;
             let ue_seq = ue.dim(1)?;
             let um = Tensor::ones((1, ue_seq), DType::F32, &device)?.to_dtype(dtype)?;
-            progress.stage_done("Encoding negative prompt (CFG)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding negative prompt (CFG)",
+                encode_start.elapsed(),
+            );
             (Some(ue), Some(um))
         } else {
             (None, None)
@@ -1517,7 +1542,11 @@ impl LtxVideoEngine {
                     normalize_latents_with_vae(&upsampler.forward(&first_pass_denorm)?, &vae)?;
                 let upsampled_latents =
                     adain_filter_latents(&upsampled_latents, &first_pass_latents)?;
-                progress.stage_done("Refining multiscale pass", refine_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::Upscale,
+                    "Refining multiscale pass",
+                    refine_start.elapsed(),
+                );
                 drop(upsampler);
                 drop(vae);
                 device.synchronize()?;
@@ -1611,7 +1640,11 @@ impl LtxVideoEngine {
             ));
         }
 
-        progress.stage_done("Decoding video frames", decode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Decoding video frames",
+            decode_start.elapsed(),
+        );
 
         // Drop VAE
         drop(vae);

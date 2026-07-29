@@ -50,6 +50,7 @@ impl FluxTransformer {
         let total_steps = timesteps.len().saturating_sub(1);
 
         for (step, window) in timesteps.windows(2).enumerate() {
+            progress.checkpoint()?;
             let step_start = Instant::now();
             let (t_curr, t_prev) = match window {
                 [a, b] => (a, b),
@@ -120,6 +121,7 @@ impl FluxTransformer {
                 }
             }
         }
+        progress.checkpoint()?;
         Ok(img)
     }
 }

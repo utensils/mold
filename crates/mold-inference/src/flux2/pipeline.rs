@@ -362,8 +362,11 @@ impl Flux2Engine {
         device: &Device,
         gpu_dtype: DType,
     ) -> Result<(Flux2AutoEncoder, DType)> {
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -823,7 +826,11 @@ impl Flux2Engine {
                 progress.stage_start("Encoding prompt (Qwen3)");
                 let encode_start = Instant::now();
                 let txt_emb = Self::encode_and_stack(encoder, prompt, target_device, target_dtype)?;
-                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (Qwen3)",
+                    encode_start.elapsed(),
+                );
                 Ok(txt_emb)
             },
         )?;
@@ -858,7 +865,7 @@ impl Flux2Engine {
         let cpu = Device::Cpu;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -878,8 +885,11 @@ impl Flux2Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Load VAE on GPU ---
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -927,7 +937,11 @@ impl Flux2Engine {
             .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-        let qwen3_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen3_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_enc_device = if on_gpu { device.clone() } else { cpu.clone() };
         let enc_device_owned =
             crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
@@ -1000,7 +1014,7 @@ impl Flux2Engine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1058,8 +1072,11 @@ impl Flux2Engine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-            let qwen3_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+            let qwen3_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen.clone(),
+                true,
+            );
             let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
             let enc_device_owned =
                 crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
@@ -1172,9 +1189,11 @@ impl Flux2Engine {
                 gpu_dtype,
             )?;
             let encoded = vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let prepared = crate::img2img::prepare_flow_match_img2img(
                 &encoded,
@@ -1310,9 +1329,11 @@ impl Flux2Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
@@ -1513,7 +1534,11 @@ impl Flux2Engine {
                 loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let prepared = crate::img2img::prepare_flow_match_img2img(
                 &encoded,
@@ -1629,7 +1654,11 @@ impl Flux2Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
-        progress.stage_done("VAE decode", vae_decode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 9. Convert candle tensor to image bytes
@@ -1664,6 +1693,7 @@ impl Flux2Engine {
 
 impl InferenceEngine for Flux2Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_flux2_loras(req);
         let result = self.generate_inner(req);
@@ -1684,6 +1714,13 @@ impl InferenceEngine for Flux2Engine {
         Flux2Engine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = Flux2Engine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
@@ -1695,6 +1732,19 @@ impl InferenceEngine for Flux2Engine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("flux2")
+            .expect("production Flux.2 batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

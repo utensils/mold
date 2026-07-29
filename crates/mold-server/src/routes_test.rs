@@ -7,7 +7,7 @@
 mod tests {
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{Method, Request, StatusCode},
     };
     use base64::Engine as _;
     use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
@@ -293,7 +293,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         app_with_state(AppState::empty(
             mold_core::Config::default(),
@@ -466,33 +466,101 @@ mod tests {
     }
 
     fn gpu_worker_stub(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
-        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel(1);
-        Arc::new(crate::gpu_pool::GpuWorker {
+        gpu_worker_stub_with_receiver(ordinal).0
+    }
+
+    fn gpu_worker_stub_with_receiver(
+        ordinal: usize,
+    ) -> (
+        Arc<crate::gpu_pool::GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+    ) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = Arc::new(crate::gpu_pool::GpuWorker {
+            owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
+                stable_id: Some(format!("cuda:{ordinal:032x}")),
+                raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
                 name: format!("gpu{ordinal}"),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
                 total_vram_bytes: 24_000_000_000,
                 free_vram_bytes: 24_000_000_000,
             },
             model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
+            legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
-        })
+        });
+        (worker, job_rx)
+    }
+
+    fn install_worker_registry(state: &mut AppState) {
+        let devices = state
+            .gpu_pool
+            .worker_snapshot()
+            .into_iter()
+            .map(|worker| crate::device_registry::DiscoveredDevice {
+                stable_id: worker.gpu.stable_id.clone(),
+                backend: worker.gpu.backend,
+                visible_ordinal: Some(worker.gpu.ordinal),
+                device_kind: mold_core::DeviceKind::UnknownCuda,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                pci_bus_id: worker.gpu.pci_bus_id.clone(),
+                name: worker.gpu.name.clone(),
+                compute_capability: worker.gpu.compute_capability,
+                total_memory_bytes: Some(worker.gpu.total_vram_bytes),
+                startup_allowed: true,
+                telemetry_ordinal: Some(worker.gpu.ordinal),
+            })
+            .collect();
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(devices)),
+            Arc::new(None),
+        ));
+    }
+
+    fn install_authoritative_v2(state: &mut AppState) {
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
     }
 
     fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
         let mut state = AppState::with_engine(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: ordinals.iter().copied().map(gpu_worker_stub).collect(),
+            workers: ordinals
+                .iter()
+                .copied()
+                .map(gpu_worker_stub)
+                .collect::<Vec<_>>()
+                .into(),
         });
+        install_worker_registry(&mut state);
         create_router(state)
     }
 
@@ -532,7 +600,7 @@ mod tests {
 
     /// Returns a valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND).
     fn minimal_png() -> Vec<u8> {
-        vec![
+        let mut bytes = vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
@@ -542,7 +610,113 @@ mod tests {
             0x01, // compressed
             0xE2, 0x21, 0xBC, 0x33, // IDAT CRC
             0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82, // IEND
-        ]
+        ];
+        // Gallery publication rejects undersized crash artifacts. PNG readers
+        // ignore bytes after IEND, so pad this tiny valid fixture past the
+        // ordinary gallery size floor without allocating a large image.
+        bytes.resize(320, 0);
+        bytes
+    }
+
+    fn minimal_mp4(marker: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom\x00\x00\x02\x00");
+        bytes.resize(8192, marker);
+        bytes
+    }
+
+    fn minimal_webp() -> Vec<u8> {
+        let image = image::RgbImage::from_fn(32, 32, |x, y| {
+            image::Rgb([
+                (x.wrapping_mul(17) ^ y.wrapping_mul(31)) as u8,
+                (x.wrapping_mul(29) ^ y.wrapping_mul(13)) as u8,
+                (x.wrapping_mul(7) ^ y.wrapping_mul(23)) as u8,
+            ])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::WebP,
+            )
+            .expect("encode WebP fixture");
+        bytes
+    }
+
+    fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
+        mold_core::OutputMetadata {
+            prompt: prompt.into(),
+            negative_prompt: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            model: "test-model".into(),
+            seed: 7,
+            steps: 4,
+            guidance: 1.0,
+            width: 1,
+            height: 1,
+            generation_width: None,
+            generation_height: None,
+            strength: None,
+            source_image_name: None,
+            source_image_sha256: None,
+            scheduler: None,
+            output_format: Some(mold_core::OutputFormat::Png),
+            cfg_plus: None,
+            lora: None,
+            lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            chain_job_id: None,
+            chain: None,
+            frames: None,
+            fps: None,
+            version: "test".into(),
+        }
+    }
+
+    fn gallery_import_body(metadata: Option<&mold_core::OutputMetadata>, bytes: &[u8]) -> Vec<u8> {
+        let fallback;
+        let (metadata, metadata_synthetic) = match metadata {
+            Some(metadata) => (metadata, false),
+            None => {
+                fallback = output_metadata("synthetic fallback");
+                (&fallback, true)
+            }
+        };
+        gallery_import_body_with_descriptor(metadata, metadata_synthetic, bytes)
+    }
+
+    fn gallery_import_body_with_descriptor(
+        metadata: &mold_core::OutputMetadata,
+        metadata_synthetic: bool,
+        bytes: &[u8],
+    ) -> Vec<u8> {
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "metadata": metadata,
+            "metadata_synthetic": metadata_synthetic,
+        }))
+        .unwrap();
+        let mut body = Vec::with_capacity(12 + descriptor.len() + bytes.len());
+        body.extend_from_slice(&(descriptor.len() as u32).to_be_bytes());
+        body.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        body.extend_from_slice(&descriptor);
+        body.extend_from_slice(bytes);
+        body
     }
 
     // ── /health ──────────────────────────────────────────────────────────────
@@ -586,6 +760,1259 @@ mod tests {
         assert!(ct.contains("application/json"));
     }
 
+    #[tokio::test]
+    async fn devices_returns_registry_workers_with_nullable_telemetry() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:00000000000000000000000000000000".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(0),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                    physical_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: Some("00000000:01:00.0".into()),
+                    name: "NVIDIA GeForce RTX 3090".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24 * 1024 * 1024 * 1024),
+                    startup_allowed: true,
+                    telemetry_ordinal: Some(0),
+                },
+            ])),
+            Arc::new(None),
+        ));
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["plan_version"], 0);
+        assert_eq!(body["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["devices"][0]["id"],
+            "cuda:00000000000000000000000000000000"
+        );
+        assert_eq!(body["devices"][0]["device_kind"], "full_gpu");
+        assert_eq!(body["devices"][0]["desired_enabled"], true);
+        assert_eq!(body["devices"][0]["schedulable"], true);
+        assert_eq!(
+            body["devices"][0]["telemetry"]["utilization_percent"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            body["devices"][0]["memory"]["used_bytes"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_disable_can_be_recovered_after_restart_into_legacy() {
+        let worker = gpu_worker_stub(0);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["desired_enabled"], false);
+        assert_eq!(body["admin_state"], "disabled");
+        assert!(pool.workers.is_empty());
+        assert!(!registry.desired_enabled(id));
+        assert!(registry.all_startup_allowed_devices_disabled());
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
+
+        let generation = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("maintenance", 64, 64)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(generation.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let generation = json_body(generation).await;
+        assert_eq!(generation["code"], "GENERATION_UNAVAILABLE");
+        assert!(
+            generation["error"]
+                .as_str()
+                .unwrap()
+                .contains("maintenance mode"),
+            "disabling the last runtime device must enter maintenance mode"
+        );
+
+        let chain_body = serde_json::to_vec(&route_chain_request()).unwrap();
+        let upscale_body = serde_json::to_vec(&serde_json::json!({
+            "model": "does-not-exist",
+            "image": "AQID",
+            "output_format": "png"
+        }))
+        .unwrap();
+        for (path, body) in [
+            ("/api/generate/chain", chain_body.clone()),
+            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/chain-jobs", chain_body),
+            ("/api/upscale", upscale_body.clone()),
+            ("/api/upscale/stream", upscale_body),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must reject before generation work"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "GENERATION_UNAVAILABLE", "{path}");
+            assert!(
+                body["error"].as_str().unwrap().contains("maintenance mode"),
+                "{path} must report last-device maintenance"
+            );
+        }
+
+        let mut legacy = AppState::with_engine(MockEngine::ready());
+        legacy.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        legacy.device_registry = registry.clone();
+        legacy.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tokio::sync::mpsc::channel(1).0,
+            crate::dispatch_mode::DispatchMode::Legacy,
+            false,
+            false,
+        );
+        let recovery = app_with_state(legacy)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovery.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(recovery).await["restart_required"], true);
+        assert!(registry.desired_enabled(id));
+        assert!(!registry.all_startup_allowed_devices_disabled());
+    }
+
+    #[tokio::test]
+    async fn busy_disable_drains_and_reenable_cancels_pending_stop() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let draining = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draining.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(draining).await["admin_state"], "draining");
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED
+        );
+        assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+
+        let enabled = app
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        assert_eq!(json_body(enabled).await["admin_state"], "enabled");
+        assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_RUNNING
+        );
+        assert!(registry.desired_enabled(id));
+    }
+
+    #[tokio::test]
+    async fn patch_remains_responsive_while_owner_admin_load_lease_is_blocked() {
+        let (worker, job_rx) = gpu_worker_stub_with_receiver(0);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = crate::gpu_worker::spawn_gpu_thread(
+            worker.clone(),
+            job_rx,
+            event_tx,
+            Duration::from_secs(60),
+        );
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+        assert!(worker.try_claim_in_flight());
+        let (load_started_tx, load_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (load_resume_tx, load_resume_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .send_grant(crate::gpu_pool::LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "blocked-admin-route".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: crate::gpu_pool::OwnerWork::Probe {
+                    id: "blocked-admin-route".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(move || {
+                        load_started_tx.send(()).unwrap();
+                        load_resume_rx.recv().unwrap();
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        load_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("admin lease must be executing");
+
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+        let draining = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("PATCH must not join a busy GPU owner")
+        .unwrap();
+        assert_eq!(draining.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(draining).await["admin_state"], "draining");
+        let devices = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.oneshot(Request::get("/api/devices").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("device reads must remain responsive during drain")
+        .unwrap();
+        assert_eq!(devices.status(), StatusCode::OK);
+
+        load_resume_tx.send(()).unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Completed { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        owner.join().unwrap();
+        assert_eq!(worker.pending_or_executing(), 0);
+    }
+
+    #[tokio::test]
+    async fn nonauthoritative_device_patch_rejects_before_state_or_event_mutation() {
+        let cases = [
+            (
+                "legacy",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Legacy,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "observe",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Observe,
+                    false,
+                    true,
+                ),
+            ),
+            (
+                "v2-maintenance",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::V2,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "v2-unavailable",
+                crate::scheduler::ScheduledWorkHandle::default(),
+            ),
+        ];
+        for (label, scheduled_work) in cases {
+            let worker = gpu_worker_stub(0);
+            worker.in_flight.store(1, Ordering::SeqCst);
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool.clone();
+            install_worker_registry(&mut state);
+            state.scheduled_work = scheduled_work;
+            let registry = state.device_registry.clone();
+            let mut events = state.events.subscribe();
+            let app = app_with_state(state);
+            let id = "cuda:00000000000000000000000000000000";
+
+            let response = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
+            assert_eq!(
+                json_body(response).await["code"],
+                "DEVICE_LIFECYCLE_MODE_CONFLICT"
+            );
+            assert!(registry.desired_enabled(id), "{label}");
+            assert_eq!(pool.workers.len(), 1, "{label}");
+            assert_eq!(
+                worker.drain_state.load(Ordering::SeqCst),
+                crate::gpu_pool::DRAIN_RUNNING,
+                "{label}"
+            );
+            assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+            let lifecycle_event = events.try_recv();
+            assert!(
+                matches!(
+                    lifecycle_event,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                        | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+                ),
+                "{label} published an event before rejecting: {lifecycle_event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonauthoritative_enable_persists_restart_recovery_without_live_mutation() {
+        for (label, mode) in [
+            ("legacy", crate::dispatch_mode::DispatchMode::Legacy),
+            ("observe", crate::dispatch_mode::DispatchMode::Observe),
+        ] {
+            let worker = gpu_worker_stub(0);
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool.clone();
+            install_worker_registry(&mut state);
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new().into(),
+            });
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tokio::sync::mpsc::channel(1).0,
+                mode,
+                false,
+                mode == crate::dispatch_mode::DispatchMode::Observe,
+            );
+            let registry = state.device_registry.clone();
+            let id = "cuda:00000000000000000000000000000000";
+            registry.set_desired_enabled(id, false).unwrap();
+            let mut events = state.events.subscribe();
+            let app = app_with_state(state);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["desired_enabled"], true, "{label}");
+            assert_eq!(body["restart_required"], true, "{label}");
+            assert!(registry.desired_enabled(id), "{label}");
+            assert_eq!(pool.workers.len(), 1, "{label}");
+            assert!(!worker.shutdown_requested.load(Ordering::SeqCst), "{label}");
+            assert!(matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ));
+
+            let listed = app
+                .clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                json_body(listed).await["devices"][0]["restart_required"],
+                true,
+                "{label}"
+            );
+
+            let idempotent = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(idempotent.status(), StatusCode::OK, "{label}");
+            assert_eq!(json_body(idempotent).await["restart_required"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn nonauthoritative_live_degraded_owner_does_not_claim_restart_recovery() {
+        for (label, mode) in [
+            ("legacy", crate::dispatch_mode::DispatchMode::Legacy),
+            ("observe", crate::dispatch_mode::DispatchMode::Observe),
+        ] {
+            let worker = gpu_worker_stub(0);
+            worker.consecutive_failures.store(3, Ordering::SeqCst);
+            *worker.degraded_until.write().unwrap() =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool;
+            install_worker_registry(&mut state);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tokio::sync::mpsc::channel(1).0,
+                mode,
+                false,
+                mode == crate::dispatch_mode::DispatchMode::Observe,
+            );
+
+            let response = app_with_state(state)
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["devices"][0]["desired_enabled"], true, "{label}");
+            assert_eq!(body["devices"][0]["health"], "degraded", "{label}");
+            assert_eq!(body["devices"][0]["schedulable"], false, "{label}");
+            assert_eq!(
+                body["devices"][0]["restart_required"], false,
+                "{label}: a live cooldown owner recovers without a process restart"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_all_disabled_boot_keeps_v2_lifecycle_and_starts_only_enabled_target() {
+        const GPU_0: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GPU_1: &str = "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let runtime_gpu =
+            |ordinal: usize, id: &str, name: &str| mold_inference::device::DiscoveredGpu {
+                ordinal,
+                stable_id: Some(id.into()),
+                raw_cuda_uuid: Some([ordinal as u8; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+                identity_error: None,
+                backend: mold_core::GpuBackend::Cuda,
+                name: name.into(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            };
+        let selected = vec![
+            runtime_gpu(0, GPU_0, "disabled startup GPU 0"),
+            runtime_gpu(1, GPU_1, "disabled startup GPU 1"),
+        ];
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let preferences = mold_db::DevicePreferences::new(&db);
+        preferences.set(GPU_0, false).unwrap();
+        preferences.set(GPU_1, false).unwrap();
+        let registry = Arc::new(
+            crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                selected.clone(),
+                &selected,
+                Arc::new(Some(db)),
+            ),
+        );
+
+        assert!(
+            registry.startup_worker_devices().is_empty(),
+            "persisted-disabled devices must not construct startup GPU owners"
+        );
+        assert_eq!(
+            registry
+                .persisted_disabled_worker_devices()
+                .iter()
+                .map(|gpu| gpu.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["disabled startup GPU 0", "disabled startup GPU 1"]
+        );
+        let plan = crate::startup_plan(
+            &mold_core::GpuSelection::All,
+            selected.len(),
+            selected.len(),
+            true,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        assert!(plan.start_gpu_workers);
+        assert!(plan.start_v2_coordinator);
+        assert!(!plan.start_legacy_dispatcher);
+
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        pool.workers
+            .install_factory(
+                crate::gpu_pool::WorkerFactory {
+                    registry: registry.clone(),
+                    shared_pool: Arc::new(Mutex::new(
+                        mold_inference::shared_pool::SharedPool::new(),
+                    )),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(pool.workers.is_empty());
+        assert!(matches!(
+            scheduler_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        state.device_registry = registry;
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let app = app_with_state(state);
+
+        let devices = app
+            .clone()
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(devices.status(), StatusCode::OK);
+        let body = json_body(devices).await;
+        assert_eq!(body["devices"].as_array().unwrap().len(), 2);
+        for device in body["devices"].as_array().unwrap() {
+            assert_eq!(device["desired_enabled"], false);
+            assert_eq!(device["admin_state"], "disabled");
+            assert_eq!(device["schedulable"], false);
+        }
+
+        let enabled = app
+            .oneshot(
+                Request::patch(format!("/api/devices/{GPU_1}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::ACCEPTED);
+        let enabled = json_body(enabled).await;
+        assert_eq!(enabled["id"], GPU_1);
+        assert_eq!(enabled["desired_enabled"], true);
+        assert_eq!(enabled["admin_state"], "starting");
+
+        let ready = tokio::time::timeout(Duration::from_secs(1), scheduler_rx.recv())
+            .await
+            .expect("re-enabled target must publish Ready without hanging")
+            .expect("re-enabled target owner channel must remain open");
+        let (ready_id, ready_epoch) = match ready {
+            crate::scheduler::WorkerEvent::Ready {
+                device_id,
+                owner_epoch,
+                ..
+            } => (device_id, owner_epoch),
+            _ => panic!("re-enabled target must publish epoch-qualified Ready"),
+        };
+        assert_eq!(ready_id, GPU_1);
+        assert!(ready_epoch > 0);
+        let workers = pool.worker_snapshot();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(crate::scheduler::worker_device_id(&workers[0]), GPU_1);
+        workers[0].request_shutdown();
+        assert!(pool.workers.wait_and_reap(GPU_1, ready_epoch));
+        assert!(pool.workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_patch_enable_returns_starting_without_waiting_for_owner_ready() {
+        let id = "cuda:dddddddddddddddddddddddddddddddd";
+        let gpu = mold_inference::device::DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some(id.into()),
+            raw_cuda_uuid: Some([0xdd; 16]),
+            device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+            identity_error: None,
+            backend: mold_core::GpuBackend::Cuda,
+            name: "replacement gpu".into(),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
+            total_vram_bytes: 24_000_000_000,
+            free_vram_bytes: 24_000_000_000,
+        };
+        let registry = Arc::new(
+            crate::device_registry::DeviceRegistry::from_runtime_inventory(
+                vec![gpu.clone()],
+                std::slice::from_ref(&gpu),
+                Arc::new(None),
+            ),
+        );
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        pool.workers
+            .install_factory(
+                crate::gpu_pool::WorkerFactory {
+                    registry: registry.clone(),
+                    shared_pool: Arc::new(Mutex::new(
+                        mold_inference::shared_pool::SharedPool::new(),
+                    )),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        state.device_registry = registry;
+        install_authoritative_v2(&mut state);
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["admin_state"], "starting");
+        assert_eq!(body["schedulable"], false);
+
+        let ready_epoch = match scheduler_rx.recv().await.unwrap() {
+            crate::scheduler::WorkerEvent::Ready { owner_epoch, .. } => owner_epoch,
+            _ => panic!("fresh owner must publish epoch-qualified Ready"),
+        };
+        let worker = pool.worker_snapshot().pop().unwrap();
+        worker.request_shutdown();
+        assert!(pool.workers.wait_and_reap(id, ready_epoch));
+    }
+
+    #[tokio::test]
+    async fn device_patch_rejects_unknown_and_startup_excluded_ids() {
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(3),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: None,
+                    physical_uuid: None,
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: None,
+                    name: "excluded".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: false,
+                    telemetry_ordinal: None,
+                },
+            ])),
+            Arc::new(None),
+        ));
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/devices/cuda:ffffffffffffffffffffffffffffffff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let excluded = app
+            .oneshot(
+                Request::patch("/api/devices/cuda:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(excluded.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn device_patch_leaves_semantic_event_publication_to_the_coordinator() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let mut events = state.events.subscribe();
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_lifecycle_is_unavailable_without_authoritative_v2_ownership() {
+        use crate::dispatch_mode::DispatchMode;
+
+        for (label, mode, authoritative, observes) in [
+            ("legacy", DispatchMode::Legacy, false, false),
+            ("observe", DispatchMode::Observe, false, true),
+            ("maintenance", DispatchMode::V2, false, false),
+        ] {
+            let worker = gpu_worker_stub(0);
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            install_worker_registry(&mut state);
+            state
+                .device_registry
+                .set_desired_enabled(worker.gpu.stable_id.as_deref().unwrap(), false)
+                .unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tx,
+                mode,
+                authoritative,
+                observes,
+            );
+            let id = worker.gpu.stable_id.as_deref().unwrap();
+            let app = app_with_state(state);
+
+            let inventory = app
+                .clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(inventory.status(), StatusCode::OK, "{label}");
+            let inventory = json_body(inventory).await;
+            assert_ne!(
+                inventory["devices"][0]["admin_state"], "disabled",
+                "{label} must not report a live worker disabled"
+            );
+            assert_eq!(
+                inventory["devices"][0]["desired_enabled"], false,
+                "{label} keeps the persisted preference visible"
+            );
+            assert_eq!(
+                inventory["devices"][0]["schedulable"], false,
+                "{label} must not rewrite registry routing eligibility"
+            );
+            assert_eq!(
+                inventory["devices"][0]["unschedulable_reason"], "device_draining",
+                "{label} must not clear the registry reason"
+            );
+
+            let patch = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(patch.status(), StatusCode::CONFLICT, "{label}");
+            assert_eq!(
+                json_body(patch).await["code"],
+                "DEVICE_LIFECYCLE_MODE_CONFLICT",
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_device_projection_preserves_degraded_health_and_routing_exclusion() {
+        let worker = gpu_worker_stub(0);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() =
+            Some(std::time::Instant::now() + Duration::from_secs(60));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Legacy,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "degraded");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_device_projection_preserves_transient_unavailability() {
+        let worker = gpu_worker_stub(0);
+        let id = worker.gpu.stable_id.clone().unwrap();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        install_worker_registry(&mut state);
+        assert!(state.device_registry.mark_unavailable(&id));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+            false,
+            true,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "unavailable");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
+        let worker = gpu_worker_stub(0);
+        let cache = worker.model_cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("poison cache to prove status routes never acquire it");
+        })
+        .join();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:00000000000000000000000000000000".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(0),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: None,
+                    physical_uuid: None,
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: None,
+                    name: "test-gpu-0".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: true,
+                    telemetry_ordinal: Some(0),
+                },
+            ])),
+            Arc::new(None),
+        ));
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "gpu-host".into(),
+            timestamp: 1,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "test-gpu-0".into(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 * 1024 * 1024 * 1024,
+                vram_used: 9 * 1024 * 1024 * 1024,
+                vram_used_by_mold: Some(8 * 1024 * 1024 * 1024),
+                vram_used_by_other: Some(1024 * 1024 * 1024),
+                gpu_utilization: Some(41),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64_000_000_000,
+                used: 20_000_000_000,
+                available: None,
+                used_by_mold: 2_000_000_000,
+                used_by_other: 18_000_000_000,
+            },
+            cpu: None,
+        });
+        let app = app_with_state(state);
+
+        let devices = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            devices["devices"][0]["memory"]["used_bytes"],
+            9 * 1024 * 1024 * 1024_u64
+        );
+        assert_eq!(
+            devices["devices"][0]["memory"]["mold_used_bytes"],
+            8 * 1024 * 1024 * 1024_u64
+        );
+        assert_eq!(
+            devices["devices"][0]["telemetry"]["utilization_percent"],
+            41
+        );
+
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["gpu_info"]["name"], "test-gpu-0");
+        assert_eq!(status["gpu_info"]["vram_total_mb"], 24_576);
+        assert_eq!(status["gpu_info"]["vram_used_mb"], 9_216);
+        assert_eq!(status["memory_status"], "VRAM: 16.1 GB free");
+        assert_eq!(status["gpus"][0]["ordinal"], 0);
+        assert_eq!(
+            status["gpus"][0]["vram_used_bytes"],
+            9 * 1024 * 1024 * 1024_u64
+        );
+        assert!(
+            status["gpu_info"].get("id").is_none(),
+            "legacy gpu_info shape must not gain device fields"
+        );
+    }
+
+    #[test]
+    fn status_handler_has_no_live_inference_device_queries() {
+        let source = include_str!("routes.rs");
+        let start = source.find("async fn server_status").unwrap();
+        let end = source[start..].find("// ── /health").unwrap() + start;
+        let handler = &source[start..end];
+
+        assert!(!handler.contains("mold_inference::device"));
+        assert!(!handler.contains("memory_status_string"));
+        assert!(!handler.contains("free_vram_bytes"));
+        assert!(!handler.contains("CudaContext"));
+    }
+
+    #[tokio::test]
+    async fn status_omits_excluded_and_workerless_devices_but_devices_keeps_them() {
+        let worker = gpu_worker_stub(1);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        let discovered = |ordinal, id: &str, name: &str, startup_allowed| {
+            crate::device_registry::DiscoveredDevice {
+                stable_id: Some(id.into()),
+                backend: mold_core::GpuBackend::Cuda,
+                visible_ordinal: Some(ordinal),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                pci_bus_id: None,
+                name: name.into(),
+                compute_capability: Some((8, 6)),
+                total_memory_bytes: Some(24_000_000_000),
+                startup_allowed,
+                telemetry_ordinal: Some(ordinal),
+            }
+        };
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                discovered(
+                    0,
+                    "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "excluded GPU",
+                    false,
+                ),
+                discovered(
+                    1,
+                    "cuda:00000000000000000000000000000001",
+                    "active GPU",
+                    true,
+                ),
+                discovered(
+                    2,
+                    "cuda:cccccccccccccccccccccccccccccccc",
+                    "workerless GPU",
+                    true,
+                ),
+            ])),
+            Arc::new(None),
+        ));
+        let app = app_with_state(state);
+
+        let devices = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(devices["devices"].as_array().unwrap().len(), 3);
+
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["gpu_info"]["name"], "active GPU");
+        assert_eq!(status["gpus"].as_array().unwrap().len(), 1);
+        assert_eq!(status["gpus"][0]["ordinal"], 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_generation_before_queueing() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("must not run", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
+        assert!(body["error"].as_str().unwrap().contains("maintenance mode"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_admin_model_load_before_resolution() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/models/load")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"does-not-exist"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_chain_and_upscale_routes_before_gpu_work() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+        let chain_body = serde_json::to_vec(&route_chain_request()).unwrap();
+        // Deliberately invalid image bytes prove the availability fence runs
+        // before upscale validation, model resolution/pull, or engine creation.
+        let upscale_body = serde_json::to_vec(&serde_json::json!({
+            "model": "does-not-exist",
+            "image": "AQID",
+            "output_format": "png"
+        }))
+        .unwrap();
+
+        for (path, body) in [
+            ("/api/generate/chain", chain_body.clone()),
+            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/upscale", upscale_body.clone()),
+            ("/api/upscale/stream", upscale_body.clone()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must be fenced in maintenance mode"
+            );
+            let body = json_body(response).await;
+            assert_eq!(
+                body["code"], "GENERATION_UNAVAILABLE",
+                "{path} must return the typed maintenance error"
+            );
+            assert!(
+                body["error"].as_str().unwrap().contains("maintenance mode"),
+                "{path} must preserve the startup reason"
+            );
+        }
+    }
+
     // ── /api/queue ───────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -601,6 +2028,68 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
         assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn queue_v2_work_items_are_additive_and_legacy_patch_still_reorders_only_entries() {
+        let state = AppState::for_tests();
+        state.job_registry.register("ordinary-a", "flux");
+        state.job_registry.register("ordinary-b", "flux");
+        state
+            .scheduled_work
+            .set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+                work_id: "chain:parent-1:attempt:4:stage:2".to_string(),
+                parent_id: "parent-1".to_string(),
+                work_kind: "chain_stage".to_string(),
+                chain_stage: Some(2),
+                planned_device_id: Some("cuda:test-gpu".to_string()),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                ..mold_core::QueueWorkItem::default()
+            }]);
+        let app = app_with_state(state);
+
+        let before = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(before["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(before["plan"]["plan_version"], 7);
+        assert_eq!(before["plan"]["state_version"], 11);
+        assert_eq!(before["plan"]["work_items"][0]["parent_id"], "parent-1");
+        assert_eq!(before["plan"]["work_items"][0]["chain_stage"], 2);
+        assert_eq!(before["plan"]["work_items"][0]["work_kind"], "chain_stage");
+        assert_eq!(
+            before["plan"]["work_items"][0]["planned_device_id"],
+            "cuda:test-gpu"
+        );
+
+        let patch = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/ordinary-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patch.status(), StatusCode::OK);
+
+        let after = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(after["entries"][0]["id"], "ordinary-b");
+        assert_eq!(
+            after["plan"]["work_items"][0]["work_id"],
+            "chain:parent-1:attempt:4:stage:2"
+        );
+        assert_eq!(after["plan"], before["plan"]);
     }
 
     #[tokio::test]
@@ -688,6 +2177,70 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["id"], "aaaa");
         assert!(body.get("target_gpu").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_queue_accepts_matching_pin_shapes_and_rejects_a_mismatch() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine_and_queue(MockEngine::ready()).0;
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        install_worker_registry(&mut state);
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "hard_pinned_device_id": id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": null,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": id,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
     }
 
     #[tokio::test]
@@ -1059,6 +2612,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_mutation_response_waits_for_scheduler_transaction_fence() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        let fence = state.scheduler_mutation_fence.clone().lock_owned().await;
+        let app = app_with_state(state);
+
+        let mutation = tokio::spawn(async move {
+            app.oneshot(
+                Request::delete("/api/queue/aaaa")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !mutation.is_finished(),
+            "mutation route must not acknowledge before the scheduler fence"
+        );
+
+        drop(fence);
+        let response = tokio::time::timeout(Duration::from_secs(1), mutation)
+            .await
+            .expect("mutation must resume after the scheduler fence")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn delete_queue_unknown_id_returns_404() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         let app = app_with_state(state);
@@ -1151,6 +2734,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json_body(resp).await["queue_paused"], false);
+    }
+
+    #[tokio::test]
+    async fn v2_pause_and_resume_wait_for_authoritative_plan_publication() {
+        let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (owner_tx, _owner_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+        let scheduled = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            owner_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            true,
+            false,
+        )
+        .with_placement_preview(control_tx);
+        state.scheduled_work = scheduled.clone();
+        let queue_pause = state.queue_pause.clone();
+        let app = app_with_state(state);
+
+        let pause = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/queue/pause")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let pause_reply = match tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("pause must reach scheduler control")
+            .expect("scheduler control channel must remain open")
+        {
+            crate::scheduler::PlacementPreviewQuery::SetQueuePaused {
+                paused: true,
+                reply_tx,
+            } => reply_tx,
+            _ => panic!("expected scheduler-owned pause control"),
+        };
+        assert!(
+            !pause.is_finished(),
+            "pause response must wait for authoritative plan publication"
+        );
+        assert!(queue_pause.pause());
+        scheduled.set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+            work_id: "paused-work".into(),
+            parent_id: "paused-work".into(),
+            blocked_reason: Some(mold_core::QueueBlockedReason::QueuePaused),
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            ..Default::default()
+        }]);
+        pause_reply.send(Ok(true)).unwrap();
+        let response = pause.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let queue = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            queue["plan"]["work_items"][0]["blocked_reason"],
+            "queue_paused"
+        );
+
+        let resume = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/queue/resume")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let resume_reply = match tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("resume must reach scheduler control")
+            .expect("scheduler control channel must remain open")
+        {
+            crate::scheduler::PlacementPreviewQuery::SetQueuePaused {
+                paused: false,
+                reply_tx,
+            } => reply_tx,
+            _ => panic!("expected scheduler-owned resume control"),
+        };
+        assert!(
+            !resume.is_finished(),
+            "resume response must wait for authoritative plan publication"
+        );
+        assert!(queue_pause.resume());
+        scheduled.set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+            work_id: "queued-work".into(),
+            parent_id: "queued-work".into(),
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            ..Default::default()
+        }]);
+        resume_reply.send(Ok(true)).unwrap();
+        let response = resume.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let queue = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(queue["plan"]["work_items"][0]["activity_phase"], "queued");
+        assert_eq!(
+            queue["plan"]["work_items"][0]["blocked_reason"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]
@@ -1300,7 +2999,20 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_reports_queue_controls_available() {
-        let app = app_empty();
+        // `server_batch` is intentionally gated by the process-global
+        // `MOLD_OUTPUT_DIR` override. Serialize this positive assertion with
+        // tests that temporarily disable output through that environment
+        // variable.
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        let mut state = AppState::for_tests();
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let app = app_with_state(state);
         let resp = app
             .oneshot(
                 Request::get("/api/capabilities")
@@ -1314,6 +3026,165 @@ mod tests {
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
+        assert_eq!(body["queue"]["server_batch"], true);
+        assert_eq!(
+            body["queue"]["server_batch_max_outputs"],
+            crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
+        );
+        assert_eq!(body["devices"]["available"], true);
+        assert_eq!(body["devices"]["lifecycle"], true);
+        assert_eq!(body["devices"]["restart_enable"], false);
+        assert_eq!(body["devices"]["stable_pins"], true);
+        assert_eq!(body["devices"]["planned_lanes"], true);
+        assert_eq!(body["devices"]["learned_eta"], true);
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_device_lifecycle_false_without_authoritative_v2() {
+        let cases = [
+            (
+                "legacy",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Legacy,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "observe",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Observe,
+                    false,
+                    true,
+                ),
+            ),
+            (
+                "maintenance",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::V2,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "unavailable",
+                crate::scheduler::ScheduledWorkHandle::default(),
+            ),
+        ];
+
+        for (label, scheduled_work) in cases {
+            let mut state = AppState::for_tests();
+            state.scheduled_work = scheduled_work;
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["devices"]["lifecycle"], false, "{label}");
+            assert_eq!(body["devices"]["restart_enable"], true, "{label}");
+            assert_eq!(body["devices"]["stable_pins"], true, "{label}");
+            assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
+            assert_eq!(body["devices"]["learned_eta"], false, "{label}");
+            assert_eq!(body["queue"]["server_batch"], false, "{label}");
+            assert!(
+                body["queue"]["server_batch_max_outputs"].is_null(),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_batch_never_enters_legacy_single_result_worker() {
+        let app = app_with(MockEngine::ready());
+        let body = serde_json::json!({
+            "prompt": "two cats",
+            "model": "mock-model",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": 2,
+            "output_format": "png"
+        });
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("authoritative scheduler V2"));
+    }
+
+    #[tokio::test]
+    async fn oversized_raw_batch_is_rejected_before_preparation_or_reservation() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.config.write().await.output_dir =
+            Some(output_dir.path().to_string_lossy().into_owned());
+        let registry = state.job_registry.clone();
+        let app = app_with_state(state);
+        let body = serde_json::json!({
+            // Invalid downstream fields deliberately prove batch admission
+            // runs before ordinary request preparation/model resolution.
+            "prompt": "",
+            "model": "must-not-be-resolved",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": u32::MAX,
+            "output_format": "png"
+        });
+
+        for route in ["/api/generate", "/api/generate/stream"] {
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.clone().oneshot(
+                    Request::post(route)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("u32::MAX batch admission must be bounded-time")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "BATCH_OUTPUT_LIMIT_EXCEEDED");
+            assert_eq!(
+                body["error"],
+                format!(
+                    "batch_size ({}) exceeds the live server batch output limit ({})",
+                    u32::MAX,
+                    crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
+                )
+            );
+        }
+
+        assert!(
+            registry.snapshot().entries.is_empty(),
+            "rejected batch must not register a parent or enumerate children"
+        );
+        assert_eq!(
+            std::fs::read_dir(output_dir.path()).unwrap().count(),
+            0,
+            "rejected batch must not reserve filenames or create transaction state"
+        );
     }
 
     /// Clients feature-detect server-side catalog sorting against this
@@ -1847,6 +3718,10 @@ mod tests {
         // User-preference keys live in the settings DB (post-#265 routing).
         assert_eq!(find("expand.enabled")["source"], "db");
         assert_eq!(find("default_steps")["source"], "db");
+        assert_eq!(
+            find("scheduler.replan_debounce_ms")["restart_required"],
+            true
+        );
         // Values are typed JSON, mirroring `mold config list --json`.
         assert_eq!(
             find("server_port")["value"],
@@ -1956,6 +3831,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_config_is_validated_persisted_and_marked_restart_required() {
+        let (app, db) = app_with_settings_db();
+        let invalid = put_json(
+            &app,
+            "/api/config/scheduler.replan_max_delay_ms",
+            r#"{"value":1999}"#,
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = put_json(
+            &app,
+            "/api/config/scheduler.replan_debounce_ms",
+            r#"{"value":1500}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["value"], 1500);
+        assert_eq!(body["source"], "db");
+        assert_eq!(body["restart_required"], true);
+
+        let settings = mold_db::Settings::for_profile(db.as_ref().as_ref().unwrap(), "default");
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_REPLAN_DEBOUNCE_MS)
+                .unwrap(),
+            Some(1500)
+        );
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_REPLAN_MAX_DELAY_MS)
+                .unwrap(),
+            Some(5000)
+        );
+        assert_eq!(
+            settings
+                .get_int(mold_db::settings::SCHEDULER_WARM_WAIT_MAX_MS)
+                .unwrap(),
+            Some(2000)
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_put_file_key_persists_to_toml() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1973,6 +3892,62 @@ mod tests {
         assert!(
             written.contains("server_port = 8123"),
             "config.toml must carry the new value: {written}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_put_output_dir_is_restart_only_and_changes_neither_runtime_nor_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(tmp.path());
+        let boot_gallery = tmp.path().join("boot-gallery");
+        let rejected_gallery = tmp.path().join("rejected-gallery");
+        let config = mold_core::Config {
+            output_dir: Some(boot_gallery.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        config.save_bootstrap_only().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let live_config = state.config.clone();
+        let app = app_with_state(state);
+        let response = put_json(
+            &app,
+            "/api/config/output_dir",
+            &serde_json::json!({
+                "value": rejected_gallery.to_string_lossy()
+            })
+            .to_string(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "RESTART_REQUIRED");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("mold config set output_dir"));
+        assert_eq!(
+            live_config.read().await.effective_output_dir(),
+            boot_gallery,
+            "the running server must stay on its boot gallery namespace"
+        );
+        let persisted = mold_core::Config::load_or_default();
+        assert_eq!(
+            persisted.effective_output_dir(),
+            boot_gallery,
+            "a rejected live PUT must not persist the next-start namespace"
+        );
+        assert!(
+            !rejected_gallery.exists(),
+            "a rejected namespace must not be touched"
         );
     }
 
@@ -2228,8 +4203,9 @@ mod tests {
 
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
+        install_worker_registry(&mut state);
         let app = app_with_state(state);
 
         let resp = app
@@ -2256,8 +4232,9 @@ mod tests {
         let worker = gpu_worker_stub(1);
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
+        install_worker_registry(&mut state);
         state.resources.publish(mold_core::ResourceSnapshot {
             hostname: "gpu-host".to_string(),
             timestamp: 1,
@@ -2274,6 +4251,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
+                available: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 30_000_000_000,
             },
@@ -2833,6 +4811,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn batch_generate_response_uses_json_content_type() {
+        let response = crate::routes::batch_generate_response(mold_core::BatchGenerateResponse {
+            batch_id: "parent-1".to_string(),
+            outputs: Vec::new(),
+        });
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["batch_id"], "parent-1");
+        assert_eq!(body["outputs"], serde_json::json!([]));
+    }
+
     // ── /api/generate — engine error ─────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2960,6 +4958,66 @@ mod tests {
             spec["paths"]["/api/generate"].is_object(),
             "spec should have /api/generate path"
         );
+        assert!(
+            spec["paths"]["/api/devices"]["get"].is_object(),
+            "spec should document GET /api/devices"
+        );
+        assert!(
+            spec["paths"]["/api/devices/{id}"]["patch"].is_object(),
+            "spec should document PATCH /api/devices/{{id}}"
+        );
+        assert!(
+            spec["paths"]["/api/generate/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/generate/placement-preview"
+        );
+        assert!(
+            spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/chain-jobs/placement-preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_fails_closed_for_utility_stages() {
+        let state = AppState::for_tests();
+        let base = r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#;
+
+        let mut expansion: GenerateRequest = serde_json::from_str(base).unwrap();
+        expansion.expand = Some(true);
+        let expansion_preview =
+            crate::routes::placement_preview_for_request(&state, expansion, 2).await;
+        assert!(!expansion_preview.authoritative);
+        assert_eq!(expansion_preview.outcome, "unsupported");
+        assert!(expansion_preview.candidate.is_none());
+        assert!(expansion_preview.stage_candidates.is_empty());
+        assert!(expansion_preview
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("utility CPU/GPU"));
+
+        let mut upscale: GenerateRequest = serde_json::from_str(base).unwrap();
+        upscale.upscale_model = Some("real-esrgan-x4plus:fp16".into());
+        let upscale_preview =
+            crate::routes::placement_preview_for_request(&state, upscale, 2).await;
+        assert!(!upscale_preview.authoritative);
+        assert_eq!(upscale_preview.outcome, "unsupported");
+        assert!(upscale_preview.candidate.is_none());
+        assert!(upscale_preview.stage_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_validates_copies_before_capability_fallback() {
+        let state = AppState::for_tests();
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 0).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.reason.unwrap().contains("between 1 and 64"));
     }
 
     // ── /api/docs ────────────────────────────────────────────────────────────
@@ -3347,7 +5405,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let app = app_with_state(AppState::empty(
             mold_core::Config::default(),
@@ -3382,8 +5440,10 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
@@ -3392,7 +5452,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -3400,6 +5462,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -3447,8 +5510,10 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
@@ -3457,7 +5522,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -3465,6 +5532,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -3715,8 +5783,10 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
@@ -3725,7 +5795,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -3733,6 +5805,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -3930,6 +6003,44 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
         assert_eq!(body["state"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_chain_job_reports_cancelling_until_worker_settles() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "running-cancel", ChainJobState::Running);
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        handle.register_cancel_for_tests("running-cancel");
+        let app = app_with_chain_handle(db, handle);
+
+        let cancel_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/chain-jobs/running-cancel/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::ACCEPTED);
+        let cancel_body = json_body(cancel_resp).await;
+        assert_eq!(cancel_body["state"], "running");
+        assert_eq!(cancel_body["cancelling"], true);
+
+        let get_resp = app
+            .oneshot(
+                Request::get("/api/chain-jobs/running-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = json_body(get_resp).await;
+        assert_eq!(get_body["state"], "running");
+        assert_eq!(get_body["cancelling"], true);
     }
 
     #[tokio::test]
@@ -4566,6 +6677,18 @@ mod tests {
             crate::rate_limit::classify_route("/api/generate/stream", &Method::POST),
             Some(RouteTier::Generation)
         );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/generate/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/chain-jobs/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/devices/cuda:0123456789abcdef", &Method::PATCH,),
+            Some(RouteTier::Generation)
+        );
 
         // Read tier
         assert_eq!(
@@ -4703,7 +6826,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
@@ -4743,7 +6866,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = app_with_state(state);
@@ -4764,6 +6887,663 @@ mod tests {
             0,
             "filesystem fallback must still apply size/header validation"
         );
+    }
+
+    #[tokio::test]
+    async fn gallery_import_uses_no_replace_publication_metadata_and_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        state.metadata_db = Arc::new(Some(db));
+        let db = state.metadata_db.clone();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+        let bytes = minimal_png();
+        let metadata = output_metadata("remote origin");
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(json_body(first).await["filename"], "print.png");
+        assert_eq!(std::fs::read(dir.path().join("print.png")).unwrap(), bytes);
+        assert_eq!(
+            db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata,
+            metadata
+        );
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryAdded { filename, .. } if filename == "print.png"
+        ));
+
+        // Identical bytes + identical metadata preserve cross-host filename
+        // identity instead of minting print-2.png.
+        let repeated = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(json_body(repeated).await["filename"], "print.png");
+        assert!(!dir.path().join("print-2.png").exists());
+        let replay_event = events.try_recv();
+        assert!(
+            matches!(
+                replay_event,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "idempotent replay emitted an unexpected event: {replay_event:?}"
+        );
+
+        // Same bytes under the same identity may not silently rewrite
+        // provenance.
+        let conflict = app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(
+                        Some(&output_metadata("conflicting origin")),
+                        &bytes,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GALLERY_METADATA_CONFLICT"
+        );
+        let conflict_event = events.try_recv();
+        assert!(
+            matches!(
+                conflict_event,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "conflicting replay emitted an unexpected event: {conflict_event:?}"
+        );
+        assert_eq!(
+            db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata,
+            metadata
+        );
+
+        let (synthetic_app, mut synthetic_events) = {
+            let config = mold_core::Config {
+                output_dir: Some(dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let mut state = AppState::empty(
+                config,
+                crate::state::QueueHandle::new(tx),
+                AppState::empty_gpu_pool_for_test(),
+                200,
+            );
+            state.metadata_db = db.clone();
+            let events = state.events.subscribe();
+            (app_with_state(state), events)
+        };
+        let synthetic_conflict = synthetic_app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body_with_descriptor(
+                        &metadata, true, &bytes,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(synthetic_conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(synthetic_conflict).await["code"],
+            "GALLERY_METADATA_CONFLICT"
+        );
+        assert!(
+            !db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata_synthetic
+        );
+        assert!(matches!(
+            synthetic_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn db_disabled_import_archive_is_authoritative_across_replay_restart_delete_and_reuse() {
+        // `Config::is_output_disabled` intentionally consults
+        // `MOLD_OUTPUT_DIR` on every call. Keep the shared environment lock
+        // for the full async lifecycle so the disabled-output route tests
+        // cannot transiently turn this gallery off underneath a replay.
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        fn state_for(dir: &std::path::Path) -> AppState {
+            let config = mold_core::Config {
+                output_dir: Some(dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            AppState::empty(
+                config,
+                crate::state::QueueHandle::new(tx),
+                AppState::empty_gpu_pool_for_test(),
+                200,
+            )
+        }
+
+        async fn import(
+            app: &axum::Router,
+            filename: &str,
+            metadata: &mold_core::OutputMetadata,
+            bytes: &[u8],
+        ) -> StatusCode {
+            app.clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(Some(metadata), bytes)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        async fn listed(app: &axum::Router) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(Request::get("/api/gallery").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_movie = minimal_mp4(0x11);
+        let webp = minimal_webp();
+        let mut movie_metadata = output_metadata("archived movie provenance");
+        movie_metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        let mut webp_metadata = output_metadata("archived WebP provenance");
+        webp_metadata.output_format = Some(mold_core::OutputFormat::Webp);
+
+        let state = state_for(dir.path());
+        let app = app_with_state(state);
+        assert_eq!(
+            import(&app, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            import(&app, "still.webp", &webp_metadata, &webp).await,
+            StatusCode::CREATED
+        );
+
+        let gallery = listed(&app).await;
+        let rows = gallery.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().any(|row| {
+                row["filename"] == "movie.mp4"
+                    && row["metadata"]["prompt"] == "archived movie provenance"
+                    && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+            }),
+            "movie archive metadata was not authoritative: {gallery}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["filename"] == "still.webp"
+                    && row["metadata"]["prompt"] == "archived WebP provenance"
+                    && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+            }),
+            "WebP archive metadata was not authoritative: {gallery}"
+        );
+        assert_eq!(
+            import(&app, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            import(&app, "still.webp", &webp_metadata, &webp).await,
+            StatusCode::OK
+        );
+
+        // A fresh state models a DB-disabled process restart. Startup recovery
+        // and the new router must retain the same committed archive authority.
+        let restarted_state = state_for(dir.path());
+        crate::batch_transaction::recover_transactions(
+            dir.path(),
+            &restarted_state.gallery_publication_gate,
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        let restarted = app_with_state(restarted_state);
+        let gallery = listed(&restarted).await;
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "movie.mp4"
+                && row["metadata"]["prompt"] == "archived movie provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+        assert_eq!(
+            import(&restarted, "movie.mp4", &movie_metadata, &first_movie).await,
+            StatusCode::OK
+        );
+
+        let deleted = restarted
+            .clone()
+            .oneshot(
+                Request::delete("/api/gallery/image/movie.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let after_delete_state = state_for(dir.path());
+        crate::batch_transaction::recover_transactions(
+            dir.path(),
+            &after_delete_state.gallery_publication_gate,
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        let after_delete = app_with_state(after_delete_state);
+        let gallery = listed(&after_delete).await;
+        assert!(!gallery
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["filename"] == "movie.mp4"));
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "still.webp"
+                && row["metadata"]["prompt"] == "archived WebP provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+
+        let replacement_movie = minimal_mp4(0x22);
+        let mut replacement_metadata = output_metadata("replacement movie provenance");
+        replacement_metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        assert_eq!(
+            import(
+                &after_delete,
+                "movie.mp4",
+                &replacement_metadata,
+                &replacement_movie,
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        let gallery = listed(&after_delete).await;
+        assert!(gallery.as_array().unwrap().iter().any(|row| {
+            row["filename"] == "movie.mp4"
+                && row["metadata"]["prompt"] == "replacement movie provenance"
+                && !row["metadata_synthetic"].as_bool().unwrap_or(false)
+        }));
+        assert_eq!(
+            import(
+                &after_delete,
+                "movie.mp4",
+                &replacement_metadata,
+                &replacement_movie,
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn gallery_import_requires_configured_key_before_creating_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let keys = std::collections::HashSet::from(["desktop-local-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = create_router(state)
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::auth::inject_auth_state,
+            ));
+        let request_body = gallery_import_body(
+            Some(&output_metadata("authenticated desktop import")),
+            &minimal_png(),
+        );
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/auth.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(request_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(!dir.path().join("auth.png").exists());
+        assert!(
+            !dir.path().join(".mold-batch").exists(),
+            "auth must reject before transaction staging exists"
+        );
+
+        let authorized = app
+            .oneshot(
+                Request::put("/api/gallery/import/auth.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .header("x-api-key", "desktop-local-key")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::CREATED);
+        assert!(dir.path().join("auth.png").is_file());
+    }
+
+    #[tokio::test]
+    async fn gallery_import_accepts_chunked_declared_files_above_global_json_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "metadata": output_metadata("large streamed import"),
+            "metadata_synthetic": false,
+        }))
+        .unwrap();
+        let declared_len = 65_u64 * 1024 * 1024;
+        let mut prefix = Vec::with_capacity(12 + descriptor.len() + 1);
+        prefix.extend_from_slice(&(descriptor.len() as u32).to_be_bytes());
+        prefix.extend_from_slice(&declared_len.to_be_bytes());
+        prefix.extend_from_slice(&descriptor);
+        prefix.push(0x89);
+        let stream = futures::stream::iter([Ok::<_, std::convert::Infallible>(
+            axum::body::Bytes::from(prefix),
+        )]);
+
+        let response = app
+            .oneshot(
+                Request::put("/api/gallery/import/large.mp4")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from_stream(stream))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "route-specific streaming limit must admit a logical file above 64 MiB"
+        );
+        assert_eq!(json_body(response).await["code"], "INVALID_GALLERY_IMPORT");
+        assert!(!dir.path().join("large.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn gallery_import_framing_and_filename_are_bounded_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+
+        let traversal = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/%2E%2E%2Fsecret.png")
+                    .body(Body::from(gallery_import_body(None, &minimal_png())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                traversal.status(),
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY | StatusCode::NOT_FOUND
+            ),
+            "encoded traversal must never reach publication: {}",
+            traversal.status()
+        );
+
+        let mut oversized_metadata = Vec::new();
+        oversized_metadata.extend_from_slice(&(1024_u32 * 1024 + 1).to_be_bytes());
+        oversized_metadata.extend_from_slice(&0_u64.to_be_bytes());
+        let oversized_metadata = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(oversized_metadata))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized_metadata.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            json_body(oversized_metadata).await["code"],
+            "GALLERY_IMPORT_TOO_LARGE"
+        );
+
+        for (filename, corrupt) in [
+            ("corrupt.png", vec![0_u8; 320]),
+            ("corrupt.mp4", vec![0_u8; 320]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(
+                            Some(&output_metadata("corrupt import")),
+                            &corrupt,
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(json_body(response).await["code"], "INVALID_GALLERY_MEDIA");
+            assert!(!dir.path().join(filename).exists());
+        }
+
+        let short = app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(vec![0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1, b'{']))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(short.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json_body(short).await["code"], "INVALID_GALLERY_IMPORT");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() != "print.png"),
+            "invalid framing must not publish a file"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_gallery_observer_and_mutator_waits_for_atomic_publication_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+        let gate = state.gallery_publication_gate.clone();
+        let writer = gate.write().await;
+        let app = app_with_state(state);
+        let cases = [
+            (Method::GET, "/api/gallery", StatusCode::OK),
+            (
+                Method::GET,
+                "/api/gallery/image/missing.png",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::GET,
+                "/api/gallery/thumbnail/missing.png",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::GET,
+                "/api/gallery/preview/missing.mp4",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::DELETE,
+                "/api/gallery/image/missing.png",
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        let mut requests: Vec<_> = cases
+            .into_iter()
+            .map(|(method, uri, expected)| {
+                let app = app.clone();
+                (
+                    expected,
+                    tokio::spawn(async move {
+                        app.oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri(uri)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                    }),
+                )
+            })
+            .collect();
+
+        for (_, request) in &mut requests {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), request)
+                    .await
+                    .is_err(),
+                "a gallery route observed a transaction while its writer gate was held"
+            );
+        }
+        drop(writer);
+        for (expected, request) in requests {
+            let response = tokio::time::timeout(Duration::from_secs(1), request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn gallery_listings_share_the_publication_reader_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+        let gate = state.gallery_publication_gate.clone();
+        let reader = gate.read().await;
+        let app = app_with_state(state);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/gallery")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("a second gallery reader must not serialize behind the first")
+        .unwrap();
+
+        drop(reader);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// `GET /api/gallery/preview/:filename` serves the cached `.preview.gif`
@@ -4806,7 +7586,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -4942,7 +7722,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
@@ -5085,15 +7865,14 @@ mod tests {
 
     #[tokio::test]
     async fn put_model_placement_updates_config_and_persists() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("MOLD_HOME", tmp.path());
+        let _home = MoldHomeGuard::set(tmp.path());
         let app = app_empty();
         // Re-create state inside this test with mutable access.
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = {
@@ -5133,23 +7912,21 @@ mod tests {
         assert_eq!(p.text_encoders, mold_core::types::DeviceRef::Cpu);
         let adv = p.advanced.unwrap();
         assert_eq!(adv.transformer, mold_core::types::DeviceRef::gpu(1));
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
     async fn put_model_placement_returns_500_when_save_fails() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // Point MOLD_HOME at a regular file so `config.toml` cannot be created
         // underneath it — `Config::save()` must return `Err`.
         let tmp = tempfile::tempdir().unwrap();
         let blocker = tmp.path().join("not-a-dir");
         std::fs::write(&blocker, "blocker").unwrap();
-        std::env::set_var("MOLD_HOME", &blocker);
+        let _home = MoldHomeGuard::set(&blocker);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state.clone());
@@ -5182,8 +7959,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
@@ -5215,7 +7990,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![gpu_worker_stub(1)],
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -5246,13 +8021,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_model_placement_returns_saved_value() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("MOLD_HOME", tmp.path());
+        let _home = MoldHomeGuard::set(tmp.path());
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -5296,7 +8070,6 @@ mod tests {
         assert_eq!(got["advanced"]["transformer"]["kind"], "gpu");
         assert_eq!(got["advanced"]["transformer"]["ordinal"], 1);
         assert_eq!(got["advanced"]["t5"]["kind"], "cpu");
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
@@ -5581,7 +8354,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -5593,6 +8366,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 1,
                 used: 0,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },
@@ -5613,13 +8387,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_routes_expose_only_frozen_cuda_visible_inventory() {
+        use futures::StreamExt as _;
+
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let visible_uuid = [0xaa; 16];
+        let targets = vec![crate::resources::TelemetryTarget::cuda(
+            0,
+            visible_uuid,
+            mold_inference::device::CudaDeviceKind::FullGpu,
+            "visible GPU".into(),
+            24 * 1024 * 1024 * 1024,
+        )];
+        let gpus = crate::resources::SmiSource::parse_visible_snapshot(
+            "0, GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, hidden physical GPU, 24576, 900\n\
+             7, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, visible UUID GPU, 24576, 300",
+            &targets,
+        );
+        assert_eq!(gpus.len(), 1, "test setup must apply the frozen inventory");
+
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new().into(),
+            }),
+            200,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "unit-test".into(),
+            timestamp: 12345,
+            gpus,
+            system_ram: mold_core::RamSnapshot {
+                total: 1,
+                used: 0,
+                available: None,
+                used_by_mold: 0,
+                used_by_other: 0,
+            },
+            cpu: None,
+        });
+        let app = create_router(state);
+
+        let one_shot = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/resources")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(one_shot["gpus"].as_array().unwrap().len(), 1);
+        assert_eq!(one_shot["gpus"][0]["ordinal"], 0);
+        assert_eq!(one_shot["gpus"][0]["name"], "visible UUID GPU");
+        assert!(
+            !one_shot.to_string().contains("hidden physical GPU"),
+            "one-shot resources leaked a CUDA-hidden physical GPU"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resources/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("cached resource SSE frame should arrive immediately")
+            .expect("resource SSE stream should yield a frame")
+            .expect("resource SSE frame should be readable");
+        let frame = String::from_utf8_lossy(&bytes);
+        assert!(frame.contains("visible UUID GPU"));
+        assert!(
+            !frame.contains("hidden physical GPU"),
+            "resource stream leaked a CUDA-hidden physical GPU"
+        );
+    }
+
+    #[tokio::test]
     async fn get_api_resources_stream_sets_sse_content_type() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let state = AppState::empty(
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -5648,7 +8508,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -5837,7 +8697,7 @@ mod tests {
             config,
             crate::state::QueueHandle::new(tx),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );

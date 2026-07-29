@@ -6,8 +6,11 @@
  * About card sourced from GET /api/status. Set-once prefs only; per-generation
  * knobs stay in Create's Advanced.
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import type { DeviceInfo } from "@studio/api/devices";
+import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
 import SegmentedControl, {
   type SegmentOption,
@@ -15,6 +18,21 @@ import SegmentedControl, {
 import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
+import type { ServerCapabilities } from "../types";
+import { originHost } from "../lib/hostRegistry";
+import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
+import {
+  hostCapabilities,
+  hostDevices,
+  hostQueue,
+  setHostDeviceEnabled,
+} from "../components/machines/hostClient";
 import {
   deleteCatalogCredential,
   getCatalogCredentialStatus,
@@ -129,6 +147,86 @@ async function removeCivitai() {
 // About — server version + processing summary.
 const { status } = useStatusPoll();
 const version = computed(() => status.value?.version ?? "—");
+const devices = ref<DeviceInfo[] | null>(null);
+const deviceCapabilities = ref<ServerCapabilities | null>(null);
+const deviceMutations = ref(new Set<string>());
+const queuePlan = ref<QueuePlan | null>(null);
+let devicePanelRequestGeneration = 0;
+
+async function loadDevicePanel() {
+  const host = originHost();
+  const generation = ++devicePanelRequestGeneration;
+  const [deviceResult, queueResult, capabilityResult] =
+    await Promise.allSettled([
+      hostDevices(host),
+      hostQueue(host),
+      hostCapabilities(host),
+    ]);
+  if (generation !== devicePanelRequestGeneration) return;
+  if (deviceResult.status === "fulfilled")
+    devices.value = deviceResult.value.devices;
+  if (queueResult.status === "fulfilled")
+    queuePlan.value = queueResult.value.plan ?? null;
+  else queuePlan.value = null;
+  deviceCapabilities.value =
+    capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+  if (deviceResult.status !== "fulfilled") devices.value = null;
+}
+
+async function toggleDeviceById(deviceId: string, enabled: boolean) {
+  const device = devices.value?.find((candidate) => candidate.id === deviceId);
+  if (!device || enabled === device.desired_enabled) return;
+  if (!canMutateDevice(device, deviceCapabilities.value)) return;
+  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
+  try {
+    await setHostDeviceEnabled(originHost(), device.id, enabled);
+    await loadDevicePanel();
+  } catch (error) {
+    toast("error", `Could not update ${device.name}: ${errorMessage(error)}`);
+  } finally {
+    const next = new Set(deviceMutations.value);
+    next.delete(device.id);
+    deviceMutations.value = next;
+  }
+}
+
+function toggleDevice(device: DeviceInfo) {
+  return toggleDeviceById(device.id, !device.desired_enabled);
+}
+
+async function unpinWork(workId: string) {
+  const host = originHost();
+  try {
+    await setQueueDevicePin(
+      { baseUrl: host.url, apiKey: host.apiKey ?? null },
+      workId,
+      null,
+    );
+    await loadDevicePanel();
+  } catch (error) {
+    toast("error", `Queue pin was not changed: ${errorMessage(error)}`);
+  }
+}
+
+let deviceEventsAbort: AbortController | null = null;
+
+onMounted(() => {
+  const host = originHost();
+  // Bootstrap even when the server predates `/api/events`; the subscription
+  // is an invalidation accelerator, not the source of initial truth.
+  void loadDevicePanel();
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    deviceEventsAbort.signal,
+    () => void loadDevicePanel(),
+  );
+});
+
+onBeforeUnmount(() => {
+  devicePanelRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 </script>
 
 <template>
@@ -157,6 +255,26 @@ const version = computed(() => status.value?.version ?? "—");
           @update:model-value="setAppearance"
         />
       </div>
+    </CardSurface>
+
+    <p v-if="devices !== null || queuePlan !== null" class="kicker">
+      Scheduler plan
+    </p>
+    <CardSurface
+      v-if="devices !== null || queuePlan !== null"
+      class="settings__card"
+    >
+      <DevicePanel
+        :devices="devices ?? []"
+        :plan="queuePlan"
+        :mutable="
+          deviceCapabilities?.devices?.lifecycle === true &&
+          deviceCapabilities?.dispatch?.v2_authoritative === true
+        "
+        :busy-device-ids="[...deviceMutations]"
+        @unpin="unpinWork"
+        @toggle="toggleDeviceById"
+      />
     </CardSurface>
 
     <p class="kicker">Accounts</p>
@@ -288,6 +406,45 @@ const version = computed(() => status.value?.version ?? "—");
 
     <ConfigSettingsPanel />
 
+    <template v-if="devices !== null">
+      <p class="kicker">Advanced · GPU devices</p>
+      <CardSurface class="settings__card" data-test="settings-device-controls">
+        <p class="device-state" data-test="settings-device-lifecycle-note">
+          {{ deviceLifecycleMessage(deviceCapabilities) }}
+        </p>
+        <div
+          v-for="device in devices"
+          :key="device.id"
+          class="row"
+          data-test="device-row"
+        >
+          <span class="row__label">
+            {{ device.name }}
+            <small class="device-state">
+              {{
+                device.ordinal == null
+                  ? device.backend
+                  : `GPU ${device.ordinal}`
+              }}
+              · {{ deviceStateLabel(device) }}
+            </small>
+          </span>
+          <button
+            type="button"
+            class="btn"
+            :data-test="`settings-device-toggle-${device.ordinal ?? device.id}`"
+            :disabled="
+              !canMutateDevice(device, deviceCapabilities) ||
+              deviceMutations.has(device.id)
+            "
+            @click="toggleDevice(device)"
+          >
+            {{ deviceActionLabel(device, deviceCapabilities) }}
+          </button>
+        </div>
+      </CardSurface>
+    </template>
+
     <p class="kicker">About</p>
     <CardSurface class="settings__card settings__card--list" :padded="false">
       <div class="about-row">
@@ -355,6 +512,15 @@ const version = computed(() => status.value?.version ?? "—");
 .row__label {
   font-size: 13.5px;
   color: var(--rebate);
+}
+
+.device-state {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
 .field {

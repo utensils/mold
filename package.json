@@ -10,6 +10,8 @@
     "desktop"
   ],
   "scripts": {
+    "fmt": "prettier --write studio",
+    "fmt:check": "prettier --check studio",
     "check:architecture": "bash scripts/tests/frontend-architecture.sh",
     "check:dead-code": "knip",
     "test:studio": "vitest run --config studio/vitest.config.ts",

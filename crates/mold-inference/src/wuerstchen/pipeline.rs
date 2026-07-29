@@ -187,9 +187,8 @@ impl WuerstchenEngine {
     }
 
     fn decoder_guidance() -> f64 {
-        std::env::var("MOLD_WUERSTCHEN_DECODER_GUIDANCE")
-            .ok()
-            .and_then(|value| value.parse::<f64>().ok())
+        crate::runtime_env::value("MOLD_WUERSTCHEN_DECODER_GUIDANCE")
+            .and_then(|value| crate::runtime_env::parse_f64(&value))
             .unwrap_or(0.0)
     }
 
@@ -584,7 +583,7 @@ impl WuerstchenEngine {
         let tier1 = self
             .pending_placement
             .as_ref()
-            .map(|p| p.text_encoders)
+            .map(|p| p.text_encoders.clone())
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
@@ -698,6 +697,7 @@ impl WuerstchenEngine {
             if step_idx + 1 >= timesteps.len() {
                 break; // last timestep is 0.0, not used for denoising
             }
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
@@ -723,6 +723,7 @@ impl WuerstchenEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
@@ -762,6 +763,7 @@ impl WuerstchenEngine {
         let start = Instant::now();
 
         for (step_idx, &t) in active_timesteps.iter().enumerate() {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
@@ -796,6 +798,7 @@ impl WuerstchenEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
@@ -855,9 +858,11 @@ impl WuerstchenEngine {
         // Scale from VQ-GAN latent space to decoder latent space (inverse of decode scaling)
         let encoded = (&encoded / VQGAN_SCALE)?;
 
-        self.base
-            .progress
-            .stage_done("Encoding source image (VQ-GAN)", encode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding source image (VQ-GAN)",
+            encode_start.elapsed(),
+        );
 
         let start_step = crate::img2img::img2img_start_index(decoder_steps, strength);
 
@@ -949,7 +954,7 @@ impl WuerstchenEngine {
                 let tier1 = self
                     .pending_placement
                     .as_ref()
-                    .map(|p| p.text_encoders)
+                    .map(|p| p.text_encoders.clone())
                     .unwrap_or_default();
                 let clip_device =
                     crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
@@ -1243,9 +1248,11 @@ impl WuerstchenEngine {
         Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.base
-            .progress
-            .stage_done("VQ-GAN decode", decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VQ-GAN decode",
+            decode_start.elapsed(),
+        );
 
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
         // due to the 42x compression rounding in the cascade.
@@ -1470,9 +1477,11 @@ impl WuerstchenEngine {
         Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.base
-            .progress
-            .stage_done("VQ-GAN decode", decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VQ-GAN decode",
+            decode_start.elapsed(),
+        );
 
         // 5. Encode to image format
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
@@ -1510,6 +1519,7 @@ impl WuerstchenEngine {
 
 impl InferenceEngine for WuerstchenEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -1528,6 +1538,13 @@ impl InferenceEngine for WuerstchenEngine {
         WuerstchenEngine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = WuerstchenEngine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
@@ -1539,6 +1556,19 @@ impl InferenceEngine for WuerstchenEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("wuerstchen")
+            .expect("production Wuerstchen batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

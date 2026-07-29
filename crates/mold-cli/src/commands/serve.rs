@@ -63,8 +63,11 @@ pub async fn run(
         GpuSelection::All => {
             println!("{} GPUs: all available", theme::icon_ok());
         }
-        GpuSelection::Specific(ordinals) => {
-            let list: Vec<String> = ordinals.iter().map(|o| o.to_string()).collect();
+        GpuSelection::None => {
+            println!("{} GPUs: none (maintenance mode)", theme::icon_ok());
+        }
+        GpuSelection::Specific(selectors) => {
+            let list: Vec<String> = selectors.iter().map(ToString::to_string).collect();
             println!("{} GPUs: {}", theme::icon_ok(), list.join(", "));
         }
     }

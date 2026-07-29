@@ -3942,6 +3942,7 @@ dependencies = [
  "safetensors 0.4.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "symphonia",
  "tempfile",
  "thiserror 2.0.18",
@@ -3949,6 +3950,10 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "mold-ai-scheduler"
+version = "0.20.2"
 
 [[package]]
 name = "mold-ai-server"
@@ -3961,6 +3966,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs 5.0.1",
+ "fs2",
  "futures",
  "futures-core",
  "getrandom 0.3.4",
@@ -3975,6 +3981,8 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-inference",
+ "mold-ai-scheduler",
+ "nvml-wrapper",
  "rust-embed",
  "serde",
  "serde_json",
@@ -3993,6 +4001,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "walkdir",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4004,6 +4013,7 @@ dependencies = [
  "block2",
  "filetime",
  "flate2",
+ "futures-util",
  "hostname",
  "if-addrs",
  "image",
@@ -4354,6 +4364,29 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
+
+[[package]]
+name = "nvml-wrapper"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9bff0aa1d48904a1385ea2a8b97576fbdcbc9a3cfccd0d31fe978e1c4038c5"
+dependencies = [
+ "bitflags 2.13.0",
+ "libloading 0.8.9",
+ "nvml-wrapper-sys",
+ "static_assertions",
+ "thiserror 1.0.69",
+ "wrapcenum-derive",
+]
+
+[[package]]
+name = "nvml-wrapper-sys"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "698d45156f28781a4e79652b6ebe2eaa0589057d588d3aec1333f6466f13fcb5"
+dependencies = [
+ "libloading 0.8.9",
+]
 
 [[package]]
 name = "objc"
@@ -9099,6 +9132,18 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "wrapcenum-derive"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76ff259533532054cfbaefb115c613203c73707017459206380f03b3b3f266e"
+dependencies = [
+ "darling 0.20.11",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

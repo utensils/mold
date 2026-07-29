@@ -390,6 +390,60 @@ is_schnell = false
     }
 
     #[test]
+    fn frozen_model_paths_ignore_every_component_environment_override() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let overrides = [
+            ("MOLD_TRANSFORMER_PATH", "/env/transformer"),
+            ("MOLD_VAE_PATH", "/env/vae"),
+            ("MOLD_SPATIAL_UPSCALER_PATH", "/env/spatial"),
+            ("MOLD_TEMPORAL_UPSCALER_PATH", "/env/temporal"),
+            ("MOLD_DISTILLED_LORA_PATH", "/env/distilled"),
+            ("MOLD_T5_PATH", "/env/t5"),
+            ("MOLD_CLIP_PATH", "/env/clip"),
+            ("MOLD_T5_TOKENIZER_PATH", "/env/t5-tokenizer"),
+            ("MOLD_CLIP_TOKENIZER_PATH", "/env/clip-tokenizer"),
+            ("MOLD_CLIP2_PATH", "/env/clip2"),
+            ("MOLD_CLIP2_TOKENIZER_PATH", "/env/clip2-tokenizer"),
+            ("MOLD_TEXT_TOKENIZER_PATH", "/env/text-tokenizer"),
+            ("MOLD_DECODER_PATH", "/env/decoder"),
+        ];
+        for (name, value) in overrides {
+            std::env::set_var(name, value);
+        }
+        let frozen = ModelConfig {
+            transformer: Some("/frozen/transformer".into()),
+            vae: Some("/frozen/vae".into()),
+            spatial_upscaler: Some("/frozen/spatial".into()),
+            temporal_upscaler: Some("/frozen/temporal".into()),
+            distilled_lora: Some("/frozen/distilled".into()),
+            t5_encoder: Some("/frozen/t5".into()),
+            clip_encoder: Some("/frozen/clip".into()),
+            t5_tokenizer: Some("/frozen/t5-tokenizer".into()),
+            clip_tokenizer: Some("/frozen/clip-tokenizer".into()),
+            clip_encoder_2: Some("/frozen/clip2".into()),
+            clip_tokenizer_2: Some("/frozen/clip2-tokenizer".into()),
+            text_tokenizer: Some("/frozen/text-tokenizer".into()),
+            decoder: Some("/frozen/decoder".into()),
+            ..ModelConfig::default()
+        };
+        let mut config = Config::default();
+        config.install_frozen_model_config("semantic-model:fp8", frozen);
+
+        let paths = ModelPaths::resolve("semantic-model:fp8", &config).unwrap();
+        assert_eq!(paths.transformer, PathBuf::from("/frozen/transformer"));
+        assert_eq!(paths.vae, PathBuf::from("/frozen/vae"));
+        assert_eq!(
+            paths.clip_tokenizer_2,
+            Some(PathBuf::from("/frozen/clip2-tokenizer"))
+        );
+        assert_eq!(paths.decoder, Some(PathBuf::from("/frozen/decoder")));
+
+        for (name, _) in overrides {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn model_paths_resolve_manifest_from_models_dir_without_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("resolve-manifest");
@@ -2122,6 +2176,74 @@ description = "stale"
     }
 
     // ── TOML serde edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn config_gpu_selection_preserves_legacy_and_explicit_modes() {
+        let cases = [
+            ("", crate::types::GpuSelection::All),
+            ("gpus = []", crate::types::GpuSelection::All),
+            ("gpus = \"all\"", crate::types::GpuSelection::All),
+            ("gpus = \"none\"", crate::types::GpuSelection::None),
+            (
+                "gpus = [1, 0]",
+                crate::types::GpuSelection::Specific(vec![
+                    crate::types::GpuSelector::Ordinal(1),
+                    crate::types::GpuSelector::Ordinal(0),
+                ]),
+            ),
+            (
+                "gpus = [\"cuda:0123\", \"GPU-fedc\", \"metal:default\"]",
+                crate::types::GpuSelection::Specific(vec![
+                    crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
+                    crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+                    crate::types::GpuSelector::Identifier("metal:default".to_string()),
+                ]),
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let config: Config = toml::from_str(source).unwrap();
+            assert_eq!(config.gpu_selection(), expected, "source: {source}");
+        }
+    }
+
+    #[test]
+    fn config_gpu_selection_rejects_mixed_selector_arrays() {
+        let error = toml::from_str::<Config>(r#"gpus = [0, "cuda:0123"]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gpus"));
+
+        for source in [r#"gpus = ["all"]"#, r#"gpus = ["none"]"#] {
+            let error = toml::from_str::<Config>(source).unwrap_err().to_string();
+            assert!(error.contains("UUID selector"), "source: {source}");
+        }
+    }
+
+    #[test]
+    fn config_gpu_selection_roundtrips_untagged_toml_shapes() {
+        let selections = [
+            crate::types::GpuSelection::All,
+            crate::types::GpuSelection::None,
+            crate::types::GpuSelection::Specific(vec![
+                crate::types::GpuSelector::Ordinal(1),
+                crate::types::GpuSelector::Ordinal(0),
+            ]),
+            crate::types::GpuSelection::Specific(vec![
+                crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
+                crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+                crate::types::GpuSelector::Identifier("metal:default".to_string()),
+            ]),
+        ];
+
+        for selection in selections {
+            let mut config = Config::default();
+            config.gpus = Some(selection.clone());
+            let serialized = toml::to_string(&config).unwrap();
+            let parsed: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(parsed.gpu_selection(), selection);
+        }
+    }
 
     #[test]
     fn config_deser_with_expand_section() {

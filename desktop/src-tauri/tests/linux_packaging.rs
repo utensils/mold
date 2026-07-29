@@ -113,3 +113,20 @@ fn nix_desktop_packages_follow_the_workspace_version() {
         "desktop Nix packages must not drift from release-plz's workspace version"
     );
 }
+
+#[test]
+fn nix_desktop_cuda_targets_keep_b200_server_only() {
+    let flake = include_str!("../../../flake.nix");
+    assert!(
+        flake.contains("mold-desktop-sm86 = mkMoldDesktop \"86\";"),
+        "RTX 3090/A40 needs a native sm_86 desktop package"
+    );
+    assert!(
+        flake.contains("mold-desktop-sm120 = mkMoldDesktop \"120\";"),
+        "the existing RTX 50-series desktop package must remain available"
+    );
+    assert!(
+        !flake.contains("mold-desktop-sm100"),
+        "B200 is a remote server target, not a desktop package"
+    );
+}

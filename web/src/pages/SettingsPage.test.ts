@@ -4,15 +4,64 @@ import SettingsPage from "./SettingsPage.vue";
 import settingsPageSource from "./SettingsPage.vue?raw";
 import { theme, themeFamily } from "../lib/theme";
 import { resetNotifications, useNotifications } from "../lib/toasts";
+import { originHost } from "../lib/hostRegistry";
 import type { ServerStatus } from "../types";
 
 const statusRef = vi.hoisted(() => ({ value: null as ServerStatus | null }));
+const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
 
 vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: statusRef }),
 }));
+vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
 const originalFetch = globalThis.fetch;
+
+function deviceWire(enabled = true, adminState = "enabled", ordinal = 0) {
+  const suffix = String.fromCharCode("a".charCodeAt(0) + ordinal);
+  return {
+    id: `cuda:${suffix.repeat(32)}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${suffix}`,
+    physical_uuid: `GPU-${suffix}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `NVIDIA RTX 3090 #${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 4_000_000_000,
+      mold_used_bytes: null,
+      other_used_bytes: null,
+    },
+    telemetry: {
+      utilization_percent: 10,
+      temperature_c: null,
+      power_w: null,
+    },
+    desired_enabled: enabled,
+    admin_state: adminState,
+    health: "healthy",
+    activity: "idle",
+    schedulable: enabled,
+    unschedulable_reason: enabled ? null : "device_disabled",
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 describe("SettingsPage", () => {
   it("keeps its padded content inside narrow web viewports", () => {
@@ -26,6 +75,7 @@ describe("SettingsPage", () => {
 
   beforeEach(() => {
     statusRef.value = null;
+    subscribeToDeviceSnapshots.mockClear();
     resetNotifications();
     localStorage.clear();
     globalThis.fetch = vi.fn(
@@ -74,6 +124,88 @@ describe("SettingsPage", () => {
   it("falls back to an em dash when the server version is unknown", () => {
     const wrapper = mount(SettingsPage);
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("—");
+  });
+
+  it("refreshes device truth on SSE connect and semantic invalidations", async () => {
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+    const [target, _signal, refresh] =
+      subscribeToDeviceSnapshots.mock.calls[0]!;
+    expect(target).toEqual({
+      baseUrl: originHost().url,
+      apiKey: originHost().apiKey ?? null,
+    });
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const before = fetchMock.mock.calls.filter(([input]) =>
+      String(input).endsWith("/api/devices"),
+    ).length;
+    expect(before).toBe(1);
+
+    refresh();
+    await flushPromises();
+
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/api/devices"),
+      ),
+    ).toHaveLength(before + 1);
+    wrapper.unmount();
+  });
+
+  it("ignores an older same-origin device response after an event refetch", async () => {
+    const older = deferred<Response>();
+    const newer = deferred<Response>();
+    let deviceCall = 0;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/devices"))
+        return deviceCall++ === 0 ? older.promise : newer.promise;
+      return {
+        ok: true,
+        json: async () => {
+          if (url.endsWith("/profiles"))
+            return { profiles: ["default"], active: "default" };
+          if (url.endsWith("/api/catalog/credentials"))
+            return {
+              hf: { configured: false, source: null, masked: null },
+              civitai: { configured: false, source: null, masked: null },
+            };
+          if (url.endsWith("/api/capabilities"))
+            return {
+              devices: { available: true, lifecycle: true },
+              dispatch: { active_mode: "v2", v2_authoritative: true },
+            };
+          return { entries: [], plan: null };
+        },
+      } as Response;
+    }) as typeof fetch;
+    const wrapper = mount(SettingsPage, {
+      global: { stubs: { DeviceSettingsPanel: true } },
+    });
+    await vi.waitFor(() =>
+      expect(subscribeToDeviceSnapshots).toHaveBeenCalled(),
+    );
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
+    refresh();
+    newer.resolve({
+      ok: true,
+      json: async () => ({
+        devices: [deviceWire(false, "disabled")],
+        plan_version: 2,
+      }),
+    } as Response);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("disabled"));
+    older.resolve({
+      ok: true,
+      json: async () => ({
+        devices: [deviceWire(true, "enabled")],
+        plan_version: 1,
+      }),
+    } as Response);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("disabled");
   });
 
   it("persists the theme family through the shared lib/theme refs", async () => {
@@ -312,5 +444,344 @@ describe("SettingsPage", () => {
     const wrapper = mount(SettingsPage);
     expect(wrapper.find("input[name=catalog_show_nsfw]").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Show NSFW");
+  });
+
+  it("shows CPU utility work when the server reports no GPUs", async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "cpu-expand",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                    activity_phase: "cpu",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
+
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
+    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
+      "cpu-expand",
+    );
+  });
+
+  it("keeps a colliding future typed lane out of the web GPU lane", async () => {
+    const device = deviceWire();
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [device], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "web-future-collision",
+                    parent_id: "parent",
+                    work_kind: "future_utility",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: device.id,
+                    planned_lane_kind: "future_accelerator_lane",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                  {
+                    work_id: "web-legacy-device",
+                    parent_id: "legacy-parent",
+                    work_kind: "generation",
+                    priority_class: "user",
+                    queue_rank: 1,
+                    bypass_count: 0,
+                    planned_device_id: device.id,
+                    planned_lane_kind: null,
+                    lane_order: 1,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("web-future-collision"),
+    );
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "web-future-collision",
+    );
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+      "web-legacy-device",
+    );
+    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
+      "web-future-collision",
+    );
+    expect(wrapper.text().match(/web-future-collision/g)).toHaveLength(1);
+    expect(wrapper.text().match(/web-legacy-device/g)).toHaveLength(1);
+  });
+
+  it("clears a stale queue plan when a device-panel refresh fails", async () => {
+    let failPanel = false;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (
+        failPanel &&
+        (url.endsWith("/api/devices") || url.endsWith("/api/queue"))
+      ) {
+        throw new Error("host offline");
+      }
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "stale-work",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("stale-work"));
+    failPanel = true;
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
+    refresh();
+    await vi.waitFor(() => expect(wrapper.text()).not.toContain("stale-work"));
+  });
+
+  it("keeps concurrent device mutations busy through out-of-order completion", async () => {
+    const first = deviceWire(true, "enabled", 0);
+    const second = deviceWire(true, "enabled", 1);
+    const firstPatch = deferred<Response>();
+    const secondPatch = deferred<Response>();
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (init?.method === "PATCH") {
+        return url.includes(encodeURIComponent(first.id))
+          ? firstPatch.promise
+          : secondPatch.promise;
+      }
+      const body = url.endsWith("/api/devices")
+        ? { devices: [first, second], plan_version: 1 }
+        : url.endsWith("/api/capabilities")
+          ? {
+              devices: { available: true, lifecycle: true },
+              dispatch: { active_mode: "v2", v2_authoritative: true },
+            }
+          : url.endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : url.endsWith("/api/catalog/credentials")
+              ? {
+                  hf: { configured: false, source: null, masked: null },
+                  civitai: { configured: false, source: null, masked: null },
+                }
+              : { entries: [], plan: null };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() =>
+      expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(2),
+    );
+
+    await wrapper.get('[data-test="device-toggle-0"]').trigger("click");
+    await wrapper.get('[data-test="device-toggle-1"]').trigger("click");
+    expect(
+      wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    secondPatch.resolve({
+      ok: true,
+      json: async () => ({ ...second, desired_enabled: false }),
+    } as Response);
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get('[data-test="device-toggle-1"]').attributes("disabled"),
+      ).toBeUndefined(),
+    );
+    expect(
+      wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+
+    firstPatch.resolve({
+      ok: true,
+      json: async () => ({ ...first, desired_enabled: false }),
+    } as Response);
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+      ).toBeUndefined(),
+    );
+  });
+
+  it("controls the origin server GPU from Advanced settings", async () => {
+    let enabled = true;
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/devices") && !init?.method) {
+        return {
+          ok: true,
+          json: async () => ({
+            devices: [deviceWire(enabled, enabled ? "enabled" : "disabled")],
+            plan_version: enabled ? 1 : 2,
+          }),
+        } as Response;
+      }
+      if (url.endsWith("/api/capabilities")) {
+        return {
+          ok: true,
+          json: async () => ({
+            devices: {
+              available: true,
+              lifecycle: true,
+              restart_enable: false,
+            },
+            dispatch: { active_mode: "v2", v2_authoritative: true },
+          }),
+        } as Response;
+      }
+      if (url.includes("/api/devices/cuda%3A") && init?.method === "PATCH") {
+        enabled = false;
+        return {
+          ok: true,
+          json: async () => deviceWire(false, "disabled"),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () =>
+          url.endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : url.endsWith("/api/catalog/credentials")
+              ? {
+                  hf: { configured: false, source: null, masked: null },
+                  civitai: { configured: false, source: null, masked: null },
+                }
+              : { entries: [] },
+      } as Response;
+    });
+
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='settings-device-controls']").text(),
+    ).toContain("NVIDIA RTX 3090");
+    expect(
+      wrapper.get("[data-test='device-panel']").attributes("data-device-count"),
+    ).toBe("1");
+
+    await wrapper
+      .get("[data-test='settings-device-toggle-0']")
+      .trigger("click");
+    await flushPromises();
+
+    const patch = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).includes("/api/devices/cuda%3A") &&
+        init?.method === "PATCH",
+    );
+    expect(patch?.[1]).toEqual(
+      expect.objectContaining({
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(wrapper.get("[data-test='settings-device-toggle-0']").text()).toBe(
+      "Enable",
+    );
   });
 });

@@ -1,5 +1,14 @@
 import { defineStore } from "pinia";
-import { apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { listDevices, type DeviceInfo } from "@studio/api/devices";
+import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
+import {
+  comparePlacementPreviews,
+  classifyPlacementPreview,
+  previewChainPlacement,
+  previewGenerationPlacement,
+  previewRequestForSiblingFanout,
+} from "@studio/api/generationPlacement";
+import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
   hostIdFromUrl,
@@ -11,7 +20,15 @@ import {
 } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
-import type { GpuInfo, ServerCapabilities, ServerStatus } from "../lib/api/types";
+import type {
+  AutoChainRequest,
+  ChainRequest,
+  GenerateRequest,
+  GpuInfo,
+  GpuWorkerStatus,
+  ServerCapabilities,
+  ServerStatus,
+} from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -62,6 +79,7 @@ export interface HostView {
   primary: boolean;
   queueDepth: number | null;
   queueCapacity: number | null;
+  predictedCompletionMs?: number | null;
   version: string | null;
   /** Stable server-installation UUID; null until learned. Dedupe key. */
   instanceId: string | null;
@@ -70,16 +88,61 @@ export interface HostView {
 interface HostTelemetry {
   queueDepth: number | null;
   queueCapacity: number | null;
+  predictedCompletionMs?: number | null;
   version: string | null;
   /** Loaded-model names from `/api/status` (absent before the first poll). */
   modelsLoaded?: string[];
   /** GPU summary from `/api/status`; the status bar's fallback when a host's
    *  resources stream is unavailable. */
   gpuInfo?: GpuInfo | null;
+  /** Every runtime worker from `/api/status.gpus`. Routing uses the largest
+   * healthy device because one model must fit on one worker. */
+  gpuWorkers?: GpuWorkerStatus[] | null;
+  /** Authoritative current-server inventory. Null means `/api/devices` is
+   * unsupported and routing must use the legacy status fields. */
+  devices?: DeviceInfo[] | null;
   /** Stable server-installation UUID from `/api/status`; absent on older servers. */
   instanceId?: string | null;
   /** Server-reported hostname from `/api/status`; drives the display label. */
   hostname?: string | null;
+}
+
+function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
+  if (telemetry?.devices != null) {
+    const devices = telemetry.devices.filter(
+      (device) => device.schedulable && device.ordinal !== null,
+    );
+    if (!devices.length) return null;
+    const strongest = devices.reduce((best, device) =>
+      (device.memory.total_bytes ?? 0) > (best.memory.total_bytes ?? 0) ? device : best,
+    );
+    return {
+      backend: strongest.backend,
+      name: strongest.name,
+      vramTotalMb:
+        strongest.memory.total_bytes === null ? null : strongest.memory.total_bytes / 1024 ** 2,
+    };
+  }
+  const workers = telemetry?.gpuWorkers?.filter((worker) => worker.state !== "degraded");
+  if (workers?.length) {
+    const strongest = workers.reduce((best, worker) =>
+      worker.vram_total_bytes > best.vram_total_bytes ? worker : best,
+    );
+    return {
+      backend: telemetry?.gpuInfo?.backend ?? null,
+      name: strongest.name,
+      vramTotalMb: strongest.vram_total_bytes / 1024 ** 2,
+    };
+  }
+  if (telemetry?.gpuWorkers != null) return null;
+  const legacy = telemetry?.gpuInfo;
+  return legacy
+    ? {
+        backend: legacy.backend ?? null,
+        name: legacy.name,
+        vramTotalMb: legacy.vram_total_mb,
+      }
+    : null;
 }
 
 /** Where a batch will run: resolved just before submit. */
@@ -113,6 +176,7 @@ export const useHostsStore = defineStore("hosts", {
      *  telemetry it survives failed polls, keeping labels stable and letting
      *  instance-id dedupe stay hostname-qualified while a host is down. */
     hostnames: {} as Record<string, string>,
+    refreshGenerations: {} as Record<string, number>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     initializing: false,
     initialized: false,
@@ -135,6 +199,7 @@ export const useHostsStore = defineStore("hosts", {
         primary: true,
         queueDepth: t?.queueDepth ?? null,
         queueCapacity: t?.queueCapacity ?? null,
+        predictedCompletionMs: t?.predictedCompletionMs ?? null,
         version: t?.version ?? null,
         instanceId: t?.instanceId ?? null,
       };
@@ -178,6 +243,7 @@ export const useHostsStore = defineStore("hosts", {
           primary: false,
           queueDepth: t?.queueDepth ?? null,
           queueCapacity: t?.queueCapacity ?? null,
+          predictedCompletionMs: t?.predictedCompletionMs ?? null,
           version: t?.version ?? null,
           instanceId,
         });
@@ -402,21 +468,26 @@ export const useHostsStore = defineStore("hosts", {
      * Auto, and a stale persisted id must never wedge every Generate click.
      */
     resolveRoute(selection: string | null, modelName: string | null = null): HostRoute | null {
-      const routable = this.all.map((h) => {
-        const gpu = this.telemetry[h.id]?.gpuInfo ?? null;
-        return {
-          ...h,
-          gpu: gpu
-            ? { backend: gpu.backend ?? null, name: gpu.name, vramTotalMb: gpu.vram_total_mb }
-            : null,
-        };
-      });
+      const routable = this.all
+        .filter((host) => {
+          const telemetry = this.telemetry[host.id];
+          if (telemetry?.devices != null)
+            return telemetry.devices.some((device) => device.schedulable);
+          const workers = telemetry?.gpuWorkers;
+          return workers == null || workers.some((worker) => worker.state !== "degraded");
+        })
+        .map((h) => {
+          return {
+            ...h,
+            gpu: strongestRoutableGpu(this.telemetry[h.id]),
+          };
+        });
       const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
 
       let chosen: (typeof routable)[number] | null;
       if (selection === "capable") {
         chosen = pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null);
-      } else if (selection !== null && routable.some((h) => h.id === selection)) {
+      } else if (selection !== null && this.all.some((h) => h.id === selection)) {
         chosen = routable.find((h) => h.id === selection && h.status === "ready") ?? null;
       } else {
         const withModel = routable.filter(
@@ -430,6 +501,148 @@ export const useHostsStore = defineStore("hosts", {
         label: chosen.label,
         kind: chosen.kind,
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+        instanceId: chosen.instanceId,
+      };
+    },
+    async resolveFeasibleRoute(
+      selection: string | null,
+      request: GenerateRequest | ChainRequest | AutoChainRequest,
+      copies = 1,
+    ): Promise<HostRoute | null> {
+      const authoritySignature = () =>
+        JSON.stringify({
+          requestedSelection: selection,
+          activeSelection: useAppPrefsStore().settings?.generateTargetHost ?? null,
+          hosts: this.all.map((host) => [
+            host.id,
+            host.baseUrl,
+            host.apiKey,
+            host.instanceId,
+            host.status,
+          ]),
+        });
+      const capturedAuthority = authoritySignature();
+      let candidates = this.all.filter((host) => {
+        if (host.status !== "ready" || !host.baseUrl) return false;
+        const telemetry = this.telemetry[host.id];
+        if (telemetry?.devices != null)
+          return telemetry.devices.some((device) => device.schedulable);
+        return (
+          telemetry?.gpuWorkers == null ||
+          telemetry.gpuWorkers.some((worker) => worker.state !== "degraded")
+        );
+      });
+      if (
+        selection !== null &&
+        selection !== "capable" &&
+        this.all.some((host) => host.id === selection)
+      )
+        candidates = candidates.filter((host) => host.id === selection);
+
+      const probes = await Promise.all(
+        candidates.map(async (host) => {
+          const started = performance.now();
+          try {
+            const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+            const preview =
+              Array.isArray((request as ChainRequest).stages) || "total_frames" in request
+                ? await previewChainPlacement(
+                    target,
+                    previewRequestForSiblingFanout(
+                      request as unknown as Record<string, unknown>,
+                      copies,
+                    ),
+                    copies,
+                  )
+                : await previewGenerationPlacement(
+                    target,
+                    previewRequestForSiblingFanout(
+                      request as unknown as Record<string, unknown>,
+                      copies,
+                    ),
+                    copies,
+                  );
+            return {
+              host,
+              preview,
+              legacyUnsupported: false,
+              roundTripMs: Math.max(0, performance.now() - started),
+            };
+          } catch (error) {
+            return {
+              host,
+              preview: null,
+              legacyUnsupported:
+                error instanceof ApiError && (error.status === 404 || error.status === 405),
+              roundTripMs: Math.max(0, performance.now() - started),
+            };
+          }
+        }),
+      );
+      if (authoritySignature() !== capturedAuthority) return null;
+
+      const planned = probes
+        .flatMap((probe) =>
+          probe.preview && classifyPlacementPreview(probe.preview) === "planned"
+            ? [
+                {
+                  host: probe.host,
+                  preview: probe.preview,
+                  roundTripMs: probe.roundTripMs,
+                },
+              ]
+            : [],
+        )
+        .map((probe) => ({
+          hostId: probe.host.id,
+          roundTripMs: probe.roundTripMs,
+          preview: probe.preview,
+        }))
+        .sort(comparePlacementPreviews);
+      if (planned.length > 0) {
+        const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
+        if (!chosen?.baseUrl) return null;
+        return {
+          hostId: chosen.id,
+          label: chosen.label,
+          kind: chosen.kind,
+          target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+          instanceId: chosen.instanceId,
+        };
+      }
+
+      const unsupportedIds = probes
+        .filter(
+          (probe) =>
+            probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
+        )
+        .map((probe) => probe.host.id);
+      const legacy = candidates
+        .filter((host) => unsupportedIds.includes(host.id))
+        .map((host) => ({
+          ...host,
+          gpu: strongestRoutableGpu(this.telemetry[host.id]),
+        }));
+      if (legacy.length === 0) return null;
+      const modelHostIds = useHostModelsStore()
+        .hostsFor(request.model)
+        .filter((id) => unsupportedIds.includes(id));
+      let chosen: (typeof legacy)[number] | null;
+      if (selection === "capable") {
+        chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
+      } else if (selection !== null && this.all.some((host) => host.id === selection)) {
+        chosen = legacy.find((host) => host.id === selection) ?? null;
+      } else {
+        const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
+        chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
+      }
+      if (!chosen?.baseUrl) return null;
+      return {
+        hostId: chosen.id,
+        label: chosen.label,
+        kind: chosen.kind,
+        target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+        instanceId: chosen.instanceId,
       };
     },
     /** Pull queue depth/capacity from every live host. */
@@ -439,15 +652,40 @@ export const useHostsStore = defineStore("hosts", {
       await Promise.all(
         this.all.map(async (host) => {
           if (!host.baseUrl || host.status === "connecting") return;
+          const generation = (this.refreshGenerations[host.id] ?? 0) + 1;
+          this.refreshGenerations[host.id] = generation;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+          const isCurrent = () => {
+            const current = this.all.find((candidate) => candidate.id === host.id);
+            return (
+              this.refreshGenerations[host.id] === generation &&
+              current?.baseUrl === host.baseUrl &&
+              current.apiKey === host.apiKey
+            );
+          };
           try {
-            const status = await apiJsonTo<ServerStatus>(target, "/api/status");
+            const [status, devices, queue] = await Promise.all([
+              apiJsonTo<ServerStatus>(target, "/api/status"),
+              listDevices(target).then(
+                (snapshot) => snapshot.devices,
+                () => null,
+              ),
+              listQueue(target).then(
+                (listing) => listing,
+                () => null,
+              ),
+            ]);
+            if (!isCurrent()) return;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
+              predictedCompletionMs:
+                queue?.plan == null ? null : predictedCompletionUnixMs(queue.plan),
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
+              gpuWorkers: status.gpus ?? null,
+              devices,
               instanceId: status.instance_id ?? null,
               hostname: status.hostname ?? null,
             };
@@ -464,7 +702,7 @@ export const useHostsStore = defineStore("hosts", {
               // request is in flight. Never resurrect its cache entry with a
               // late response from the old identity or address.
               const current = this.all.find((candidate) => candidate.id === host.id);
-              if (current?.status === "ready" && current.baseUrl === host.baseUrl) {
+              if (isCurrent() && current?.status === "ready" && current.baseUrl === host.baseUrl) {
                 this.capabilities[host.id] = capabilities;
               } else {
                 delete this.capabilities[host.id];
@@ -475,6 +713,7 @@ export const useHostsStore = defineStore("hosts", {
               delete this.capabilities[host.id];
             }
           } catch (err) {
+            if (!isCurrent()) return;
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra) {
               extra.status = "error";

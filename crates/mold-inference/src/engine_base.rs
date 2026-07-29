@@ -8,7 +8,7 @@
 use mold_core::ModelPaths;
 
 use crate::engine::LoadStrategy;
-use crate::progress::{ProgressCallback, ProgressReporter};
+use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressReporter};
 
 /// Common fields shared by all inference engine implementations.
 ///
@@ -68,5 +68,13 @@ impl<L> EngineBase<L> {
     /// Remove the progress callback.
     pub fn clear_on_progress(&mut self) {
         self.progress.clear_callback();
+    }
+
+    pub fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.progress.set_cancellation_token(token);
+    }
+
+    pub fn clear_cancellation_token(&mut self) {
+        self.progress.clear_cancellation_token();
     }
 }

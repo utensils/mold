@@ -12,13 +12,13 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import StatusDot from "./StatusDot.vue";
 import { useHostPoll } from "./hostClient";
-import { formatGb } from "./machineTelemetry";
+import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
 import type { HostEntry } from "../../lib/hostRegistry";
 
 const props = defineProps<{ host: HostEntry; primary?: boolean }>();
 const emit = defineEmits<{ open: [id: string] }>();
 
-const poll = useHostPoll(props.host);
+const poll = useHostPoll(computed(() => props.host));
 
 const showSkeleton = computed(() => poll.loading.value && !poll.status.value);
 const offline = computed(() => !showSkeleton.value && !poll.online.value);
@@ -37,8 +37,7 @@ function hostAddress(url: string): string | null {
 
 const gpuLine = computed(() => {
   const status = poll.status.value;
-  const gpu = status?.gpus?.[0] ?? null;
-  const name = gpu?.name ?? status?.gpu_info?.name ?? null;
+  const name = deriveHostCardGpu(status)?.label ?? null;
   const secondary = props.primary
     ? (status?.hostname ?? null)
     : hostAddress(props.host.url);
@@ -47,19 +46,10 @@ const gpuLine = computed(() => {
 });
 
 const memory = computed<{ used: number; total: number } | null>(() => {
-  const status = poll.status.value;
-  const gpu = status?.gpus?.[0];
-  if (gpu && gpu.vram_total_bytes > 0) {
-    return { used: gpu.vram_used_bytes, total: gpu.vram_total_bytes };
-  }
-  const info = status?.gpu_info;
-  if (info && info.vram_total_mb > 0) {
-    return {
-      used: info.vram_used_mb * 1_000_000,
-      total: info.vram_total_mb * 1_000_000,
-    };
-  }
-  return null;
+  const summary = deriveHostCardGpu(poll.status.value);
+  return summary && summary.total > 0
+    ? { used: summary.used, total: summary.total }
+    : null;
 });
 
 const memLabel = computed(() =>

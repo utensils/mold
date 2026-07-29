@@ -1,0 +1,11 @@
+{
+  "overrides": [
+    {
+      "files": ["desktop/**/*"],
+      "options": {
+        "printWidth": 100,
+        "singleAttributePerLine": false
+      }
+    }
+  ]
+}

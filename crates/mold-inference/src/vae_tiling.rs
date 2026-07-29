@@ -86,13 +86,16 @@ pub enum TiledMode {
     Off,
 }
 
-/// Read the `MOLD_VAE_TILED` env var and resolve to a [`TiledMode`].
+/// Read `MOLD_VAE_TILED` once and resolve the process-wide [`TiledMode`].
+/// Scheduler plans and execution share this same authority, so changing the
+/// environment after admission cannot alter a granted generation.
 ///
 /// Accepts `auto`, `force`, `off`, plus boolean-ish synonyms: `1`, `true`, `yes`
 /// map to `Force`; `0`, `false`, `no` map to `Off`. Anything unrecognized
 /// (including unset) returns [`TiledMode::Auto`].
 pub fn resolve_mode() -> TiledMode {
-    parse_mode(std::env::var("MOLD_VAE_TILED").ok().as_deref())
+    static CACHED: std::sync::OnceLock<TiledMode> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| parse_mode(crate::runtime_env::value("MOLD_VAE_TILED").as_deref()))
 }
 
 fn parse_mode(value: Option<&str>) -> TiledMode {

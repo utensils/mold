@@ -15,12 +15,20 @@ docker build -t mold-server .
 docker build --build-arg CUDA_COMPUTE_CAP=90 -t mold-server-h100 .
 ```
 
-```bash [Ampere]
+```bash [Ampere A100]
 docker build --build-arg CUDA_COMPUTE_CAP=80 -t mold-server-a100 .
 ```
 
-```bash [Blackwell]
-docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-b200 .
+```bash [Ampere RTX 3090 / A40]
+docker build --build-arg CUDA_COMPUTE_CAP=86 -t mold-server-rtx3090 .
+```
+
+```bash [Datacenter Blackwell]
+docker build --build-arg CUDA_COMPUTE_CAP=100 -t mold-server-b200 .
+```
+
+```bash [Consumer Blackwell]
+docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-rtx5090 .
 ```
 
 :::
@@ -36,10 +44,16 @@ docker pull ghcr.io/utensils/mold:latest
 # Ampere (A100)
 docker pull ghcr.io/utensils/mold:latest-sm80
 
+# Ampere (RTX 3090 / A40)
+docker pull ghcr.io/utensils/mold:latest-sm86
+
 # Hopper (H100/H200)
 docker pull ghcr.io/utensils/mold:latest-sm90
 
-# Blackwell (RTX 5090)
+# Datacenter Blackwell (B200 / B300)
+docker pull ghcr.io/utensils/mold:latest-sm100
+
+# Consumer Blackwell (RTX 5090)
 docker pull ghcr.io/utensils/mold:latest-sm120
 ```
 
@@ -64,12 +78,30 @@ docker run --gpus all -p 7680:7680 \
 The pre-built GHCR images are the fastest path. Pick the tag that matches your
 GPU's compute capability:
 
-| GPU family                 | Image tag                            |
-| -------------------------- | ------------------------------------ |
-| Ada (RTX 4090, L40S)       | `ghcr.io/utensils/mold:latest`       |
-| Ampere (A100, RTX 3090)    | `ghcr.io/utensils/mold:latest-sm80`  |
-| Hopper (H100, H200, GH200) | `ghcr.io/utensils/mold:latest-sm90`  |
-| Blackwell (RTX 5090, B200) | `ghcr.io/utensils/mold:latest-sm120` |
+| GPU family                        | Image tag                            |
+| --------------------------------- | ------------------------------------ |
+| Ada (RTX 4090, L40S)              | `ghcr.io/utensils/mold:latest`       |
+| Ampere (A30, A100)                | `ghcr.io/utensils/mold:latest-sm80`  |
+| Ampere (A2/A10/A16/A40, RTX 30/A) | `ghcr.io/utensils/mold:latest-sm86`  |
+| Hopper (H100, H200)               | `ghcr.io/utensils/mold:latest-sm90`  |
+| Datacenter Blackwell (B200/B300)  | `ghcr.io/utensils/mold:latest-sm100` |
+| Consumer Blackwell (RTX 50/PRO)   | `ghcr.io/utensils/mold:latest-sm120` |
+
+The `latest*` aliases are mutable rolling main-branch channels. A release
+creates each `<version>*` tag once and rejects a release rerun if the existing
+tag points at different content. Tags remain registry names, however, so
+stable Mold provisioning does not trust them as immutable: the release also
+publishes `mold-container-digests.json`, and Lambda, RunPod CLI, and desktop
+submit the selected `ghcr.io/utensils/mold@sha256:…` reference. A missing,
+malformed, wrong-release, or wrong-source manifest fails closed without tag
+fallback. Manual Docker commands may pin the same digest for identical
+semantics. Generic Ampere maps to sm_80; ambiguous generic Blackwell uses the
+default sm_89 image rather than guessing sm_100 or sm_120.
+
+B200 support is simulated, not hardware-qualified. The sm_100 image is built
+and statically checked in hosted CI; real 8×B200 qualification is deferred and
+is never provisioned by CI.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
 ### Option 1 — Web Console
 

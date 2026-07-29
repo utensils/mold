@@ -5,9 +5,9 @@ use crate::chain_job::{
 };
 use crate::error::MoldError;
 use crate::types::{
-    ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
-    LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent, VideoData,
+    DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
+    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -769,6 +769,61 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Feature-detect optional server contracts before rendering controls.
+    pub async fn server_capabilities(&self) -> Result<crate::ServerCapabilities> {
+        let resp = self
+            .client
+            .get(format!("{}/api/capabilities", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<crate::ServerCapabilities>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Read the server's stable, runtime-visible device inventory.
+    pub async fn devices(&self) -> Result<DeviceState> {
+        let resp = self
+            .client
+            .get(format!("{}/api/devices", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<DeviceState>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Alias used by clients that preflight optional administrative actions.
+    pub async fn capabilities(&self) -> Result<crate::ServerCapabilities> {
+        self.server_capabilities().await
+    }
+
+    /// Enable or disable one stable device. The server may return a draining
+    /// or starting state while the owner transition completes.
+    pub async fn set_device_enabled(
+        &self,
+        device_id: &str,
+        enabled: bool,
+    ) -> Result<crate::DeviceInfo> {
+        let response = self
+            .client
+            .patch(format!(
+                "{}/api/devices/{}",
+                self.base_url,
+                encode_path_segment(device_id)
+            ))
+            .json(&crate::DeviceMutationRequest { enabled })
+            .send()
+            .await?;
+        let response = error_for_status_with_body(response)
+            .await?
+            .json::<crate::DeviceInfo>()
+            .await?;
+        Ok(response)
+    }
+
     /// Snapshot the server's generation queue (`GET /api/queue`).
     ///
     /// The listing covers everything currently queued or running — completed
@@ -1384,6 +1439,146 @@ mod tests {
             "/models/cv-827325/fluxRealSkin-V2.safetensors"
         );
         assert_eq!(loras[0].trained_words, ["realskin"]);
+    }
+
+    #[tokio::test]
+    async fn devices_fetches_and_parses_the_stable_inventory() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": [{
+                    "id": "cuda:0123456789abcdef0123456789abcdef",
+                    "backend": "cuda",
+                    "ordinal": 0,
+                    "device_kind": "full_gpu",
+                    "nvml_uuid": null,
+                    "physical_uuid": null,
+                    "mig_uuid": null,
+                    "mig_parent_uuid": null,
+                    "mig_profile": null,
+                    "name": "test gpu",
+                    "pci_bus_id": null,
+                    "compute_capability": "8.6",
+                    "memory": {
+                        "total_bytes": 24_000_000_000_u64,
+                        "used_bytes": null,
+                        "mold_used_bytes": null,
+                        "other_used_bytes": null
+                    },
+                    "telemetry": {
+                        "utilization_percent": null,
+                        "temperature_c": null,
+                        "power_w": null
+                    },
+                    "desired_enabled": true,
+                    "admin_state": "enabled",
+                    "health": "healthy",
+                    "activity": "idle",
+                    "schedulable": true,
+                    "unschedulable_reason": null,
+                    "loaded_models": [],
+                    "active_work_id": null,
+                    "planned_work_ids": []
+                }],
+                "plan_version": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let devices = MoldClient::new(&server.uri()).devices().await.unwrap();
+        assert_eq!(
+            devices.devices[0].id,
+            "cuda:0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(devices.devices[0].device_kind, crate::DeviceKind::FullGpu);
+        assert_eq!(devices.devices[0].memory.used_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn capabilities_defaults_missing_device_lifecycle_to_unavailable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "gallery": { "can_delete": true },
+                "catalog": { "available": false, "families": [], "sort": [] }
+            })))
+            .mount(&server)
+            .await;
+
+        let capabilities = MoldClient::new(&server.uri()).capabilities().await.unwrap();
+        assert!(!capabilities.devices.lifecycle);
+    }
+
+    #[tokio::test]
+    async fn set_device_enabled_preserves_the_server_error_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/devices/cuda%3Adevice-1"))
+            .and(body_json(serde_json::json!({ "enabled": true })))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_string("device is startup-excluded and requires a restart"),
+            )
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .set_device_enabled("cuda:device-1", true)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("409 Conflict"));
+        assert!(message.contains("startup-excluded"));
+        assert!(message.contains("requires a restart"));
+    }
+
+    #[tokio::test]
+    async fn set_device_enabled_encodes_the_stable_id_and_sends_auth() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/devices/cuda%3Aparent%2Fgpu"))
+            .and(header("x-api-key", "sekrit"))
+            .and(body_json(serde_json::json!({ "enabled": false })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "cuda:parent/gpu",
+                "backend": "cuda",
+                "ordinal": 1,
+                "device_kind": "full_gpu",
+                "name": "GPU 1",
+                "memory": {},
+                "telemetry": {},
+                "desired_enabled": false,
+                "admin_state": "draining",
+                "health": "healthy",
+                "activity": "generating",
+                "schedulable": false,
+                "loaded_models": [],
+                "planned_work_ids": []
+            })))
+            .mount(&server)
+            .await;
+
+        let device = MoldClient::with_api_key(&server.uri(), "sekrit".to_string())
+            .set_device_enabled("cuda:parent/gpu", false)
+            .await
+            .unwrap();
+        assert_eq!(device.id, "cuda:parent/gpu");
+        assert_eq!(device.admin_state, crate::DeviceAdminState::Draining);
+        assert!(!device.desired_enabled);
     }
 
     // ── Queue endpoints ──────────────────────────────────────────────────

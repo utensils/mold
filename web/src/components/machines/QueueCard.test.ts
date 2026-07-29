@@ -34,7 +34,7 @@ function listing(): QueueEntry[] {
 
 function mountCard() {
   return mount(QueueCard, {
-    props: { entries: listing(), gpuCount: 1, canReorder: true },
+    props: { entries: listing(), gpuOrdinals: [0], canReorder: true },
   });
 }
 
@@ -43,7 +43,7 @@ describe("QueueCard reorder index", () => {
     const wrapper = mount(QueueCard, {
       props: {
         entries: listing(),
-        gpuCount: 2,
+        gpuOrdinals: [0, 1],
         canReorder: true,
         canPause: true,
         canCancelAll: true,
@@ -61,6 +61,29 @@ describe("QueueCard reorder index", () => {
     expect(
       wrapper.findAll("[data-test='queue-lane']")[1]!.attributes("disabled"),
     ).toBeUndefined();
+  });
+
+  it("preserves non-contiguous advertised GPU ordinals in lane values", () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        entries: listing(),
+        gpuOrdinals: [1, 3],
+      },
+    });
+
+    const options = wrapper
+      .find("[data-test='queue-lane']")
+      .findAll("option")
+      .map((option) => ({
+        value: option.attributes("value"),
+        label: option.text(),
+      }));
+
+    expect(options).toEqual([
+      { value: "", label: "Auto" },
+      { value: "1", label: "GPU 1" },
+      { value: "3", label: "GPU 3" },
+    ]);
   });
 
   it("moves the last queued job up to queued index 0, not its listing position", async () => {

@@ -15,10 +15,11 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda"]
+cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda", "nvml"]
+nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal", "mold-inference/metal", "mold-tui?/metal"]
 # FlashAttention v2 path for FLUX/FLUX2. Implies `cuda` via mold-inference.
-flash-attn = ["mold-inference/flash-attn"]
+flash-attn = ["mold-inference/flash-attn", "cuda"]
 preview = ["viuer"]
 discord = ["mold-discord"]
 expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]
@@ -35,6 +36,7 @@ mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.20.2
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.20.2" }
 mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.20.2" }
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.20.2" }
+mold-scheduler = { path = "../mold-scheduler", package = "mold-ai-scheduler", version = "0.20.2" }
 mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.20.2" }
 anyhow = "1"
 base64 = "0.22"

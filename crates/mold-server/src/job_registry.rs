@@ -18,6 +18,8 @@
 use crate::events::EventBroadcaster;
 use mold_core::ServerEvent;
 use serde::Serialize;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
@@ -75,6 +77,8 @@ pub struct JobEntry {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct QueueListing {
     pub entries: Vec<JobEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<mold_core::QueuePlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,17 +120,38 @@ pub enum QueueReorderError {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchClaimError {
+    NotFound,
+    NotQueued,
+}
+
+#[derive(Debug)]
+pub(crate) enum DispatchAttemptError<T> {
+    Claim(DispatchClaimError, T),
+    Transport(T),
+}
+
 /// The registry itself. Construct via `JobRegistry::new` and share through
 /// `AppState`. All mutation is fire-and-forget — if the inner lock is
 /// poisoned (extremely unlikely in practice) we recover from the inner
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
+    batch_parents: RwLock<HashMap<String, BatchParentEntry>>,
+    mutation_sequence: AtomicU64,
+    mutation_notify: Arc<Notify>,
     /// Optional lifecycle broadcast (`GET /api/events`). Emitting from the
     /// registry — rather than each call site — guarantees every submit /
     /// promote / terminal path produces exactly one event. `None` keeps
     /// event-less construction (tests) cheap.
     events: Option<Arc<EventBroadcaster>>,
+}
+
+#[derive(Clone)]
+struct BatchParentEntry {
+    children: BTreeSet<String>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
@@ -136,6 +161,9 @@ impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            batch_parents: RwLock::new(HashMap::new()),
+            mutation_sequence: AtomicU64::new(0),
+            mutation_notify: Arc::new(Notify::new()),
             events: None,
         })
     }
@@ -145,6 +173,9 @@ impl JobRegistry {
     pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            batch_parents: RwLock::new(HashMap::new()),
+            mutation_sequence: AtomicU64::new(0),
+            mutation_notify: Arc::new(Notify::new()),
             events: Some(events),
         })
     }
@@ -211,8 +242,83 @@ impl JobRegistry {
                 cancel: cancel.clone(),
             });
         }
+        self.mark_mutated();
         self.emit(ServerEvent::JobQueued { id, model });
         cancel
+    }
+
+    /// Create the one public cancellation authority for a server-owned batch.
+    pub fn register_batch_parent(
+        &self,
+        parent_id: impl Into<String>,
+    ) -> tokio_util::sync::CancellationToken {
+        let parent_id = parent_id.into();
+        let token = tokio_util::sync::CancellationToken::new();
+        self.batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                parent_id,
+                BatchParentEntry {
+                    children: BTreeSet::new(),
+                    cancel: token.clone(),
+                },
+            );
+        token
+    }
+
+    pub fn register_batch_child(&self, parent_id: &str, child_id: &str) -> bool {
+        let mut parents = self
+            .batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(parent) = parents.get_mut(parent_id) else {
+            return false;
+        };
+        if parent.cancel.is_cancelled() {
+            return false;
+        }
+        parent.children.insert(child_id.to_string());
+        true
+    }
+
+    pub fn unregister_batch_child(&self, parent_id: &str, child_id: &str) {
+        if let Some(parent) = self
+            .batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(parent_id)
+        {
+            parent.children.remove(child_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn batch_child_count(&self, parent_id: &str) -> Option<usize> {
+        self.batch_parents
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(parent_id)
+            .map(|parent| parent.children.len())
+    }
+
+    /// Close cancellation admission immediately before durable commit. The
+    /// write lock orders this against `cancel_queued`: either cancellation
+    /// wins and this returns false, or commit wins and later DELETE observes
+    /// no cancellable parent.
+    pub fn begin_batch_commit(&self, parent_id: &str) -> bool {
+        self.batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(parent_id)
+            .is_some_and(|parent| !parent.cancel.is_cancelled())
+    }
+
+    pub fn remove_batch_parent(&self, parent_id: &str) {
+        self.batch_parents
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(parent_id);
     }
 
     /// Cancel a still-queued job: remove its entry and fire the cancel
@@ -225,6 +331,42 @@ impl JobRegistry {
     /// promoted. (A worker that already dequeued the job before the cancel
     /// landed will observe the closed result channel and skip it.)
     pub fn cancel_queued(&self, id: &str) -> Result<(), QueuedJobCancelError> {
+        let batch_children = {
+            let parents = self
+                .batch_parents
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            parents.get(id).map(|parent| {
+                // Cancel while retaining the read lock. `begin_batch_commit`
+                // takes the write side, so it cannot remove a not-yet-signaled
+                // authority between lookup and signal.
+                parent.cancel.cancel();
+                parent.children.clone()
+            })
+        };
+        if let Some(children) = batch_children {
+            let removed = {
+                let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+                let mut removed = Vec::new();
+                entries.retain(|entry| {
+                    if children.contains(&entry.id) && entry.state == JobLifecycle::Queued {
+                        entry.cancel.notify_one();
+                        removed.push(entry.id.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                removed
+            };
+            for child_id in &removed {
+                self.emit(ServerEvent::JobEnded {
+                    id: child_id.clone(),
+                });
+            }
+            self.mark_mutated();
+            return Ok(());
+        }
         {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let Some(pos) = entries.iter().position(|e| e.id == id) else {
@@ -236,17 +378,31 @@ impl JobRegistry {
             let entry = entries.remove(pos);
             entry.cancel.notify_one();
         }
+        self.mark_mutated();
         self.emit(ServerEvent::JobEnded { id: id.to_string() });
         Ok(())
     }
 
-    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`.
-    /// Under a single write lock this removes each `Queued` entry and fires its
-    /// cancel signal; running jobs are left untouched (same rule as
-    /// [`cancel_queued`](Self::cancel_queued) — a GPU worker owns them). After
-    /// dropping the lock it emits one `JobEnded` per cancelled job (the
-    /// emit-outside-lock discipline). Returns the number of jobs cancelled.
+    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`,
+    /// and close every open server-batch parent authority. Ordinary running
+    /// jobs remain untouched; running batch children drain without publication.
+    /// After dropping the entry lock this emits one `JobEnded` per removed
+    /// queued row. The return value remains that queued-row count.
     pub fn cancel_all_queued(&self) -> usize {
+        {
+            // Hold the write side while closing every still-open parent
+            // authority. This orders bulk cancellation against
+            // `begin_batch_commit` exactly like the single-parent path:
+            // either commit already removed the authority, or cancellation
+            // becomes visible before commit can cross its fence.
+            let parents = self
+                .batch_parents
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            for parent in parents.values() {
+                parent.cancel.cancel();
+            }
+        }
         let cancelled_ids = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let mut ids = Vec::new();
@@ -264,6 +420,9 @@ impl JobRegistry {
         for id in &cancelled_ids {
             self.emit(ServerEvent::JobEnded { id: id.clone() });
         }
+        if !cancelled_ids.is_empty() {
+            self.mark_mutated();
+        }
         cancelled_ids.len()
     }
 
@@ -280,6 +439,7 @@ impl JobRegistry {
             })
         };
         if let Some(model) = model {
+            self.mark_mutated();
             self.emit(ServerEvent::JobStarted {
                 id: id.to_string(),
                 model,
@@ -288,19 +448,87 @@ impl JobRegistry {
         }
     }
 
+    /// Claim a queued row for one scheduler grant.
+    ///
+    /// The scheduler holds `AppState::scheduler_mutation_fence` across this
+    /// claim and the nonblocking worker send. Queue mutation routes take the
+    /// same fence, so once this returns, cancel/reorder/retarget observes
+    /// `Running` and cannot race the transported grant.
+    pub(crate) fn dispatch_if_queued<T>(
+        &self,
+        id: &str,
+        gpu: usize,
+        payload: T,
+        send: impl FnOnce(T) -> Result<(), T>,
+    ) -> Result<Option<usize>, DispatchAttemptError<T>> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+            return Err(DispatchAttemptError::Claim(
+                DispatchClaimError::NotFound,
+                payload,
+            ));
+        };
+        if entry.state != JobLifecycle::Queued {
+            return Err(DispatchAttemptError::Claim(
+                DispatchClaimError::NotQueued,
+                payload,
+            ));
+        }
+        let previous_target = entry.target_gpu;
+        if let Err(payload) = send(payload) {
+            return Err(DispatchAttemptError::Transport(payload));
+        }
+        entry.state = JobLifecycle::Running;
+        entry.gpu = Some(gpu);
+        entry.target_gpu = None;
+        let model = entry.model.clone();
+        drop(entries);
+        self.mark_mutated();
+        self.emit(ServerEvent::JobStarted {
+            id: id.to_string(),
+            model,
+            gpu: Some(gpu),
+        });
+        Ok(previous_target)
+    }
+
+    pub(crate) fn requeue_rejected_dispatch(&self, id: &str, target_gpu: Option<usize>) {
+        let restored = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    if entry.state != JobLifecycle::Running {
+                        return false;
+                    }
+                    entry.state = JobLifecycle::Queued;
+                    entry.gpu = None;
+                    entry.target_gpu = target_gpu;
+                    true
+                })
+        };
+        if restored {
+            self.mark_mutated();
+        }
+    }
+
     pub fn set_target_gpu(
         &self,
         id: &str,
         target_gpu: Option<usize>,
     ) -> Result<(), TargetGpuUpdateError> {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let Some(e) = entries.iter_mut().find(|e| e.id == id) else {
-            return Err(TargetGpuUpdateError::NotFound);
-        };
-        if e.state == JobLifecycle::Running {
-            return Err(TargetGpuUpdateError::AlreadyRunning);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(e) = entries.iter_mut().find(|e| e.id == id) else {
+                return Err(TargetGpuUpdateError::NotFound);
+            };
+            if e.state == JobLifecycle::Running {
+                return Err(TargetGpuUpdateError::AlreadyRunning);
+            }
+            e.target_gpu = target_gpu;
         }
-        e.target_gpu = target_gpu;
+        self.mark_mutated();
         Ok(())
     }
 
@@ -318,44 +546,47 @@ impl JobRegistry {
     /// The relative order of the other queued jobs is preserved. Moving a job
     /// that is already at `position` is a successful no-op.
     pub fn reorder_queued(&self, id: &str, position: usize) -> Result<(), QueueReorderError> {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let Some(from) = entries.iter().position(|e| e.id == id) else {
-            return Err(QueueReorderError::NotFound);
-        };
-        if entries[from].state == JobLifecycle::Running {
-            return Err(QueueReorderError::AlreadyRunning);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(from) = entries.iter().position(|e| e.id == id) else {
+                return Err(QueueReorderError::NotFound);
+            };
+            if entries[from].state == JobLifecycle::Running {
+                return Err(QueueReorderError::AlreadyRunning);
+            }
+            // Vec indices occupied by queued entries, in order — running entries
+            // are skipped so `position` indexes purely among movable jobs.
+            let queued_slots: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.state == JobLifecycle::Queued)
+                .map(|(i, _)| i)
+                .collect();
+            // `from` is queued (checked above), so it is present here.
+            let cur = queued_slots
+                .iter()
+                .position(|&i| i == from)
+                .expect("queued job must appear in its own queued-slot list");
+            let target = position.min(queued_slots.len() - 1);
+            if cur == target {
+                return Ok(());
+            }
+            // Pull the job out, then reinsert at the Vec index that makes it the
+            // `target`-th queued entry among the survivors.
+            let entry = entries.remove(from);
+            let remaining_slots: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.state == JobLifecycle::Queued)
+                .map(|(i, _)| i)
+                .collect();
+            let dest = remaining_slots
+                .get(target)
+                .copied()
+                .unwrap_or(entries.len());
+            entries.insert(dest, entry);
         }
-        // Vec indices occupied by queued entries, in order — running entries
-        // are skipped so `position` indexes purely among movable jobs.
-        let queued_slots: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.state == JobLifecycle::Queued)
-            .map(|(i, _)| i)
-            .collect();
-        // `from` is queued (checked above), so it is present here.
-        let cur = queued_slots
-            .iter()
-            .position(|&i| i == from)
-            .expect("queued job must appear in its own queued-slot list");
-        let target = position.min(queued_slots.len() - 1);
-        if cur == target {
-            return Ok(());
-        }
-        // Pull the job out, then reinsert at the Vec index that makes it the
-        // `target`-th queued entry among the survivors.
-        let entry = entries.remove(from);
-        let remaining_slots: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.state == JobLifecycle::Queued)
-            .map(|(i, _)| i)
-            .collect();
-        let dest = remaining_slots
-            .get(target)
-            .copied()
-            .unwrap_or(entries.len());
-        entries.insert(dest, entry);
+        self.mark_mutated();
         Ok(())
     }
 
@@ -384,8 +615,16 @@ impl JobRegistry {
     /// Drop the entry — call once on every terminal path (success, error,
     /// client-disconnect skip, dispatch failure). Idempotent.
     pub fn remove(&self, id: &str) {
+        let _ = self.remove_if_present(id);
+    }
+
+    /// Drop the entry and report whether this call owned terminal settlement.
+    ///
+    /// The scheduler uses this to pair queue-depth decrement with the exact
+    /// terminal path that actually removed a job after an owner disappeared.
+    pub(crate) fn remove_if_present(&self, id: &str) -> bool {
         if id.is_empty() {
-            return;
+            return false;
         }
         let removed = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -397,8 +636,10 @@ impl JobRegistry {
         // idempotent — only the call that actually dropped the entry emits,
         // so subscribers see exactly one `job_ended` per job.
         if removed {
+            self.mark_mutated();
             self.emit(ServerEvent::JobEnded { id: id.to_string() });
         }
+        removed
     }
 
     /// The ids of currently-queued jobs, in dispatch-priority order — the same
@@ -417,6 +658,22 @@ impl JobRegistry {
             .filter(|e| e.state == JobLifecycle::Queued)
             .map(|e| e.id.clone())
             .collect()
+    }
+
+    /// Monotonic signal consumed by the scheduler coordinator. Unlike a
+    /// snapshot comparison, this cannot miss two rapid mutations that happen
+    /// to restore the same visible queue shape.
+    pub fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence.load(Ordering::SeqCst)
+    }
+
+    pub fn mutation_notifier(&self) -> Arc<Notify> {
+        self.mutation_notify.clone()
+    }
+
+    fn mark_mutated(&self) {
+        self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        self.mutation_notify.notify_one();
     }
 
     /// Snapshot the registry as a wire-shaped listing. Positions are assigned
@@ -439,7 +696,10 @@ impl JobRegistry {
                 metadata: e.metadata.clone(),
             })
             .collect();
-        QueueListing { entries: out }
+        QueueListing {
+            entries: out,
+            plan: None,
+        }
     }
 
     /// Currently-tracked job count. Exposed for tests and metrics.
@@ -474,6 +734,27 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_mutation_sequence_observes_target_reorder_and_cancel() {
+        let reg = JobRegistry::new();
+        let initial = reg.mutation_sequence();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        let after_enqueue = reg.mutation_sequence();
+        assert!(after_enqueue >= initial + 2);
+
+        reg.set_target_gpu("a", Some(1)).unwrap();
+        let after_target = reg.mutation_sequence();
+        assert!(after_target > after_enqueue);
+
+        reg.reorder_queued("b", 0).unwrap();
+        let after_reorder = reg.mutation_sequence();
+        assert!(after_reorder > after_target);
+
+        reg.cancel_queued("a").unwrap();
+        assert!(reg.mutation_sequence() > after_reorder);
+    }
+
+    #[test]
     fn mark_running_flips_state_and_records_gpu_ordinal() {
         let reg = JobRegistry::new();
         reg.register("a", "flux-dev:fp16");
@@ -481,6 +762,38 @@ mod tests {
         let snap = reg.snapshot();
         assert_eq!(snap.entries[0].state, JobLifecycle::Running);
         assert_eq!(snap.entries[0].gpu, Some(1));
+    }
+
+    #[test]
+    fn atomic_dispatch_marks_running_only_after_transport_accepts() {
+        let reg = JobRegistry::new();
+        reg.register_with_target_gpu("a", "flux-dev:fp16", Some(2));
+
+        let previous_target = reg
+            .dispatch_if_queued("a", 1, "payload", |_| Ok(()))
+            .expect("transport accepted");
+
+        assert_eq!(previous_target, Some(2));
+        let entry = reg.entry("a").unwrap();
+        assert_eq!(entry.state, JobLifecycle::Running);
+        assert_eq!(entry.gpu, Some(1));
+        assert_eq!(entry.target_gpu, None);
+    }
+
+    #[test]
+    fn failed_atomic_dispatch_preserves_queued_state_and_target() {
+        let reg = JobRegistry::new();
+        reg.register_with_target_gpu("a", "flux-dev:fp16", Some(2));
+
+        let error = reg
+            .dispatch_if_queued("a", 1, "payload", Err)
+            .expect_err("transport rejected");
+
+        assert!(matches!(error, DispatchAttemptError::Transport("payload")));
+        let entry = reg.entry("a").unwrap();
+        assert_eq!(entry.state, JobLifecycle::Queued);
+        assert_eq!(entry.gpu, None);
+        assert_eq!(entry.target_gpu, Some(2));
     }
 
     #[test]
@@ -709,6 +1022,69 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), cancel_b.notified())
             .await
             .expect("cancel signal for b must resolve");
+    }
+
+    #[tokio::test]
+    async fn cancel_all_queued_cancels_mixed_batch_parent_authority() {
+        let reg = JobRegistry::new();
+        let parent_cancel = reg.register_batch_parent("parent");
+        let running_cancel = reg.register("parent", "flux-dev:fp16");
+        let queued_cancel = reg.register("sibling", "flux-dev:fp16");
+        assert!(reg.register_batch_child("parent", "parent"));
+        assert!(reg.register_batch_child("parent", "sibling"));
+        reg.mark_running("parent", Some(0));
+
+        assert_eq!(
+            reg.cancel_all_queued(),
+            1,
+            "the public bulk-delete count remains the number of queued rows removed"
+        );
+        assert!(
+            parent_cancel.is_cancelled(),
+            "bulk delete must close the parent authority even with a running child"
+        );
+        assert!(
+            !reg.begin_batch_commit("parent"),
+            "a cancelled parent must never cross the commit fence"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), queued_cancel.notified())
+            .await
+            .expect("the queued sibling must receive its existing cancellation signal");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                running_cancel.notified()
+            )
+            .await
+            .is_err(),
+            "running children remain owned by their worker and drain through parent cancellation"
+        );
+        let snapshot = reg.snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].id, "parent");
+        assert_eq!(snapshot.entries[0].state, JobLifecycle::Running);
+    }
+
+    #[test]
+    fn cancelled_parent_rejects_late_child_registration() {
+        let reg = JobRegistry::new();
+        let cancel = reg.register_batch_parent("parent");
+        cancel.cancel();
+        assert!(!reg.register_batch_child("parent", "late"));
+        assert_eq!(reg.batch_child_count("parent"), Some(0));
+    }
+
+    #[test]
+    fn completed_batch_children_are_pruned_from_parent_authority() {
+        let reg = JobRegistry::new();
+        reg.register_batch_parent("parent");
+        for index in 0..10_000 {
+            let child = format!("child-{index}");
+            assert!(reg.register_batch_child("parent", &child));
+            assert_eq!(reg.batch_child_count("parent"), Some(1));
+            reg.unregister_batch_child("parent", &child);
+        }
+        assert_eq!(reg.batch_child_count("parent"), Some(0));
     }
 
     #[tokio::test]

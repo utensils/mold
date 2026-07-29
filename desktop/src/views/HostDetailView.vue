@@ -5,7 +5,10 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
+import { setDeviceEnabled } from "@studio/api/devices";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -15,8 +18,10 @@ import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
@@ -102,6 +107,7 @@ function startResourceStream(reset = false) {
 // ── Live queue (this host's server queue via the jobs store) ──────────────
 
 let queueTimer: ReturnType<typeof setInterval> | null = null;
+let deviceEventsAbort: AbortController | null = null;
 
 function tickQueue() {
   const current = host.value;
@@ -113,6 +119,15 @@ function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
   tickQueue();
   queueTimer = setInterval(tickQueue, 5_000);
+}
+
+function startDeviceEvents() {
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
+  const target = hostTarget();
+  if (!target) return;
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(target, deviceEventsAbort.signal, tickQueue);
 }
 
 let statusAbort: AbortController | null = null;
@@ -176,6 +191,7 @@ watch(
       recentlyUnloaded.value.clear();
     }
     startResourceStream(hostChanged);
+    startDeviceEvents();
     void fetchStatus(hostChanged);
     startQueuePolling();
     startReadyServices();
@@ -200,6 +216,8 @@ watch(
 onUnmounted(() => {
   resourceAbort?.abort();
   resourceAbort = null;
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
   statusAbort?.abort();
   statusAbort = null;
   if (queueTimer) clearInterval(queueTimer);
@@ -212,19 +230,7 @@ onUnmounted(() => {
  *  stream) fall back to the status poll's MB-based `gpu_info` summary. */
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value) return snapshot.value.gpus;
-  const info = telemetry.value?.gpuInfo;
-  if (!info) return [];
-  // Decimal MB → bytes, matching formatGB and the server's resources path.
-  return [
-    {
-      ordinal: 0,
-      name: info.name,
-      backend: info.backend ?? inferBackendFromGpuName(info.name),
-      vram_total: info.vram_total_mb * 1_000_000,
-      vram_used: info.vram_used_mb * 1_000_000,
-      gpu_utilization: null,
-    },
-  ];
+  return gpuSnapshotsFromWorkers(telemetry.value?.gpuInfo, telemetry.value?.gpuWorkers);
 });
 
 function backendLabel(gpu: GpuSnapshot): string {
@@ -248,7 +254,43 @@ const installedModels = computed(() => hostModels.installedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
+const mutatingDeviceIds = ref(new Set<string>());
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
+
+async function toggleDeviceById(deviceId: string, enabled: boolean) {
+  const target = hostTarget();
+  if (!target) return;
+  mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
+  try {
+    await setDeviceEnabled(target, deviceId, enabled);
+    await hosts.refresh();
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Couldn't ${enabled ? "enable" : "disable"} device: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  } finally {
+    const next = new Set(mutatingDeviceIds.value);
+    next.delete(deviceId);
+    mutatingDeviceIds.value = next;
+  }
+}
+
+async function unpinWork(workId: string) {
+  const target = hostTarget();
+  if (!target) return;
+  try {
+    await setQueueDevicePin(target, workId, null);
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Queue pin was not changed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  }
+}
 
 // ── Loaded-model chips: per-host unload ───────────────────────────────────
 
@@ -625,6 +667,23 @@ async function forget() {
                 </RouterLink>
               </div>
               <DownloadsTray :host-id="hostId" data-test="host-downloads" class="mt-2" />
+            </CardSurface>
+
+            <CardSurface large>
+              <DevicePanel
+                :devices="queueSnapshot?.devices ?? []"
+                :plan="queueSnapshot?.plan ?? null"
+                :mutable="
+                  queueSnapshot?.devices !== null &&
+                  hosts.capabilities[hostId]?.devices?.lifecycle === true &&
+                  hosts.capabilities[hostId]?.dispatch?.v2_authoritative === true
+                "
+                :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
+                show-controls
+                :busy-device-ids="[...mutatingDeviceIds]"
+                @unpin="unpinWork"
+                @toggle="toggleDeviceById"
+              />
             </CardSurface>
 
             <!-- Queue — the whole server queue (other clients' jobs included),

@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../lib/api/client";
 import type { ModelEntry, ServerStatus } from "../lib/api/types";
 import type { QueueEntry } from "../stores/jobs";
 import type { MobileHost } from "./hosts";
@@ -14,10 +15,16 @@ interface SseCall {
   };
 }
 
-const { apiJsonTo, unloadModel, sseCalls } = vi.hoisted(() => ({
+const { apiJsonTo, setDeviceEnabled, unloadModel, sseCalls } = vi.hoisted(() => ({
   apiJsonTo: vi.fn(),
+  setDeviceEnabled: vi.fn(),
   unloadModel: vi.fn(),
   sseCalls: [] as SseCall[],
+}));
+
+vi.mock("@studio/api/devices", () => ({
+  setDeviceEnabled,
+  parseDeviceListResponse: (value: { devices: unknown[]; plan_version: number }) => value,
 }));
 
 vi.mock("../lib/api/client", async (importOriginal) => ({
@@ -143,6 +150,16 @@ function installApi(): void {
     if (path === "/api/queue") {
       return Promise.resolve({ entries: target.baseUrl === renderBox.baseUrl ? [] : queueEntries });
     }
+    if (path === "/api/devices") {
+      return Promise.resolve({ devices: [], plan_version: 0 });
+    }
+    if (path === "/api/capabilities") {
+      return Promise.resolve({
+        events: { available: true },
+        devices: { available: true, lifecycle: true, restart_enable: false },
+        dispatch: { active_mode: "v2", v2_authoritative: true },
+      });
+    }
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
 }
@@ -171,6 +188,44 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function raceDevice(name: string) {
+  return {
+    id: `cuda:${name}`,
+    backend: "cuda",
+    ordinal: 0,
+    device_kind: "full_gpu",
+    nvml_uuid: name,
+    physical_uuid: name,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    restart_required: false,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
+}
+
 let wrapper: VueWrapper | null = null;
 
 async function mountDetail(host: MobileHost = studio, active = false): Promise<VueWrapper> {
@@ -181,6 +236,7 @@ async function mountDetail(host: MobileHost = studio, active = false): Promise<V
 
 beforeEach(() => {
   apiJsonTo.mockReset();
+  setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   unloadModel.mockReset().mockResolvedValue(undefined);
   sseCalls.length = 0;
   installApi();
@@ -189,9 +245,108 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
+  vi.useRealTimers();
 });
 
 describe("MobileHostDetail remote host data", () => {
+  it("shows a CPU utility lane when the host reports no GPUs", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "optimized",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "cpu-upscale",
+                parent_id: "parent",
+                work_kind: "post_upscale",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                planned_device_id: null,
+                planned_lane_kind: "host_utility",
+                lane_order: 0,
+                estimate_confidence: "low",
+                activity_phase: "cpu",
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-devices']").text()).toContain("Host utility");
+    expect(view.findAll('[data-test="device-card"]')).toHaveLength(0);
+  });
+
+  it("keeps a colliding future typed lane out of the mobile GPU lane", async () => {
+    const visible = raceDevice("MOBILE DEVICE");
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/devices") {
+        return Promise.resolve({ devices: [visible], plan_version: 1 });
+      }
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "optimized",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "mobile-future-collision",
+                parent_id: "parent",
+                work_kind: "future_utility",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                planned_device_id: visible.id,
+                planned_lane_kind: "future_accelerator_lane",
+                lane_order: 0,
+                estimate_confidence: "low",
+              },
+              {
+                work_id: "mobile-legacy-device",
+                parent_id: "legacy-parent",
+                work_kind: "generation",
+                priority_class: "user",
+                queue_rank: 1,
+                bypass_count: 0,
+                planned_device_id: visible.id,
+                planned_lane_kind: null,
+                lane_order: 1,
+                estimate_confidence: "low",
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get('[data-test="other-compute-lane"]').text()).toContain(
+      "mobile-future-collision",
+    );
+    expect(view.get('[data-test="device-lane"]').text()).toContain("mobile-legacy-device");
+    expect(view.get('[data-test="device-lane"]').text()).not.toContain("mobile-future-collision");
+    expect(view.text().match(/mobile-future-collision/g)).toHaveLength(1);
+    expect(view.text().match(/mobile-legacy-device/g)).toHaveLength(1);
+  });
+
   it("targets the exact remote and renders telemetry, queue, downloads, and installed models", async () => {
     const view = await mountDetail();
 
@@ -203,6 +358,10 @@ describe("MobileHostDetail remote host data", () => {
       retry: true,
     });
     expect(stream("/api/downloads/stream").options).toMatchObject({
+      target: studioTarget,
+      retry: true,
+    });
+    expect(stream("/api/events").options).toMatchObject({
       target: studioTarget,
       retry: true,
     });
@@ -298,6 +457,517 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
   });
 
+  it("ignores older same-host queue and device refetches after a newer event refresh", async () => {
+    const view = await mountDetail();
+    const olderQueue = deferred<unknown>();
+    const newerQueue = deferred<unknown>();
+    const olderDevices = deferred<unknown>();
+    const newerDevices = deferred<unknown>();
+    let queueCall = 0;
+    let deviceCall = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/queue") return queueCall++ === 0 ? olderQueue.promise : newerQueue.promise;
+      if (path === "/api/devices")
+        return deviceCall++ === 0 ? olderDevices.promise : newerDevices.promise;
+      return existingApi(requestTarget, path);
+    });
+    const deviceEvents = stream("/api/events");
+    const invalidate = () =>
+      deviceEvents.options.onEvent("message", JSON.stringify({ type: "queue_plan_changed" }));
+    invalidate();
+    invalidate();
+
+    newerQueue.resolve({
+      entries: [
+        {
+          id: "newer-job",
+          model: "newer-model",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 0,
+        },
+      ],
+    });
+    newerDevices.resolve({
+      devices: [raceDevice("NEW DEVICE")],
+      plan_version: 3,
+    });
+    await flushPromises();
+    olderQueue.resolve({
+      entries: [
+        {
+          id: "older-job",
+          model: "older-model",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+      ],
+    });
+    olderDevices.resolve({
+      devices: [raceDevice("OLD DEVICE")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(view.text()).toContain("newer-model");
+    expect(view.text()).not.toContain("older-model");
+    expect(view.text()).toContain("NEW DEVICE");
+    expect(view.text()).not.toContain("OLD DEVICE");
+  });
+
+  it("polls through a failed event bootstrap, preserves the last device snapshot, and clears its warning after recovery", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 2) {
+          return Promise.reject(new ApiError("device inventory temporarily unavailable", 503));
+        }
+        return Promise.resolve({
+          devices: [raceDevice(deviceCalls === 1 ? "LAST GOOD DEVICE" : "RECOVERED DEVICE")],
+          plan_version: deviceCalls,
+        });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls === 2) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.text()).toContain("LAST GOOD DEVICE");
+    expect(sseCalls.some((call) => call.path === "/api/events")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    const alert = view.get("[data-test='host-detail-device-error']");
+    expect(alert.text()).toContain("Couldn’t refresh compute devices");
+    expect(alert.text()).toContain("device inventory temporarily unavailable");
+    expect(alert.text()).toContain("try again automatically");
+    expect(view.text()).toContain("LAST GOOD DEVICE");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(deviceCalls).toBe(3);
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.text()).toContain("RECOVERED DEVICE");
+    expect(view.text()).not.toContain("LAST GOOD DEVICE");
+  });
+
+  it("treats failed capabilities as uncertainty rather than proof of a legacy host", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return deviceCalls === 1
+          ? Promise.reject(new ApiError("device inventory unavailable", 500))
+          : Promise.resolve({
+              devices: [raceDevice("RECOVERED AFTER CAPABILITIES")],
+              plan_version: 2,
+            });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls <= 2) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-device-error']").text()).toContain(
+      "device inventory unavailable",
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.text()).toContain("RECOVERED AFTER CAPABILITIES");
+  });
+
+  it("keeps a capability-confirmed legacy host quiet when the device endpoint is absent", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        return Promise.reject(new ApiError("Not Found", 404));
+      }
+      if (path === "/api/capabilities") return Promise.resolve({});
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.find("[data-test='host-detail-devices']").exists()).toBe(false);
+  });
+
+  it("keeps device telemetry but disables lifecycle mutations while capability authority is uncertain", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return Promise.resolve({
+          devices: [raceDevice(deviceCalls === 1 ? "INITIAL DEVICE" : "CURRENT DEVICE")],
+          plan_version: deviceCalls,
+        });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls === 3) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.text()).toContain("CURRENT DEVICE");
+    expect(view.get("[data-test='host-detail-device-error']").text()).toContain(
+      "Couldn’t verify compute device controls",
+    );
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("coalesces an arbitrary burst of device invalidations behind one in-flight poll", async () => {
+    vi.useFakeTimers();
+    const slowPoll = deferred<unknown>();
+    let deviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 1) {
+          return Promise.resolve({
+            devices: [raceDevice("INITIAL DEVICE")],
+            plan_version: 1,
+          });
+        }
+        if (deviceCalls === 2) return slowPoll.promise;
+        return Promise.resolve({
+          devices: [raceDevice("COALESCED DEVICE")],
+          plan_version: 3,
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    const events = stream("/api/events");
+    await vi.advanceTimersByTimeAsync(5_000);
+    for (let index = 0; index < 20; index += 1) {
+      events.options.onEvent("message", JSON.stringify({ type: "device_state_changed" }));
+    }
+    await flushPromises();
+    expect(deviceCalls).toBe(2);
+
+    slowPoll.resolve({
+      devices: [raceDevice("STALE SLOW DEVICE")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(deviceCalls).toBe(3);
+    expect(view.text()).toContain("COALESCED DEVICE");
+    expect(view.text()).not.toContain("STALE SLOW DEVICE");
+  });
+
+  it("retargets a pending device poll and suppresses its stale host result", async () => {
+    vi.useFakeTimers();
+    const staleStudioPoll = deferred<unknown>();
+    let studioDeviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        if (requestTarget.baseUrl === studio.baseUrl) {
+          studioDeviceCalls += 1;
+          return studioDeviceCalls === 1
+            ? Promise.resolve({
+                devices: [raceDevice("STUDIO DEVICE")],
+                plan_version: 1,
+              })
+            : staleStudioPoll.promise;
+        }
+        return Promise.resolve({
+          devices: [raceDevice("RENDER DEVICE")],
+          plan_version: 1,
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(studioDeviceCalls).toBe(2);
+
+    await view.setProps({ host: renderBox });
+    await flushPromises();
+    expect(view.text()).toContain("RENDER DEVICE");
+
+    staleStudioPoll.resolve({
+      devices: [raceDevice("STALE STUDIO DEVICE")],
+      plan_version: 99,
+    });
+    await flushPromises();
+    expect(view.text()).not.toContain("STALE STUDIO DEVICE");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    const lastDeviceTarget = apiJsonTo.mock.calls
+      .filter(([, path]) => path === "/api/devices")
+      .at(-1)?.[0];
+    expect(lastDeviceTarget).toEqual(renderTarget);
+  });
+
+  it("stops device polling and suppresses an in-flight result after unmount", async () => {
+    vi.useFakeTimers();
+    const pendingPoll = deferred<unknown>();
+    let deviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return deviceCalls === 1
+          ? Promise.resolve({
+              devices: [raceDevice("MOUNTED DEVICE")],
+              plan_version: 1,
+            })
+          : pendingPoll.promise;
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    const events = stream("/api/events");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(deviceCalls).toBe(2);
+
+    view.unmount();
+    wrapper = null;
+    expect(events.options.signal.aborted).toBe(true);
+
+    pendingPoll.resolve({
+      devices: [raceDevice("UNMOUNTED DEVICE")],
+      plan_version: 2,
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(deviceCalls).toBe(2);
+  });
+
+  it("renders every status GPU before the resource stream produces a snapshot", async () => {
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/status") {
+        return Promise.resolve(
+          serverStatus({
+            gpus: [
+              {
+                ordinal: 0,
+                name: "NVIDIA RTX 3090",
+                vram_total_bytes: 24_000_000_000,
+                vram_used_bytes: 8_000_000_000,
+                state: "generating",
+              },
+              {
+                ordinal: 1,
+                name: "NVIDIA B200",
+                vram_total_bytes: 80_000_000_000,
+                vram_used_bytes: 20_000_000_000,
+                state: "idle",
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
+    });
+
+    const view = await mountDetail();
+
+    expect(view.text()).toContain("NVIDIA RTX 3090");
+    expect(view.text()).toContain("NVIDIA B200");
+    expect(view.text()).toContain("8.0 GB/24.0 GB");
+    expect(view.text()).toContain("20.0 GB/80.0 GB");
+  });
+
+  it("mutates one device on the exact remote and reloads the lifecycle state", async () => {
+    const device = {
+      id: "cuda:GPU-3090",
+      backend: "cuda",
+      ordinal: 1,
+      device_kind: "full_gpu",
+      nvml_uuid: "GPU-3090",
+      physical_uuid: "GPU-3090",
+      mig_uuid: null,
+      mig_parent_uuid: null,
+      mig_profile: null,
+      name: "NVIDIA RTX 3090",
+      pci_bus_id: "0000:02:00.0",
+      compute_capability: "8.6",
+      memory: {
+        total_bytes: 24_000_000_000,
+        used_bytes: 4_000_000_000,
+        mold_used_bytes: null,
+        other_used_bytes: null,
+      },
+      telemetry: {
+        utilization_percent: 10,
+        temperature_c: 45,
+        power_w: 80,
+      },
+      desired_enabled: true,
+      admin_state: "enabled",
+      health: "healthy",
+      activity: "idle",
+      schedulable: true,
+      unschedulable_reason: null,
+      loaded_models: [],
+      active_work_id: null,
+      planned_work_ids: [],
+    };
+    let deviceLoads = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path !== "/api/devices") return existingApi(target, path);
+      deviceLoads += 1;
+      return Promise.resolve({
+        devices:
+          deviceLoads === 1
+            ? [device]
+            : [
+                {
+                  ...device,
+                  desired_enabled: false,
+                  admin_state: "disabled",
+                  schedulable: false,
+                  unschedulable_reason: "device_disabled",
+                },
+              ],
+        plan_version: deviceLoads + 1,
+      });
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-devices']").text()).toContain("NVIDIA RTX 3090");
+
+    await view.get("[data-test='device-toggle-1']").trigger("click");
+    await flushPromises();
+
+    expect(setDeviceEnabled).toHaveBeenCalledWith(studioTarget, "cuda:GPU-3090", false);
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/devices")).toHaveLength(2);
+    expect(view.get("[data-test='device-toggle-1']").text()).toBe("Enable");
+  });
+
+  it("shows persisted restart recovery instead of an unavailable disable action", async () => {
+    const pendingRestart = {
+      id: "cuda:GPU-3090",
+      backend: "cuda",
+      ordinal: 1,
+      device_kind: "full_gpu",
+      nvml_uuid: "GPU-3090",
+      physical_uuid: "GPU-3090",
+      mig_uuid: null,
+      mig_parent_uuid: null,
+      mig_profile: null,
+      name: "NVIDIA RTX 3090",
+      pci_bus_id: "0000:02:00.0",
+      compute_capability: "8.6",
+      memory: {
+        total_bytes: 24_000_000_000,
+        used_bytes: 4_000_000_000,
+        mold_used_bytes: null,
+        other_used_bytes: null,
+      },
+      telemetry: {
+        utilization_percent: 10,
+        temperature_c: 45,
+        power_w: 80,
+      },
+      desired_enabled: true,
+      restart_required: true,
+      admin_state: "enabled",
+      health: "unavailable",
+      activity: "idle",
+      schedulable: false,
+      unschedulable_reason: "device_unavailable",
+      loaded_models: [],
+      active_work_id: null,
+      planned_work_ids: [],
+    };
+    let deviceLoads = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/devices") {
+        deviceLoads += 1;
+        return Promise.resolve({
+          devices: [
+            deviceLoads === 1
+              ? {
+                  ...pendingRestart,
+                  desired_enabled: false,
+                  restart_required: false,
+                  admin_state: "disabled",
+                  health: "healthy",
+                  unschedulable_reason: "device_disabled",
+                }
+              : pendingRestart,
+          ],
+          plan_version: deviceLoads,
+        });
+      }
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          devices: { available: true, lifecycle: true, restart_enable: true },
+          dispatch: { active_mode: "observe", v2_authoritative: false },
+        });
+      return existingApi(target, path);
+    });
+
+    const view = await mountDetail();
+    const action = view.get("[data-test='device-toggle-1']");
+    expect(action.text()).toBe("Enable on restart");
+    await action.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(studioTarget, "cuda:GPU-3090", true);
+
+    const pending = view.get("[data-test='device-toggle-1']");
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    const row = view.get("[data-test='device-card']");
+    expect(row.text()).toContain("Restart required");
+    expect(row.text()).not.toContain("unavailable");
+  });
+
   it("uses the live queue count after the queue API responds", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));
@@ -327,6 +997,109 @@ describe("MobileHostDetail remote host data", () => {
       "7/8",
     );
   });
+
+  it.each([
+    ["404", () => new ApiError("queue unsupported", 404)],
+    ["transport failure", () => new TypeError("Failed to fetch")],
+    ["500", () => new ApiError("server failure", 500)],
+  ])(
+    "clears stale queue entries and plan after %s, then restores authority",
+    async (_label, failure) => {
+      vi.useFakeTimers();
+      try {
+        let queueCalls = 0;
+        const originalApi = apiJsonTo.getMockImplementation()!;
+        apiJsonTo.mockImplementation((target, path) => {
+          if (path === "/api/status") {
+            return Promise.resolve(serverStatus({ queue_depth: 7 }));
+          }
+          if (path === "/api/queue") {
+            queueCalls += 1;
+            if (queueCalls === 1) {
+              return Promise.resolve({
+                entries: [queueEntries[0]],
+                plan: {
+                  plan_version: 1,
+                  state_version: 1,
+                  optimizer_state: "optimized",
+                  dirty_since_unix_ms: null,
+                  next_replan_at_unix_ms: null,
+                  work_items: [
+                    {
+                      work_id: "stale-cpu-work",
+                      parent_id: "parent",
+                      work_kind: "post_upscale",
+                      priority_class: "user",
+                      queue_rank: 0,
+                      bypass_count: 0,
+                      planned_device_id: null,
+                      planned_lane_kind: "host_utility",
+                      lane_order: 0,
+                      estimate_confidence: "low",
+                    },
+                  ],
+                },
+              });
+            }
+            if (queueCalls === 2) {
+              return Promise.reject(failure());
+            }
+            return Promise.resolve({
+              entries: [queueEntries[0]],
+              plan: {
+                plan_version: 2,
+                state_version: 2,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "restored-cpu-work",
+                    parent_id: "parent",
+                    work_kind: "post_upscale",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            });
+          }
+          return originalApi(target, path);
+        });
+
+        const view = await mountDetail();
+        expect(view.text()).toContain("stale-cpu-work");
+        expect(view.find("[data-test='host-detail-queue']").exists()).toBe(true);
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("1/8");
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushPromises();
+
+        expect(view.text()).not.toContain("stale-cpu-work");
+        expect(view.find("[data-test='host-detail-queue']").exists()).toBe(false);
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("7/8");
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushPromises();
+
+        expect(view.text()).toContain("restored-cpu-work");
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("1/8");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("recovers from a transient initial failure when retrying the same host", async () => {
     let statusAttempts = 0;
@@ -419,17 +1192,20 @@ describe("MobileHostDetail host switching", () => {
     const view = await mountDetail();
     const oldResources = stream("/api/resources/stream");
     const oldDownloads = stream("/api/downloads/stream");
+    const oldDeviceEvents = stream("/api/events");
 
     await view.setProps({ host: renderBox });
     await flushPromises();
 
     expect(oldResources.options.signal.aborted).toBe(true);
     expect(oldDownloads.options.signal.aborted).toBe(true);
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/status");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/models");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/queue");
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(false);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(false);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(false);
 
     oldResources.options.onEvent(
       "snapshot",
@@ -463,6 +1239,26 @@ describe("MobileHostDetail host switching", () => {
     wrapper = null;
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(true);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(true);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(true);
+  });
+
+  it("restarts every authoritative source when the same host rotates credentials", async () => {
+    const view = await mountDetail();
+    const oldDeviceEvents = stream("/api/events");
+    const rotated = { ...studio, apiKey: "rotated-secret" };
+
+    await view.setProps({ host: rotated });
+    await flushPromises();
+
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
+    expect(stream("/api/events").options.target).toEqual({
+      baseUrl: studio.baseUrl,
+      apiKey: "rotated-secret",
+    });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: studio.baseUrl, apiKey: "rotated-secret" },
+      "/api/devices",
+    );
   });
 
   it("ignores a late status response from the previously selected host", async () => {

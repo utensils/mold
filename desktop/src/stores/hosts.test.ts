@@ -24,18 +24,79 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 const apiJsonTo = vi.fn();
+const listDevices = vi.fn();
+const listQueue = vi.fn();
+const previewGenerationPlacement = vi.fn();
+const previewChainPlacement = vi.fn();
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
+}));
+vi.mock("@studio/api/devices", () => ({
+  listDevices: (...a: unknown[]) => listDevices(...a),
+}));
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  listQueue: (...a: unknown[]) => listQueue(...a),
+}));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationPlacement")>()),
+  previewGenerationPlacement: (...a: unknown[]) => previewGenerationPlacement(...a),
+  previewChainPlacement: (...a: unknown[]) => previewChainPlacement(...a),
 }));
 
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
-import { useHostsStore } from "./hosts";
+import { useHostsStore, type ExtraHost } from "./hosts";
 import { useToastStore } from "./toasts";
-import type { ModelEntry, ServerCapabilities } from "../lib/api/types";
+import type {
+  AutoChainRequest,
+  GenerateRequest,
+  ModelEntry,
+  ServerCapabilities,
+} from "../lib/api/types";
+import type { DeviceInfo } from "@studio/api/devices";
+import { ApiError } from "../lib/api/client";
+
+function device(ordinal: number, overrides: Partial<DeviceInfo> = {}): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24 * 1024 ** 3,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
 
 function installedModel(name: string): ModelEntry {
   return {
@@ -52,6 +113,43 @@ function installedModel(name: string): ModelEntry {
     downloaded: true,
   };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function plannedPlacement(deviceId = "cuda:0") {
+  return {
+    version: 1,
+    authoritative: true,
+    state_version: 1,
+    plan_version: 1,
+    outcome: "planned",
+    candidate: {
+      device_id: deviceId,
+      execution_fingerprint: "test",
+      predicted_start_after_ms: 0,
+      predicted_completion_after_ms: 100,
+      setup_ms: 0,
+      setup_kind: "warm",
+      estimate_confidence: "high",
+    },
+  };
+}
+
+const placementRequest = {
+  prompt: "",
+  model: "flux-dev:q4",
+  width: 512,
+  height: 512,
+  steps: 4,
+  guidance: 3.5,
+  batch_size: 1,
+} as GenerateRequest;
 
 function settings(overrides: Record<string, unknown> = {}) {
   return {
@@ -117,6 +215,10 @@ beforeEach(() => {
   });
   installSettings(settings());
   apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+  listDevices.mockRejectedValue(new Error("legacy server"));
+  listQueue.mockRejectedValue(new Error("legacy server"));
+  previewGenerationPlacement.mockResolvedValue(plannedPlacement());
+  previewChainPlacement.mockResolvedValue(plannedPlacement());
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
   conn.status = "ready";
@@ -335,6 +437,212 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("hal9000-7680")).toBeNull();
   });
 
+  it("drops an in-flight placement result when the live generation selection changes", async () => {
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({
+      generateTargetHost: "local",
+    }) as unknown as AppSettings;
+    const gate = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(gate.promise);
+    const hosts = useHostsStore();
+
+    const pending = hosts.resolveFeasibleRoute("local", placementRequest);
+    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    prefs.settings = settings({
+      generateTargetHost: "hal9000-7680",
+    }) as unknown as AppSettings;
+    gate.resolve(plannedPlacement());
+
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it.each([
+    [
+      "URL",
+      (host: ExtraHost) => {
+        host.url = "http://replacement:7680";
+      },
+    ],
+    [
+      "API key",
+      (host: ExtraHost) => {
+        host.apiKey = "replacement-key";
+      },
+    ],
+    [
+      "instance identity",
+      (host: ExtraHost) => {
+        host.instanceId = "replacement-instance";
+      },
+    ],
+  ])("drops an in-flight placement result when the host %s changes", async (_field, mutate) => {
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({
+      generateTargetHost: hal.id,
+    }) as unknown as AppSettings;
+    const hosts = useHostsStore();
+    const extra = {
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready" as const,
+      error: null,
+      instanceId: "instance-a",
+    };
+    hosts.extras.push(extra);
+    const gate = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(gate.promise);
+
+    const pending = hosts.resolveFeasibleRoute(hal.id, placementRequest);
+    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    mutate(hosts.extras.find((host) => host.id === hal.id)!);
+    gate.resolve(plannedPlacement());
+
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it("never reroutes an explicitly selected host after authoritative infeasibility", async () => {
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({
+      generateTargetHost: hal.id,
+    }) as unknown as AppSettings;
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "instance-a",
+    });
+    previewGenerationPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      outcome: "infeasible",
+      reason: "insufficient_vram",
+      candidate: null,
+    });
+
+    await expect(hosts.resolveFeasibleRoute(hal.id, placementRequest)).resolves.toBeNull();
+    expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
+    expect(previewGenerationPlacement.mock.calls[0]?.[0]).toEqual({
+      baseUrl: hal.url,
+      apiKey: "host-key",
+    });
+  });
+
+  it.each([401, 403, 426, 500])("does not legacy-fallback placement HTTP %s", async (status) => {
+    previewGenerationPlacement.mockRejectedValueOnce(new ApiError("placement failed", status));
+    const hosts = useHostsStore();
+    await expect(hosts.resolveFeasibleRoute("local", placementRequest)).resolves.toBeNull();
+  });
+
+  it.each([404, 405])(
+    "keeps the exact selected legacy host for placement HTTP %s",
+    async (status) => {
+      const prefs = useAppPrefsStore();
+      prefs.settings = settings({
+        generateTargetHost: hal.id,
+      }) as unknown as AppSettings;
+      const hosts = useHostsStore();
+      hosts.extras.push({
+        id: hal.id,
+        label: "hal9000",
+        url: hal.url,
+        apiKey: "host-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-a",
+      });
+      previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
+
+      await expect(hosts.resolveFeasibleRoute(hal.id, placementRequest)).resolves.toMatchObject({
+        hostId: hal.id,
+        instanceId: "instance-a",
+        target: { baseUrl: hal.url, apiKey: "host-key" },
+      });
+    },
+  );
+
+  it("keeps the exact selected host for an explicit unsupported chain preview", async () => {
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({
+      generateTargetHost: hal.id,
+    }) as unknown as AppSettings;
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "instance-a",
+    });
+    previewChainPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    const request: AutoChainRequest = {
+      model: "ltx2.3-dev:bf16",
+      prompt: "",
+      total_frames: 193,
+      clip_frames: 97,
+      motion_tail_frames: 17,
+      width: 768,
+      height: 512,
+      steps: 20,
+      guidance: 3.5,
+    };
+
+    await expect(hosts.resolveFeasibleRoute(hal.id, request, 3)).resolves.toMatchObject({
+      hostId: hal.id,
+      instanceId: "instance-a",
+      target: { baseUrl: hal.url, apiKey: "host-key" },
+    });
+    expect(previewChainPlacement).toHaveBeenCalledWith(expect.anything(), expect.anything(), 3);
+  });
+
+  it("previews an auto-expanded long video through the chain endpoint", async () => {
+    const hosts = useHostsStore();
+    const request: AutoChainRequest = {
+      model: "ltx2.3-dev:bf16",
+      prompt: "",
+      total_frames: 193,
+      clip_frames: 97,
+      motion_tail_frames: 17,
+      width: 768,
+      height: 512,
+      steps: 20,
+      guidance: 3.5,
+    };
+
+    await expect(hosts.resolveFeasibleRoute("local", request)).resolves.toMatchObject({
+      hostId: "local",
+    });
+    expect(previewChainPlacement).toHaveBeenCalledTimes(1);
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("previews prepared Batch N as N one-image siblings without mutating the request", async () => {
+    const hosts = useHostsStore();
+    const request = { ...placementRequest, batch_size: 4 };
+
+    await expect(hosts.resolveFeasibleRoute("local", request, 4)).resolves.toMatchObject({
+      hostId: "local",
+    });
+
+    expect(previewGenerationPlacement).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ batch_size: 1 }),
+      4,
+    );
+    expect(request.batch_size).toBe(4);
+  });
+
   it("resolveRoute falls back to Auto for a stale pick whose host is gone", () => {
     const hosts = useHostsStore();
     // Only the primary exists; a persisted pick for a forgotten host must
@@ -364,6 +672,101 @@ describe("hosts store", () => {
       },
     };
     expect(hosts.resolveRoute("capable")?.hostId).toBe("hal9000-7680");
+  });
+
+  it('resolveRoute("capable") considers every healthy GPU on a host', async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: {
+        name: "NVIDIA RTX A2000",
+        vram_total_mb: 12288,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+      gpuWorkers: [
+        {
+          ordinal: 0,
+          name: "NVIDIA RTX A2000",
+          vram_total_bytes: 12 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+        {
+          ordinal: 1,
+          name: "NVIDIA B200",
+          vram_total_bytes: 80 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+    };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: {
+        name: "NVIDIA RTX 4090",
+        vram_total_mb: 24564,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+    };
+
+    expect(hosts.resolveRoute("capable")?.hostId).toBe("local");
+  });
+
+  it("uses /api/devices and does not route excluded current-server GPUs", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("http://hal9000:7680", null, null);
+    hosts.telemetry.local = {
+      queueDepth: 0,
+      queueCapacity: 200,
+      version: "0.20.0",
+      gpuInfo: {
+        backend: "cuda",
+        name: "NVIDIA B200",
+        vram_total_mb: 196608,
+        vram_used_mb: 0,
+      },
+      gpuWorkers: [
+        {
+          ordinal: 0,
+          name: "NVIDIA B200",
+          vram_total_bytes: 192 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+      devices: [
+        device(0, {
+          admin_state: "startup_excluded",
+          desired_enabled: false,
+          schedulable: false,
+          unschedulable_reason: "excluded by MOLD_GPUS",
+        }),
+      ],
+    };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 1,
+      queueCapacity: 200,
+      version: "0.20.0",
+      gpuInfo: {
+        backend: "cuda",
+        name: "NVIDIA RTX 4090",
+        vram_total_mb: 24576,
+        vram_used_mb: 0,
+      },
+      gpuWorkers: null,
+    };
+
+    expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
+    expect(hosts.resolveRoute("local")).toBeNull();
   });
 
   it('resolveRoute("capable") infers the backend from the GPU name on older servers', async () => {
@@ -579,6 +982,19 @@ describe("hosts store", () => {
       version: "0.16.0",
       models_loaded: ["flux2-klein:q4"],
       gpu_info: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24564, vram_used_mb: 8192 },
+      gpus: [
+        {
+          ordinal: 0,
+          name: "NVIDIA GeForce RTX 4090",
+          vram_total_bytes: 24564 * 1024 ** 2,
+          vram_used_bytes: 8192 * 1024 ** 2,
+          state: "idle",
+        },
+      ],
+    });
+    listDevices.mockResolvedValue({
+      plan_version: 1,
+      devices: [device(0)],
     });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
@@ -588,6 +1004,89 @@ describe("hosts store", () => {
     // The status-bar fallback data rides the same poll.
     expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
+    expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
+    expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
+  });
+
+  it("ignores an older same-host telemetry refresh after a newer refresh settles", async () => {
+    const older = deferred<Record<string, unknown>>();
+    const newer = deferred<Record<string, unknown>>();
+    let statusCall = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return statusCall++ === 0 ? older.promise : newer.promise;
+      if (path === "/api/capabilities") return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    listDevices.mockResolvedValue({
+      plan_version: 1,
+      devices: [device(0)],
+    });
+    listQueue.mockResolvedValue({ entries: [], plan: null });
+    const hosts = useHostsStore();
+
+    const first = hosts.refresh();
+    const second = hosts.refresh();
+    newer.resolve({
+      queue_depth: 9,
+      queue_capacity: 16,
+      version: "newer",
+    });
+    await second;
+    older.resolve({
+      queue_depth: 1,
+      queue_capacity: 16,
+      version: "older",
+    });
+    await first;
+
+    expect(hosts.telemetry.local?.queueDepth).toBe(9);
+    expect(hosts.telemetry.local?.version).toBe("newer");
+  });
+
+  it("always refreshes predicted completion so Auto can refine equal-depth hosts", async () => {
+    const now = Date.now();
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 2,
+      queue_capacity: 8,
+      version: "0.20.2",
+    });
+    listQueue.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        entries: [],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "queued",
+              parent_id: "queued",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "high",
+              estimated_finish_unix_ms: target.baseUrl.includes("hal9000")
+                ? now + 10_000
+                : now + 20_000,
+            },
+          ],
+        },
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+
+    await hosts.refresh();
+
+    expect(listQueue).toHaveBeenCalledWith({
+      baseUrl: "http://hal9000:7680",
+      apiKey: null,
+    });
+    expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 
   it("connect() dedupes a server already connected under another address by instance id", async () => {

@@ -90,6 +90,30 @@ const expandPromptMock = vi.hoisted(() =>
   })),
 );
 const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
+const placementPreviewMock = vi.hoisted(() =>
+  vi.fn(async () => ({
+    version: 1,
+    authoritative: true,
+    state_version: 1,
+    plan_version: 1,
+    outcome: "planned",
+    candidate: {
+      device_id: "cuda:0",
+      execution_fingerprint: "test",
+      predicted_start_after_ms: 0,
+      predicted_completion_after_ms: 100,
+      setup_ms: 0,
+      setup_kind: "warm",
+      estimate_confidence: "high",
+    },
+  })),
+);
+
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationPlacement")>()),
+  previewGenerationPlacement: placementPreviewMock,
+  previewChainPlacement: placementPreviewMock,
+}));
 const fetchChainLimitsMock = vi.hoisted(() =>
   vi.fn(async () => ({
     model: "ltx-2-19b-distilled:fp8",
@@ -183,6 +207,18 @@ const hostModelsMock = vi.hoisted(() =>
 vi.mock("../components/machines/hostClient", () => ({
   hostStatus: hostStatusMock,
   hostModels: hostModelsMock,
+  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
+  hostDevices: () => Promise.reject(new Error("legacy server in tests")),
+  hostModelComponents: (_host: unknown, model: string) =>
+    Promise.resolve({ model, components: [] }),
+  hostGenerationEstimate: (_host: unknown, request: { model: string }) =>
+    Promise.resolve({
+      model: request.model,
+      peak_memory_bytes: 1,
+      activation_memory_bytes: 1,
+      fits_available_memory: true,
+      load_strategy: "resident",
+    }),
 }));
 
 const RecentGridStub = defineComponent({
@@ -232,6 +268,7 @@ describe("CreatePage layout and behavior", () => {
         ),
       }),
     );
+    placementPreviewMock.mockClear();
     fetchChainLimitsMock.mockClear();
     listChainJobsMock.mockClear();
     listChainJobsMock.mockResolvedValue({ jobs: [] });
@@ -663,6 +700,17 @@ describe("CreatePage layout and behavior", () => {
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
     );
+    expect(placementPreviewMock).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: expect.any(String) }),
+      expect.objectContaining({
+        model: "ltx-2-19b-distilled:fp8",
+        stages: [
+          expect.objectContaining({ prompt: "the opening" }),
+          expect.objectContaining({ prompt: "the landing" }),
+        ],
+      }),
+      1,
+    );
     expect(submitMock).not.toHaveBeenCalled();
   });
 
@@ -912,6 +960,56 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
   });
 
+  it("fans an ordinary batch out into one routed request per print", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        description: "Flux Dev Q4",
+        size_gb: 4,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+        is_loaded: false,
+        hf_repo: "example/flux",
+        downloaded: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "three lighthouses";
+    form.state.value.batchSize = 3;
+    form.state.value.seedMode = "static";
+    form.state.value.seed = 41;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(3);
+    const batchIds = new Set<string>();
+    for (const [index, call] of submitMock.mock.calls.entries()) {
+      expect(call[0]).toMatchObject({
+        prompt: "three lighthouses",
+        batch_size: 1,
+        batch_index: index + 1,
+        batch_count: 3,
+        seed: 41 + index,
+      });
+      batchIds.add(call[0].batch_id);
+    }
+    expect(batchIds.size).toBe(1);
+    expect(placementPreviewMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ batch_size: 1 }),
+      3,
+    );
+  });
+
   it("prepares a batch on the server and queues provenance on every sibling", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
@@ -978,6 +1076,56 @@ describe("CreatePage layout and behavior", () => {
       wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
     ).toHaveLength(3);
   });
+
+  it.each([
+    [
+      "authoritative infeasible",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "infeasible",
+        candidate: null,
+        reason: "insufficient_vram",
+      },
+    ],
+    ["null", null],
+    ["malformed unsupported", { outcome: "unsupported" }],
+    [
+      "planned without a candidate",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "planned",
+      },
+    ],
+  ])(
+    "preserves every reviewed variation and submits zero siblings after %s revalidation",
+    async (_case, response) => {
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      const form = useGenerateForm();
+      form.state.value.model = "flux-dev:q4";
+      form.state.value.modelFamily = "flux";
+      form.state.value.prompt = "a lighthouse";
+      form.state.value.batchSize = 3;
+      await nextTick();
+      await wrapper.get("[data-test='composer-expand']").trigger("click");
+      await flushPromises();
+      placementPreviewMock.mockResolvedValueOnce(response as never);
+
+      await wrapper.get("[data-test='queue-variations']").trigger("click");
+      await flushPromises();
+
+      expect(submitMock).not.toHaveBeenCalled();
+      expect(
+        wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
+      ).toHaveLength(3);
+      expect(wrapper.text()).toContain("Nothing was queued");
+    },
+  );
 
   it("sends the active style as a directive on the main-prompt expand", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
@@ -1149,6 +1297,7 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock.mock.calls[0]?.[2]).toEqual({
       hostId: studio.id,
       label: "Studio",
+      instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });
@@ -1191,7 +1340,7 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
     const canvas = wrapper.getComponent({ name: "ResultCanvas" });
     const variations = canvas.props("variations") as string[];
     canvas.vm.$emit("use-variation", 0);
@@ -1218,7 +1367,7 @@ describe("CreatePage layout and behavior", () => {
 
     // Fan the batch out into variations so there's review state to clear.
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
     expect(
       wrapper.get("[data-test='result-canvas']").attributes("data-count"),
     ).toBe("2");
@@ -1627,6 +1776,7 @@ describe("CreatePage host routing", () => {
     expect(submitMock.mock.calls[0]?.[2]).toEqual({
       hostId: studio.id,
       label: "Studio",
+      instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });
@@ -1820,6 +1970,26 @@ describe("CreatePage host routing", () => {
 
   it("routes Most capable to the strongest GPU", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    placementPreviewMock.mockImplementation(async (...args: unknown[]) => ({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: (
+          args[0] as { baseUrl: string }
+        ).baseUrl.includes("studio")
+          ? 50
+          : 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    }));
     localStorage.setItem("mold.web.generateTarget.v1", CAPABLE_TARGET_ID);
     hostModelsMock.mockResolvedValue([flux]);
     hostStatusMock.mockImplementation(async (host: { id: string }) => ({

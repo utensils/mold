@@ -10,7 +10,8 @@ use super::connectors::{
 };
 use super::encoder::{GemmaHiddenStateEncoder, GemmaHiddenStates};
 use super::gemma::{
-    resolve_gemma_variant, EncodedPromptPair, GemmaAssets, GemmaVariant, PromptTokens,
+    resolve_gemma_variant_with_preference, EncodedPromptPair, GemmaAssets, GemmaVariant,
+    PromptTokens,
 };
 use super::gemma3_gguf::GgufGemmaEncoder;
 use crate::ltx2::model::LtxRopeType;
@@ -99,9 +100,10 @@ impl NativePromptEncoder {
         preset: &Ltx2ModelPreset,
         device: &Device,
         dtype: DType,
+        gemma_variant: Option<&str>,
     ) -> Result<Self> {
         let assets = GemmaAssets::discover(gemma_root)?;
-        let variant = resolve_gemma_variant(&assets)?;
+        let variant = resolve_gemma_variant_with_preference(&assets, gemma_variant)?;
         let gemma_backend = match variant {
             GemmaVariant::Bf16Safetensors => GemmaHiddenStateBackend::Safetensors(
                 GemmaHiddenStateEncoder::load_from_assets(&assets, device, dtype)?,

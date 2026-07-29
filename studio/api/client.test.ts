@@ -10,10 +10,12 @@ afterEach(() => vi.unstubAllGlobals());
 describe("target-explicit Studio API", () => {
   it("keeps durable API keys in headers and out of URLs", async () => {
     let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      captured = [input, init];
-      return new Response("{}");
-    });
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return new Response("{}");
+      },
+    );
     vi.stubGlobal("fetch", fetchMock);
     await apiFetchTo(
       { baseUrl: "http://studio:7680", apiKey: "secret" },

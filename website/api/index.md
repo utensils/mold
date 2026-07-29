@@ -54,6 +54,8 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/upscale/stream`                     | Upscale with SSE tile progress                                                                                    |
 | `GET`    | `/api/resources`                          | Latest RAM/GPU resource snapshot                                                                                  |
 | `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
+| `GET`    | `/api/devices`                            | Stable runtime-visible device inventory with nullable cached telemetry                                            |
+| `PATCH`  | `/api/devices/:id`                        | Persist and apply a scheduler-V2 GPU enable/disable lifecycle request                                             |
 | `GET`    | `/api/events`                             | Server-wide lifecycle events (job + gallery) as SSE                                                               |
 | `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
@@ -84,7 +86,18 @@ clients, and custom integrations on one generation contract.
 servers advertise the accepted catalog sort values in
 `catalog.sort` (`downloads`, `recent`, `rating`), queue controls as
 `queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`, and
-server-assisted DNS-SD as `discovery.can_browse`. Clients must only request
+server-assisted DNS-SD as `discovery.can_browse`, and the read-only device
+resource as `devices.available`. `devices.lifecycle` is true only when
+scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and
+unavailable runtimes report false. Those runtimes advertise
+`devices.restart_enable` instead: clients may offer **Enable on restart** only
+for a device whose persisted preference is disabled. Live controls must also
+require `dispatch.v2_authoritative`. Stable pin support is advertised as
+`devices.stable_pins`; versioned lanes and learned ETA are advertised as
+`devices.planned_lanes` and `devices.learned_eta` only while V2 is
+authoritative. Dispatch rollout is exposed as `dispatch.active_mode`,
+`dispatch.v2_authoritative`, and `dispatch.observes_v2_decisions`. Clients must
+only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
@@ -218,9 +231,11 @@ open http://localhost:7680/api/docs
 
 ## `/api/generate`
 
-`POST /api/generate` returns raw image bytes, not a JSON envelope. The response
-`Content-Type` matches the requested format, and the server includes an
-`x-mold-seed-used` header with the effective seed.
+`POST /api/generate` returns raw image bytes for `batch_size = 1`. A raw
+server-owned batch (`batch_size > 1`) returns one ordered
+`BatchGenerateResponse` JSON parent after its gallery transaction commits.
+The server includes an `x-mold-seed-used` header with the effective seed on
+singleton responses.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \
@@ -296,6 +311,15 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
 
 Only `prompt` is required. All other fields have defaults or model-specific
 validation.
+
+Authoritative Scheduler V2 servers with gallery output enabled advertise
+`queue.server_batch = true` and `queue.server_batch_max_outputs = 64` from
+`GET /api/capabilities`. The latter is the live atomic HTTP
+delivery/materialization limit, not a GPU planner limit. Requests above it
+fail promptly with HTTP 422 and stable code
+`BATCH_OUTPUT_LIMIT_EXCEEDED`, before model preparation, child enumeration, or
+gallery filename reservation. Clients that need more outputs should submit
+multiple parents or independent prepared siblings.
 
 Important fields:
 
@@ -444,9 +468,15 @@ metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 
 ## `/api/queue`
 
-`GET /api/queue` returns queued and running generation jobs. Running jobs carry
-their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
-can render one lane per GPU plus an automatic lane.
+`GET /api/queue` keeps `entries` limited to queued and running generation jobs.
+Running jobs carry their actual `gpu`; queued jobs carry an
+optional `target_gpu` so UI clients can render one lane per GPU plus an
+automatic lane. Current authoritative V2 servers also return a nullable,
+additive `plan` snapshot with versioned stable-device lanes, ordinary
+generation plus scheduler-owned utility and durable-chain work items, estimated
+start/finish times, confidence, blocked reasons, and the next tentative replan
+deadline. Clients must treat it as advisory: the server revalidates the exact
+execution fingerprint and frozen artifacts before CUDA.
 
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
@@ -454,10 +484,13 @@ Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 ```bash
 curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000 \
   -H "Content-Type: application/json" \
-  -d '{"target_gpu":0,"position":1}'
+  -d '{"hard_pinned_device_id":"cuda:0123...","position":1}'
 ```
 
 Set `target_gpu` to `null` to return the queued job to automatic placement.
+`hard_pinned_device_id` accepts the opaque ID from `/api/devices`; send `null`
+to return to Auto. If both ordinal and stable-ID pins are supplied, they must
+name the same device.
 Omitting either field leaves it unchanged. `position` is clamped to the current
 queued range, so a large value sends a job to the back. Reordering changes real
 dispatch priority, not only the listing returned by `GET /api/queue`.
@@ -565,8 +598,10 @@ curl -N http://localhost:7680/api/generate/stream \
   }'
 ```
 
-The final `complete` event matches the `GenerateResponse` JSON shape used by the
-server internally.
+For `batch_size = 1`, the final `complete` event matches the
+`GenerateResponse` JSON shape used by the server internally. A server-owned
+batch emits one ordered `batch_complete` event after durable commit and uses
+the same advertised 64-output live limit.
 
 ::: tip RunPod Note
 RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
@@ -574,11 +609,11 @@ RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long
 
 ## `/api/events`
 
-`GET /api/events` is a single SSE stream of **server-wide** lifecycle events —
-every generation job's queued/started/ended transitions plus gallery
-additions and removals — so a client can keep its gallery and queue views
-live over one connection instead of holding a stream per job. Frames use the
-event name `event` with an internally tagged JSON payload:
+`GET /api/events` is a single SSE stream of **server-wide** lifecycle events:
+generation jobs, gallery changes, versioned queue replans, and semantic device
+lifecycle/health transitions. Raw utilization and memory telemetry remain on
+`GET /api/resources/stream`. Frames use the event name `event` with an
+internally tagged JSON payload:
 
 ```text
 event: event
@@ -608,16 +643,18 @@ data: {"type":"chain_job_ended","id":"550e8400-…","state":"completed"}
 
 Event semantics:
 
-| `type`              | Meaning                                                                                                                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job_queued`        | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
-| `job_started`       | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
-| `job_ended`         | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
-| `gallery_added`     | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed`   | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
-| `chain_job_queued`  | A durable chain job entered the queue — created, resumed, retaken, or amended. Carries `id`, `model`, and `stage_count`.                                                                          |
-| `chain_job_started` | The chain runner claimed the job and began rendering stages (`id`, `model`).                                                                                                                      |
-| `chain_job_ended`   | The job settled. `state` is `completed`, `failed`, or `cancelled`. Terminal chain jobs stay listed on `/api/chain-jobs` — this only says the runner is done with it.                              |
+| `type`                 | Meaning                                                                                                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`           | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
+| `job_started`          | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
+| `job_ended`            | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
+| `gallery_added`        | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed`      | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `queue_plan_changed`   | The scheduler published a newer versioned queue plan. Replace tentative lanes only when `plan_version` advances.                                                                                  |
+| `device_state_changed` | Device administration, worker health, or activity changed. Treat the payload as a hint and refetch `GET /api/devices`; telemetry-only samples do not emit this event.                             |
+| `chain_job_queued`     | A durable chain job entered the queue — created, resumed, retaken, or amended. Carries `id`, `model`, and `stage_count`.                                                                          |
+| `chain_job_started`    | The chain runner claimed the job and began rendering stages (`id`, `model`).                                                                                                                      |
+| `chain_job_ended`      | The job settled. `state` is `completed`, `failed`, or `cancelled`. Terminal chain jobs stay listed on `/api/chain-jobs` — this only says the runner is done with it.                              |
 
 The three `chain_job_*` events are additive and deliberately distinct from
 `job_queued` / `job_started` / `job_ended`: chain jobs do not support the
@@ -628,8 +665,10 @@ announced. Clients that render sequences in a unified activity surface can
 use these instead of polling `GET /api/chain-jobs`.
 
 The stream carries **deltas only** — there is no initial snapshot. Subscribe
-first, then bootstrap current state from `GET /api/queue` and
-`GET /api/gallery` so nothing lands in the gap. Feature-detect with
+first, then bootstrap current state from `GET /api/queue`, `GET /api/devices`,
+and `GET /api/gallery`. Refetch those authoritative snapshots after every
+reconnect because lagged broadcast frames are intentionally not replayed.
+Feature-detect with
 `GET /api/capabilities` (`"events": {"available": true}`); servers older than
 this endpoint omit the field. Keep-alive pings arrive every 15 s.
 
@@ -825,7 +864,7 @@ Endpoints:
 - `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
 - `POST /api/chain-jobs/:id/retake` — body is `RetakeRequest` (`stage_idx`, `mode`, optional `seed_offset`, optional `prompt`).
 - `POST /api/chain-jobs/:id/amend` — replace the whole stage list in place, reusing cached clips. See below.
-- `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; running jobs stop at the next boundary/progress check.
+- `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; an accepted running cancellation returns `202`, exposes `summary.cancelling: true`, and cannot publish a completed stage/job after that barrier.
 - `DELETE /api/chain-jobs/:id` — remove a non-running job and its job directory.
 - `POST /api/chain-jobs/gc` — prune successful ephemeral jobs and completed non-ephemeral job artifacts older than `chain.jobs_artifact_ttl_days`.
 - `GET /api/chain-jobs/:id/stages/:idx/preview` — returns `image/jpeg` when that stage has a preview.
@@ -993,6 +1032,90 @@ Example response:
 
 Older single-GPU clients can still read `gpu_info`; multi-GPU-aware clients
 should prefer `gpus[]`, `queue_depth`, and `queue_capacity`.
+
+`GET /api/resources` and `GET /api/resources/stream` expose only the GPU
+inventory that CUDA made visible when the server started. CUDA builds sample
+NVML by the raw CUDA/NVIDIA UUID rather than a physical ordinal, so numeric
+`CUDA_VISIBLE_DEVICES` reordering and `GPU-...` selectors preserve the correct
+process-local ordinal and hidden physical cards are not published. The
+`nvidia-smi` fallback applies the same UUID filter and converts its MiB values
+to binary bytes. A MIG worker accepts only telemetry carrying its matching
+`MIG-...` UUID; Mold does not substitute the parent GPU's full-memory sample.
+When the installed NVML adapter cannot prove a MIG parent UUID or profile,
+`mig_parent_uuid` and `mig_profile` remain `null`.
+
+## `/api/devices`
+
+`GET /api/devices` is the stable multi-device resource. Device `id` values are
+opaque and must be URL-encoded rather than parsed; CUDA ordinals are
+process-local display hints. Operational values that the active sampler cannot
+provide are JSON `null`, not zero.
+
+```json
+{
+  "devices": [
+    {
+      "id": "cuda:0123456789abcdef0123456789abcdef",
+      "backend": "cuda",
+      "ordinal": 0,
+      "device_kind": "full_gpu",
+      "nvml_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+      "physical_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+      "mig_uuid": null,
+      "mig_parent_uuid": null,
+      "mig_profile": null,
+      "name": "NVIDIA GeForce RTX 3090",
+      "pci_bus_id": "00000000:01:00.0",
+      "compute_capability": "8.6",
+      "memory": {
+        "total_bytes": 25769803776,
+        "used_bytes": 8589934592,
+        "mold_used_bytes": null,
+        "other_used_bytes": null
+      },
+      "telemetry": {
+        "utilization_percent": 41,
+        "temperature_c": null,
+        "power_w": null
+      },
+      "desired_enabled": true,
+      "restart_required": false,
+      "admin_state": "enabled",
+      "health": "healthy",
+      "activity": "idle",
+      "schedulable": true,
+      "unschedulable_reason": null,
+      "loaded_models": [],
+      "active_work_id": null,
+      "planned_work_ids": []
+    }
+  ],
+  "plan_version": 0
+}
+```
+
+`plan_version` remains `0` until the versioned scheduler plan is active.
+Desired enablement is machine-wide; a newly seen device with no explicit
+preference defaults to enabled.
+
+`PATCH /api/devices/{url-encoded-stable-id}` accepts
+`{"enabled":false}` or `{"enabled":true}`. Disabling removes the device from
+new scheduling immediately and returns `202` while an active lease drains.
+Re-enabling starts a fresh owner lifetime and returns `202` with
+`admin_state:"starting"` without waiting for CUDA context creation. The first
+epoch-qualified ready event changes it to enabled. If context creation fails,
+the desired preference remains enabled, health is unavailable, and
+`unschedulable_reason` reports `device_start_failed: ...`; retry the PATCH or
+restart after correcting the driver/device fault. A delayed ready, stopped, or
+completion event from the predecessor cannot mutate or reap the replacement.
+
+Runtime mutation requires scheduler V2. In legacy, observe, or maintenance
+mode, disabling still returns `409`, but enabling a persistently-disabled,
+startup-selected device records the preference for the next boot. The first
+such PATCH returns `202` with `restart_required:true`; repeated identical
+PATCHes return `200`, and subsequent device polls retain that flag until a
+restart creates the owner. Startup-excluded devices cannot use this recovery
+path and return `409`.
 
 ## `/api/models/pull`
 

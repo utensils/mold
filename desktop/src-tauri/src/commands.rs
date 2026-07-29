@@ -47,7 +47,7 @@ pub struct LocalServerInfo {
 }
 
 impl LocalServer {
-    fn info(&self, api_key: &str) -> Option<LocalServerInfo> {
+    pub(crate) fn info(&self, api_key: &str) -> Option<LocalServerInfo> {
         let (kind, base_url, port) = match self {
             LocalServer::Off => return None,
             LocalServer::Embedded(engine) => ("embedded", engine.base_url(), engine.port),
@@ -227,11 +227,48 @@ async fn ensure_local_server_inner(
     .map_err(|e| format!("{e:#}"))?;
     let base_url = engine.base_url();
     if !server::wait_healthy(&base_url, Duration::from_secs(30)).await {
-        engine.join(Duration::from_secs(1));
+        if !shutdown_embedded_or_retain(
+            &mut local,
+            engine,
+            &state.local_api_key,
+            Duration::from_secs(1),
+        )
+        .await
+        {
+            return Err(
+                "The engine didn't become healthy and did not stop; gallery authority remains with the server. Check the logs (~/.mold/logs)."
+                    .into(),
+            );
+        }
         return Err("The engine didn't start. Check the logs (~/.mold/logs).".into());
     }
     *local = LocalServer::Embedded(engine);
     Ok(local.info(&state.local_api_key).expect("embedded info"))
+}
+
+async fn shutdown_embedded_or_retain(
+    local: &mut LocalServer,
+    mut engine: server::EngineHandle,
+    api_key: &str,
+    timeout: Duration,
+) -> bool {
+    let _ = reqwest::Client::new()
+        .post(format!("{}/api/shutdown", engine.base_url()))
+        .header("X-Api-Key", api_key)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    let deadline = tokio::time::Instant::now() + timeout;
+    while engine.is_alive() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if engine.join(Duration::ZERO) {
+        *local = LocalServer::Off;
+        true
+    } else {
+        *local = LocalServer::Embedded(engine);
+        false
+    }
 }
 
 async fn ensure_local_server_auth(base_url: &str, api_key: &str) -> Result<(), String> {
@@ -280,14 +317,15 @@ pub async fn start_local_engine(
 pub async fn stop_local_engine(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo, String> {
-    let engine = {
-        let mut local = state.local_server.lock().await;
-        match std::mem::replace(&mut *local, LocalServer::Off) {
-            LocalServer::Embedded(engine) => Some(engine),
-            LocalServer::External { .. } | LocalServer::Off => None,
-        }
-    };
-    if let Some(engine) = engine {
+    stop_local_engine_inner(&state, Duration::from_secs(5)).await
+}
+
+async fn stop_local_engine_inner(
+    state: &AppState,
+    shutdown_timeout: Duration,
+) -> Result<ConnectionInfo, String> {
+    let mut local = state.local_server.lock().await;
+    if let LocalServer::Embedded(engine) = &mut *local {
         let shutdown_url = format!("{}/api/shutdown", engine.base_url());
         let _ = reqwest::Client::new()
             .post(&shutdown_url)
@@ -295,10 +333,20 @@ pub async fn stop_local_engine(
             .timeout(Duration::from_secs(3))
             .send()
             .await;
-        tauri::async_runtime::spawn_blocking(move || engine.join(Duration::from_secs(5)))
-            .await
-            .map_err(|e| e.to_string())?;
+        let deadline = tokio::time::Instant::now() + shutdown_timeout;
+        while engine.is_alive() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !engine.join(Duration::ZERO) {
+            return Err(format!(
+                "The embedded engine did not stop within {shutdown_timeout:?}; gallery authority remains with the server."
+            ));
+        }
+        *local = LocalServer::Off;
     }
+    // External means a separately-owned process. Disconnecting it as the
+    // primary never transfers filesystem authority to the desktop process.
+    drop(local);
     let mut conn = state.conn.lock().await;
     if primary_uses_local_server(&conn) {
         *conn = Conn::Off;
@@ -602,6 +650,15 @@ pub fn secret_clear(state: tauri::State<'_, AppState>, name: String) -> Result<(
 mod tests {
     use super::*;
 
+    fn test_state(dir: &tempfile::TempDir, conn: Conn, local_server: LocalServer) -> AppState {
+        AppState {
+            conn: tokio::sync::Mutex::new(conn),
+            local_server: tokio::sync::Mutex::new(local_server),
+            local_api_key: "desktop-test-key".into(),
+            secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
+        }
+    }
+
     #[test]
     fn local_and_external_engines_own_the_local_server_lifecycle() {
         assert!(primary_uses_local_server(&Conn::Local {
@@ -611,6 +668,118 @@ mod tests {
             base_url: "http://127.0.0.1:7680".into(),
         }));
         assert!(!primary_uses_local_server(&Conn::Off));
+    }
+
+    #[tokio::test]
+    async fn stopping_external_primary_preserves_server_gallery_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(
+            &dir,
+            Conn::External {
+                base_url: "http://127.0.0.1:7680".into(),
+            },
+            LocalServer::External {
+                base_url: "http://127.0.0.1:7680".into(),
+            },
+        );
+
+        let info = stop_local_engine_inner(&state, Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        assert_eq!(info.mode, "off");
+        assert!(matches!(
+            &*state.local_server.lock().await,
+            LocalServer::External { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedded_shutdown_timeout_retains_server_gallery_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(
+            &dir,
+            Conn::Local {
+                base_url: "http://127.0.0.1:9".into(),
+            },
+            LocalServer::Embedded(server::EngineHandle::sleeping_for_tests(
+                Duration::from_millis(150),
+            )),
+        );
+
+        let error = stop_local_engine_inner(&state, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("gallery authority remains with the server"));
+        assert!(matches!(
+            &*state.local_server.lock().await,
+            LocalServer::Embedded(engine) if engine.is_alive()
+        ));
+        tokio::time::sleep(Duration::from_millis(175)).await;
+        let mut local = state.local_server.lock().await;
+        let LocalServer::Embedded(engine) = &mut *local else {
+            panic!("timed-out engine authority was discarded");
+        };
+        assert!(engine.join(Duration::from_secs(1)));
+    }
+
+    #[tokio::test]
+    async fn held_server_gallery_task_blocks_authority_transfer_until_joined() {
+        let dir = tempfile::tempdir().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let state = test_state(
+            &dir,
+            Conn::Local {
+                base_url: "http://127.0.0.1:9".into(),
+            },
+            LocalServer::Embedded(server::EngineHandle::held_gallery_task_for_tests(
+                release_rx,
+            )),
+        );
+
+        let error = stop_local_engine_inner(&state, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.contains("gallery authority remains with the server"));
+        assert!(matches!(
+            &*state.local_server.lock().await,
+            LocalServer::Embedded(engine) if engine.is_alive()
+        ));
+        assert!(matches!(&*state.conn.lock().await, Conn::Local { .. }));
+
+        release_tx.send(()).unwrap();
+        let info = stop_local_engine_inner(&state, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(info.mode, "off");
+        assert!(matches!(
+            &*state.local_server.lock().await,
+            LocalServer::Off
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_health_timeout_retains_unstopped_embedded_authority() {
+        let mut local = LocalServer::Off;
+        let stopped = shutdown_embedded_or_retain(
+            &mut local,
+            server::EngineHandle::sleeping_for_tests(Duration::from_millis(150)),
+            "desktop-test-key",
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(!stopped);
+        assert!(matches!(
+            &local,
+            LocalServer::Embedded(engine) if engine.is_alive()
+        ));
+        tokio::time::sleep(Duration::from_millis(175)).await;
+        let LocalServer::Embedded(engine) = &mut local else {
+            panic!("failed-start engine authority was discarded");
+        };
+        assert!(engine.join(Duration::from_secs(1)));
     }
 
     #[test]

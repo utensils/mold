@@ -3,8 +3,9 @@
 //! Shares the CLI's key registry, typed get/set, env-override detection,
 //! and DB-vs-TOML surface routing via `mold_core::config_keys`, and its
 //! DB persistence via `mold_db::config_sync`. Reads come from the server's
-//! in-memory `Config`; writes mutate it in place (so the running server
-//! reflects changes immediately) and persist to the owning surface.
+//! in-memory `Config`; writes mutate it in place and persist to the owning
+//! surface. Rows marked `restart_required` (currently `scheduler.*`) are
+//! consumed by the next coordinator start rather than hot-reconfigured.
 
 use axum::{
     extract::{Path, State},
@@ -26,6 +27,9 @@ const ENV_OVERRIDDEN: &str = "ENV_OVERRIDDEN";
 const UNKNOWN_CONFIG_KEY: &str = "UNKNOWN_CONFIG_KEY";
 /// 422 error code for reset attempts on config.toml-owned keys.
 const FILE_BACKED_KEY: &str = "FILE_BACKED_KEY";
+/// 409 error code for bootstrap namespaces that a live server cannot switch
+/// without splitting long-lived workers from HTTP observers.
+const RESTART_REQUIRED: &str = "RESTART_REQUIRED";
 
 fn settings_db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
     state.metadata_db.as_ref().as_ref().ok_or_else(|| {
@@ -56,6 +60,7 @@ fn entry_for(key: &str, value: serde_json::Value) -> ConfigEntry {
         value,
         source,
         env_var,
+        restart_required: key.starts_with("scheduler."),
     }
 }
 
@@ -173,6 +178,21 @@ pub async fn put_config_key(
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
     }
+    // output_dir is a server-lifetime namespace. The durable chain runner,
+    // queued generation attempts, gallery publication gate, reconciliation,
+    // and HTTP routes must all agree on the directory captured at boot.
+    // Persisting a next-start value while the listener remains live would
+    // split those authorities, so the live API rejects the write before
+    // parsing, mutating, or persisting anything. Offline `mold config set`
+    // remains the supported editor.
+    if key == "output_dir" {
+        return Err(ApiError::with_code(
+            "'output_dir' is fixed for the lifetime of mold serve; stop the server, run \
+             `mold config set output_dir <path>`, then restart it",
+            RESTART_REQUIRED,
+            StatusCode::CONFLICT,
+        ));
+    }
     if let Some((var, _)) = keys::env_override_for(&key) {
         return Err(ApiError::with_code(
             format!("'{key}' is set by {var} in the environment — unset it to edit"),
@@ -215,11 +235,13 @@ pub async fn put_config_key(
     let value = keys::get_value(&cfg, &key)
         .map(|v| v.to_json())
         .unwrap_or(serde_json::Value::Null);
+    let restart_required = key.starts_with("scheduler.");
     Ok(Json(ConfigEntry {
         key,
         value,
         source: surface.as_str().to_string(),
         env_var: None,
+        restart_required,
     }))
 }
 
@@ -289,6 +311,7 @@ pub async fn delete_config_key(
         Some((var, _)) => ("env".to_string(), Some(var.to_string())),
         None => ("default".to_string(), None),
     };
+    let restart_required = key.starts_with("scheduler.");
     Ok(Json(ConfigEntry {
         key,
         value: fallback
@@ -296,6 +319,7 @@ pub async fn delete_config_key(
             .unwrap_or(serde_json::Value::Null),
         source,
         env_var,
+        restart_required,
     }))
 }
 

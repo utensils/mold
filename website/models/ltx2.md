@@ -79,11 +79,12 @@ should compare generated contact sheets or clips from that fixed seed.
   instead of inline base64 for larger local media. Configure `media_roots` or
   `MOLD_MEDIA_ROOTS`; mold canonicalizes the target and rejects missing files,
   directories, traversal, or symlink escapes outside the allow roots.
-- On CUDA, explicit LTX-2 unload drops the retained native runtime before
-  resetting the assigned CUDA primary context. To manually verify OOM recovery,
-  run a GPU-resident LTX-2 request, force unload by switching models or using
-  the server unload/admin path, then confirm the next LTX-2 request logs a fresh
-  runtime load rather than reusing stale CUDA allocations.
+- On CUDA, explicit LTX-2 unload drops the retained native runtime, safely
+  synchronizes pending work, and samples the actual free VRAM without
+  invalidating the process-owned primary context. To manually verify OOM
+  recovery, run a GPU-resident LTX-2 request, force unload by switching models
+  or using the server unload/admin path, then confirm the next LTX-2 request
+  logs a fresh runtime load rather than reusing stale allocations.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 

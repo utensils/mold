@@ -749,6 +749,77 @@ impl hf_hub::api::Progress for SyncDownloadProgress {
     }
 }
 
+/// Synchronous hf-hub progress adapter used by pre-admission dependency
+/// preparation running on Tokio's blocking pool.
+struct SyncCallbackProgress {
+    callback: DownloadProgressCallback,
+    started_at: Instant,
+    filename: String,
+    accumulated: u64,
+    total: u64,
+    last_emit: Instant,
+}
+
+impl SyncCallbackProgress {
+    fn new(callback: DownloadProgressCallback) -> Self {
+        Self {
+            callback,
+            started_at: Instant::now(),
+            filename: String::new(),
+            accumulated: 0,
+            total: 0,
+            last_emit: Instant::now(),
+        }
+    }
+}
+
+impl hf_hub::api::Progress for SyncCallbackProgress {
+    fn init(&mut self, size: usize, filename: &str) {
+        self.filename = filename.to_string();
+        self.accumulated = 0;
+        self.total = size as u64;
+        self.last_emit = Instant::now();
+        (self.callback)(DownloadProgressEvent::FileStart {
+            filename: self.filename.clone(),
+            file_index: 0,
+            total_files: 1,
+            size_bytes: self.total,
+            batch_bytes_downloaded: 0,
+            batch_bytes_total: self.total,
+            batch_elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+        });
+    }
+
+    fn update(&mut self, size: usize) {
+        self.accumulated = self.accumulated.saturating_add(size as u64);
+        let now = Instant::now();
+        if now.duration_since(self.last_emit).as_millis() < 250 && self.accumulated < self.total {
+            return;
+        }
+        self.last_emit = now;
+        (self.callback)(DownloadProgressEvent::FileProgress {
+            filename: self.filename.clone(),
+            file_index: 0,
+            bytes_downloaded: self.accumulated,
+            bytes_total: self.total,
+            batch_bytes_downloaded: self.accumulated,
+            batch_bytes_total: self.total,
+            batch_elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+        });
+    }
+
+    fn finish(&mut self) {
+        (self.callback)(DownloadProgressEvent::FileDone {
+            filename: self.filename.clone(),
+            file_index: 0,
+            total_files: 1,
+            batch_bytes_downloaded: self.total,
+            batch_bytes_total: self.total,
+            batch_elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+        });
+    }
+}
+
 /// Returns `true` if the file already exists at `clean_path` with the correct
 /// size and (if a SHA-256 is available) the correct digest.
 ///
@@ -1226,6 +1297,46 @@ pub fn download_single_file_sync(
     hf_filename: &str,
     target_subdir: Option<&str>,
 ) -> Result<PathBuf, DownloadError> {
+    let msg_width = filename_column_width();
+    let bar_style = ProgressStyle::with_template(&format!(
+        "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
+    ))
+    .unwrap()
+    .progress_chars("━╸─");
+    let bar = ProgressBar::new(0);
+    bar.set_style(bar_style);
+    bar.set_message(truncate_filename(hf_filename, msg_width));
+    let progress = SyncDownloadProgress::new(bar, msg_width);
+    download_single_file_sync_with_adapter(hf_repo, hf_filename, target_subdir, progress)
+}
+
+/// Callback-reporting counterpart to [`download_single_file_sync`].
+///
+/// It remains a blocking function by design; callers must use
+/// `tokio::task::spawn_blocking`.
+pub fn download_single_file_sync_with_progress(
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+    callback: DownloadProgressCallback,
+) -> Result<PathBuf, DownloadError> {
+    download_single_file_sync_with_adapter(
+        hf_repo,
+        hf_filename,
+        target_subdir,
+        SyncCallbackProgress::new(callback),
+    )
+}
+
+fn download_single_file_sync_with_adapter<P>(
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+    progress: P,
+) -> Result<PathBuf, DownloadError>
+where
+    P: hf_hub::api::Progress,
+{
     use hf_hub::api::sync::ApiBuilder;
 
     let mut builder = ApiBuilder::from_env()
@@ -1238,16 +1349,6 @@ pub fn download_single_file_sync(
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
     let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
-    let msg_width = filename_column_width();
-    let bar_style = ProgressStyle::with_template(&format!(
-        "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
-    ))
-    .unwrap()
-    .progress_chars("━╸─");
-    let bar = ProgressBar::new(0);
-    bar.set_style(bar_style);
-    bar.set_message(truncate_filename(hf_filename, msg_width));
-    let progress = SyncDownloadProgress::new(bar, msg_width);
     let hf_path = repo
         .download_with_progress(hf_filename, progress)
         .map_err(|e| {
@@ -2046,6 +2147,46 @@ mod tests {
         // max_len < 8 returns unchanged to avoid degenerate "..." output
         let name = "something.safetensors";
         assert_eq!(truncate_filename(name, 5), name);
+    }
+
+    #[test]
+    fn sync_callback_progress_reports_real_accumulated_bytes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = events.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |event| {
+            events_for_callback.lock().unwrap().push(event);
+        });
+        let mut progress = SyncCallbackProgress::new(callback);
+        hf_hub::api::Progress::init(&mut progress, 100, "encoder.gguf");
+        hf_hub::api::Progress::update(&mut progress, 40);
+        hf_hub::api::Progress::update(&mut progress, 60);
+        hf_hub::api::Progress::finish(&mut progress);
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            &events[0],
+            DownloadProgressEvent::FileStart {
+                filename,
+                size_bytes: 100,
+                ..
+            } if filename == "encoder.gguf"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DownloadProgressEvent::FileProgress {
+                bytes_downloaded: 100,
+                bytes_total: 100,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(DownloadProgressEvent::FileDone {
+                batch_bytes_downloaded: 100,
+                batch_bytes_total: 100,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

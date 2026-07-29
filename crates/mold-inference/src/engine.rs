@@ -3,7 +3,7 @@ use mold_core::GenerateRequest;
 use mold_core::GenerateResponse;
 use std::ops::{Deref, DerefMut};
 
-use crate::progress::ProgressCallback;
+use crate::progress::{InferenceCancellationToken, ProgressCallback};
 
 /// Controls how model components are loaded during inference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -15,6 +15,49 @@ pub enum LoadStrategy {
     Sequential,
 }
 
+/// Engine-family batching contract consumed by the server-owned adaptive
+/// batch planner.
+///
+/// A family that reports only `[1]` supports parallel singleton children but
+/// does not claim native tensor batching. Sizes must be strictly increasing
+/// and non-zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchExecutionCapability {
+    pub native_batch_sizes: &'static [usize],
+    pub cooperative_cancellation: bool,
+}
+
+impl BatchExecutionCapability {
+    /// Conservative default for adapters and test doubles that have not
+    /// implemented an attempt-scoped cancellation hook.
+    pub const SINGLETON_NON_COOPERATIVE: Self = Self {
+        native_batch_sizes: &[1],
+        cooperative_cancellation: false,
+    };
+
+    pub const SINGLETON_COOPERATIVE: Self = Self {
+        native_batch_sizes: &[1],
+        cooperative_cancellation: true,
+    };
+
+    pub fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.native_batch_sizes.is_empty(),
+            "native batch sizes must not be empty"
+        );
+        let mut previous = 0;
+        for &size in self.native_batch_sizes {
+            anyhow::ensure!(size > 0, "native batch sizes must be non-zero");
+            anyhow::ensure!(
+                size > previous,
+                "native batch sizes must be strictly increasing"
+            );
+            previous = size;
+        }
+        Ok(())
+    }
+}
+
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
@@ -22,6 +65,13 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
     /// Load model weights. Called automatically on first generate if not yet loaded.
     fn load(&mut self) -> Result<()>;
+    /// Load model weights using the exact request placement selected before
+    /// dispatch. Engines whose placement affects construction must override
+    /// this method; the default preserves engines with no request-sensitive
+    /// load behavior.
+    fn load_for_request(&mut self, _req: &GenerateRequest) -> Result<()> {
+        self.load()
+    }
     /// Unload model weights to free GPU memory. The engine remains valid and
     /// can be re-loaded by calling `load()` or generating again.
     fn unload(&mut self) {}
@@ -30,9 +80,37 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
     /// Clear any previously installed progress callback.
     fn clear_on_progress(&mut self) {}
+    /// Install an attempt-scoped cooperative cancellation token. The caller
+    /// may signal it from another thread; the engine observes it only at safe
+    /// checkpoints on its owning worker thread.
+    fn set_cancellation_token(&mut self, _token: InferenceCancellationToken) {}
+    /// Remove the current attempt's cancellation token before the engine is
+    /// reused for another job.
+    fn clear_cancellation_token(&mut self) {}
+    /// Declare this engine family's tested batch and cancellation contract.
+    /// Adapters and test doubles default fail-closed; every production family
+    /// overrides this explicitly after implementing safe checkpoints.
+    fn batch_execution_capability(&self) -> BatchExecutionCapability {
+        BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+    }
     /// Return the model's resolved file paths, if available.
     /// Used by the server for pre-load memory checks on unified-memory systems.
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
+        None
+    }
+    /// Exact load policy supplied when this engine was created, when the
+    /// caller records one. Server scheduler plans use this to avoid silently
+    /// reusing an engine built under a different residency contract.
+    fn configured_load_strategy(&self) -> Option<LoadStrategy> {
+        None
+    }
+    /// Exact request-controlled block-offload flag supplied at creation.
+    fn configured_block_offload(&self) -> Option<bool> {
+        None
+    }
+    /// Scheduler execution-plan fingerprint that governed this engine's
+    /// successful load.
+    fn configured_execution_fingerprint(&self) -> Option<&str> {
         None
     }
 
@@ -45,6 +123,22 @@ pub trait InferenceEngine: Send + Sync {
     /// chaining return `None` and the caller responds with 422.
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         None
+    }
+}
+
+/// Run one attempt with a cancellation token installed, clearing it before
+/// the cached engine can be reused even when inference unwinds.
+pub fn with_inference_cancellation<T>(
+    engine: &mut dyn InferenceEngine,
+    token: InferenceCancellationToken,
+    operation: impl FnOnce(&mut dyn InferenceEngine) -> T,
+) -> T {
+    engine.set_cancellation_token(token);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(engine)));
+    engine.clear_cancellation_token();
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
@@ -135,7 +229,7 @@ pub(crate) fn resolve_cfg_plus(req: &GenerateRequest) -> bool {
         return explicit;
     }
     matches!(
-        std::env::var("MOLD_CFG_PLUS").ok().as_deref(),
+        crate::runtime_env::value("MOLD_CFG_PLUS").as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
 }
@@ -178,6 +272,119 @@ pub(crate) fn seeded_randn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_execution_capability_rejects_invalid_native_sizes() {
+        for native_batch_sizes in [&[][..], &[0][..], &[1, 1][..], &[2, 1][..]] {
+            assert!(
+                BatchExecutionCapability {
+                    native_batch_sizes,
+                    cooperative_cancellation: true,
+                }
+                .validate()
+                .is_err(),
+                "{native_batch_sizes:?}"
+            );
+        }
+        BatchExecutionCapability::SINGLETON_COOPERATIVE
+            .validate()
+            .unwrap();
+        BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn default_engine_does_not_claim_cooperative_cancellation() {
+        struct MinimalEngine;
+        impl InferenceEngine for MinimalEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
+                unreachable!()
+            }
+
+            fn model_name(&self) -> &str {
+                "minimal"
+            }
+
+            fn is_loaded(&self) -> bool {
+                true
+            }
+
+            fn load(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            MinimalEngine.batch_execution_capability(),
+            BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+        );
+    }
+
+    #[test]
+    fn cancellation_scope_clears_a_cancelled_token_before_engine_reuse() {
+        #[derive(Default)]
+        struct ReusableEngine {
+            token: Option<InferenceCancellationToken>,
+        }
+        impl InferenceEngine for ReusableEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
+                self.token
+                    .as_ref()
+                    .map_or(Ok(()), InferenceCancellationToken::checkpoint)?;
+                unreachable!("the test only exercises cancellation")
+            }
+
+            fn model_name(&self) -> &str {
+                "reusable"
+            }
+
+            fn is_loaded(&self) -> bool {
+                true
+            }
+
+            fn load(&mut self) -> Result<()> {
+                Ok(())
+            }
+
+            fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+                self.token = Some(token);
+            }
+
+            fn clear_cancellation_token(&mut self) {
+                self.token = None;
+            }
+        }
+
+        let mut engine = ReusableEngine::default();
+        let cancelled = InferenceCancellationToken::default();
+        cancelled.cancel();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "test",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        let error =
+            with_inference_cancellation(&mut engine, cancelled, |engine| engine.generate(&request))
+                .unwrap_err();
+        assert!(crate::progress::is_inference_cancelled(&error));
+        assert!(engine.token.is_none());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_inference_cancellation(&mut engine, InferenceCancellationToken::default(), |_| {
+                panic!("injected inference panic")
+            })
+        }));
+        assert!(panic.is_err());
+        assert!(
+            engine.token.is_none(),
+            "an unwinding attempt must not poison the cached engine's next cancellation scope"
+        );
+    }
 
     #[test]
     fn seeded_randn_produces_correct_shape() {

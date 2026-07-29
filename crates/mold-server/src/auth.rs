@@ -66,6 +66,20 @@ impl ApiKeySet {
         found.into()
     }
 
+    fn audit_identity(&self, candidate: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(&self.gallery_signing_secret)
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(b"mold-api-key-audit-v1\n");
+        mac.update(candidate.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let mut identity = String::from("key:");
+        for byte in &digest[..8] {
+            use std::fmt::Write as _;
+            write!(&mut identity, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        identity
+    }
+
     fn validates_gallery_media_token(
         &self,
         token: &str,
@@ -108,8 +122,13 @@ impl ApiKeySet {
 
 /// Marker proving normal API-key authentication succeeded for this request.
 /// The matched API key itself deliberately never leaves the middleware.
-#[derive(Clone, Copy)]
-pub(crate) struct ApiKeyAuthenticated;
+#[derive(Clone)]
+pub(crate) struct ApiKeyAuthenticated {
+    /// Process-local opaque audit label. It is derived with the server's
+    /// random signing secret, so neither the API key nor an offline-comparable
+    /// digest enters logs.
+    pub(crate) identity: String,
+}
 
 #[derive(Debug, Serialize)]
 struct AuthError {
@@ -201,7 +220,10 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         Some(value) => {
             let candidate = value.to_str().unwrap_or("");
             if key_set.contains(candidate) {
-                request.extensions_mut().insert(ApiKeyAuthenticated);
+                let identity = key_set.audit_identity(candidate);
+                request
+                    .extensions_mut()
+                    .insert(ApiKeyAuthenticated { identity });
                 next.run(request).await
             } else {
                 warn!("rejected request with invalid API key");
@@ -303,6 +325,7 @@ pub fn api_key_header_name() -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     /// Serialize env var mutations across parallel test threads.
     fn env_lock() -> &'static std::sync::Mutex<()> {
@@ -439,5 +462,61 @@ mod tests {
         assert!(!ks.validates_gallery_media_token(&api_key_derived, MEDIA_PATH, 1_900, 1_000,));
         assert!(!ks.validates_gallery_media_token(&other_process, MEDIA_PATH, 1_900, 1_000,));
         assert!(ks.contains(WEAK_API_KEY));
+    }
+
+    fn protected_test_app(auth_state: AuthState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/devices/:id",
+                axum::routing::patch(|| async { axum::http::StatusCode::OK }),
+            )
+            .layer(axum::middleware::from_fn(require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                inject_auth_state,
+            ))
+    }
+
+    #[tokio::test]
+    async fn configured_key_is_required_for_device_patch_even_with_loopback_connect_info() {
+        let auth = Some(Arc::new(ApiKeySet::new(HashSet::from([
+            "correct-key".to_string()
+        ]))));
+        let mut request = Request::patch("/api/devices/cuda:test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+
+        let missing = protected_test_app(auth.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+        let accepted = protected_test_app(auth)
+            .oneshot(
+                Request::patch("/api/devices/cuda:test")
+                    .header("x-api-key", "correct-key")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn device_patch_is_open_when_server_auth_is_disabled() {
+        let response = protected_test_app(None)
+            .oneshot(
+                Request::patch("/api/devices/cuda:test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 }

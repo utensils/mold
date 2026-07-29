@@ -68,6 +68,7 @@ import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import {
+  buildAutoChainRequest,
   buildGenerationEstimateRequest,
   decideGenerateRequestRouting,
   unsupportedAutoChainFields,
@@ -218,7 +219,7 @@ async function pullMissingModel() {
         `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
         "error",
       );
-    } else {
+    } else if (routeRequired.value) {
       toasts.push(String(err), "error");
     }
   }
@@ -1442,13 +1443,53 @@ async function generate() {
     // A pinned host that went away is an error, not a reroute. Resolved
     // BEFORE source preprocessing so an upscale-then-fit cache miss hits the same host.
     let route: HostRoute | null = preparedSubmission?.route ?? quickSubmission?.route ?? null;
-    if (!preparedSubmission && !quickSubmission && routeRequired.value) {
-      route = hosts.resolveRoute(
+    const preliminaryRequest = buildRequest(draft);
+    const preliminaryRouting = decideGenerateRequestRouting(preliminaryRequest, draft.family);
+    if (preliminaryRouting.kind === "reject") {
+      toasts.push(preliminaryRouting.reason, "error");
+      return;
+    }
+    if (
+      preliminaryRouting.kind === "chain" &&
+      unsupportedAutoChainFields(preliminaryRequest).length > 0
+    ) {
+      toasts.push(
+        "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
+        "error",
+      );
+      return;
+    }
+    const planningRequest =
+      preliminaryRouting.kind === "chain"
+        ? buildAutoChainRequest(preliminaryRequest, preliminaryRouting)
+        : preliminaryRequest;
+    if (route) {
+      // Prepared work already froze the concrete host. Preserve that
+      // authority through source preprocessing and perform exactly one
+      // placement preview against the finalized request below.
+      const feasible = hosts.resolveRoute(route.hostId);
+      if (
+        !feasible ||
+        feasible.hostId !== route.hostId ||
+        feasible.target.baseUrl !== route.target.baseUrl ||
+        feasible.target.apiKey !== route.target.apiKey ||
+        (feasible.instanceId ?? null) !== (route.instanceId ?? null)
+      ) {
+        toasts.push(
+          "The prepared machine no longer has an authoritative route for this print. Nothing was queued.",
+          "error",
+        );
+        return;
+      }
+      route = feasible;
+    } else {
+      route = await hosts.resolveFeasibleRoute(
         appPrefs.settings?.generateTargetHost ?? null,
-        draft.model || null,
+        planningRequest,
+        batch,
       );
       if (!route) {
-        toasts.push("The selected host isn't reachable. Pick another host.", "error");
+        toasts.push("No selected machine has an authoritative route for this print.", "error");
         return;
       }
     }
@@ -1493,6 +1534,29 @@ async function generate() {
         "error",
       );
       return;
+    }
+    const finalizedPlanningRequest =
+      chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
+    if (route) {
+      const finalizedRoute = await hosts.resolveFeasibleRoute(
+        route.hostId,
+        finalizedPlanningRequest,
+        batch,
+      );
+      if (
+        !finalizedRoute ||
+        finalizedRoute.hostId !== route.hostId ||
+        finalizedRoute.target.baseUrl !== route.target.baseUrl ||
+        finalizedRoute.target.apiKey !== route.target.apiKey ||
+        (finalizedRoute.instanceId ?? null) !== (route.instanceId ?? null)
+      ) {
+        toasts.push(
+          "The finalized source request is no longer feasible on the selected machine. Nothing was queued.",
+          "error",
+        );
+        return;
+      }
+      route = finalizedRoute;
     }
     // Stash the exact source bytes by sha (the hash the server records as
     // source_image_sha256) so Reuse settings can restore uploads and fitted

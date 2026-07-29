@@ -161,9 +161,12 @@ export function clipsToChainScript(
         frames: clip.frames,
         transition: idx === 0 ? "smooth" : clip.transition,
       };
-      if (idx > 0 && clip.transition === "fade") stage.fade_frames = clip.fadeFrames;
-      if (clip.negativePrompt.trim()) stage.negative_prompt = clip.negativePrompt;
-      if (clip.sourceImage?.base64) stage.source_image_b64 = clip.sourceImage.base64;
+      if (idx > 0 && clip.transition === "fade")
+        stage.fade_frames = clip.fadeFrames;
+      if (clip.negativePrompt.trim())
+        stage.negative_prompt = clip.negativePrompt;
+      if (clip.sourceImage?.base64)
+        stage.source_image_b64 = clip.sourceImage.base64;
       return stage;
     }),
   };

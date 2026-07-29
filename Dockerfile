@@ -11,7 +11,8 @@
 # CUDA_COMPUTE_CAP targets:
 #   80 = Ampere (A100)          86 = Ampere (RTX 3090, A40)
 #   89 = Ada Lovelace (RTX 4090, L40S)   90 = Hopper (H100)
-#   120 = Blackwell (RTX 5090, B200)
+#   100 = datacenter Blackwell (B200/B300)
+#   120 = consumer Blackwell (RTX 5090)
 
 # ── Stage 1a: Build web gallery SPA ─────────────────────────────────
 # The gallery is served by `mold serve` as a SPA fallback. Building it
@@ -38,7 +39,10 @@ RUN bun run build:web
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_COMPUTE_CAP=89
+ARG MOLD_DISTRIBUTION_IMAGE_VERSION=latest
+ARG MOLD_GIT_SHA=unknown
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
+ENV MOLD_DISTRIBUTION_IMAGE_VERSION=${MOLD_DISTRIBUTION_IMAGE_VERSION}
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies for building.
@@ -56,6 +60,7 @@ RUN set -eux; \
             nasm \
             git \
             ca-certificates \
+            python3 \
             curl \
         && break \
         || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
@@ -106,12 +111,23 @@ RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4
 
 # Now copy the real source code
 COPY crates/ crates/
+COPY scripts/seal-cuda-ptx-manifest.py scripts/seal-cuda-ptx-manifest.py
+COPY scripts/probe-cuda-embedded-ptx.py scripts/probe-cuda-embedded-ptx.py
 
 # Touch source files to invalidate the stub builds but keep dep artifacts
 RUN find crates/ -name "*.rs" -exec touch {} +
 
-# Build the real binary
+# Bind source identity only after the dependency-cache layer. The official
+# release workflow supplies the exact full GitHub SHA and verifies it from the
+# digest-addressed runtime image before publishing release manifests.
+ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
+
+# Build the real binary.
 RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
+RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
+    "${CUDA_COMPUTE_CAP}" /build/target/release/build
+RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \
+    "${CUDA_COMPUTE_CAP}" --extract-only >/dev/null
 
 # Verify no unexpected missing libraries (libcuda.so.1 is expected to be
 # absent — it's the NVIDIA driver, injected at runtime by the container toolkit)

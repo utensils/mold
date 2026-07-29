@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["mold-inference/cuda"]
+cuda = ["mold-inference/cuda", "nvml"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
@@ -38,6 +38,7 @@ mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.20.2
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.20.2" }
 mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.20.2" }
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.20.2" }
+mold-scheduler = { path = "../mold-scheduler", package = "mold-ai-scheduler", version = "0.20.2" }
 anyhow = "1"
 libc = "0.2"
 axum = "0.7"
@@ -75,9 +76,14 @@ rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path
 mime_guess = "2"
 nvml-wrapper = { version = "0.10", optional = true }
 sysinfo = "0.34"
+fs2 = "0.4"
 async-stream = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
+filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 # Chain route tests build a synthetic motion-tail Tensor via the same

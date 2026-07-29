@@ -31,17 +31,51 @@ impl EngineHandle {
     }
 
     /// Join the engine thread after shutdown has been requested over HTTP.
-    pub fn join(mut self, timeout: Duration) {
+    /// A timeout retains the thread handle, so callers cannot accidentally
+    /// advertise filesystem authority while an engine still owns the gallery.
+    pub fn join(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if self.is_alive() {
+            return false;
+        }
         if let Some(thread) = self.thread.take() {
-            let deadline = std::time::Instant::now() + timeout;
-            while !thread.is_finished() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            } else {
-                tracing::warn!("embedded engine did not stop within {timeout:?}; detaching");
-            }
+            let _ = thread.join();
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sleeping_for_tests(duration: Duration) -> Self {
+        Self {
+            port: 9,
+            models_dir: PathBuf::new(),
+            thread: Some(std::thread::spawn(move || std::thread::sleep(duration))),
+        }
+    }
+
+    /// Model the embedded runtime waiting for a server-owned blocking gallery
+    /// task. The engine thread must remain live until that task is released.
+    #[cfg(test)]
+    pub(crate) fn held_gallery_task_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
+        Self {
+            port: 9,
+            models_dir: PathBuf::new(),
+            thread: Some(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime");
+                runtime.block_on(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let _ = release.recv();
+                    })
+                    .await
+                    .expect("held gallery task");
+                });
+            })),
         }
     }
 }
@@ -119,13 +153,14 @@ fn start_engine_inner(
                 .thread_name("mold-engine-worker")
                 .build()
                 .expect("engine tokio runtime");
-            match rt.block_on(mold_server::run_server(
+            let result = rt.block_on(mold_server::run_server(
                 &bind,
                 port,
                 dir,
                 gpu_selection,
                 size,
-            )) {
+            ));
+            match result {
                 Ok(()) => {
                     // Also to stderr: the file subscriber may not be active.
                     eprintln!("embedded mold engine stopped (clean shutdown)");
@@ -146,6 +181,12 @@ fn start_engine_inner(
                     }
                 }
             }
+            // Do not use `shutdown_timeout`: Tokio may detach blocking tasks
+            // when that deadline expires. Normal Runtime drop cancels async
+            // tasks and waits for every blocking task, so EngineHandle can
+            // treat thread exit as proof that no server-owned gallery work
+            // survives the authority transfer.
+            drop(rt);
         })?;
     Ok(EngineHandle {
         port,

@@ -10,9 +10,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "1"
 
-# Note: CUDA builds are not run in CI — they require a GPU host with NixOS + CUDA.
-# CI only checks non-CUDA compilation, lints, and tests.
-#
 # Cache strategy: jobs that compile the same features share a cache key.
 # Only main-branch pushes save caches; PRs read from main's cache.
 #
@@ -46,6 +43,12 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'scripts/qualify-local-multi-gpu.py'
+              - 'scripts/validate-local-multi-gpu-report.py'
+              - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
+              - 'scripts/tests/local_multi_gpu_qualification_test.py'
+              - 'docs/qualification/local-multi-gpu-report.schema.json'
+              - 'docs/qualification/README.md'
               - '.github/workflows/ci.yml'
             website:
               - 'website/**'
@@ -72,9 +75,38 @@ jobs:
               - '.github/workflows/ci.yml'
             release:
               - 'Dockerfile'
+              - 'flake.nix'
+              - 'install.sh'
+              - 'nix/**'
+              - 'packaging/**'
+              - 'crates/mold-cli/Cargo.toml'
+              - 'crates/mold-cli/src/commands/lambda.rs'
+              - 'crates/mold-cli/src/commands/runpod.rs'
+              - 'crates/mold-core/src/cuda_distribution.rs'
+              - 'crates/mold-server/Cargo.toml'
+              - 'desktop/src-tauri/Cargo.toml'
+              - 'desktop/src-tauri/src/runpod.rs'
               - 'release-plz.toml'
+              - 'website/deployment/docker.md'
+              - 'website/deployment/nixos.md'
+              - 'website/guide/installation.md'
+              - '.github/workflows/desktop-distribution.yml'
+              - '.github/workflows/release.yml'
               - 'scripts/release/**'
+              - 'scripts/verify-cuda-release-binary.sh'
+              - 'scripts/probe-cuda-embedded-ptx.py'
+              - 'scripts/seal-cuda-ptx-manifest.py'
+              - 'scripts/create-release-provenance.sh'
+              - 'scripts/create-container-digest-manifest.sh'
+              - 'scripts/validate-cuda-qualification-report.py'
+              - 'scripts/verify-png-artifact.py'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
+              - 'scripts/tests/cuda-distribution-contract.sh'
+              - 'scripts/tests/cuda-ptx-parser-contract.py'
+              - 'scripts/tests/install-cuda-arch.sh'
+              - 'scripts/tests/cuda-qualification-contract.sh'
+              - 'scripts/qualify-cuda-sm86.sh'
+              - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - '.github/workflows/release-plz.yml'
@@ -92,6 +124,14 @@ jobs:
         run: bash scripts/tests/ci-coverage-disk-guard.sh
       - name: Test Docker web build context
         run: bash scripts/tests/docker-web-context.sh
+      - name: Test CUDA distribution contract
+        run: bash scripts/tests/cuda-distribution-contract.sh
+      - name: Test embedded PTX parser contract
+        run: python3 scripts/tests/cuda-ptx-parser-contract.py
+      - name: Test installer CUDA architecture selection
+        run: bash scripts/tests/install-cuda-arch.sh
+      - name: Test deferred CUDA qualification contract
+        run: bash scripts/tests/cuda-qualification-contract.sh
 
   docs:
     needs: changes
@@ -190,8 +230,58 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Test local multi-GPU qualification contract
+        run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
+
+  cuda-check:
+    name: CUDA forced-local typecheck
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      CUDA_COMPUTE_CAP: "89"
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+      - name: Install Rust build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: root-ci-sm89
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-cuda-sm89
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check CUDA forced-local and server paths
+        run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns
+
+  metal-check:
+    name: Metal forced-local typecheck
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-metal
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check Metal forced-local and server paths
+        run: cargo check -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns
 
   coverage:
     needs: changes

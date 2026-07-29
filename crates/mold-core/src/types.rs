@@ -566,6 +566,22 @@ pub struct GenerateResponse {
     pub gpu: Option<usize>,
 }
 
+/// Ordered response for a server-owned atomic batch submitted through
+/// `POST /api/generate` with `batch_size > 1`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchGenerateResponse {
+    pub batch_id: String,
+    pub outputs: Vec<BatchGenerateOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BatchGenerateOutput {
+    /// One-based stable position in the normalized parent.
+    pub batch_index: u32,
+    pub filename: String,
+    pub response: GenerateResponse,
+}
+
 /// Video output from a video model family.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VideoData {
@@ -1226,6 +1242,367 @@ pub struct QueueJobEntryWire {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
+/// Confidence attached to a learned scheduler ETA.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueueEstimateConfidence {
+    #[default]
+    Low,
+    Medium,
+    High,
+    Unknown(String),
+}
+
+impl QueueEstimateConfidence {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueEstimateConfidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueEstimateConfidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueEstimateConfidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// Typed reason that a scheduler work unit cannot currently advance.
+///
+/// `reason` remains on [`QueueWorkItem`] as a backward-compatible display
+/// alias. New clients should prefer this field so assignment and blocking
+/// causes cannot be confused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueBlockedReason {
+    DeviceDisabled,
+    DeviceDraining,
+    DeviceStartupExcluded,
+    DeviceUnavailable,
+    DeviceDegraded,
+    HardPinUnavailable,
+    BackendUnsupported,
+    ModelNotInstalled,
+    InsufficientVram,
+    InsufficientHostRam,
+    AggregateHostRamReserved,
+    ExecutionPlanIncompatible,
+    DependencyWait,
+    WarmWait,
+    QueuePaused,
+    MaintenanceMode,
+    Cancelling,
+    NoSchedulableDevice,
+    NoIdleDevice,
+    LowerPriorityOpening,
+    Unknown(String),
+}
+
+impl QueueBlockedReason {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::DeviceDisabled => "device_disabled",
+            Self::DeviceDraining => "device_draining",
+            Self::DeviceStartupExcluded => "device_startup_excluded",
+            Self::DeviceUnavailable => "device_unavailable",
+            Self::DeviceDegraded => "device_degraded",
+            Self::HardPinUnavailable => "hard_pin_unavailable",
+            Self::BackendUnsupported => "backend_unsupported",
+            Self::ModelNotInstalled => "model_not_installed",
+            Self::InsufficientVram => "insufficient_vram",
+            Self::InsufficientHostRam => "insufficient_host_ram",
+            Self::AggregateHostRamReserved => "aggregate_host_ram_reserved",
+            Self::ExecutionPlanIncompatible => "execution_plan_incompatible",
+            Self::DependencyWait => "dependency_wait",
+            Self::WarmWait => "warm_wait",
+            Self::QueuePaused => "queue_paused",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::Cancelling => "cancelling",
+            Self::NoSchedulableDevice => "no_schedulable_device",
+            Self::NoIdleDevice => "no_idle_device",
+            Self::LowerPriorityOpening => "lower_priority_opening",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueueBlockedReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueBlockedReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device_disabled" => Self::DeviceDisabled,
+            "device_draining" => Self::DeviceDraining,
+            "device_startup_excluded" => Self::DeviceStartupExcluded,
+            "device_unavailable" => Self::DeviceUnavailable,
+            "device_degraded" => Self::DeviceDegraded,
+            "hard_pin_unavailable" => Self::HardPinUnavailable,
+            "backend_unsupported" => Self::BackendUnsupported,
+            "model_not_installed" => Self::ModelNotInstalled,
+            "insufficient_vram" => Self::InsufficientVram,
+            "insufficient_host_ram" => Self::InsufficientHostRam,
+            "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
+            "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
+            "dependency_wait" => Self::DependencyWait,
+            "warm_wait" => Self::WarmWait,
+            "queue_paused" => Self::QueuePaused,
+            "maintenance_mode" => Self::MaintenanceMode,
+            "cancelling" => Self::Cancelling,
+            "no_schedulable_device" => Self::NoSchedulableDevice,
+            "no_idle_device" => Self::NoIdleDevice,
+            "lower_priority_opening" => Self::LowerPriorityOpening,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// Truthful scheduler-owned phase for a projected work unit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueueActivityPhase {
+    #[default]
+    Queued,
+    Blocked,
+    WarmWait,
+    Dispatching,
+    Active,
+    Cpu,
+    Unknown(String),
+}
+
+impl QueueActivityPhase {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::WarmWait => "warm_wait",
+            Self::Dispatching => "dispatching",
+            Self::Active => "active",
+            Self::Cpu => "cpu",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueActivityPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueActivityPhase {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueActivityPhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "queued" => Self::Queued,
+            "blocked" => Self::Blocked,
+            "warm_wait" => Self::WarmWait,
+            "dispatching" => Self::Dispatching,
+            "active" => Self::Active,
+            "cpu" => Self::Cpu,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueBatchPartition {
+    /// One-based partition/sibling index.
+    pub index: u32,
+    pub count: u32,
+    /// Number of generation outputs owned by this work unit.
+    pub size: u32,
+}
+
+/// Public class of scheduler lane used by a planned work item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueuePlannedLaneKind {
+    #[default]
+    Device,
+    HostUtility,
+    Unknown(String),
+}
+
+impl QueuePlannedLaneKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Device => "device",
+            Self::HostUtility => "host_utility",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueuePlannedLaneKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueuePlannedLaneKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device" => Self::Device,
+            "host_utility" => Self::HostUtility,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// One internal scheduler unit in the additive queue-plan projection.
+///
+/// Strings are used for extensible scheduler states/reasons so an older
+/// client can continue rendering a plan after a server adds a work kind.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueWorkItem {
+    pub work_id: String,
+    pub parent_id: String,
+    pub work_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_partition: Option<QueueBatchPartition>,
+    pub priority_class: String,
+    pub queue_rank: u64,
+    pub bypass_count: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_pinned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_gpu: Option<usize>,
+    /// Public lane class. A host utility lane is not a hardware device, so its
+    /// `planned_device_id` serializes as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub planned_lane_kind: Option<QueuePlannedLaneKind>,
+    #[serde(default)]
+    pub planned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_order: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_start_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_finish_unix_ms: Option<u64>,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub estimate_confidence: QueueEstimateConfidence,
+    /// Backward-compatible display alias. For queued work this contains the
+    /// block, warm-wait, or assignment reason used by pre-Phase-E clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub blocked_reason: Option<QueueBlockedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_wait_deadline_unix_ms: Option<u64>,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub activity_phase: QueueActivityPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_fingerprint: Option<String>,
+    /// Parent-level deterministic execution identity. Unlike
+    /// `execution_fingerprint`, this may match across compatible devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_equivalence_fingerprint: Option<String>,
+}
+
+impl QueueWorkItem {
+    /// Whether this work belongs to the host utility lane.
+    ///
+    /// Current servers provide the typed lane class. The exact legacy
+    /// scheduler sentinel is recognized only when that class is absent so a
+    /// future typed lane always remains authoritative.
+    pub fn is_host_utility_lane(&self) -> bool {
+        matches!(
+            self.planned_lane_kind.as_ref(),
+            Some(&QueuePlannedLaneKind::HostUtility)
+        ) || (self.planned_lane_kind.is_none()
+            && self.planned_device_id.as_deref() == Some("cpu:utility:0"))
+    }
+
+    /// Normalize the legacy host-utility sentinel for public presentation.
+    ///
+    /// This removes an internal scheduler identity while retaining device and
+    /// unknown future typed lanes exactly as received.
+    pub fn normalize_planned_lane_for_presentation(&mut self) {
+        if self.is_host_utility_lane() {
+            self.planned_lane_kind = Some(QueuePlannedLaneKind::HostUtility);
+            self.planned_device_id = None;
+        }
+    }
+}
+
+/// Versioned scheduler plan appended to `GET /api/queue`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePlan {
+    pub plan_version: u64,
+    pub state_version: u64,
+    pub optimizer_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_since_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_replan_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub work_items: Vec<QueueWorkItem>,
+}
+
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
 /// mold-server's `job_registry::QueueListing`. The server wraps the rows in
 /// an object (not a bare array) so the response can grow extra fields without
@@ -1234,6 +1611,22 @@ pub struct QueueJobEntryWire {
 pub struct QueueListingWire {
     #[serde(default)]
     pub entries: Vec<QueueJobEntryWire>,
+    /// Absent on legacy servers and before the V2 coordinator has produced
+    /// its first plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<QueuePlan>,
+}
+
+impl QueueListingWire {
+    /// Normalize legacy internal lane identities before presenting this
+    /// client-side projection to another consumer.
+    pub fn normalize_planned_lanes_for_presentation(&mut self) {
+        if let Some(plan) = &mut self.plan {
+            for work in &mut plan.work_items {
+                work.normalize_planned_lane_for_presentation();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -1251,31 +1644,154 @@ pub struct GpuInfo {
     pub backend: Option<GpuBackend>,
 }
 
+/// One startup GPU selector.
+///
+/// Ordinals are legacy, process-local selectors resolved against the current
+/// CUDA-visible inventory. Identifiers are stable Mold IDs (`cuda:...`) or
+/// NVIDIA UUID forms (`GPU-...` / `MIG-...`) and are resolved after discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GpuSelector {
+    Ordinal(usize),
+    Identifier(String),
+}
+
+impl std::fmt::Display for GpuSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordinal(ordinal) => ordinal.fmt(formatter),
+            Self::Identifier(identifier) => identifier.fmt(formatter),
+        }
+    }
+}
+
 /// GPU selection for multi-GPU setups.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+///
+/// The custom untagged serde shape preserves the original TOML contract:
+/// `gpus = []` and `"all"` select all visible devices, `"none"` selects
+/// maintenance mode, numeric arrays are legacy ordinal allowlists, and string
+/// arrays contain UUID-based selectors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum GpuSelection {
     /// Use all discovered GPUs (default).
     #[default]
     All,
-    /// Use only these specific GPU ordinals.
-    Specific(Vec<usize>),
+    /// Start without GPU workers.
+    None,
+    /// Use only devices matching these startup selectors.
+    Specific(Vec<GpuSelector>),
 }
 
 impl GpuSelection {
-    /// Parse from comma-separated string like "0,1,2".
+    /// Parse a comma-separated CLI/environment selector list.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
-        if s.is_empty() || s.to_lowercase() == "all" {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return Ok(Self::All);
         }
-        let ordinals: Vec<usize> = s
+        if trimmed.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+
+        let selectors = trimmed
             .split(',')
-            .map(|s| s.trim().parse::<usize>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("invalid GPU ordinal: {e}"))?;
-        if ordinals.is_empty() {
-            return Ok(Self::All);
+            .map(|token| {
+                let token = token.trim();
+                if token.is_empty() {
+                    anyhow::bail!("GPU selector entries must not be empty");
+                }
+                if token.eq_ignore_ascii_case("all") {
+                    anyhow::bail!("'all' cannot be combined with specific GPU selectors");
+                }
+                if token.eq_ignore_ascii_case("none") {
+                    anyhow::bail!("'none' cannot be combined with specific GPU selectors");
+                }
+                if token.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return token
+                        .parse::<usize>()
+                        .map(GpuSelector::Ordinal)
+                        .map_err(|error| anyhow::anyhow!("invalid GPU ordinal '{token}': {error}"));
+                }
+                if token
+                    .get(..5)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cuda:"))
+                    || token
+                        .get(..6)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("metal:"))
+                    || token
+                        .get(..4)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+                    || token
+                        .get(..4)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+                {
+                    return Ok(GpuSelector::Identifier(token.to_string()));
+                }
+                anyhow::bail!(
+                    "invalid GPU selector '{token}': expected an ordinal, cuda: ID, metal: ID, GPU- UUID, or MIG- UUID"
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self::Specific(selectors))
+    }
+}
+
+impl Serialize for GpuSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::All => serializer.serialize_str("all"),
+            Self::None => serializer.serialize_str("none"),
+            Self::Specific(selectors) => selectors.serialize(serializer),
         }
-        Ok(Self::Specific(ordinals))
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Keyword(String),
+            Ordinals(Vec<usize>),
+            Identifiers(Vec<String>),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Keyword(keyword) if keyword.eq_ignore_ascii_case("all") => Ok(Self::All),
+            Repr::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => Ok(Self::None),
+            Repr::Keyword(keyword) => Err(serde::de::Error::custom(format!(
+                "invalid gpus keyword '{keyword}': expected 'all' or 'none'"
+            ))),
+            Repr::Ordinals(ordinals) if ordinals.is_empty() => Ok(Self::All),
+            Repr::Ordinals(ordinals) => Ok(Self::Specific(
+                ordinals.into_iter().map(GpuSelector::Ordinal).collect(),
+            )),
+            Repr::Identifiers(identifiers) if identifiers.is_empty() => Ok(Self::All),
+            Repr::Identifiers(identifiers) => {
+                let selectors = identifiers
+                    .into_iter()
+                    .map(|identifier| match Self::parse(&identifier) {
+                        Ok(Self::Specific(mut selectors))
+                            if selectors.len() == 1
+                                && matches!(selectors[0], GpuSelector::Identifier(_)) =>
+                        {
+                            Ok(selectors.remove(0))
+                        }
+                        Ok(_) => Err(serde::de::Error::custom(format!(
+                            "gpus string arrays must contain UUID selectors, not '{identifier}'"
+                        ))),
+                        Err(error) => Err(serde::de::Error::custom(error)),
+                    })
+                    .collect::<Result<Vec<_>, D::Error>>()?;
+                Ok(Self::Specific(selectors))
+            }
+        }
     }
 }
 
@@ -1306,13 +1822,15 @@ pub enum GpuWorkerState {
 ///
 /// - `Auto` preserves the existing VRAM-aware auto-placement logic.
 /// - `Cpu` pins the component to CPU regardless of available VRAM.
-/// - `Gpu { ordinal }` pins to GPU ordinal `n` (CUDA-specific ordinal,
-///   or `0` on Metal/unified memory).
+/// - `Gpu { ordinal }` is the legacy process-local CUDA ordinal pin.
+/// - `Device { id }` pins to an exact durable device-registry ID such as
+///   `cuda:<uuid>` or `metal:default`.
 ///
 /// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
-/// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
-/// field deserializes to `Auto`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
+/// `{"kind":"cpu"}`, `{"kind":"gpu","ordinal":1}`, or
+/// `{"kind":"device","id":"cuda:..."}`. A missing `DeviceRef` field
+/// deserializes to `Auto`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeviceRef {
     #[default]
@@ -1321,12 +1839,19 @@ pub enum DeviceRef {
     Gpu {
         ordinal: usize,
     },
+    Device {
+        id: String,
+    },
 }
 
 impl DeviceRef {
     /// Helper constructor mirroring the compact `Gpu(n)` form used in tests.
     pub const fn gpu(ordinal: usize) -> Self {
         DeviceRef::Gpu { ordinal }
+    }
+
+    pub fn device(id: impl Into<String>) -> Self {
+        DeviceRef::Device { id: id.into() }
     }
 }
 
@@ -1377,6 +1902,12 @@ pub struct AdvancedPlacement {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseProgressEvent {
+    /// The job is waiting for a concrete model dependency to become locally
+    /// available. No accelerator lease has been granted at this point.
+    DependencyWait {
+        dependency: String,
+        reason: String,
+    },
     StageStart {
         name: String,
     },
@@ -1523,6 +2054,14 @@ pub struct SseCompleteEvent {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
+/// One atomic server-owned parent completion. Emitted as `batch_complete`
+/// only after every ordered output and metadata row is durably published.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseBatchCompleteEvent {
+    pub batch_id: String,
+    pub outputs: Vec<SseCompleteEvent>,
+}
+
 /// SSE event emitted when an upscale request completes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseUpscaleCompleteEvent {
@@ -1594,20 +2133,82 @@ pub struct CpuSnapshot {
 pub struct RamSnapshot {
     pub total: u64,
     pub used: u64,
+    /// OS-reported memory immediately available without swapping. Additive
+    /// and optional so older resource snapshots remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<u64>,
     pub used_by_mold: u64,
     pub used_by_other: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
     Cuda,
     Metal,
 }
 
+impl GpuBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_selection_parses_all_none_and_legacy_empty() {
+        assert_eq!(GpuSelection::parse("").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("   ").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("ALL").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("none").unwrap(), GpuSelection::None);
+    }
+
+    #[test]
+    fn gpu_selection_parses_ordinals_and_uuid_selectors() {
+        assert_eq!(
+            GpuSelection::parse(
+                "1,cuda:0123456789abcdef0123456789abcdef,\
+                 GPU-fedcba98-7654-3210-fedc-ba9876543210,\
+                 MIG-00112233-4455-6677-8899-aabbccddeeff,\
+                 metal:default"
+            )
+            .unwrap(),
+            GpuSelection::Specific(vec![
+                GpuSelector::Ordinal(1),
+                GpuSelector::Identifier("cuda:0123456789abcdef0123456789abcdef".to_string()),
+                GpuSelector::Identifier("GPU-fedcba98-7654-3210-fedc-ba9876543210".to_string()),
+                GpuSelector::Identifier("MIG-00112233-4455-6677-8899-aabbccddeeff".to_string()),
+                GpuSelector::Identifier("metal:default".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn gpu_selection_rejects_keywords_mixed_with_specific_selectors() {
+        let error = GpuSelection::parse("all,0").unwrap_err().to_string();
+        assert!(error.contains("'all'"));
+
+        let error = GpuSelection::parse("none,GPU-abc").unwrap_err().to_string();
+        assert!(error.contains("'none'"));
+    }
 
     #[test]
     fn output_format_from_str_png() {
@@ -2638,6 +3239,7 @@ mod tests {
                 value: serde_json::json!(7680),
                 source: "file".to_string(),
                 env_var: None,
+                restart_required: false,
             }],
         };
         let json = serde_json::to_string(&listing).unwrap();
@@ -2645,21 +3247,33 @@ mod tests {
         assert!(json.contains(r#""value":7680"#), "got: {json}");
         // env_var is omitted from the wire unless the source is "env".
         assert!(!json.contains("env_var"), "got: {json}");
+        assert!(!json.contains("restart_required"), "got: {json}");
         let back: ConfigListing = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries[0].key, "server_port");
         assert_eq!(back.profile.as_deref(), Some("default"));
+        assert!(!back.entries[0].restart_required);
 
         let env_entry = ConfigEntry {
             key: "embed_metadata".to_string(),
             value: serde_json::json!(true),
             source: "env".to_string(),
             env_var: Some("MOLD_EMBED_METADATA".to_string()),
+            restart_required: false,
         };
         let json = serde_json::to_string(&env_entry).unwrap();
         assert!(
             json.contains(r#""env_var":"MOLD_EMBED_METADATA""#),
             "got: {json}"
         );
+        let restart_entry = ConfigEntry {
+            key: "scheduler.replan_debounce_ms".to_string(),
+            value: serde_json::json!(2000),
+            source: "db".to_string(),
+            env_var: None,
+            restart_required: true,
+        };
+        let json = serde_json::to_string(&restart_entry).unwrap();
+        assert!(json.contains(r#""restart_required":true"#), "got: {json}");
 
         let profiles = ConfigProfiles {
             active: "dev".to_string(),
@@ -2721,6 +3335,24 @@ mod tests {
                 bytes_total: 10_000_000,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn sse_progress_dependency_wait_roundtrip_is_typed() {
+        let event = SseProgressEvent::DependencyWait {
+            dependency: "Qwen3 q6".to_string(),
+            reason: "joining an in-progress encoder dependency download".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"dependency_wait""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::DependencyWait {
+                dependency,
+                reason,
+            } if dependency == "Qwen3 q6" && reason.contains("in-progress")
         ));
     }
 
@@ -3003,6 +3635,44 @@ mod tests {
         assert!(req.control_image.is_none());
         assert!(req.control_model.is_none());
         assert!((req.control_scale - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
+        let output = |index| SseCompleteEvent {
+            image: String::new(),
+            format: OutputFormat::Png,
+            width: 64,
+            height: 64,
+            original_image: None,
+            original_width: None,
+            original_height: None,
+            seed_used: index,
+            generation_time_ms: 1,
+            model: "flux".into(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            gpu: Some(index as usize),
+            filename: Some(format!("{index}.png")),
+            original_filename: None,
+            metadata: None,
+        };
+        let event = SseBatchCompleteEvent {
+            batch_id: "parent".into(),
+            outputs: vec![output(1), output(2)],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: SseBatchCompleteEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.batch_id, "parent");
+        assert_eq!(decoded.outputs.len(), 2);
+        assert_eq!(decoded.outputs[0].seed_used, 1);
+        assert_eq!(decoded.outputs[1].seed_used, 2);
     }
 
     #[test]
@@ -3483,6 +4153,7 @@ mod tests {
             system_ram: RamSnapshot {
                 total: 64_000_000_000,
                 used: 38_400_000_000,
+                available: None,
                 used_by_mold: 22_100_000_000,
                 used_by_other: 16_300_000_000,
             },
@@ -3499,6 +4170,30 @@ mod tests {
         assert_eq!(back.gpus[0].backend, GpuBackend::Cuda);
         assert_eq!(back.gpus[0].vram_used_by_mold, Some(10_100_000_000));
         assert_eq!(back.system_ram.used_by_mold, 22_100_000_000);
+    }
+
+    #[test]
+    fn ram_available_is_additive_and_wire_backward_compatible() {
+        let legacy = r#"{
+            "total": 64000000000,
+            "used": 50000000000,
+            "used_by_mold": 10000000000,
+            "used_by_other": 40000000000
+        }"#;
+        let parsed: RamSnapshot = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.available, None);
+
+        let current = RamSnapshot {
+            total: 64_000_000_000,
+            used: 50_000_000_000,
+            available: Some(20_000_000_000),
+            used_by_mold: 10_000_000_000,
+            used_by_other: 40_000_000_000,
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains(r#""available":20000000000"#));
+        let round_trip: RamSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.available, current.available);
     }
 
     #[test]
@@ -3659,6 +4354,20 @@ pub struct QueueCapabilities {
     pub can_cancel_all: bool,
     #[serde(default)]
     pub can_reorder: bool,
+    /// Queue pins may use opaque stable device IDs.
+    #[serde(default)]
+    pub stable_device_pins: bool,
+    /// Server can cooperatively cancel already-running work.
+    #[serde(default)]
+    pub cooperative_cancellation: bool,
+    /// Server accepts one atomic batch request instead of client siblings.
+    #[serde(default)]
+    pub server_batch: bool,
+    /// Maximum number of ordered outputs accepted by one live atomic
+    /// `POST /api/generate` or `/api/generate/stream` parent. Absent on older
+    /// servers and whenever live server batches are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_batch_max_outputs: Option<u32>,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
@@ -3684,6 +4393,189 @@ pub struct ExpandCapabilities {
     pub backend: ExpandBackend,
 }
 
+// ── Device inventory ────────────────────────────────────────────────────────
+
+/// Runtime-visible device classification. CUDA ordinals are deliberately not
+/// encoded here: clients must treat [`DeviceInfo::id`] as the durable,
+/// backend-qualified identity and `ordinal` as a process-local display hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    FullGpu,
+    Mig,
+    UnknownCuda,
+    Metal,
+}
+
+/// Administrator-requested lifecycle state. Phase A exposes this state
+/// read-only; lifecycle mutation lands in a later phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAdminState {
+    StartupExcluded,
+    Starting,
+    Enabled,
+    Draining,
+    Disabled,
+}
+
+/// Administrative enablement mutation accepted by
+/// `PATCH /api/devices/{stable-id}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceMutationRequest {
+    pub enabled: bool,
+}
+
+impl DeviceAdminState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupExcluded => "startup_excluded",
+            Self::Starting => "starting",
+            Self::Enabled => "enabled",
+            Self::Draining => "draining",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Transient device health. Health is never persisted as a user preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+    Poisoned,
+}
+
+impl DeviceHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Poisoned => "poisoned",
+        }
+    }
+}
+
+/// Current worker activity, orthogonal to administrative and health state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceActivity {
+    Idle,
+    Loading,
+    Generating,
+    Upscaling,
+    AdminLoading,
+    Stopping,
+}
+
+/// Device memory snapshot. Unsupported or unavailable operational values are
+/// explicit JSON `null`, never fabricated zeroes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceMemoryInfo {
+    pub total_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    pub mold_used_bytes: Option<u64>,
+    pub other_used_bytes: Option<u64>,
+}
+
+/// Optional operational telemetry from the server's background sampler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceTelemetry {
+    pub utilization_percent: Option<u8>,
+    pub temperature_c: Option<f32>,
+    pub power_w: Option<f32>,
+}
+
+/// One runtime-visible compute device returned by `GET /api/devices`.
+///
+/// Stable IDs are opaque strings such as
+/// `cuda:0123456789abcdef0123456789abcdef` or `metal:default`. Consumers must
+/// URL-encode them and must not parse their components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub backend: GpuBackend,
+    pub ordinal: Option<usize>,
+    pub device_kind: DeviceKind,
+    pub nvml_uuid: Option<String>,
+    pub physical_uuid: Option<String>,
+    pub mig_uuid: Option<String>,
+    pub mig_parent_uuid: Option<String>,
+    pub mig_profile: Option<String>,
+    pub name: String,
+    pub pci_bus_id: Option<String>,
+    pub compute_capability: Option<String>,
+    pub memory: DeviceMemoryInfo,
+    pub telemetry: DeviceTelemetry,
+    pub desired_enabled: bool,
+    /// The requested preference is persisted, but a server restart is needed
+    /// before this device can become schedulable.
+    #[serde(default)]
+    pub restart_required: bool,
+    pub admin_state: DeviceAdminState,
+    pub health: DeviceHealth,
+    pub activity: DeviceActivity,
+    pub schedulable: bool,
+    pub unschedulable_reason: Option<String>,
+    pub loaded_models: Vec<String>,
+    pub active_work_id: Option<String>,
+    pub planned_work_ids: Vec<String>,
+}
+
+/// Read-only device inventory response. `plan_version` remains zero until the
+/// versioned scheduler plan is introduced; keeping the field now avoids a
+/// later response-shape fork.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceState {
+    pub devices: Vec<DeviceInfo>,
+    pub plan_version: u64,
+}
+
+/// Device API feature detection for clients talking to mixed-version hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCapabilities {
+    /// `GET /api/devices` is present.
+    pub available: bool,
+    /// Runtime enable/disable lifecycle mutation is currently authoritative.
+    /// This is `true` only while scheduler V2 owns dispatch; legacy, observe,
+    /// maintenance, and otherwise unavailable runtimes report `false`.
+    pub lifecycle: bool,
+    /// A disabled device can be persistently enabled for the next restart
+    /// even though live lifecycle mutation is not authoritative.
+    #[serde(default)]
+    pub restart_enable: bool,
+    /// Queue pins may use stable device IDs.
+    #[serde(default)]
+    pub stable_pins: bool,
+    /// Queue snapshots include versioned per-device lanes.
+    #[serde(default)]
+    pub planned_lanes: bool,
+    /// ETAs may be backed by persisted runtime observations.
+    #[serde(default)]
+    pub learned_eta: bool,
+}
+
+/// Restart-time GPU dispatch rollout state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchCapabilities {
+    /// Modes accepted by `MOLD_DISPATCH_MODE`.
+    pub modes: Vec<String>,
+    /// Active mode for this process. Missing on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_mode: Option<String>,
+    /// V2 is the authoritative dispatcher and lease owner.
+    pub v2_authoritative: bool,
+    /// Legacy owns dispatch while read-only V2 decisions are recorded.
+    pub observes_v2_decisions: bool,
+    /// The server can run the authoritative scheduler against an exact,
+    /// read-only request preview without reserving or enqueueing work.
+    #[serde(default)]
+    pub request_placement_preview: bool,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -3702,10 +4594,100 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Absent on older servers. Missing means the read-only device resource
+    /// and lifecycle controls are unavailable. `devices.lifecycle` is a
+    /// runtime authority flag, not merely endpoint presence.
+    #[serde(default)]
+    pub devices: DeviceCapabilities,
+    /// Absent on older servers. Dispatch mode changes require a restart.
+    #[serde(default)]
+    pub dispatch: DispatchCapabilities,
     /// Absent on older servers. Unlike default-false capability groups,
     /// absence here means unknown so newer clients may still try expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<ExpandCapabilities>,
+}
+
+#[cfg(test)]
+mod device_types_tests {
+    use super::*;
+
+    #[test]
+    fn device_state_serializes_nullable_telemetry_and_stable_enums() {
+        let state = DeviceState {
+            devices: vec![DeviceInfo {
+                id: "cuda:0123456789abcdef0123456789abcdef".into(),
+                backend: GpuBackend::Cuda,
+                ordinal: Some(0),
+                device_kind: DeviceKind::FullGpu,
+                nvml_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                physical_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: "NVIDIA GeForce RTX 3090".into(),
+                pci_bus_id: Some("00000000:01:00.0".into()),
+                compute_capability: Some("8.6".into()),
+                memory: DeviceMemoryInfo {
+                    total_bytes: Some(24_000_000_000),
+                    used_bytes: None,
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: DeviceTelemetry {
+                    utilization_percent: None,
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                restart_required: false,
+                admin_state: DeviceAdminState::Enabled,
+                health: DeviceHealth::Healthy,
+                activity: DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: vec![],
+                active_work_id: None,
+                planned_work_ids: vec![],
+            }],
+            plan_version: 0,
+        };
+
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["devices"][0]["device_kind"], "full_gpu");
+        assert_eq!(json["devices"][0]["admin_state"], "enabled");
+        assert_eq!(json["devices"][0]["health"], "healthy");
+        assert_eq!(json["devices"][0]["activity"], "idle");
+        assert_eq!(
+            json["devices"][0]["telemetry"]["utilization_percent"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["devices"][0]["memory"]["used_bytes"],
+            serde_json::Value::Null
+        );
+
+        let round_trip: DeviceState = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.devices[0].device_kind, DeviceKind::FullGpu);
+        assert_eq!(
+            round_trip.devices[0].memory.total_bytes,
+            Some(24_000_000_000)
+        );
+    }
+
+    #[test]
+    fn old_capabilities_default_device_api_to_unavailable() {
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(!caps.devices.available);
+        assert!(!caps.devices.lifecycle);
+        assert!(caps.dispatch.modes.is_empty());
+        assert!(caps.dispatch.active_mode.is_none());
+        assert!(!caps.dispatch.v2_authoritative);
+        assert!(!caps.dispatch.observes_v2_decisions);
+    }
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
@@ -3768,6 +4750,10 @@ pub struct ConfigEntry {
     /// without guessing the key-to-variable mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
+    /// This persisted value is read when the engine/coordinator starts and
+    /// does not change the running process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_required: bool,
 }
 
 /// Whole-config listing returned by `GET /api/config`.
@@ -3798,6 +4784,62 @@ pub struct GenerationMemoryEstimate {
     pub load_strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fits_available_memory: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreviewRequest {
+    pub request: GenerateRequest,
+    #[serde(default = "default_preview_copies")]
+    pub copies: u32,
+}
+
+fn default_preview_copies() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementCandidate {
+    pub device_id: String,
+    pub execution_fingerprint: String,
+    /// Parent-level deterministic execution identity shared by compatible
+    /// device-specific candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_equivalence_fingerprint: Option<String>,
+    pub predicted_start_after_ms: u64,
+    pub predicted_completion_after_ms: u64,
+    pub setup_ms: u64,
+    pub setup_kind: String,
+    #[schema(value_type = String)]
+    pub estimate_confidence: QueueEstimateConfidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainStagePlacementCandidate {
+    pub stage_index: u32,
+    /// Zero-based sibling index for repeated ordinary-generation work. Absent
+    /// for a once-per-parent stage such as local prompt expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_index: Option<u32>,
+    #[serde(flatten)]
+    pub candidate: GenerationPlacementCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreview {
+    pub version: u32,
+    pub authoritative: bool,
+    pub state_version: u64,
+    pub plan_version: u64,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<GenerationPlacementCandidate>,
+    /// Exact per-stage assignments for every work item in an ordinary
+    /// generation DAG. Durable-chain previews remain unsupported until the
+    /// server can freeze the chain runner's per-device stage plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_candidates: Vec<ChainStagePlacementCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -4016,6 +5058,17 @@ pub enum ServerEvent {
     /// New-job dispatch resumed via `POST /api/queue/resume`. Emitted only on
     /// the paused→resumed transition.
     QueueResumed,
+    /// The V2 scheduler published a newer versioned plan. Clients replace
+    /// their tentative lanes only when `plan_version` advances.
+    QueuePlanChanged {
+        plan: Box<QueuePlan>,
+    },
+    /// A machine-wide device lifecycle preference or runtime state changed.
+    DeviceStateChanged {
+        device_id: String,
+        desired_enabled: bool,
+        admin_state: DeviceAdminState,
+    },
 }
 
 /// Listing returned from `GET /api/downloads`.
@@ -4089,6 +5142,21 @@ mod server_event_tests {
     }
 
     #[test]
+    fn device_state_event_serializes_stable_lifecycle_fields() {
+        let wire = serde_json::to_value(ServerEvent::DeviceStateChanged {
+            device_id: "cuda:0123456789abcdef0123456789abcdef".into(),
+            desired_enabled: false,
+            admin_state: DeviceAdminState::Draining,
+        })
+        .unwrap();
+
+        assert_eq!(wire["type"], "device_state_changed");
+        assert_eq!(wire["device_id"], "cuda:0123456789abcdef0123456789abcdef");
+        assert_eq!(wire["desired_enabled"], false);
+        assert_eq!(wire["admin_state"], "draining");
+    }
+
+    #[test]
     fn job_started_omits_gpu_when_none() {
         let single = ServerEvent::JobStarted {
             id: "j1".into(),
@@ -4109,6 +5177,21 @@ mod server_event_tests {
         assert!(serde_json::to_string(&multi)
             .unwrap()
             .contains(r#""gpu":1"#));
+    }
+
+    #[test]
+    fn plan_and_device_events_are_additive_snake_case_contracts() {
+        let event = ServerEvent::QueuePlanChanged {
+            plan: Box::new(QueuePlan {
+                plan_version: 4,
+                state_version: 7,
+                optimizer_state: "optimized".into(),
+                ..QueuePlan::default()
+            }),
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "queue_plan_changed");
+        assert_eq!(json["plan"]["plan_version"], 4);
     }
 
     #[test]
@@ -4332,5 +5415,191 @@ mod downloads_types_tests {
         let s = serde_json::to_string(&evt).unwrap();
         assert!(s.contains("\"type\":\"progress\""), "wire: {s}");
         assert!(s.contains("\"bytes_done\":2000000"), "wire: {s}");
+    }
+}
+
+#[cfg(test)]
+mod queue_plan_wire_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_reasons_round_trip_without_collapsing_distinct_causes() {
+        let expected = [
+            "device_disabled",
+            "device_draining",
+            "device_startup_excluded",
+            "device_unavailable",
+            "device_degraded",
+            "hard_pin_unavailable",
+            "backend_unsupported",
+            "model_not_installed",
+            "insufficient_vram",
+            "insufficient_host_ram",
+            "aggregate_host_ram_reserved",
+            "execution_plan_incompatible",
+            "dependency_wait",
+            "warm_wait",
+            "queue_paused",
+            "maintenance_mode",
+            "cancelling",
+            "no_schedulable_device",
+            "no_idle_device",
+            "lower_priority_opening",
+        ];
+
+        for wire in expected {
+            let parsed: QueueBlockedReason =
+                serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn future_blocked_reason_retains_its_exact_wire_value() {
+        let parsed: QueueBlockedReason =
+            serde_json::from_value(serde_json::json!("thermal_throttle")).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::json!("thermal_throttle")
+        );
+    }
+
+    #[test]
+    fn future_phase_and_confidence_retain_their_exact_wire_values() {
+        let phase: QueueActivityPhase =
+            serde_json::from_value(serde_json::json!("thermal_wait")).unwrap();
+        let confidence: QueueEstimateConfidence =
+            serde_json::from_value(serde_json::json!("calibrating")).unwrap();
+
+        assert_eq!(phase.as_str(), "thermal_wait");
+        assert_eq!(confidence.as_str(), "calibrating");
+        assert_eq!(
+            serde_json::to_value(phase).unwrap(),
+            serde_json::json!("thermal_wait")
+        );
+        assert_eq!(
+            serde_json::to_value(confidence).unwrap(),
+            serde_json::json!("calibrating")
+        );
+    }
+
+    #[test]
+    fn planned_lane_kind_is_typed_and_retains_future_wire_values() {
+        let device: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("device")).unwrap();
+        let host: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("host_utility")).unwrap();
+        let future: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("remote_utility")).unwrap();
+
+        assert_eq!(device, QueuePlannedLaneKind::Device);
+        assert_eq!(host, QueuePlannedLaneKind::HostUtility);
+        assert_eq!(future.as_str(), "remote_utility");
+        assert_eq!(
+            serde_json::to_value(future).unwrap(),
+            serde_json::json!("remote_utility")
+        );
+    }
+
+    #[test]
+    fn presentation_normalization_only_rewrites_host_utility_identities() {
+        let mut listing = QueueListingWire {
+            entries: vec![],
+            plan: Some(QueuePlan {
+                work_items: vec![
+                    QueueWorkItem {
+                        work_id: "legacy".into(),
+                        activity_phase: QueueActivityPhase::Queued,
+                        planned_device_id: Some("cpu:utility:0".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "typed-host".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::HostUtility),
+                        planned_device_id: Some("must-not-leak".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "gpu".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::Device),
+                        planned_device_id: Some("cuda:stable-a".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "future".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::Unknown(
+                            "remote_utility".into(),
+                        )),
+                        planned_device_id: Some("future-public-id".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        listing.normalize_planned_lanes_for_presentation();
+        let work = &listing.plan.unwrap().work_items;
+        for item in &work[..2] {
+            assert_eq!(
+                item.planned_lane_kind,
+                Some(QueuePlannedLaneKind::HostUtility)
+            );
+            assert_eq!(item.planned_device_id, None);
+        }
+        assert_eq!(
+            work[2].planned_lane_kind,
+            Some(QueuePlannedLaneKind::Device)
+        );
+        assert_eq!(work[2].planned_device_id.as_deref(), Some("cuda:stable-a"));
+        assert_eq!(
+            work[3].planned_lane_kind,
+            Some(QueuePlannedLaneKind::Unknown("remote_utility".into()))
+        );
+        assert_eq!(
+            work[3].planned_device_id.as_deref(),
+            Some("future-public-id")
+        );
+    }
+
+    #[test]
+    fn legacy_reason_only_queue_item_remains_readable() {
+        let parsed: QueueWorkItem = serde_json::from_value(serde_json::json!({
+            "work_id": "job-1",
+            "parent_id": "job-1",
+            "work_kind": "generation",
+            "priority_class": "user",
+            "queue_rank": 4,
+            "bypass_count": 0,
+            "estimate_confidence": "low",
+            "reason": "insufficient_vram"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.reason.as_deref(), Some("insufficient_vram"));
+        assert_eq!(parsed.blocked_reason, None);
+        assert_eq!(parsed.planned_lane_kind, None);
+        assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
+        assert_eq!(parsed.execution_equivalence_fingerprint, None);
+    }
+
+    #[test]
+    fn execution_equivalence_wire_fields_are_additive_and_optional() {
+        let legacy: GenerationPlacementCandidate = serde_json::from_value(serde_json::json!({
+            "device_id": "cuda:stable",
+            "execution_fingerprint": "device-qualified",
+            "predicted_start_after_ms": 0,
+            "predicted_completion_after_ms": 10,
+            "setup_ms": 1,
+            "setup_kind": "cold",
+            "estimate_confidence": "low"
+        }))
+        .unwrap();
+        assert_eq!(legacy.execution_equivalence_fingerprint, None);
+
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert!(serialized
+            .get("execution_equivalence_fingerprint")
+            .is_none());
     }
 }

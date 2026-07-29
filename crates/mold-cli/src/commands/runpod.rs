@@ -12,9 +12,10 @@ use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::error::MoldError;
 use mold_core::runpod::{
-    image_tag_for_gpu, valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest,
-    GpuType, NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV,
-    DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
+    canonical_supported_gpu_type_id, legacy_gpu_type_id_from_display_name,
+    valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest, GpuType,
+    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV, DEFAULT_ENDPOINT,
+    NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
 use crate::theme;
@@ -333,7 +334,9 @@ pub async fn run_gpus(json: bool, all: bool) -> Result<()> {
         println!(
             "{:<28}{:<6}{:<20}{:<10}",
             g.display_name,
-            format!("{}G", g.memory_in_gb),
+            g.memory_in_gb
+                .map(|memory| format!("{memory}G"))
+                .unwrap_or_else(|| "—".into()),
             stock_colored,
             secure
         );
@@ -882,6 +885,28 @@ pub fn resolve_hf_token(opts: &CreateOptions) -> Option<String> {
     Some("{{ RUNPOD_SECRET_HF_TOKEN }}".to_string())
 }
 
+/// Validate both provider fields, then retain the authoritative type ID as
+/// the single source for allocation and distribution-image architecture.
+fn ensure_published_runpod_gpu_identity<'a>(
+    gpu_type_id: &'a str,
+    display_name: &str,
+) -> Result<&'a str> {
+    mold_core::cuda_distribution::ensure_published_image_platform(gpu_type_id)?;
+    mold_core::cuda_distribution::ensure_published_image_platform(display_name)?;
+    Ok(gpu_type_id)
+}
+
+fn authoritative_runpod_gpu_type_id(gpu: &GpuType) -> String {
+    gpu.allocation_type_id()
+        .map(str::to_owned)
+        .unwrap_or_default()
+}
+
+fn advertised_vram_gb(gpu: &GpuType) -> u32 {
+    gpu.memory_in_gb
+        .unwrap_or_else(|| gpu_vram_gb(&gpu.display_name).unwrap_or(0))
+}
+
 /// Build a `CreatePodRequest` from resolved defaults.
 pub async fn build_create_request(
     opts: &CreateOptions,
@@ -890,13 +915,38 @@ pub async fn build_create_request(
 ) -> Result<CreatePodRequest> {
     // Resolve GPU — either user-supplied, config default, or cheapest available.
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
+    let supported_gpu_ids = client
+        .supported_pod_gpu_type_ids()
+        .await
+        .context("load RunPod Pod API GPU types")?;
+    let Some(gpu_name) = canonical_supported_gpu_type_id(&supported_gpu_ids, &gpu_name) else {
+        bail!(
+            "GPU type {gpu_name:?} is not currently accepted by RunPod's Pod API; \
+             refresh inventory or choose another GPU"
+        );
+    };
+    let gpu_name = gpu_name.to_string();
+    let distribution_gpu_name = ensure_published_runpod_gpu_identity(&gpu_name, &gpu_display)?;
 
     // Resolve image tag.
-    let image_tag = opts
-        .image_tag
-        .clone()
-        .unwrap_or_else(|| image_tag_for_gpu(&gpu_display).to_string());
-    let image = format!("ghcr.io/utensils/mold:{image_tag}");
+    let image = if let Some(image_tag) = opts.image_tag.clone() {
+        if image_tag.starts_with("sha256:") {
+            let reference = format!("ghcr.io/utensils/mold@{image_tag}");
+            if !mold_core::cuda_distribution::is_exact_image_digest_reference(&reference) {
+                bail!("--image-tag sha256 digest must contain exactly 64 hexadecimal characters");
+            }
+            reference
+        } else {
+            format!("ghcr.io/utensils/mold:{image_tag}")
+        }
+    } else {
+        mold_core::cuda_distribution::resolve_distribution_image_reference(
+            mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
+            distribution_gpu_name,
+            mold_core::cuda_distribution::distribution_image_version(),
+        )
+        .await?
+    };
 
     // Resolve volume + network volume.
     let volume_id = opts
@@ -964,10 +1014,16 @@ async fn resolve_gpu(
 ) -> Result<(String, String)> {
     if let Some(gpu) = opts.gpu.clone() {
         let resolved = normalize_gpu_id(&gpu);
+        if resolved.is_empty() {
+            bail!("GPU type cannot be blank");
+        }
         return Ok((resolved.clone(), friendly_gpu_name(&resolved)));
     }
     if let Some(gpu) = config.runpod.default_gpu.clone() {
         let resolved = normalize_gpu_id(&gpu);
+        if resolved.is_empty() {
+            bail!("configured RunPod GPU type cannot be blank");
+        }
         return Ok((resolved.clone(), friendly_gpu_name(&resolved)));
     }
     let gpus = client.gpu_types().await?;
@@ -996,14 +1052,10 @@ async fn resolve_gpu(
         "H100 SXM",
     ];
     for preferred in ranked {
-        let vram = gpu_vram_gb(preferred).unwrap_or(0);
-        if vram < need {
-            continue;
-        }
         if let Some(g) = gpus.iter().find(|g| g.display_name == *preferred) {
             let stock = g.stock_status.as_deref().unwrap_or("");
-            if matches!(stock, "High" | "Medium") {
-                return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
+            if advertised_vram_gb(g) >= need && matches!(stock, "High" | "Medium") {
+                return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
             }
         }
     }
@@ -1011,9 +1063,9 @@ async fn resolve_gpu(
     for g in &gpus {
         if g.stock_status.as_deref() == Some("High")
             && is_interesting_gpu(&g.display_name)
-            && gpu_vram_gb(&g.display_name).unwrap_or(0) >= need
+            && advertised_vram_gb(g) >= need
         {
-            return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
+            return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
         }
     }
     bail!(
@@ -1064,28 +1116,13 @@ async fn resolve_datacenter(
 /// Convert RunPod's `displayName` (e.g. `"RTX 5090"`) to the `gpuId` the REST
 /// API actually accepts (e.g. `"NVIDIA GeForce RTX 5090"`).
 pub fn friendly_to_gpu_id(display: &str) -> String {
-    // RunPod `/gputypes` returns these as `displayName`, but the create
-    // endpoint expects the full NVIDIA name. The mapping is hardcoded because
-    // RunPod's REST API doesn't expose a lookup endpoint.
-    match display {
-        "RTX 4090" => "NVIDIA GeForce RTX 4090",
-        "RTX 5090" => "NVIDIA GeForce RTX 5090",
-        "RTX 3090" => "NVIDIA GeForce RTX 3090",
-        "L40S" => "NVIDIA L40S",
-        "L40" => "NVIDIA L40",
-        "A100 PCIe" => "NVIDIA A100 80GB PCIe",
-        "A100 SXM" => "NVIDIA A100-SXM4-80GB",
-        "H100 SXM" => "NVIDIA H100 80GB HBM3",
-        "H100 NVL" => "NVIDIA H100 NVL",
-        "RTX A6000" => "NVIDIA RTX A6000",
-        other => other,
-    }
-    .to_string()
+    legacy_gpu_type_id_from_display_name(display).to_string()
 }
 
 fn normalize_gpu_id(user: &str) -> String {
     // Allow users to pass the short alias (e.g. "4090", "5090", "a100") or
     // the full NVIDIA name. If we don't recognize it, pass through unchanged.
+    let user = user.trim();
     let u = user.to_lowercase();
     if u == "4090" || u == "rtx4090" || u == "rtx 4090" {
         return friendly_to_gpu_id("RTX 4090");
@@ -1845,6 +1882,9 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
 fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
     use mold_core::types::SseProgressEvent as E;
     match ev {
+        E::DependencyWait { dependency, reason } => {
+            format!("waiting for dependency {dependency}: {reason}")
+        }
         E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
         E::StageStart { name } => format!("stage: {name}"),
         E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
@@ -2371,6 +2411,346 @@ mod tests {
         assert_eq!(
             normalize_gpu_id("NVIDIA GeForce RTX 4090"),
             "NVIDIA GeForce RTX 4090"
+        );
+    }
+
+    #[test]
+    fn published_runpod_gpu_identity_rejects_grace_in_either_field() {
+        assert!(ensure_published_runpod_gpu_identity("NVIDIA GB200 A100", "A100 PCIe").is_err());
+        assert!(
+            ensure_published_runpod_gpu_identity("NVIDIA A100 80GB PCIe", "NVIDIA GB200").is_err()
+        );
+        assert!(ensure_published_runpod_gpu_identity("NVIDIA B200", "NVIDIA B200").is_ok());
+    }
+
+    #[test]
+    fn authoritative_provider_id_also_owns_distribution_image_selection() {
+        assert_eq!(
+            ensure_published_runpod_gpu_identity(
+                "NVIDIA A100 80GB PCIe",
+                "NVIDIA GeForce RTX 5090"
+            )
+            .unwrap(),
+            "NVIDIA A100 80GB PCIe"
+        );
+    }
+
+    #[test]
+    fn absent_provider_id_retains_legacy_display_name_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "A100 PCIe"
+        }))
+        .unwrap();
+        assert_eq!(
+            authoritative_runpod_gpu_type_id(&gpu),
+            "NVIDIA A100 80GB PCIe"
+        );
+    }
+
+    #[test]
+    fn alternate_provider_gpu_id_precedes_display_name_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "gpuId": "  NVIDIA A100-SXM4-80GB  ",
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        assert_eq!(
+            authoritative_runpod_gpu_type_id(&gpu),
+            "NVIDIA A100-SXM4-80GB"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_gpu_resolution_uses_provider_memory_instead_of_display_label_capacity() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "NVIDIA GeForce RTX 5090",
+                        "displayName": "A100 PCIe",
+                        "memoryInGb": 16,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "A100 PCIe",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no GPUs with"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_gpu_resolution_preserves_present_zero_provider_memory() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "NVIDIA GeForce RTX 5090",
+                        "displayName": "A100 PCIe",
+                        "memoryInGb": 0,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "A100 PCIe",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no GPUs with"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_inventory_gpu_missing_from_live_pod_schema() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "unsupported-provider-id",
+                        "displayName": "RTX 5090",
+                        "memoryInGb": 32,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "RTX 5090",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "components": { "schemas": { "PodCreateInput": { "properties": {
+                    "gpuTypeIds": { "items": { "enum": ["different-supported-id"] } }
+                } } } }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not currently accepted"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_uses_exact_live_schema_identity_after_normalized_inventory_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "  nvidia  geforce rtx 5090 ",
+                        "displayName": "RTX 5090",
+                        "memoryInGb": 32,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "RTX 5090",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "components": { "schemas": { "PodCreateInput": { "properties": {
+                    "gpuTypeIds": { "items": { "enum": ["NVIDIA GeForce RTX 5090"] } }
+                } } } }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let request = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            request.gpu_type_ids,
+            ["NVIDIA GeForce RTX 5090".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_blank_gpu_identity_is_rejected_before_network_access() {
+        let server = MockServer::start().await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: Some(" \t ".into()),
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("GPU type cannot be blank"),
+            "unexpected error: {error:#}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_gpu_resolution_preserves_authoritative_provider_id_for_platform_validation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "NVIDIA GB200",
+                        "displayName": "A100 PCIe",
+                        "memoryInGb": 80,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "A100 PCIe",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "components": { "schemas": { "PodCreateInput": { "properties": {
+                    "gpuTypeIds": { "items": { "enum": ["NVIDIA GB200"] } }
+                } } } }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("linux/arm64"),
+            "unexpected error: {error:#}"
         );
     }
 

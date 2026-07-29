@@ -49,6 +49,55 @@ macOS and Linux:
 
 Mold also ships a responsive web studio with every `mold serve`, a
 keyboard-first terminal UI, a REST/SSE API, and a remote iPhone companion.
+On CUDA servers, resource telemetry is joined to CUDA's startup-visible
+devices by UUID. `CUDA_VISIBLE_DEVICES` remains a hard boundary even when it
+reorders cards or uses GPU/MIG UUID selectors: hidden GPUs are not published,
+and a MIG worker never inherits its parent GPU's full-memory sample.
+One versioned device registry supplies those telemetry targets, worker
+construction, scheduler candidates, `/api/devices`, and legacy status, so a
+device cannot silently acquire a different identity between subsystems.
+GPU startup defaults to `all`. `--gpus` / `MOLD_GPUS` also accepts `none`
+(maintenance mode), visible ordinals, Mold stable IDs (`cuda:<uuid>` or
+`metal:default`), and NVIDIA `GPU-...` / `MIG-...` UUIDs. Prefer stable IDs in
+persistent configuration because ordinals are process-local. Maintenance mode
+keeps inventory, telemetry, downloads, and settings available but rejects
+generation and model-load requests.
+Use `mold gpu list`, `mold gpu disable <ID>`, and `mold gpu enable <ID>` for
+runtime administration when `/api/capabilities.devices.lifecycle` is true.
+That flag is true only while authoritative scheduler V2 owns live GPU workers;
+legacy, observe, CPU-fallback, and maintenance runtimes are read-only and
+reject lifecycle mutation. Busy devices drain their current generation before
+disabling; startup-excluded devices require a restart.
+Scheduler admission uses each device's sampled free VRAM rather than total
+capacity and freezes a concrete per-component execution plan before dispatch.
+Explicit CPU/device placement is a hard constraint; missing devices and
+cross-GPU component pins fail instead of falling back. `mold run --local
+--batch N` uses the same deterministic assignment core across every GPU
+selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
+selection.
+
+Web, desktop, and iPhone preview each finalized ordinary-generation request on
+candidate hosts before queueing. The read-only preview preserves the sibling
+count without reserving a GPU or loading weights, redacts prompt/media content,
+and keeps prepared work pinned to the same endpoint, key, and server instance.
+A strict non-authoritative `unsupported` response or legacy `404`/`405` keeps
+backward-compatible routing; infeasible, malformed, authentication, upgrade,
+and server failures queue nothing. Exact chain and local prompt-expansion/
+post-generation-upscale utility previewing is deliberately deferred rather
+than guessed.
+
+Scheduler V2 learns cold load, warm reload, and execution time separately, so
+ETA planning adds the applicable setup cost exactly once. Machine detail,
+status, TUI, CLI, MCP, and Discord surfaces report every device; interactive
+device buttons appear only for authoritative live lifecycle control, with the
+supported restart-enable recovery shown for read-only dispatch modes.
+
+Scheduler V2 is the default GPU dispatch owner. During the one-release rollback
+window, restart with `MOLD_DISPATCH_MODE=legacy` to restore the previous
+depth-two dispatcher or `MOLD_DISPATCH_MODE=observe` to keep legacy dispatch
+authoritative while recording read-only V2 decisions. The mode is restart-only;
+Mold never switches CUDA owners or contexts live. Queue pause applies to
+generation, utility, and admin GPU work in every mode.
 
 ## Install
 
@@ -56,8 +105,12 @@ keyboard-first terminal UI, a REST/SSE API, and a remote iPhone companion.
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
-The installer downloads the latest release to `~/.local/bin/mold`, selects the
-right NVIDIA build on Linux, and installs the Metal build on macOS.
+The installer downloads the latest release to `~/.local/bin/mold`, verifies
+its SHA-256 checksum, inspects every Linux GPU visible through
+`CUDA_VISIBLE_DEVICES`, and selects one compatible NVIDIA build independent of
+device order. Unsupported mixed architecture groups fail with an actionable
+override/source-build error instead of silently targeting GPU 0. macOS installs
+the Metal build.
 
 <details>
 <summary>Other install options</summary>
@@ -66,7 +119,13 @@ right NVIDIA build on Linux, and installs the Metal build on macOS.
 # Nix — NVIDIA Ada / RTX 40-series
 nix run github:utensils/mold -- run "a cat"
 
-# Nix — NVIDIA Blackwell / RTX 50-series
+# Nix — NVIDIA Ampere / RTX 3090 or A40
+nix run github:utensils/mold#mold-sm86 -- run "a cat"
+
+# Nix — NVIDIA datacenter Blackwell / B200 or B300
+nix run github:utensils/mold#mold-sm100 -- run "a cat"
+
+# Nix — NVIDIA consumer Blackwell / RTX 50-series
 nix run github:utensils/mold#mold-sm120 -- run "a cat"
 
 # Arch Linux
@@ -80,6 +139,12 @@ cargo build --release -p mold-ai --features cuda
 ./scripts/ensure-web-dist.sh
 cargo build --release -p mold-ai --features metal
 ```
+
+B200/B300 sm_100 builds and synthetic multi-device coverage are simulated,
+not hardware-qualified. Real 8×B200 qualification remains deferred.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+The deferred RTX 3090 acceptance runner and evidence schema live in
+[`docs/qualification/`](docs/qualification/); no passing report is claimed.
 
 Prebuilt binaries and checksums are available on the
 [releases page](https://github.com/utensils/mold/releases/latest). See the

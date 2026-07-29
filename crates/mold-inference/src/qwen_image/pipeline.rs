@@ -75,12 +75,8 @@ enum Qwen2TextEncoderMode {
 }
 
 impl Qwen2TextEncoderMode {
-    fn from_env() -> Self {
-        match std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+    fn from_value(value: Option<&str>) -> Self {
+        match value.unwrap_or_default().to_ascii_lowercase().as_str() {
             "gpu" => Self::Gpu,
             "cpu-stage" => Self::CpuStage,
             "cpu_stage" => Self::CpuStage,
@@ -367,6 +363,8 @@ pub struct QwenImageEngine {
     #[allow(dead_code)]
     active_lora_fingerprint: Vec<QwenImageLoraFingerprint>,
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Qwen2TextEncoderMode,
 }
 
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
@@ -773,7 +771,11 @@ impl QwenImageEngine {
             Self::is_oom_error,
         );
 
-        progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding source image (VAE)",
+            encode_start.elapsed(),
+        );
         result
     }
 
@@ -1003,6 +1005,29 @@ impl QwenImageEngine {
         offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
+        Self::new_with_preferences(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            offload,
+            shared_pool,
+            crate::runtime_env::value("MOLD_QWEN2_VARIANT"),
+            crate::runtime_env::value("MOLD_QWEN2_TEXT_ENCODER_MODE"),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_preferences(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        qwen2_variant: Option<String>,
+        qwen2_text_encoder_mode: Option<String>,
+    ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
@@ -1011,6 +1036,10 @@ impl QwenImageEngine {
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
             shared_pool,
+            qwen2_variant,
+            qwen2_text_encoder_mode: Qwen2TextEncoderMode::from_value(
+                qwen2_text_encoder_mode.as_deref(),
+            ),
         }
     }
 
@@ -1045,7 +1074,11 @@ impl QwenImageEngine {
         let encode_start = Instant::now();
         let (hidden_states, _attention_mask, valid_len) =
             text_encoder.encode(prompt, device, dtype)?;
-        progress.stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Encoding prompt (Qwen2.5)",
+            encode_start.elapsed(),
+        );
 
         prompt_cache.lock().expect("cache poisoned").insert(
             cache_key,
@@ -1447,12 +1480,11 @@ impl QwenImageEngine {
         free_vram: u64,
         usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
-        let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
         self.resolve_text_encoder_source_with_preference(
             gpu_device,
             free_vram,
             usage,
-            preference.as_deref(),
+            self.qwen2_variant.as_deref(),
         )
     }
 
@@ -1679,7 +1711,7 @@ impl QwenImageEngine {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let plan = Self::qwen2_text_encoder_plan_for_mode(
-            Qwen2TextEncoderMode::from_env(),
+            self.qwen2_text_encoder_mode,
             is_cuda,
             is_metal,
             resolved,
@@ -1754,7 +1786,7 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1805,8 +1837,11 @@ impl QwenImageEngine {
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -1834,7 +1869,11 @@ impl QwenImageEngine {
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
         let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let qwen_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
@@ -1936,7 +1975,7 @@ impl QwenImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -2008,8 +2047,11 @@ impl QwenImageEngine {
             } else {
                 let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let qwen_ref =
-                    effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+                let qwen_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.qwen.clone(),
+                    true,
+                );
                 let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
@@ -2330,6 +2372,7 @@ impl QwenImageEngine {
         };
 
         for step in 0..num_steps {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let noise_pred = if use_cfg {
@@ -2425,6 +2468,7 @@ impl QwenImageEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -2451,8 +2495,11 @@ impl QwenImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -2511,9 +2558,11 @@ impl QwenImageEngine {
             );
         }
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
@@ -2626,7 +2675,11 @@ impl QwenImageEngine {
                 &loaded.device,
                 loaded.dtype,
             )?;
-        progress.stage_done("Encoding prompt (Qwen2.5 edit)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Encoding prompt (Qwen2.5 edit)",
+            encode_start.elapsed(),
+        );
         let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
             progress.stage_start("Encoding negative prompt (Qwen2.5 edit)");
             let neg_start = Instant::now();
@@ -2700,7 +2753,11 @@ impl QwenImageEngine {
             img_shapes.push((1, encoded.dim(2)? / 2, encoded.dim(3)? / 2));
             packed_input_storage.push(Self::pack_latents_4d(&encoded)?);
         }
-        progress.stage_done("Encoding edit images (VAE)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding edit images (VAE)",
+            encode_start.elapsed(),
+        );
 
         let packed_inputs = if packed_input_storage.is_empty() {
             None
@@ -2744,6 +2801,7 @@ impl QwenImageEngine {
             };
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let timestep = if use_batched_cfg {
@@ -2830,6 +2888,7 @@ impl QwenImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
         let latents = Self::unpack_latents_packed(&latents, height / 8, width / 8)?;
@@ -3216,6 +3275,7 @@ impl QwenImageEngine {
             };
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let noise_pred = if use_cfg {
@@ -3295,6 +3355,7 @@ impl QwenImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
         // Free text embeddings
@@ -3387,7 +3448,7 @@ impl QwenImageEngine {
             );
         }
 
-        progress.stage_done("VAE decode", vae_start.elapsed());
+        progress.phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 9. Encode to output format
         let output_metadata = build_output_metadata(req, seed, None);
@@ -3421,6 +3482,7 @@ impl QwenImageEngine {
 
 impl InferenceEngine for QwenImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_loras(req);
         let result = self.generate_inner(req);
@@ -3441,6 +3503,15 @@ impl InferenceEngine for QwenImageEngine {
         QwenImageEngine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        self.pending_loras = effective_loras(req);
+        let result = QwenImageEngine::load(self);
+        self.pending_placement = None;
+        self.pending_loras.clear();
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
@@ -3452,6 +3523,19 @@ impl InferenceEngine for QwenImageEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("qwen-image")
+            .expect("production Qwen-Image batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

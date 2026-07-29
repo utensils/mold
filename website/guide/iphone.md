@@ -201,6 +201,7 @@ host action.
 Tap a saved host to inspect its current state. The detail screen shows:
 
 - GPU/VRAM, CPU, and RAM telemetry;
+- every GPU's utilization, VRAM, lifecycle state, and enable/disable control;
 - free and used storage for the models filesystem;
 - queued/running generation work and loaded models;
 - queued/active model downloads with progress; and
@@ -220,6 +221,8 @@ cover:
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
 - **Remote hosts:** saved-host count and a shortcut to manage them
+- **GPUs:** enable or disable each GPU on the selected host; a busy GPU
+  finishes its current stage before disabling
 - **About:** app version, remote-only processing, TestFlight updates, and equal
   project-owner credit for core contributors James Brink and Jeffrey Dilley,
   plus an external link to the [Mold privacy policy](/privacy)

@@ -9,6 +9,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Rolling binaries route to the rolling GHCR map; stable tag builds embed the
+  # exact release used to resolve its published target-to-digest manifest.
+  MOLD_DISTRIBUTION_IMAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}
+
 jobs:
   build-macos:
     runs-on: macos-14
@@ -66,6 +71,92 @@ jobs:
         with:
           name: mold-aarch64-apple-darwin
           path: mold-aarch64-apple-darwin.tar.gz
+
+  # Ampere (RTX 3090/A40, sm_86)
+  build-linux-sm86:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: sm86
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "::warning::sccache probe failed; falling back to direct rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cuda-sm86-release
+          cache-on-failure: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
+
+      - name: Build (CUDA sm_86)
+        env:
+          CUDA_COMPUTE_CAP: "86"
+          LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
+
+      - name: Package
+        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz -C target/release mold
+
+      - name: Verify embedded target PTX, loader, NVML, and archive
+        run: scripts/verify-cuda-release-binary.sh target/release/mold 86 mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-x86_64-unknown-linux-gnu-cuda-sm86
+          path: mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
 
   # Ada Lovelace (RTX 40-series, sm_89)
   build-linux-sm89:
@@ -142,15 +233,108 @@ jobs:
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
+
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
+
+      - name: Verify embedded target PTX, loader, NVML, and archive
+        run: scripts/verify-cuda-release-binary.sh target/release/mold 89 mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm89
           path: mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
 
-  # Blackwell (RTX 50-series, sm_120)
+  # Datacenter Blackwell (B200/B300, sm_100). Built and statically validated;
+  # hardware qualification remains deferred.
+  build-linux-sm100:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm
+
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: sm100
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "::warning::sccache probe failed; falling back to direct rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cuda-sm100-release
+          cache-on-failure: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
+
+      - name: Build (CUDA sm_100)
+        env:
+          CUDA_COMPUTE_CAP: "100"
+          LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
+
+      - name: Package
+        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz -C target/release mold
+
+      - name: Verify embedded target PTX, loader, NVML, and archive
+        run: scripts/verify-cuda-release-binary.sh target/release/mold 100 mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-x86_64-unknown-linux-gnu-cuda-sm100
+          path: mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
+
+  # Consumer Blackwell (RTX 50-series, sm_120)
   build-linux-sm120:
     runs-on: ubuntu-latest
     env:
@@ -225,13 +409,46 @@ jobs:
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build
+
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
+
+      - name: Verify embedded target PTX, loader, NVML, and archive
+        run: scripts/verify-cuda-release-binary.sh target/release/mold 120 mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm120
           path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
+
+  # Evaluate and build every new public Nix output on a hosted runner. This is
+  # intentionally a real build gate, not a source grep or dry-run.
+  build-nix-distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Build sm86, sm100, and Linux desktop sm86 outputs
+        run: nix build .#mold-sm86 .#mold-sm100 .#mold-desktop-sm86 --no-link
 
   # Signed + notarized stable desktop app and Tauri updater payload — tags only.
   # Main-branch desktop nightlies are gated and published by desktop.yml.
@@ -242,8 +459,8 @@ jobs:
       channel: stable
     secrets: inherit
 
-  # Docker image — build and push to GHCR
-  # Tags: `latest` on main, `v1.2.3` + `latest` on version tags
+  # Docker images — main publishes the mutable rolling latest* map; v* jobs
+  # create-once/verify semver aliases and export exact digest fragments.
   docker:
     runs-on: ubuntu-latest
     permissions:
@@ -254,16 +471,22 @@ jobs:
         include:
           - cuda_cap: "89"
             suffix: ""
-            tag_suffix: ""
+            target: "sm89"
           - cuda_cap: "80"
             suffix: "-sm80"
-            tag_suffix: "-sm80"
+            target: "sm80"
+          - cuda_cap: "86"
+            suffix: "-sm86"
+            target: "sm86"
           - cuda_cap: "90"
             suffix: "-sm90"
-            tag_suffix: "-sm90"
+            target: "sm90"
+          - cuda_cap: "100"
+            suffix: "-sm100"
+            target: "sm100"
           - cuda_cap: "120"
             suffix: "-sm120"
-            tag_suffix: "-sm120"
+            target: "sm120"
     steps:
       - uses: actions/checkout@v6
 
@@ -297,15 +520,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
-          flavor: |
-            suffix=${{ matrix.suffix }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
+            type=raw,value=latest${{ matrix.suffix }},enable={{is_default_branch}}
+            type=raw,value=sha-${{ github.sha }}${{ matrix.suffix }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -314,13 +534,90 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CUDA_COMPUTE_CAP=${{ matrix.cuda_cap }}
+            MOLD_DISTRIBUTION_IMAGE_VERSION=${{ env.MOLD_DISTRIBUTION_IMAGE_VERSION }}
+            MOLD_GIT_SHA=${{ github.sha }}
           cache-from: type=gha,scope=docker${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=docker${{ matrix.suffix }}
+
+      - name: Verify built container source identity
+        env:
+          BUILT_IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$BUILT_IMAGE"
+          # A GitHub-hosted runner has no NVIDIA driver injection. The CUDA
+          # runtime image includes the forward-compatibility driver library,
+          # but its compat directory is intentionally not the normal runtime
+          # loader path. Expose it only for this GPU-less identity smoke.
+          version="$(
+            docker run --rm \
+              --entrypoint /bin/sh \
+              -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64 \
+              "$BUILT_IMAGE" \
+              -c 'exec mold version'
+          )"
+          grep -Fq "$GITHUB_SHA" <<<"$version" || {
+            echo "::error::container does not report exact source SHA $GITHUB_SHA: $version"
+            exit 1
+          }
+
+      - name: Create once and verify immutable stable tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          SUFFIX: ${{ matrix.suffix }}
+          REPOSITORY: ghcr.io/${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          target="$REPOSITORY:${VERSION#v}$SUFFIX"
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" \
+              --format '{{json .Manifest.Digest}}' 2>/dev/null \
+              | tr -d '"'
+          }
+          existing="$(inspect_digest "$target" || true)"
+          if [[ -n "$existing" && "$existing" != "$BUILT_DIGEST" ]]; then
+            echo "::error::immutable stable container tag already points at $existing, not $BUILT_DIGEST: $target"
+            exit 1
+          fi
+          if [[ -z "$existing" ]]; then
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "$target" \
+              "$REPOSITORY@$BUILT_DIGEST"
+          fi
+          verified="$(inspect_digest "$target")"
+          if [[ "$verified" != "$BUILT_DIGEST" ]]; then
+            echo "::error::stable container digest verification failed for $target"
+            exit 1
+          fi
+
+      - name: Record exact stable target digest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SUFFIX: ${{ matrix.suffix }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          jq -n \
+            --arg target "$TARGET" \
+            --arg tag "${VERSION#v}$SUFFIX" \
+            --arg digest "$DIGEST" \
+            '{target: $target, tag: $tag, digest: $digest}' \
+            > "container-digest-$TARGET.json"
+
+      - uses: actions/upload-artifact@v7
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: container-digest-${{ matrix.target }}
+          path: container-digest-${{ matrix.target }}.json
 
   # Rolling pre-release on every push to main
   release-latest:
     if: github.ref == 'refs/heads/main'
-    needs: [build-macos, build-linux-sm89, build-linux-sm120]
+    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120, build-nix-distribution, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -344,7 +641,9 @@ jobs:
           make_latest: false
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/SHA256SUMS
           body: |
@@ -357,8 +656,13 @@ jobs:
             | Platform | GPU | File |
             |----------|-----|------|
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
-            | Linux x86_64 | CUDA — RTX 50-series (Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+            | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 50-series (consumer Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+            Current Linux release archives and container images are linux/amd64 only.
 
             The install script auto-detects your GPU:
             ```bash
@@ -373,7 +677,9 @@ jobs:
             ./mold version
 
             # Linux (requires NVIDIA driver + CUDA runtime)
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz   # RTX 3090 / A40
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz   # RTX 40-series
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz  # B200 / B300 (simulated)
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
             ```
@@ -381,7 +687,7 @@ jobs:
   # Versioned release + crates.io publish on v* tags
   release-version:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-macos, build-linux-sm89, build-linux-sm120, build-desktop-dmg]
+    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120, build-nix-distribution, build-desktop-dmg, docker]
     runs-on: ubuntu-latest
     concurrency:
       group: stable-release-publication
@@ -465,6 +771,35 @@ jobs:
       - name: Generate checksums
         run: cd artifacts && sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
 
+      - name: Generate exact container digest manifest and release provenance
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          scripts/create-container-digest-manifest.sh \
+            artifacts/mold-container-digests.json \
+            "ghcr.io/$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$SOURCE_SHA" \
+            artifacts/container-digest-*.json
+          (
+            cd artifacts
+            sha256sum mold-container-digests.json >> SHA256SUMS
+          )
+          scripts/create-release-provenance.sh \
+            artifacts/mold-release-provenance.json \
+            "$RELEASE_TAG" \
+            "$SOURCE_SHA" \
+            artifacts/SHA256SUMS \
+            artifacts
+          # Provenance is derived from the artifact-only checksum set above.
+          # Append its digest afterwards so SHA256SUMS binds the exact manifest
+          # without creating a circular provenance/checksum dependency.
+          (
+            cd artifacts
+            sha256sum mold-release-provenance.json >> SHA256SUMS
+          )
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -472,13 +807,17 @@ jobs:
           make_latest: ${{ steps.stable-pointer.outputs.make_latest }}
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/*.dmg
             artifacts/Mold.app.zip
             artifacts/Mold_*_aarch64.app.tar.gz
             artifacts/Mold_*_aarch64.app.tar.gz.sig
             artifacts/mold-desktop-stable.json
+            artifacts/mold-release-provenance.json
+            artifacts/mold-container-digests.json
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
@@ -504,8 +843,13 @@ jobs:
             | Platform | GPU | File |
             |----------|-----|------|
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
-            | Linux x86_64 | CUDA — RTX 50-series (Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+            | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 50-series (consumer Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+            Current Linux release archives and container images are linux/amd64 only.
 
             ## Desktop app (macOS)
 

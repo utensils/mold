@@ -30,6 +30,8 @@ vi.mock("vue-router", () => ({
 vi.mock("../machines/hostClient", () => ({
   hostStatus: () => Promise.reject(new Error("offline in tests")),
   hostModels: () => Promise.reject(new Error("offline in tests")),
+  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
+  hostDevices: () => Promise.reject(new Error("offline in tests")),
 }));
 
 function baseForm(

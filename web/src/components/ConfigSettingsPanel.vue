@@ -237,6 +237,12 @@ onMounted(load);
               <span v-if="row.env_var" class="env-lock"
                 >Set by {{ row.env_var }}</span
               >
+              <span
+                v-if="schema.needsEngineRestart || row.restart_required"
+                class="env-lock"
+                :data-test="`restart-${row.key}`"
+                >Restart server to apply</span
+              >
             </div>
             <div class="config-editor">
               <input
@@ -245,7 +251,7 @@ onMounted(load);
                 v-model="drafts[row.key]"
                 :data-test="`config-${row.key}`"
                 type="checkbox"
-                :disabled="row.source === 'env'"
+                :disabled="row.source === 'env' || schema.liveReadOnly"
               />
               <select
                 v-else-if="schema.editor === 'select'"
@@ -253,7 +259,7 @@ onMounted(load);
                 v-model="drafts[row.key]"
                 class="input"
                 :data-test="`config-${row.key}`"
-                :disabled="row.source === 'env'"
+                :disabled="row.source === 'env' || schema.liveReadOnly"
               >
                 <option
                   v-for="option in schema.options"
@@ -273,12 +279,16 @@ onMounted(load);
                 :min="schema.min"
                 :max="schema.max"
                 :step="schema.step"
-                :disabled="row.source === 'env'"
+                :disabled="row.source === 'env' || schema.liveReadOnly"
               />
               <button
                 class="btn"
                 :data-test="`save-${row.key}`"
-                :disabled="row.source === 'env' || saving === row.key"
+                :disabled="
+                  row.source === 'env' ||
+                  schema.liveReadOnly ||
+                  saving === row.key
+                "
                 @click="save(row)"
               >
                 Save
@@ -288,6 +298,7 @@ onMounted(load);
                 :data-test="`reset-${row.key}`"
                 :disabled="
                   row.source === 'env' ||
+                  schema.liveReadOnly ||
                   !canResetConfig(row.key) ||
                   saving === row.key
                 "

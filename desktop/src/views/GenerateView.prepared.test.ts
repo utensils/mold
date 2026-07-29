@@ -33,6 +33,7 @@ vi.mock("vue-router", () => ({
 }));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
+const placementPreview = vi.hoisted(() => vi.fn());
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {
     constructor(
@@ -52,6 +53,11 @@ vi.mock("../lib/ipc", () => ({ ipc: {} }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt: vi.fn() }));
 vi.mock("../lib/api/catalog", () => ({ startCatalogDownload: vi.fn() }));
 vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess: vi.fn() }));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationPlacement")>()),
+  previewGenerationPlacement: (...args: unknown[]) => placementPreview(...args),
+  previewChainPlacement: (...args: unknown[]) => placementPreview(...args),
+}));
 
 enableAutoUnmount(afterEach);
 
@@ -107,6 +113,22 @@ describe("GenerateView prepared expansion batches", () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) =>
       Promise.resolve(path === "/api/models" ? [model] : []),
     );
+    placementPreview.mockReset().mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
     vi.mocked(expandPrompt).mockReset();
     vi.mocked(startCatalogDownload).mockReset();
     vi.mocked(startCatalogDownload).mockResolvedValue("pull-job");
@@ -166,7 +188,7 @@ describe("GenerateView prepared expansion batches", () => {
     expect(prepared.props("batch").route.hostId).toBe("local");
   });
 
-  it("submits edited prompts with source provenance through the frozen route", async () => {
+  it("runs exactly one finalized placement preview before submitting edited prepared prompts", async () => {
     vi.mocked(expandPrompt).mockResolvedValue({
       original: "a lighthouse at dusk",
       expanded: ["storm light", "sea mist", "aerial coast"],
@@ -182,6 +204,10 @@ describe("GenerateView prepared expansion batches", () => {
     await flushPromises();
 
     const prepared = wrapper.findComponent(PreparedExpansionBatch);
+    const preparedRoute = prepared.props("batch").route;
+    const preview = vi
+      .spyOn(useHostsStore(), "resolveFeasibleRoute")
+      .mockResolvedValue(preparedRoute);
     const firstId = prepared.props("batch").prompts[0]!.id;
     prepared.vm.$emit("edit", { id: firstId, text: "edited storm light" });
     await flushPromises();
@@ -189,9 +215,11 @@ describe("GenerateView prepared expansion batches", () => {
     await flushPromises();
 
     expect(submit).toHaveBeenCalledTimes(1);
-    const [, count, frozenRoute, , options] = submit.mock.calls[0]!;
+    expect(preview).toHaveBeenCalledTimes(1);
+    expect(preview).toHaveBeenCalledWith("local", expect.anything(), 3);
+    const [, count, submittedRoute, , options] = submit.mock.calls[0]!;
     expect(count).toBe(3);
-    expect(frozenRoute).toMatchObject({
+    expect(submittedRoute).toMatchObject({
       hostId: "local",
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     });
@@ -202,6 +230,75 @@ describe("GenerateView prepared expansion batches", () => {
     });
     expect(document.activeElement).toBe(wrapper.get('textarea[aria-label="Prompt"]').element);
   });
+
+  it.each([
+    {
+      label: "local",
+      route: {
+        hostId: "local",
+        label: "This device",
+        kind: "local" as const,
+        target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+        instanceId: null,
+      },
+    },
+    {
+      label: "remote",
+      route: {
+        hostId: "remote-one",
+        label: "Studio GPU",
+        kind: "remote" as const,
+        target: { baseUrl: "http://studio:7680", apiKey: "remote-key" },
+        instanceId: "studio-id",
+      },
+    },
+  ])(
+    "preserves reviewed prompts and queues nothing when the finalized $label preview rejects",
+    async ({ route }) => {
+      vi.mocked(expandPrompt).mockResolvedValue({
+        original: "a lighthouse at dusk",
+        expanded: ["storm light", "sea mist", "aerial coast"],
+      });
+      const hosts = useHostsStore();
+      if (route.kind === "remote") {
+        hosts.extras = [
+          {
+            id: route.hostId,
+            label: route.label,
+            url: route.target.baseUrl,
+            apiKey: route.target.apiKey,
+            status: "ready",
+            error: null,
+            instanceId: route.instanceId,
+          },
+        ];
+      }
+      vi.spyOn(hosts, "resolveRoute").mockReturnValue(route);
+      const finalizedPreview = vi.spyOn(hosts, "resolveFeasibleRoute").mockResolvedValue(null);
+      const submit = vi.spyOn(useGenerationStore(), "submitBatch");
+      const wrapper = mountView();
+      await flushPromises();
+
+      wrapper.findComponent(ExpandControl).vm.$emit("expand");
+      await flushPromises();
+      const before = wrapper
+        .findComponent(PreparedExpansionBatch)
+        .props("batch")
+        .prompts.map((prompt: { text: string }) => prompt.text);
+      wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+      await flushPromises();
+
+      expect(finalizedPreview).toHaveBeenCalledTimes(1);
+      expect(finalizedPreview).toHaveBeenCalledWith(route.hostId, expect.anything(), 3);
+      expect(submit).not.toHaveBeenCalled();
+      const preserved = wrapper.findComponent(PreparedExpansionBatch);
+      expect(preserved.exists()).toBe(true);
+      expect(
+        preserved.props("batch").prompts.map((prompt: { text: string }) => prompt.text),
+      ).toEqual(before);
+      expect(useToastStore().items.at(-1)?.message).toContain("Nothing was queued");
+    },
+  );
 
   it("freezes the Batch 1 expansion route through the next Generate", async () => {
     useGenerateFormStore().form.batchSize = 1;
@@ -222,6 +319,7 @@ describe("GenerateView prepared expansion batches", () => {
       label: "This device",
       kind: "local" as const,
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      instanceId: null,
     };
     const remoteRoute = {
       hostId: "remote-one",
@@ -243,7 +341,9 @@ describe("GenerateView prepared expansion batches", () => {
 
     wrapper.findComponent(ExpandControl).vm.$emit("expand");
     await flushPromises();
-    resolveRoute.mockReturnValue(remoteRoute);
+    resolveRoute.mockImplementation((selection) =>
+      selection === "local" ? localRoute : remoteRoute,
+    );
     useHostsStore().telemetry.local = {
       queueDepth: 10,
       queueCapacity: 10,
@@ -312,7 +412,10 @@ describe("GenerateView prepared expansion batches", () => {
       prompt: "storm light",
       original_prompt: "a lighthouse at dusk",
     });
-    expect(submit.mock.calls[0]![2]).toBeNull();
+    expect(submit.mock.calls[0]![2]).toMatchObject({
+      hostId: "local",
+      target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+    });
   });
 
   it("re-expands the original prompt for the current model before generating", async () => {

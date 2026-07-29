@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use mold_core::{Config, ModelPaths, Scheduler};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::engine::{InferenceEngine, LoadStrategy};
@@ -14,6 +15,75 @@ use crate::sdxl::SDXLEngine;
 use crate::shared_pool::SharedPool;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
+
+/// Immutable inputs that may change the concrete engine constructed for a
+/// model. Scheduler-owned execution plans capture this once and pass it to
+/// [`create_engine_with_frozen_config`], so worker dispatch never consults a
+/// newer `Config` or process environment after admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenEngineConfig {
+    pub family: String,
+    pub is_schnell: Option<bool>,
+    pub is_turbo: Option<bool>,
+    pub scheduler: Option<Scheduler>,
+    pub t5_variant: Option<String>,
+    pub qwen3_variant: Option<String>,
+    pub qwen2_variant: Option<String>,
+    pub qwen2_text_encoder_mode: Option<String>,
+    pub ltx2_gemma_variant: Option<String>,
+    /// Exact encoder artifacts materialized before scheduler admission. Empty
+    /// fields mean the legacy non-planned factory path; the planned factory
+    /// verifies every populated path is already local before constructing an
+    /// engine, so a leased worker cannot trigger a network download.
+    pub selected_t5_path: Option<PathBuf>,
+    pub selected_qwen3_paths: Vec<PathBuf>,
+    pub selected_qwen2_path: Option<PathBuf>,
+    pub selected_gemma_paths: Vec<PathBuf>,
+    pub runtime_environment: crate::runtime_env::FrozenRuntimeEnvironment,
+    pub attention_backend: crate::attention::AttentionBackend,
+    pub attention_chunk: crate::attention::AttentionChunkPolicy,
+    pub vae_tiling: crate::vae_tiling::TiledMode,
+    pub vae_dtype: crate::device::VaeDtypePolicy,
+}
+
+impl FrozenEngineConfig {
+    pub fn resolve(model_name: &str, config: &Config) -> Self {
+        let model_cfg = config.resolved_model_config(model_name);
+        let runtime_environment = crate::runtime_env::snapshot();
+        Self {
+            family: resolve_family(model_name, config),
+            is_schnell: model_cfg.is_schnell,
+            is_turbo: model_cfg.is_turbo,
+            scheduler: model_cfg.scheduler,
+            t5_variant: runtime_environment
+                .value("MOLD_T5_VARIANT")
+                .map(str::to_string)
+                .or_else(|| config.t5_variant.clone()),
+            qwen3_variant: runtime_environment
+                .value("MOLD_QWEN3_VARIANT")
+                .map(str::to_string)
+                .or_else(|| config.qwen3_variant.clone()),
+            qwen2_variant: runtime_environment
+                .value("MOLD_QWEN2_VARIANT")
+                .map(str::to_string),
+            qwen2_text_encoder_mode: runtime_environment
+                .value("MOLD_QWEN2_TEXT_ENCODER_MODE")
+                .map(str::to_string),
+            ltx2_gemma_variant: runtime_environment
+                .value("MOLD_LTX2_GEMMA_VARIANT")
+                .map(str::to_string),
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            runtime_environment,
+            attention_backend: crate::attention::AttentionBackend::resolve(),
+            attention_chunk: crate::attention::resolved_chunk_policy(),
+            vae_tiling: crate::vae_tiling::resolve_mode(),
+            vae_dtype: crate::device::resolved_vae_dtype_policy(),
+        }
+    }
+}
 
 /// Determine the model family from config or manifest, defaulting to "flux".
 fn resolve_family(model_name: &str, config: &Config) -> String {
@@ -83,6 +153,130 @@ fn is_ltx2_native_single_file(paths: &ModelPaths) -> bool {
         && crate::ltx2::single_file::load(&paths.transformer).is_ok()
 }
 
+fn require_prepared_cache_entry(
+    path: &PathBuf,
+    repo: &str,
+    filename: &str,
+    subdir: &str,
+) -> Result<()> {
+    let cached = mold_core::download::cached_file_path(repo, filename, Some(subdir));
+    if cached.as_ref() != Some(path) {
+        bail!(
+            "prepared encoder artifact '{}' is not the current local cache entry \
+             for {repo}/{filename}; refusing post-lease dependency resolution",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_prepared_quantized_dependencies(frozen: &FrozenEngineConfig) -> Result<()> {
+    if let (Some(path), Some(tag)) = (&frozen.selected_t5_path, frozen.t5_variant.as_deref()) {
+        if tag != "fp16" {
+            let variant = mold_core::manifest::find_t5_variant(tag)
+                .ok_or_else(|| anyhow::anyhow!("unknown prepared T5 variant '{tag}'"))?;
+            require_prepared_cache_entry(
+                path,
+                variant.hf_repo,
+                variant.hf_filename,
+                "shared/t5-gguf",
+            )?;
+        }
+    }
+    if let Some(path) = frozen.selected_qwen3_paths.first() {
+        if frozen.qwen3_variant.as_deref() != Some("bf16") {
+            let tag = frozen
+                .qwen3_variant
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("prepared Qwen3 path has no frozen variant"))?;
+            let candidates = [
+                (
+                    mold_core::manifest::find_qwen3_variant(tag),
+                    "shared/qwen3-gguf",
+                ),
+                (
+                    mold_core::manifest::find_qwen3_8b_variant(tag),
+                    "shared/qwen3-8b-gguf",
+                ),
+            ];
+            let matched = candidates.into_iter().any(|(variant, subdir)| {
+                variant.is_some_and(|variant| {
+                    mold_core::download::cached_file_path(
+                        variant.hf_repo,
+                        variant.hf_filename,
+                        Some(subdir),
+                    )
+                    .as_ref()
+                        == Some(path)
+                })
+            });
+            if !matched {
+                bail!(
+                    "prepared Qwen3 artifact '{}' is not a current local cache entry",
+                    path.display()
+                );
+            }
+        }
+    }
+    if let Some(path) = &frozen.selected_qwen2_path {
+        let tag = frozen
+            .qwen2_variant
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("prepared Qwen2 path has no frozen variant"))?;
+        let variant = mold_core::manifest::find_qwen2_vl_variant(tag)
+            .ok_or_else(|| anyhow::anyhow!("unknown prepared Qwen2 variant '{tag}'"))?;
+        require_prepared_cache_entry(
+            path,
+            variant.hf_repo,
+            variant.hf_filename,
+            "shared/qwen2-vl-gguf",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_prepared_gemma_dependencies(
+    paths: &ModelPaths,
+    frozen: &FrozenEngineConfig,
+) -> Result<()> {
+    if frozen.selected_gemma_paths.is_empty() {
+        return Ok(());
+    }
+    let root = paths
+        .text_encoder_files
+        .first()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| anyhow::anyhow!("prepared Gemma assets have no concrete root"))?;
+    let tag = frozen
+        .ltx2_gemma_variant
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("prepared Gemma paths have no frozen variant"))?;
+    let mut discovered = std::fs::read_dir(root)
+        .map_err(|error| anyhow::anyhow!("failed to inspect prepared Gemma root: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let selected = match tag {
+                "bf16" => {
+                    name == "model.safetensors"
+                        || (name.starts_with("model-") && name.ends_with(".safetensors"))
+                }
+                "q4" => name.ends_with(".gguf"),
+                _ => false,
+            };
+            (selected && path.is_file()).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    if discovered != frozen.selected_gemma_paths {
+        bail!(
+            "prepared Gemma {tag} artifact set changed after admission; refusing live variant discovery"
+        );
+    }
+    Ok(())
+}
+
 /// Create an inference engine for the given model, auto-detecting the family.
 ///
 /// Returns the appropriate engine (FluxEngine, SD15Engine, SDXLEngine, or ZImageEngine)
@@ -122,20 +316,76 @@ pub fn create_engine_with_pool(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
-    let family = resolve_family(&model_name, config);
-    let model_cfg = config.resolved_model_config(&model_name);
+    let frozen = FrozenEngineConfig::resolve(&model_name, config);
+    create_engine_with_frozen_config(
+        model_name,
+        paths,
+        &frozen,
+        load_strategy,
+        gpu_ordinal,
+        offload,
+        shared_pool,
+    )
+}
 
-    match family.as_str() {
+fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn InferenceEngine> {
+    Box::new(engine)
+}
+
+/// Create an engine from scheduler-frozen construction inputs.
+///
+/// Unlike [`create_engine_with_pool`], this path performs no live config or
+/// environment resolution. It is the only factory entry point valid after a
+/// scheduler lease has been granted.
+pub fn create_engine_with_frozen_config(
+    model_name: String,
+    paths: ModelPaths,
+    frozen: &FrozenEngineConfig,
+    load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
+    offload: bool,
+    shared_pool: Option<Arc<Mutex<SharedPool>>>,
+) -> Result<Box<dyn InferenceEngine>> {
+    let current_attention = crate::attention::AttentionBackend::resolve();
+    let current_chunk = crate::attention::resolved_chunk_policy();
+    let current_vae_tiling = crate::vae_tiling::resolve_mode();
+    let current_vae_dtype = crate::device::resolved_vae_dtype_policy();
+    let current_runtime_environment = crate::runtime_env::snapshot();
+    if frozen.attention_backend != current_attention
+        || frozen.attention_chunk != current_chunk
+        || frozen.vae_tiling != current_vae_tiling
+        || frozen.vae_dtype != current_vae_dtype
+        || frozen.runtime_environment != current_runtime_environment
+    {
+        bail!(
+            "frozen engine runtime policy does not match the process-frozen \
+             attention/chunk/VAE authority"
+        );
+    }
+    for path in frozen
+        .selected_t5_path
+        .iter()
+        .chain(frozen.selected_qwen3_paths.iter())
+        .chain(frozen.selected_qwen2_path.iter())
+        .chain(frozen.selected_gemma_paths.iter())
+    {
+        if !path.is_file() {
+            bail!(
+                "prepared encoder artifact '{}' is not locally available; \
+                 refusing post-lease dependency resolution",
+                path.display()
+            );
+        }
+    }
+    validate_prepared_quantized_dependencies(frozen)?;
+    validate_prepared_gemma_dependencies(&paths, frozen)?;
+    let engine_result: Result<Box<dyn InferenceEngine>> = match frozen.family.as_str() {
         "flux" => {
-            let is_schnell = model_cfg.is_schnell;
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
-            Ok(Box::new(FluxEngine::new(
+            Ok(boxed_inference_engine(FluxEngine::new(
                 model_name,
                 paths,
-                is_schnell,
-                t5_variant,
+                frozen.is_schnell,
+                frozen.t5_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -143,7 +393,7 @@ pub fn create_engine_with_pool(
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
-            let scheduler = model_cfg.scheduler.unwrap_or(Scheduler::Ddim);
+            let scheduler = frozen.scheduler.unwrap_or(Scheduler::Ddim);
             if is_single_file(&paths) {
                 // Companion-pulled CLIP-L tokenizer. Civitai
                 // single-file checkpoints never bundle the tokenizer.
@@ -154,7 +404,7 @@ pub fn create_engine_with_pool(
                         "single-file SD1.5 dispatch requires a companion-pulled clip_tokenizer"
                     ))?;
                 let single_file = paths.transformer.clone();
-                Ok(Box::new(SD15Engine::from_single_file(
+                Ok(boxed_inference_engine(SD15Engine::from_single_file(
                     model_name,
                     single_file,
                     clip_tokenizer,
@@ -164,7 +414,7 @@ pub fn create_engine_with_pool(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(SD15Engine::new(
+                Ok(boxed_inference_engine(SD15Engine::new(
                     model_name,
                     paths,
                     scheduler,
@@ -175,10 +425,10 @@ pub fn create_engine_with_pool(
             }
         }
         "sdxl" => {
-            let is_turbo = model_cfg
+            let is_turbo = frozen
                 .is_turbo
                 .unwrap_or_else(|| model_name.contains("turbo"));
-            let scheduler = model_cfg.scheduler.unwrap_or(if is_turbo {
+            let scheduler = frozen.scheduler.unwrap_or(if is_turbo {
                 Scheduler::EulerAncestral
             } else {
                 Scheduler::Ddim
@@ -196,7 +446,7 @@ pub fn create_engine_with_pool(
                     )
                 })?;
                 let single_file = paths.transformer.clone();
-                Ok(Box::new(SDXLEngine::from_single_file(
+                Ok(boxed_inference_engine(SDXLEngine::from_single_file(
                     model_name,
                     single_file,
                     clip_l_tokenizer,
@@ -208,7 +458,7 @@ pub fn create_engine_with_pool(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(SDXLEngine::new(
+                Ok(boxed_inference_engine(SDXLEngine::new(
                     model_name,
                     paths,
                     scheduler,
@@ -220,19 +470,16 @@ pub fn create_engine_with_pool(
             }
         }
         "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => {
-            let is_turbo = model_cfg
+            let is_turbo = frozen
                 .is_turbo
                 .unwrap_or_else(|| model_name.contains("turbo"));
             let is_medium = model_name.contains("medium");
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
-            Ok(Box::new(SD3Engine::new(
+            Ok(boxed_inference_engine(SD3Engine::new(
                 model_name,
                 paths,
                 is_turbo,
                 is_medium,
-                t5_variant,
+                frozen.t5_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -240,13 +487,10 @@ pub fn create_engine_with_pool(
             )))
         }
         "z-image" => {
-            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
-                .ok()
-                .or_else(|| config.qwen3_variant.clone());
-            Ok(Box::new(ZImageEngine::new(
+            Ok(boxed_inference_engine(ZImageEngine::new(
                 model_name,
                 paths,
-                qwen3_variant,
+                frozen.qwen3_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -254,31 +498,28 @@ pub fn create_engine_with_pool(
             )))
         }
         "flux2" | "flux.2" | "flux2-klein" => {
-            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
-                .ok()
-                .or_else(|| config.qwen3_variant.clone());
             if is_flux2_bfl_native_single_file(&paths) {
                 // Civitai / ComfyUI fine-tunes ship as one BFL-native
                 // safetensors. The VAE + Qwen3 text encoder come from the
                 // `flux2-vae` and `flux2-te*` companions wired by the
                 // catalog bridge — copy them through unchanged.
-                Ok(Box::new(Flux2Engine::from_single_file(
+                Ok(boxed_inference_engine(Flux2Engine::from_single_file(
                     model_name,
                     paths.transformer.clone(),
                     paths.vae.clone(),
                     paths.text_encoder_files.clone(),
                     paths.text_tokenizer.clone(),
-                    qwen3_variant,
+                    frozen.qwen3_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     offload,
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(Flux2Engine::new(
+                Ok(boxed_inference_engine(Flux2Engine::new(
                     model_name,
                     paths,
-                    qwen3_variant,
+                    frozen.qwen3_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     offload,
@@ -286,26 +527,27 @@ pub fn create_engine_with_pool(
                 )))
             }
         }
-        "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new(
+        "qwen-image" | "qwen_image" => Ok(boxed_inference_engine(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
             gpu_ordinal,
             offload,
             shared_pool,
+            frozen.qwen2_variant.clone(),
+            frozen.qwen2_text_encoder_mode.clone(),
         ))),
-        "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
+        "qwen-image-edit" => Ok(boxed_inference_engine(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
             gpu_ordinal,
             offload,
             shared_pool,
+            frozen.qwen2_variant.clone(),
+            frozen.qwen2_text_encoder_mode.clone(),
         ))),
         "ltx-video" | "ltx_video" => {
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
             if is_single_file(&paths) {
                 // Civitai single-file dispatch. `paths.vae` is
                 // either the same checkpoint (combined transformer+VAE) or
@@ -315,52 +557,54 @@ pub fn create_engine_with_pool(
                 } else {
                     None
                 };
-                Ok(Box::new(LtxVideoEngine::from_single_file(
+                Ok(boxed_inference_engine(LtxVideoEngine::from_single_file(
                     model_name,
                     paths.transformer.clone(),
                     vae_path,
                     paths.t5_encoder.clone(),
                     paths.t5_tokenizer.clone(),
-                    t5_variant,
+                    frozen.t5_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(LtxVideoEngine::new(
+                Ok(boxed_inference_engine(LtxVideoEngine::new(
                     model_name,
                     paths,
-                    t5_variant,
+                    frozen.t5_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
                 )))
             }
         }
-        "ltx2" | "ltx-2" => {
+        "ltx2" | "ltx-2" | "ltx2.3" => {
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
                 // `vae.*`; transformer-only checkpoints use `paths.vae`.
                 // Pass the full companion graph so both the Gemma encoder
                 // and version-matched VAE reach the runtime and chain stages.
                 let checkpoint = paths.transformer.clone();
-                Ok(Box::new(Ltx2Engine::from_single_file(
+                Ok(boxed_inference_engine(Ltx2Engine::from_single_file_with_gemma_variant(
                     model_name,
                     checkpoint,
                     paths,
                     load_strategy,
                     gpu_ordinal,
+                    frozen.ltx2_gemma_variant.clone(),
                 )?))
             } else {
-                Ok(Box::new(Ltx2Engine::new(
+                Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
                     model_name,
                     paths,
                     load_strategy,
                     gpu_ordinal,
+                    frozen.ltx2_gemma_variant.clone(),
                 )))
             }
         }
-        "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
+        "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
             load_strategy,
@@ -372,7 +616,10 @@ pub fn create_engine_with_pool(
             other,
             model_name
         ),
-    }
+    };
+    let engine = engine_result?;
+    crate::validate_runtime_batch_capability(&frozen.family, engine.batch_execution_capability())?;
+    Ok(engine)
 }
 
 #[cfg(test)]
@@ -398,6 +645,109 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    #[test]
+    fn every_advertised_production_family_and_alias_constructs_through_frozen_factory() {
+        for entry in crate::production_batch_capabilities() {
+            for family in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
+                let mut frozen = FrozenEngineConfig::resolve(family, &Config::default());
+                frozen.family = family.to_string();
+                let engine = create_engine_with_frozen_config(
+                    family.to_string(),
+                    dummy_paths(),
+                    &frozen,
+                    LoadStrategy::Sequential,
+                    0,
+                    false,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "advertised production family/alias {family:?} did not construct: {error}"
+                    )
+                });
+                assert_eq!(
+                    engine.batch_execution_capability(),
+                    entry.execution,
+                    "{family}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_factory_rejects_runtime_policy_claim_it_cannot_consume() {
+        let config = Config::default();
+        let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &config);
+        frozen.attention_backend = match frozen.attention_backend {
+            crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
+            crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
+        };
+        let error = create_engine_with_frozen_config(
+            "flux-dev:q4".into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        )
+        .err()
+        .expect("mismatched runtime policy must fail closed");
+        assert!(error
+            .to_string()
+            .contains("process-frozen attention/chunk/VAE authority"));
+    }
+
+    #[test]
+    fn prepared_gemma_rejects_new_live_variant_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let tokenizer = root.path().join("tokenizer.json");
+        let shard = root.path().join("model-00001-of-00001.safetensors");
+        std::fs::write(&tokenizer, b"tokenizer").unwrap();
+        std::fs::write(&shard, b"weights").unwrap();
+        let mut paths = dummy_paths();
+        paths.text_encoder_files = vec![tokenizer];
+        let mut frozen = FrozenEngineConfig::resolve("ltx-2-19b-distilled:fp8", &Config::default());
+        frozen.ltx2_gemma_variant = Some("bf16".into());
+        frozen.selected_gemma_paths = vec![shard];
+        validate_prepared_gemma_dependencies(&paths, &frozen).unwrap();
+
+        std::fs::write(
+            root.path().join("model-00002-of-00002.safetensors"),
+            b"changed",
+        )
+        .unwrap();
+        let error = validate_prepared_gemma_dependencies(&paths, &frozen).unwrap_err();
+        assert!(error.to_string().contains("changed after admission"));
+    }
+
+    #[test]
+    fn prepared_qwen3_bf16_missing_path_fails_before_live_variant_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("planned-qwen3-bf16.safetensors");
+        let mut paths = dummy_paths();
+        paths.text_encoder_files = vec![missing.clone()];
+        let mut frozen = FrozenEngineConfig::resolve("z-image:bf16", &Config::default());
+        frozen.family = "z-image".into();
+        frozen.qwen3_variant = Some("bf16".into());
+        frozen.selected_qwen3_paths = vec![missing];
+
+        let error = create_engine_with_frozen_config(
+            "z-image:bf16".into(),
+            paths,
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        )
+        .err()
+        .expect("a missing planned BF16 path must fail before runtime auto-resolution");
+        assert!(error
+            .to_string()
+            .contains("refusing post-lease dependency resolution"));
     }
 
     #[test]
@@ -431,6 +781,43 @@ mod tests {
             },
         );
         assert_eq!(resolve_family("custom-model", &config), "sd15");
+    }
+
+    #[test]
+    fn every_factory_family_runtime_contract_matches_the_static_registry() {
+        for family in [
+            "flux",
+            "flux2",
+            "sd15",
+            "sdxl",
+            "sd3",
+            "z-image",
+            "qwen-image",
+            "qwen-image-edit",
+            "ltx-video",
+            "ltx2",
+            "wuerstchen",
+        ] {
+            let mut config = Config::default();
+            config.models.insert(
+                format!("test-{family}"),
+                mold_core::config::ModelConfig {
+                    family: Some(family.to_string()),
+                    ..Default::default()
+                },
+            );
+            let engine = create_engine(
+                format!("test-{family}"),
+                dummy_paths(),
+                &config,
+                LoadStrategy::Sequential,
+                0,
+                false,
+            )
+            .unwrap();
+            let expected = crate::batch_execution_capability_for_family(family).unwrap();
+            assert_eq!(engine.batch_execution_capability(), expected, "{family}");
+        }
     }
 
     #[test]

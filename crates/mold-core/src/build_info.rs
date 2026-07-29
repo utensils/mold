@@ -40,8 +40,8 @@ mod tests {
             return; // no git context (crates.io / sandboxed build)
         }
         assert!(
-            GIT_SHA.len() >= 7 && GIT_SHA.len() <= 12,
-            "short SHA should be 7-12 chars, got {}: {GIT_SHA}",
+            (7..=12).contains(&GIT_SHA.len()) || GIT_SHA.len() == 40,
+            "SHA should be a 7-12 character abbreviation or exact 40-character commit, got {}: {GIT_SHA}",
             GIT_SHA.len()
         );
         assert!(

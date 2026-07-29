@@ -14,6 +14,7 @@
 
 export const ORIGIN_HOST_ID = "origin";
 export const HOSTS_STORAGE_KEY = "mold.web.hosts.v1";
+export const HOSTS_CHANGED_EVENT = "mold:hosts-changed";
 
 export interface HostEntry {
   /** Slug of the host URL, or "origin" for the serving host. */
@@ -105,6 +106,9 @@ export function listStoredHosts(): HostEntry[] {
 
 function writeStoredHosts(hosts: HostEntry[]): void {
   localStorage.setItem(HOSTS_STORAGE_KEY, JSON.stringify(hosts));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(HOSTS_CHANGED_EVENT));
+  }
 }
 
 /** Every host the browser knows: the primary origin first, then remotes. */

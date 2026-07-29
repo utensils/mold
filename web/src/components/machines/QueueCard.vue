@@ -19,7 +19,8 @@ const props = withDefaults(
   defineProps<{
     entries: QueueEntry[];
     models?: ModelInfoExtended[];
-    gpuCount: number;
+    /** Exact schedulable CUDA ordinals advertised by this host. */
+    gpuOrdinals: number[];
     canReorder?: boolean;
     canPause?: boolean;
     canCancelAll?: boolean;
@@ -130,7 +131,7 @@ function queuedIndexOf(id: string): number {
           <span class="qc__model">{{ modelLabel(entry.model) }}</span>
 
           <select
-            v-if="gpuCount > 1"
+            v-if="gpuOrdinals.length > 1"
             class="qc__lane"
             data-test="queue-lane"
             :disabled="dimmed || entry.state !== 'queued'"
@@ -139,8 +140,12 @@ function queuedIndexOf(id: string): number {
             @change="onLane(entry, $event)"
           >
             <option value="">Auto</option>
-            <option v-for="g in gpuCount" :key="g - 1" :value="g - 1">
-              GPU {{ g - 1 }}
+            <option
+              v-for="ordinal in gpuOrdinals"
+              :key="ordinal"
+              :value="ordinal"
+            >
+              GPU {{ ordinal }}
             </option>
           </select>
 

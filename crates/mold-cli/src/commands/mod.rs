@@ -8,6 +8,7 @@ pub mod default;
 pub mod discord;
 pub mod expand;
 pub(crate) mod generate;
+pub mod gpu;
 pub mod info;
 pub mod jobs;
 pub mod lambda;

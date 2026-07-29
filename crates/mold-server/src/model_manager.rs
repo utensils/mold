@@ -23,12 +23,16 @@ pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEven
 pub use crate::memory_preflight::ActivationHint;
 #[cfg(test)]
 pub(crate) use crate::memory_preflight::{
-    check_model_memory_budget, preflight_memory_guard_with_available, rejection_suggestion,
+    check_model_memory_budget, preflight_memory_guard_with_available,
+    preflight_memory_guard_with_available_and_policy, rejection_suggestion,
+    request_requires_fresh_engine_for_offload_policy_with_request,
+    server_offload_enabled_for_paths_with_request,
 };
 pub(crate) use crate::memory_preflight::{
     effective_load_available_bytes, estimate_generation_memory_for_request, preflight_memory_guard,
-    request_requires_fresh_engine_for_offload_policy, select_server_load_strategy_for_budget,
-    select_server_load_strategy_for_device, server_offload_enabled_for_paths,
+    preflight_memory_guard_after_drop, request_requires_fresh_engine_for_offload_policy,
+    select_server_load_strategy_for_budget, select_server_load_strategy_for_device,
+    server_offload_enabled_for_paths,
 };
 
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
@@ -152,7 +156,7 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
 
 fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
     let mut names = Vec::new();
-    for worker in &state.gpu_pool.workers {
+    for worker in state.gpu_pool.worker_snapshot() {
         // Prefer the active-generation model (cache entry is taken out during
         // inflight generation), else whatever is GPU-resident.
         let active = worker
@@ -160,10 +164,7 @@ fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
             .read()
             .ok()
             .and_then(|g| g.as_ref().map(|g| g.model.clone()));
-        let loaded = active.or_else(|| {
-            let cache = worker.model_cache.lock().ok()?;
-            cache.active_model().map(|s| s.to_string())
-        });
+        let loaded = active.or_else(|| worker.resident_model.read().ok()?.clone());
         if let Some(name) = loaded {
             if !names.contains(&name) {
                 names.push(name);
@@ -663,7 +664,33 @@ pub(crate) async fn estimate_generation_memory(
         }
     };
     let hint = activation_hint_for_request(state, req).await;
-    let estimate = estimate_generation_memory_for_request(req, &paths, hint);
+    // This endpoint is diagnostic, not an admission side channel. Use the
+    // latest resource-sampler facts and report the roomiest current
+    // candidate for an Auto request; never perform a device-0 live query or
+    // substitute total VRAM when no free-memory sample exists.
+    let roomiest = state.resources.latest().and_then(|snapshot| {
+        snapshot
+            .gpus
+            .iter()
+            .map(|gpu| (gpu.vram_total.saturating_sub(gpu.vram_used), gpu.ordinal))
+            .max_by_key(|(available, ordinal)| (*available, std::cmp::Reverse(*ordinal)))
+    });
+    let available = roomiest.map(|(available, _)| available);
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    let estimate = estimate_generation_memory_for_request(
+        req,
+        &paths,
+        hint,
+        available,
+        forced_offload,
+        request_has_effective_lora(req),
+        roomiest.is_some_and(|(_, ordinal)| {
+            crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal)
+        }),
+    );
 
     Ok(GenerationMemoryEstimate {
         model: req.model.clone(),
@@ -997,23 +1024,6 @@ pub(crate) async fn ensure_model_ready(
             if let Some(paths) = cached_paths.as_ref() {
                 preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
             }
-            let load_strategy = cached_paths
-                .as_ref()
-                .map(|paths| {
-                    select_server_load_strategy_for_budget(
-                        paths,
-                        effective_load_available_bytes(active_vram, 0),
-                        hint,
-                    )
-                })
-                .unwrap_or(mold_inference::LoadStrategy::Eager);
-            if load_strategy == mold_inference::LoadStrategy::Sequential {
-                tracing::info!(
-                    model = %model_name,
-                    "server load strategy degraded to sequential to fit memory budget"
-                );
-            }
-
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
@@ -1024,23 +1034,40 @@ pub(crate) async fn ensure_model_ready(
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
-                // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-                // because `state.model_load_lock` (taken above) is the only
-                // lock protecting GPU 0's primary context on this path — the
-                // GpuPool path uses `worker.model_load_lock` and
-                // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-                mold_inference::reclaim_gpu_memory(0);
             }
 
-            // Take the engine out of cache to load in spawn_blocking. Using
-            // `take()` (not `remove()`) keeps the model name in the cache's
-            // `in_flight` set so concurrent `check_model_available` calls
-            // still see it as logically cached during the load window.
-            let cached = cache.take(model_name).ok_or_else(|| {
-                ApiError::internal(format!("cache race: model '{model_name}' vanished"))
-            })?;
             drop(cache);
+            if let Some(paths) = cached_paths.as_ref() {
+                preflight_memory_guard_after_drop(model_name, paths, 0, hint)?;
+            } else {
+                #[cfg(feature = "cuda")]
+                mold_inference::device::post_drop_free_vram_bytes(0)
+                    .map_err(|error| ApiError::insufficient_memory(error.to_string()))?;
+            }
+            let load_strategy = match cached_paths.as_ref() {
+                Some(paths) => select_server_load_strategy_for_budget(
+                    paths,
+                    effective_load_available_bytes(0, 0)?,
+                    hint,
+                ),
+                None => mold_inference::LoadStrategy::Eager,
+            };
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                tracing::info!(
+                    model = %model_name,
+                    "server load strategy degraded to sequential to fit post-drop memory budget"
+                );
+            }
 
+            // Only check the engine out after the authoritative post-drop
+            // guard passes. A failed guard must leave the parked cache entry
+            // intact rather than leaking its in-flight marker.
+            let cached = {
+                let mut cache = state.model_cache.lock().await;
+                cache.take(model_name).ok_or_else(|| {
+                    ApiError::internal(format!("cache race: model '{model_name}' vanished"))
+                })?
+            };
             let mut engine = cached.engine;
             if load_strategy == mold_inference::LoadStrategy::Sequential {
                 let Some(paths) = cached_paths else {
@@ -1235,17 +1262,6 @@ pub(crate) async fn pull_model(
 /// Unload the active model from GPU. The engine remains in the cache (unloaded)
 /// so it can be reloaded quickly on the next request.
 pub(crate) async fn unload_model(state: &AppState) -> String {
-    // Always clear the cached upscaler engine to free GPU memory,
-    // regardless of whether a diffusion model is loaded.
-    // Use try_lock() to avoid blocking the async runtime if an upscale
-    // is in progress (the spawn_blocking thread holds this lock).
-    if let Ok(mut upscaler) = state.upscaler_cache.try_lock() {
-        if upscaler.is_some() {
-            *upscaler = None;
-            tracing::info!("upscaler cache cleared");
-        }
-    }
-
     let mut cache = state.model_cache.lock().await;
     match cache.unload_active() {
         Some(name) => {
@@ -1255,12 +1271,11 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);
-            // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-            // because `state.model_load_lock` (taken above) is the only
-            // lock protecting GPU 0's primary context on this path — the
-            // GpuPool path uses `worker.model_load_lock` and
-            // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-            mold_inference::reclaim_gpu_memory(0);
+            let free_after_drop = mold_inference::device::post_drop_free_vram_bytes(0);
+            tracing::info!(
+                free_vram_bytes = ?free_after_drop,
+                "legacy model unloaded; sampled post-drop VRAM"
+            );
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
@@ -1282,24 +1297,8 @@ async fn create_and_load_engine(
         cache.active_vram_bytes()
     };
     preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
-    let load_strategy = select_server_load_strategy_for_device(
-        &paths,
-        effective_load_available_bytes(active_vram, 0),
-        mold_inference::device::total_vram_bytes(0),
-        hint,
-    );
-    if load_strategy == mold_inference::LoadStrategy::Sequential {
-        tracing::info!(
-            model = %model_name,
-            "server load strategy degraded to sequential to fit memory budget"
-        );
-    }
-
     // Unload the current active model to free GPU memory.
-    // Only reclaim GPU memory if there was an active model — calling
-    // reclaim_gpu_memory() (CUDA primary context reset) when nothing was
-    // loaded is unnecessary and may misbehave on some driver versions.
-    let had_active = {
+    {
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
         if let Some(ref name) = result {
@@ -1311,15 +1310,19 @@ async fn create_and_load_engine(
                 "unloading active model before loading new one"
             );
         }
-        result.is_some()
-    };
-    if had_active {
-        // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-        // because `state.model_load_lock` (taken above) is the only
-        // lock protecting GPU 0's primary context on this path — the
-        // GpuPool path uses `worker.model_load_lock` and
-        // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-        mold_inference::reclaim_gpu_memory(0);
+    }
+    preflight_memory_guard_after_drop(model_name, &paths, 0, hint)?;
+    let load_strategy = select_server_load_strategy_for_device(
+        &paths,
+        effective_load_available_bytes(0, 0)?,
+        mold_inference::device::total_vram_bytes(0),
+        hint,
+    );
+    if load_strategy == mold_inference::LoadStrategy::Sequential {
+        tracing::info!(
+            model = %model_name,
+            "server load strategy degraded to sequential to fit post-drop memory budget"
+        );
     }
 
     let config = state.config.read().await;
@@ -1391,6 +1394,94 @@ mod tests {
 
     const GB: u64 = 1_000_000_000;
 
+    struct IsolatedModelEnvironment {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl IsolatedModelEnvironment {
+        fn new(home: &std::path::Path) -> Self {
+            Self::with_models_dir_override(home, true)
+        }
+
+        fn without_models_dir_override(home: &std::path::Path) -> Self {
+            Self::with_models_dir_override(home, false)
+        }
+
+        fn with_models_dir_override(home: &std::path::Path, set_models_dir: bool) -> Self {
+            const CLEARED_KEYS: &[&str] = &[
+                "MOLD_TRANSFORMER_PATH",
+                "MOLD_VAE_PATH",
+                "MOLD_CLIP_PATH",
+                "MOLD_CLIP_TOKENIZER_PATH",
+                "MOLD_CLIP2_PATH",
+                "MOLD_CLIP2_TOKENIZER_PATH",
+                "MOLD_T5_PATH",
+                "MOLD_T5_TOKENIZER_PATH",
+                "MOLD_TEXT_TOKENIZER_PATH",
+                "MOLD_DECODER_PATH",
+                "MOLD_SPATIAL_UPSCALER_PATH",
+                "MOLD_TEMPORAL_UPSCALER_PATH",
+                "MOLD_DISTILLED_LORA_PATH",
+            ];
+            let lock = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut previous = Vec::with_capacity(CLEARED_KEYS.len() + 4);
+            for key in ["MOLD_HOME", "MOLD_MODELS_DIR", "HF_HOME", "HF_HUB_CACHE"] {
+                previous.push((key, std::env::var_os(key)));
+            }
+            for &key in CLEARED_KEYS {
+                previous.push((key, std::env::var_os(key)));
+            }
+            unsafe {
+                std::env::set_var("MOLD_HOME", home);
+                if set_models_dir {
+                    std::env::set_var("MOLD_MODELS_DIR", home);
+                } else {
+                    std::env::remove_var("MOLD_MODELS_DIR");
+                }
+                std::env::set_var("HF_HOME", home.join("hf-home"));
+                std::env::set_var("HF_HUB_CACHE", home.join("hf-home/hub"));
+                for key in CLEARED_KEYS {
+                    std::env::remove_var(key);
+                }
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IsolatedModelEnvironment {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, value) in self.previous.drain(..).rev() {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn materialize_manifest_companion(
+        models_dir: &std::path::Path,
+        companion: &str,
+        config: &mold_core::Config,
+    ) -> mold_core::ModelPaths {
+        let manifest = mold_core::manifest::find_manifest(companion).unwrap();
+        for file in &manifest.files {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"test fixture").unwrap();
+            mold_core::download::write_sha256_marker(&path, "test").unwrap();
+        }
+        mold_core::ModelPaths::resolve(companion, config).unwrap()
+    }
+
     #[test]
     fn installed_ltx2_catalog_models_advertise_checkpoint_audio_assets() {
         let dir = tempfile::tempdir().unwrap();
@@ -1456,81 +1547,6 @@ mod tests {
         );
         let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(combined[0].supports_audio, Some(true));
-    }
-
-    /// RAII guard for `MOLD_LTX2_GEMMA_DEVICE` (and the deprecated alias).
-    /// Drop restores the prior values so adjacent tests don't see stale
-    /// state. Cargo's parallel runner is serialized via a static mutex
-    /// because env vars are process-global.
-    struct Ltx2GemmaEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior_main: Option<std::ffi::OsString>,
-        prior_legacy: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for Ltx2GemmaEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
-                std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-                if let Some(v) = self.prior_main.take() {
-                    std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
-                }
-                if let Some(v) = self.prior_legacy.take() {
-                    std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
-                }
-            }
-        }
-    }
-
-    fn ltx2_gemma_env_guard(value: &str) -> Ltx2GemmaEnvGuard {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
-        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-        unsafe {
-            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-            std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", value);
-        }
-        Ltx2GemmaEnvGuard {
-            _lock: lock,
-            prior_main,
-            prior_legacy,
-        }
-    }
-
-    struct OffloadEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for OffloadEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("MOLD_OFFLOAD");
-                if let Some(v) = self.prior.take() {
-                    std::env::set_var("MOLD_OFFLOAD", v);
-                }
-            }
-        }
-    }
-
-    fn offload_env_guard(value: &str) -> OffloadEnvGuard {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var_os("MOLD_OFFLOAD");
-        unsafe {
-            std::env::set_var("MOLD_OFFLOAD", value);
-        }
-        OffloadEnvGuard { _lock: lock, prior }
     }
 
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
@@ -1729,10 +1745,9 @@ mod tests {
         (dir, paths)
     }
 
-    /// Regression: a quantized FLUX-shaped model should fit on a 24 GB card
-    /// when the sibling model is unloaded and the context reset, even though
-    /// the Eager (sum) peak would have been ~24 GB and tripped the 90 %
-    /// hard limit.
+    /// Regression: a quantized FLUX-shaped model should fit when the actual
+    /// post-drop sample reports 24 GB available, even though the Eager (sum)
+    /// peak would have been ~24 GB and tripped the 90 % hard limit.
     ///
     /// Concrete shape: FLUX-dev:q8 → transformer ≈ 12 GB, VAE ≈ 0.3 GB,
     /// T5 ≈ 9.5 GB, CLIP ≈ 0.25 GB. Eager peak = 12+0.3+9.5+0.25+2 ≈ 24 GB
@@ -1744,10 +1759,7 @@ mod tests {
         // composition is realistic enough to exercise Eager-vs-Sequential
         // divergence (encoder + transformer both > headroom).
         let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
-        // Free 4 GB on a 24 GB card with an 18 GB sibling about to be
-        // reclaimed → effective_available passed in by the outer guard
-        // is total_vram = 24 GB on CUDA, but we test the inner directly with
-        // the Sequential strategy in mind.
+        // This is the authoritative post-drop reading, not nominal capacity.
         let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB, None);
         assert!(
             result.is_ok(),
@@ -1757,8 +1769,32 @@ mod tests {
     }
 
     #[test]
+    fn preflight_treats_unrecovered_vram_as_unavailable_pressure() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        // Nominal capacity may be 24 GB, but only the observed 14 GB is
+        // admissible after the old engine is gone. The guard must not promote
+        // this reading back to total capacity.
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 14 * GB, None);
+        assert!(
+            result.is_err(),
+            "unrecovered or externally-owned VRAM must remain unavailable"
+        );
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn metal_unified_memory_has_no_second_post_drop_admission_gate() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(100, 10, 20, 5);
+        let result = preflight_memory_guard_after_drop("metal-swap", &paths, 0, None);
+        assert!(
+            result.is_ok(),
+            "Metal uses the additive unified-memory guard before unload; an \
+             instantaneous post-drop sample must not add a spurious second gate"
+        );
+    }
+
+    #[test]
     fn preflight_accepts_forced_flux_offload_bf16_layout_on_24gb() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux_shaped_paths_with_sizes(24, 1, 10, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1768,8 +1804,15 @@ mod tests {
             family: ActivationFamily::FluxDit,
         };
 
-        let result =
-            preflight_memory_guard_with_available("flux-dev:bf16", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "flux-dev:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            true,
+            false,
+        );
 
         assert!(
             result.is_ok(),
@@ -1780,7 +1823,6 @@ mod tests {
 
     #[test]
     fn preflight_accepts_large_flux_bf16_auto_offload_on_24gb() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1808,7 +1850,6 @@ mod tests {
 
     #[test]
     fn server_auto_enables_offload_for_large_flux_bf16_without_env() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1819,7 +1860,7 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, false),
             "large FLUX BF16 checkpoints should load with block offload even \
              when MOLD_OFFLOAD is not globally forced"
         );
@@ -1965,7 +2006,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_sd3_gguf() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1976,14 +2016,13 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force unsupported SD3 GGUF block offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_zimage_gguf() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
         let hint = ActivationHint {
             width: 1024,
@@ -1994,14 +2033,13 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force unsupported Z-Image GGUF block offload"
         );
     }
 
     #[test]
     fn offload_env_is_preserved_for_zimage_bf16() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
         let hint = ActivationHint {
             width: 1024,
@@ -2012,14 +2050,13 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "BF16/FP Z-Image paths should still receive explicit offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_zimage_lora_with_ambiguous_family_hint() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2057,7 +2094,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "Z-Image LoRA requests must not receive global MOLD_OFFLOAD even \
              when duplicate catalog rows provide an ambiguous Flux hint"
         );
@@ -2065,7 +2102,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_lora_request() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2076,7 +2112,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "global MOLD_OFFLOAD must not force Flux.2 block offload for LoRA \
              requests because Flux.2 offload+LoRA is not supported"
         );
@@ -2084,7 +2120,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_lora_with_ambiguous_family_hint() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2123,7 +2158,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "Flux.2 LoRA requests must not receive global MOLD_OFFLOAD even \
              when the catalog family hint is missing or ambiguous"
         );
@@ -2131,7 +2166,6 @@ mod tests {
 
     #[test]
     fn flux2_lora_request_requires_fresh_engine_when_plain_offload_was_enabled() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2169,7 +2203,12 @@ mod tests {
         };
 
         assert!(
-            request_requires_fresh_engine_for_offload_policy(&paths, Some(hint), true),
+            request_requires_fresh_engine_for_offload_policy_with_request(
+                &paths,
+                Some(hint),
+                true,
+                true,
+            ),
             "a cached Flux.2 engine loaded for plain offload must be recreated \
              before serving a LoRA request, otherwise the runtime still sees \
              offload+LoRA"
@@ -2178,7 +2217,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_preserved_for_plain_flux2_request() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2189,14 +2227,13 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "plain Flux.2 requests should still receive explicit offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_flux2_gguf() {
-        let _guard = offload_env_guard("1");
         let (dir, mut paths) = flux2_klein9b_bf16_paths();
         let gguf = dir.path().join("flux2-klein-9b-q8.gguf");
         std::fs::File::create(&gguf)
@@ -2214,7 +2251,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force Flux.2 GGUF block offload \
              because GGUF variants use quantized transformer paths"
         );
@@ -2222,7 +2259,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_nvfp4() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2260,7 +2296,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force Flux.2 NVFP4 block offload \
              because the NVFP4 streaming linear path is the memory-control mechanism"
         );
@@ -2478,7 +2514,6 @@ mod tests {
     /// at 2048² (where the budget grows past 1 GB) on the same card.
     #[test]
     fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
-        let _guard = offload_env_guard("0");
         // Shape: 19 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
         // peak = max(10, 20) + 2 GB headroom = 22 GB. On a 25 GB card the
         // 90 % hard limit is 22.5 GB:
@@ -2746,7 +2781,7 @@ mod tests {
     }
 
     #[test]
-    fn server_load_strategy_uses_device_total_when_live_available_missing() {
+    fn server_load_strategy_never_substitutes_total_when_live_available_missing() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2759,12 +2794,7 @@ mod tests {
         let strategy =
             select_server_load_strategy_for_device(&paths, None, Some(24 * GB), Some(hint));
 
-        assert_eq!(
-            strategy,
-            mold_inference::LoadStrategy::Sequential,
-            "when live free-memory probing is unavailable, the worker should still \
-             use known device total VRAM instead of defaulting to eager"
-        );
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
     }
 
     /// Build LTX-2-shaped paths: a single 46 GB single-file checkpoint
@@ -2873,7 +2903,6 @@ mod tests {
     /// that flips the hint plumbing back is caught.
     #[test]
     fn preflight_rejects_ltx2_22b_when_hint_marks_non_streaming() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 0);
         // Use FluxDit family — same shape, no streaming flag — so the
         // preflight falls through to the file-size estimator and rejects
@@ -2902,7 +2931,6 @@ mod tests {
     /// see from the runtime, but the preflight captures it up-front.
     #[test]
     fn preflight_rejects_ltx2_when_encoder_phase_exceeds_card() {
-        let _guard = ltx2_gemma_env_guard("gpu");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2911,8 +2939,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            true,
+        );
         assert!(
             result.is_err(),
             "25 GB Gemma TE alone exceeds 90 %% of 24 GB during the encoder \
@@ -2928,7 +2963,6 @@ mod tests {
     /// the runtime fallback can run.
     #[test]
     fn preflight_admits_ltx2_auto_gemma_even_when_gpu_encoder_would_exceed_cap() {
-        let _guard = ltx2_gemma_env_guard("auto");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2937,8 +2971,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            false,
+        );
         assert!(
             result.is_ok(),
             "auto Gemma placement can fall back to CPU at runtime, so preflight \
@@ -2954,7 +2995,6 @@ mod tests {
     /// This is the load-bearing behavior on a single 3090 running cv:2752735.
     #[test]
     fn preflight_admits_ltx2_22b_with_25gb_gemma_when_resolver_picks_cpu() {
-        let _guard = ltx2_gemma_env_guard("cpu");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2963,8 +3003,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            false,
+        );
         assert!(
             result.is_ok(),
             "with MOLD_LTX2_GEMMA_DEVICE=cpu the encoder phase should not \
@@ -3217,8 +3264,7 @@ mod tests {
     fn resolve_intent_picks_flux_vae_companion_when_primary_is_transformer_only() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3246,21 +3292,13 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_preserves_flux_schnell_subfamily() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path = models_dir
             .join("cv-1153358/flux/civitai/1153358/agfluxSchnell_realistic23.safetensors");
@@ -3291,21 +3329,13 @@ mod tests {
             Some(true),
             "flux1-s catalog entries must select FLUX schnell config, not dev guidance config"
         );
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_applies_flux_dev_subfamily_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path =
             models_dir.join("cv-2319074/flux/civitai/2319074/jibMixFlux_v12SRPO.safetensors");
@@ -3337,111 +3367,67 @@ mod tests {
         assert_eq!(cfg.default_guidance, Some(3.5));
         assert_eq!(cfg.default_width, Some(1024));
         assert_eq!(cfg.default_height, Some(1024));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_populates_qwen_runtime_companion_paths() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
         let primary_path =
             models_dir.join("cv-2110043/qwen-image/civitai/2110043/qwenImage_fp8.safetensors");
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
         std::fs::File::create(&primary_path).unwrap();
 
-        let runtime_dir = models_dir.join("qwen-image-runtime");
-        let vae_path = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
-        let te_path = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
-        let tok_path = runtime_dir.join("tokenizer/tokenizer.json");
-        for path in [&vae_path, &te_path, &tok_path] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::File::create(path).unwrap();
-        }
-
-        let mut config = mold_core::Config {
+        let config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        config.models.insert(
-            "qwen-image-runtime".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(vae_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                text_encoder_files: Some(vec![te_path.to_string_lossy().into_owned()]),
-                text_tokenizer: Some(tok_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
+        let companion_paths =
+            materialize_manifest_companion(models_dir, "qwen-image-runtime", &config);
+        let vae_path = companion_paths.vae;
+        let text_encoder_files = companion_paths.text_encoder_files;
+        let tokenizer_path = companion_paths.text_tokenizer;
 
         let mut entry = flux_unet_only_catalog_entry("2110043", "qwenImage_fp8.safetensors");
         entry.family = mold_catalog::families::Family::QwenImage;
         entry.companions = vec!["qwen-image-runtime".into()];
         let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
         let cfg = resolve_intent_to_paths("cv:2110043", &intent, &config).unwrap();
+        let expected_text_encoder_files = text_encoder_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
 
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(
             cfg.text_encoder_files.as_deref(),
-            Some(vec![te_path.to_string_lossy().into_owned()].as_slice())
+            Some(expected_text_encoder_files.as_slice())
         );
-        assert_eq!(cfg.text_tokenizer.as_deref(), tok_path.to_str());
+        assert_eq!(
+            cfg.text_tokenizer.as_deref(),
+            tokenizer_path.as_deref().and_then(std::path::Path::to_str)
+        );
     }
 
     #[test]
     fn resolve_intent_populates_wuerstchen_runtime_companion_paths() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
         let primary_path = models_dir.join(
             "hf-example/wuerstchen-prior/wuerstchen/example/wuerstchen-prior/prior.safetensors",
         );
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
         std::fs::File::create(&primary_path).unwrap();
 
-        let runtime_dir = models_dir.join("wuerstchen-runtime");
-        let decoder_path = runtime_dir.join("decoder/diffusion_pytorch_model.safetensors");
-        let vae_path = runtime_dir.join("vqgan/diffusion_pytorch_model.safetensors");
-        let clip_path = runtime_dir.join("text_encoder/model.safetensors");
-        let clip_tok_path = runtime_dir.join("tokenizer/tokenizer.json");
-        let clip_g_path = runtime_dir.join("prior/text_encoder/model.safetensors");
-        let clip_g_tok_path = runtime_dir.join("prior/tokenizer/tokenizer.json");
-        for path in [
-            &decoder_path,
-            &vae_path,
-            &clip_path,
-            &clip_tok_path,
-            &clip_g_path,
-            &clip_g_tok_path,
-        ] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::File::create(path).unwrap();
-        }
-
-        let mut config = mold_core::Config {
+        let config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        config.models.insert(
-            "wuerstchen-runtime".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(decoder_path.to_string_lossy().into_owned()),
-                decoder: Some(decoder_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                clip_encoder: Some(clip_path.to_string_lossy().into_owned()),
-                clip_tokenizer: Some(clip_tok_path.to_string_lossy().into_owned()),
-                clip_encoder_2: Some(clip_g_path.to_string_lossy().into_owned()),
-                clip_tokenizer_2: Some(clip_g_tok_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
+        let companion_paths =
+            materialize_manifest_companion(models_dir, "wuerstchen-runtime", &config);
 
         let mut entry = flux_unet_only_catalog_entry("unused", "prior.safetensors");
         entry.id = mold_catalog::entry::CatalogId::from("hf:example/wuerstchen-prior");
@@ -3455,12 +3441,42 @@ mod tests {
         let cfg = resolve_intent_to_paths("hf:example/wuerstchen-prior", &intent, &config).unwrap();
 
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
-        assert_eq!(cfg.decoder.as_deref(), decoder_path.to_str());
-        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
-        assert_eq!(cfg.clip_encoder.as_deref(), clip_path.to_str());
-        assert_eq!(cfg.clip_tokenizer.as_deref(), clip_tok_path.to_str());
-        assert_eq!(cfg.clip_encoder_2.as_deref(), clip_g_path.to_str());
-        assert_eq!(cfg.clip_tokenizer_2.as_deref(), clip_g_tok_path.to_str());
+        assert_eq!(
+            cfg.decoder.as_deref(),
+            companion_paths
+                .decoder
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(cfg.vae.as_deref(), companion_paths.vae.to_str());
+        assert_eq!(
+            cfg.clip_encoder.as_deref(),
+            companion_paths
+                .clip_encoder
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_tokenizer.as_deref(),
+            companion_paths
+                .clip_tokenizer
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_encoder_2.as_deref(),
+            companion_paths
+                .clip_encoder_2
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_tokenizer_2.as_deref(),
+            companion_paths
+                .clip_tokenizer_2
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
     }
 
     #[test]
@@ -3473,8 +3489,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let mut config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
@@ -3585,13 +3600,6 @@ mod tests {
             cfg.text_encoder_files.as_deref(),
             Some(expected_text_encoder_files.as_slice())
         );
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     /// Task 5 (Step 1): resolution surfaces the *specific* missing
@@ -3602,6 +3610,7 @@ mod tests {
     fn resolve_intent_returns_error_naming_missing_required_companion() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3610,9 +3619,6 @@ mod tests {
             &primary_path,
             &["double_blocks.0.img_attn.proj.weight", "img_in.weight"],
         );
-
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
 
         // Empty config — none of t5, clip-l, flux-vae are installed.
         let config = mold_core::Config {
@@ -3633,13 +3639,6 @@ mod tests {
             "error must name a specific missing companion, got: {msg}"
         );
         assert!(matches!(err, ResolveError::CompanionConfigMissing { .. }));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     /// Task 6: with the lazy intent / resolve flow, a second request
@@ -3651,8 +3650,7 @@ mod tests {
     fn cv_id_resolves_when_files_arrive_after_initial_request() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let entry =
             flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3686,21 +3684,13 @@ mod tests {
         let cfg_second = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
         assert_eq!(cfg_second.transformer.as_deref(), primary_path.to_str());
         assert_eq!(cfg_second.vae.as_deref(), vae_path.to_str());
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_rejects_truncated_sidecar_primary() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3729,13 +3719,6 @@ mod tests {
 
         let err = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap_err();
         assert!(matches!(err, ResolveError::PrimaryFileMissing { .. }));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     // ── InstallError translation tests (Task 4) ────────────────────────────

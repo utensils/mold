@@ -620,9 +620,9 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_schema_reaches_v11_and_creates_chain_job_tables() {
+    fn in_memory_schema_reaches_current_version_and_creates_chain_job_tables() {
         let db = db();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), crate::SCHEMA_VERSION);
         assert!(table_exists(&db, "chain_jobs"));
         assert!(table_exists(&db, "chain_job_stages"));
     }

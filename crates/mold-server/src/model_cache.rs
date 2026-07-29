@@ -57,6 +57,9 @@ pub struct ModelCache {
     /// readers can still see "this model is the active one" during the
     /// take/restore window.
     in_flight_active: Option<String>,
+    /// Measured footprint of the checked-out active engine. This remains
+    /// visible to scheduler telemetry while inference owns the engine.
+    in_flight_active_vram_bytes: u64,
 }
 
 impl ModelCache {
@@ -67,6 +70,7 @@ impl ModelCache {
             max_cached: max_cached.max(1),
             in_flight: HashSet::new(),
             in_flight_active: None,
+            in_flight_active_vram_bytes: 0,
         }
     }
 
@@ -104,6 +108,7 @@ impl ModelCache {
         self.in_flight.remove(&name);
         if self.in_flight_active.as_deref() == Some(name.as_str()) {
             self.in_flight_active = None;
+            self.in_flight_active_vram_bytes = 0;
         }
         self.touch_order(&name);
         self.report_size();
@@ -138,6 +143,7 @@ impl ModelCache {
             self.in_flight.insert(model_name.to_string());
             if entry.residency == ModelResidency::Gpu {
                 self.in_flight_active = Some(model_name.to_string());
+                self.in_flight_active_vram_bytes = entry.vram_bytes;
             }
             self.report_size();
         }
@@ -151,6 +157,7 @@ impl ModelCache {
         self.in_flight.remove(&name);
         if self.in_flight_active.as_deref() == Some(name.as_str()) {
             self.in_flight_active = None;
+            self.in_flight_active_vram_bytes = 0;
         }
         self.lru_order.push(name.clone());
         self.entries.insert(name, cached);
@@ -168,6 +175,7 @@ impl ModelCache {
         self.in_flight.remove(model_name);
         if self.in_flight_active.as_deref() == Some(model_name) {
             self.in_flight_active = None;
+            self.in_flight_active_vram_bytes = 0;
         }
         self.debug_check_invariants();
     }
@@ -205,6 +213,7 @@ impl ModelCache {
         self.in_flight.remove(&model_name);
         if self.in_flight_active.as_deref() == Some(model_name.as_str()) {
             self.in_flight_active = None;
+            self.in_flight_active_vram_bytes = 0;
         }
         self.touch_order(&model_name);
         self.report_size();
@@ -227,6 +236,7 @@ impl ModelCache {
         self.in_flight.remove(model_name);
         if self.in_flight_active.as_deref() == Some(model_name) {
             self.in_flight_active = None;
+            self.in_flight_active_vram_bytes = 0;
         }
         let removed = self.entries.remove(model_name).map(|e| e.engine);
         if removed.is_some() {
@@ -282,6 +292,7 @@ impl ModelCache {
         self.lru_order.clear();
         self.in_flight.clear();
         self.in_flight_active = None;
+        self.in_flight_active_vram_bytes = 0;
         let drained: Vec<_> = self.entries.drain().map(|(_, e)| e.engine).collect();
         self.report_size();
         self.debug_check_invariants();
@@ -294,7 +305,7 @@ impl ModelCache {
             .values()
             .find(|e| e.residency == ModelResidency::Gpu)
             .map(|e| e.vram_bytes)
-            .unwrap_or(0)
+            .unwrap_or(self.in_flight_active_vram_bytes)
     }
 
     /// The currently GPU-loaded model name.
@@ -788,6 +799,23 @@ mod tests {
         );
         assert_eq!(cache.len(), 0);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn active_vram_remains_reclaimable_while_engine_is_checked_out() {
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("model-a")), 16 << 30);
+        assert_eq!(cache.active_vram_bytes(), 16 << 30);
+
+        let engine = cache.take("model-a").expect("loaded engine");
+        assert_eq!(
+            cache.active_vram_bytes(),
+            16 << 30,
+            "scheduler must still see the exact resident footprint while the owner is busy"
+        );
+
+        cache.restore(engine);
+        assert_eq!(cache.active_vram_bytes(), 16 << 30);
     }
 
     /// `clear_in_flight` on a name that was never in flight is a no-op.

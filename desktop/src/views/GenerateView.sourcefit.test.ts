@@ -23,11 +23,37 @@ vi.mock("vue-router", () => ({
   useRoute: () => ({ query: {} }),
 }));
 const apiJsonTo = vi.fn();
-vi.mock("../lib/api/client", () => ({
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJson: vi.fn(() => Promise.resolve([])),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),
 }));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@studio/api/generationPlacement")>();
+  const planned = () =>
+    Promise.resolve({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+  return {
+    ...original,
+    previewGenerationPlacement: planned,
+    previewChainPlacement: planned,
+  };
+});
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
 vi.mock("../lib/api/history", () => ({ fetchHistory: vi.fn(() => Promise.resolve([])) }));
 
@@ -106,7 +132,7 @@ describe("GenerateView source-fit submit path", () => {
 
   it("resolves the host before preprocessing and routes the upscale to it", async () => {
     const hosts = setupMultiHost();
-    const resolveRoute = vi.spyOn(hosts, "resolveRoute");
+    const resolveFeasibleRoute = vi.spyOn(hosts, "resolveFeasibleRoute");
     const generation = useGenerationStore();
     const submitBatch = vi
       .spyOn(generation, "submitBatch")
@@ -127,28 +153,26 @@ describe("GenerateView source-fit submit path", () => {
     await flushPromises();
 
     // Host resolution happened BEFORE preprocessing (same-host invariant).
-    expect(resolveRoute).toHaveBeenCalled();
+    expect(resolveFeasibleRoute).toHaveBeenCalled();
     expect(applySourceFitPreprocess).toHaveBeenCalled();
-    expect(Math.min(...resolveRoute.mock.invocationCallOrder)).toBeLessThan(
+    expect(Math.min(...resolveFeasibleRoute.mock.invocationCallOrder)).toBeLessThan(
       Math.min(...applySourceFitPreprocess.mock.invocationCallOrder),
     );
 
     // The upscale hit the SAME host the generation routed to.
-    const route = resolveRoute.mock.results.find((r) => r.type === "return")!.value;
-    expect(route).not.toBeNull();
-    if (!route) throw new Error("unreachable: resolveRoute returned null");
+    expect(submitBatch).toHaveBeenCalledTimes(1);
+    const [req, , batchRoute] = submitBatch.mock.calls[0]!;
+    expect(batchRoute).toBeTruthy();
+    if (!batchRoute) throw new Error("unreachable: submit did not retain its route");
     expect(upscaleImage).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "real-esrgan-x2plus:fp16",
         image: "SRC",
-        target: route.target,
+        target: batchRoute.target,
       }),
     );
-    expect(submitBatch).toHaveBeenCalledTimes(1);
-    const [req, , batchRoute] = submitBatch.mock.calls[0]!;
     expect(req.source_image).toBe("FIT");
     expect(req.mask_image).toBe("PADMASK");
-    expect(batchRoute).toEqual(route);
   });
 
   it("passes the form's source, mask, policy, and target size to the preprocess", async () => {

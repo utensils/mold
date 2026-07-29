@@ -15,7 +15,10 @@ vi.mock("../../lib/api/client", () => ({
   apiFetchTo: vi.fn(),
 }));
 vi.mock("../../lib/ipc", () => ({
-  ipc: { localGalleryList: vi.fn(() => Promise.resolve([])), localGalleryDelete: vi.fn() },
+  ipc: {
+    localGalleryList: vi.fn(() => Promise.resolve({ images: [], target: null })),
+    localGalleryDelete: vi.fn(),
+  },
   inTauri: () => false,
 }));
 

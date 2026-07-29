@@ -1,12 +1,16 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::io::Write as _;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use base64::Engine as _;
 use mold_core::{
     ImageData, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use mold_db::{MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
@@ -104,6 +108,7 @@ pub(crate) fn save_image_to_dir(
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
 ) {
+    let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
     save_image_to_dir_with_suffix(
         dir,
         img,
@@ -114,6 +119,7 @@ pub(crate) fn save_image_to_dir(
         generation_time_ms,
         db,
         events,
+        &gallery_gate,
     );
 }
 
@@ -128,6 +134,7 @@ fn save_image_to_dir_with_suffix(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -143,31 +150,58 @@ fn save_image_to_dir_with_suffix(
             filename.trim_end_matches(&format!(".{ext}"))
         );
     }
-    let path = dir.join(&filename);
-    match std::fs::write(&path, &img.data) {
-        Ok(()) => tracing::info!("saved image to {}", path.display()),
-        Err(e) => {
-            tracing::warn!("failed to save image to {}: {e}", path.display());
-            return None;
-        }
-    }
-    let mut image_row = None;
-    if let (Some(db), Some(meta)) = (db, metadata) {
-        image_row = mold_db::persist::record_saved_output_returning(
-            db,
+    let (filename, path, reservation) =
+        match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
+            Ok(saved) => saved,
+            Err(e) => {
+                tracing::warn!("failed to save image to {}: {e}", dir.display());
+                return None;
+            }
+        };
+    tracing::info!("saved image to {}", path.display());
+    let image_row = if let Some(meta) = metadata {
+        let params = mold_db::persist::OutputRecordParams {
+            format: img.format,
+            metadata: meta,
+            source: RecordSource::Server,
+            generation_time_ms,
+            backend: Some(mold_inference::compiled_backend_label()),
+        };
+        let record = mold_db::persist::build_saved_output_record(dir, &filename, &path, &params);
+        let record = match crate::batch_transaction::archive_ordinary_gallery_record(
             dir,
-            &filename,
             &path,
-            &mold_db::persist::OutputRecordParams {
-                format: img.format,
-                metadata: meta,
-                source: RecordSource::Server,
-                generation_time_ms,
-                backend: Some(mold_inference::compiled_backend_label()),
-            },
-        )
-        .map(|rec| Box::new(rec.to_gallery_image()));
-    }
+            record,
+            gallery_gate,
+            reservation.authority(),
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                drop(reservation);
+                tracing::error!(
+                    file = %path.display(),
+                    %error,
+                    "gallery archive failed; rolled back unpublished image"
+                );
+                return None;
+            }
+        };
+        drop(reservation);
+        if let Some(db) = db {
+            if let Err(error) = db.upsert(&record) {
+                tracing::warn!(
+                    "metadata DB upsert failed for {}: {error:#}",
+                    record.filename
+                );
+            }
+        }
+        Some(Box::new(record.to_gallery_image()))
+    } else {
+        drop(reservation);
+        None
+    };
     // Emit even without a DB row — `image: None` tells clients to refetch
     // `/api/gallery` instead of inserting in place.
     if let Some(events) = events {
@@ -200,6 +234,7 @@ pub(crate) fn save_generated_image_outputs(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> SavedOutputNames {
     let mut names = SavedOutputNames::default();
     if let Some(original) = original {
@@ -215,6 +250,7 @@ pub(crate) fn save_generated_image_outputs(
             generation_time_ms,
             db,
             events,
+            gallery_gate,
         );
     }
     let mut output_metadata = metadata.clone();
@@ -229,6 +265,7 @@ pub(crate) fn save_generated_image_outputs(
         generation_time_ms,
         db,
         events,
+        gallery_gate,
     );
     names
 }
@@ -253,6 +290,7 @@ pub(crate) fn save_video_to_dir(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -260,32 +298,55 @@ pub(crate) fn save_video_to_dir(
     }
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
-    let filename = mold_core::default_output_filename(model, ts, ext, 1, 0);
-    let path = dir.join(&filename);
-    if let Err(e) = std::fs::write(&path, bytes) {
-        tracing::error!("failed to save video to {}: {e}", path.display());
-        return None;
-    }
+    let desired = mold_core::default_output_filename(model, ts, ext, 1, 0);
+    let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
+        Ok(saved) => saved,
+        Err(e) => {
+            tracing::error!("failed to save video to {}: {e}", dir.display());
+            return None;
+        }
+    };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let record = mold_db::persist::build_saved_output_record(dir, &filename, &path, &params);
+    let record = match crate::batch_transaction::archive_ordinary_gallery_record(
+        dir,
+        &path,
+        record,
+        gallery_gate,
+        reservation.authority(),
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+            drop(reservation);
+            tracing::error!(
+                file = %path.display(),
+                %error,
+                "gallery archive failed; rolled back unpublished video"
+            );
+            return None;
+        }
+    };
+    drop(reservation);
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
     }
-    let mut image_row = None;
     if let Some(db) = db {
-        image_row = mold_db::persist::record_saved_output_returning(
-            db,
-            dir,
-            &filename,
-            &path,
-            &mold_db::persist::OutputRecordParams {
-                format,
-                metadata,
-                source: RecordSource::Server,
-                generation_time_ms,
-                backend: Some(mold_inference::compiled_backend_label()),
-            },
-        )
-        .map(|rec| Box::new(rec.to_gallery_image()));
+        if let Err(error) = db.upsert(&record) {
+            tracing::warn!(
+                "metadata DB upsert failed for {}: {error:#}",
+                record.filename
+            );
+        }
     }
+    let image_row = Some(Box::new(record.to_gallery_image()));
     if let Some(events) = events {
         events.publish(mold_core::ServerEvent::GalleryAdded {
             filename: filename.clone(),
@@ -293,6 +354,158 @@ pub(crate) fn save_video_to_dir(
         });
     }
     Some(filename)
+}
+
+/// Idempotently publish a video under one caller-owned gallery filename.
+///
+/// Durable chain finalization uses an attempt-derived filename so replaying a
+/// crash window upserts the same gallery row instead of allocating another
+/// timestamped output. An existing file is accepted only when its bytes match.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_video_to_dir_named(
+    dir: &std::path::Path,
+    filename: &str,
+    bytes: &[u8],
+    format: OutputFormat,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> anyhow::Result<String> {
+    let filename_path = std::path::Path::new(filename);
+    if filename_path.components().count() != 1
+        || !matches!(
+            filename_path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        anyhow::bail!("gallery filename must be one normal path component");
+    }
+    std::fs::create_dir_all(dir)?;
+    let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir)?;
+    let path = dir.join(filename);
+    let created = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(error.into());
+            }
+            crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&path)?;
+            if existing != bytes {
+                anyhow::bail!(
+                    "gallery replay target '{}' exists with different bytes",
+                    path.display()
+                );
+            }
+            false
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
+    let record = if let Some(existing) = index.get(filename) {
+        anyhow::ensure!(
+            existing.record().format == format
+                && existing.record().metadata == *metadata
+                && !existing.record().metadata_synthetic,
+            "gallery replay target '{}' exists with different archived metadata",
+            path.display()
+        );
+        existing.record().clone()
+    } else {
+        let record = mold_db::persist::build_saved_output_record(dir, filename, &path, &params);
+        match crate::batch_transaction::archive_ordinary_gallery_record(
+            dir,
+            &path,
+            record,
+            gallery_gate,
+            &authority,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                }
+                return Err(error).context("archiving durable chain gallery publication");
+            }
+        }
+    };
+    drop(authority);
+    if let Some(db) = db {
+        db.upsert(&record)
+            .context("recording durable chain gallery metadata")?;
+    }
+    if let Some(events) = events {
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename: filename.to_string(),
+            image: Some(Box::new(record.to_gallery_image())),
+        });
+    }
+    Ok(filename.to_string())
+}
+
+fn write_gallery_bytes_no_replace(
+    dir: &std::path::Path,
+    desired: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(
+    String,
+    std::path::PathBuf,
+    crate::batch_transaction::GalleryNameReservation,
+)> {
+    write_gallery_bytes_no_replace_with_directory_sync(
+        dir,
+        desired,
+        bytes,
+        &crate::batch_transaction::sync_ordinary_gallery_directory,
+    )
+}
+
+fn write_gallery_bytes_no_replace_with_directory_sync(
+    dir: &std::path::Path,
+    desired: &str,
+    bytes: &[u8],
+    sync_directory: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<(
+    String,
+    std::path::PathBuf,
+    crate::batch_transaction::GalleryNameReservation,
+)> {
+    let reservation = crate::batch_transaction::reserve_gallery_final_name_with_directory_sync(
+        dir,
+        desired,
+        sync_directory,
+    )?;
+    let filename = reservation.final_name().to_owned();
+    let path = dir.join(&filename);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
+    sync_directory(dir)?;
+    Ok((filename, path, reservation))
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -319,7 +532,7 @@ fn post_upscale_model_to_pull(
     Ok(Some(model_name))
 }
 
-async fn ensure_post_upscale_model_downloaded(
+pub(crate) async fn ensure_post_upscale_model_downloaded(
     state: &AppState,
     req: &mold_core::GenerateRequest,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -513,6 +726,9 @@ async fn upscale_generated_image_on_single_worker(
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
+                if let Some(mut old_engine) = cache.take() {
+                    old_engine.unload();
+                }
                 *cache = Some(new_engine);
             }
             let engine = cache.as_mut().unwrap();
@@ -709,6 +925,10 @@ pub struct QueuePause {
     /// `notify_waiters()` so *all* loops (single- and multi-GPU) proceed, not
     /// just one.
     notify: Notify,
+    #[cfg(test)]
+    waiters: AtomicUsize,
+    #[cfg(test)]
+    waiter_notify: Notify,
 }
 
 impl QueuePause {
@@ -716,6 +936,10 @@ impl QueuePause {
         Arc::new(Self {
             paused: AtomicBool::new(false),
             notify: Notify::new(),
+            #[cfg(test)]
+            waiters: AtomicUsize::new(0),
+            #[cfg(test)]
+            waiter_notify: Notify::new(),
         })
     }
 
@@ -762,6 +986,26 @@ impl QueuePause {
             tokio::pin!(notified);
             notified.as_mut().enable();
             if !self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.waiters.fetch_add(1, Ordering::SeqCst);
+                self.waiter_notify.notify_waiters();
+            }
+            notified.await;
+            #[cfg(test)]
+            self.waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn wait_until_blocked(&self) {
+        while self.waiters.load(Ordering::SeqCst) == 0 {
+            let notified = self.waiter_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.waiters.load(Ordering::SeqCst) > 0 {
                 break;
             }
             notified.await;
@@ -839,15 +1083,15 @@ async fn single_gpu_loaded_models(state: &AppState) -> std::collections::HashSet
 /// cache entry briefly disappears).
 fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    for worker in &state.gpu_pool.workers {
+    for worker in state.gpu_pool.worker_snapshot() {
         if let Ok(active_gen) = worker.active_generation.read() {
             if let Some(g) = active_gen.as_ref() {
                 set.insert(g.model.clone());
             }
         }
-        if let Ok(cache) = worker.model_cache.lock() {
-            if let Some(name) = cache.active_model() {
-                set.insert(name.to_string());
+        if let Ok(resident) = worker.resident_model.read() {
+            if let Some(name) = resident.as_ref() {
+                set.insert(name.clone());
             }
         }
     }
@@ -1267,12 +1511,14 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             );
             let mut saved_names = SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
+                let _gallery_writer = state.gallery_publication_gate.write().await;
                 let dir = dir.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
+                let gallery_gate = state.gallery_publication_gate.clone();
                 let save_task = if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
                     let video_gif_preview = video.gif_preview.clone();
@@ -1289,6 +1535,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
+                            &gallery_gate,
                         ),
                         original: None,
                     })
@@ -1307,6 +1554,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
+                            &gallery_gate,
                         )
                     })
                 };
@@ -1397,10 +1645,316 @@ pub async fn run_queue_dispatcher(
     job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
 ) {
+    run_queue_dispatcher_until_cancelled(job_rx, state, tokio_util::sync::CancellationToken::new())
+        .await;
+}
+
+pub async fn run_queue_dispatcher_until_cancelled(
+    job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
     tracing::debug!("multi-GPU queue dispatcher started");
     let buffer_size = resolve_lookahead_buffer();
     let max_deferrals = resolve_max_deferrals();
-    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
+    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals, shutdown).await;
+}
+
+pub async fn run_legacy_scheduled_work_dispatcher(
+    mut scheduled_work_rx: tokio::sync::mpsc::Receiver<crate::scheduler::ScheduledOwnerWork>,
+    mut owner_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::gpu_worker::LegacyOwnerEvent>,
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut scheduled_closed = false;
+    let mut followups_closed = false;
+    loop {
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
+        if scheduled_closed && followups_closed {
+            break;
+        }
+        let work = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            work = scheduled_work_rx.recv(), if !scheduled_closed => {
+                match work {
+                    Some(work) => Some(work),
+                    None => {
+                        scheduled_closed = true;
+                        None
+                    }
+                }
+            }
+            event = owner_event_rx.recv(), if !followups_closed => {
+                match event {
+                    Some(crate::gpu_worker::LegacyOwnerEvent::FollowupReady(work)) => Some(*work),
+                    None => {
+                        followups_closed = true;
+                        None
+                    }
+                }
+            }
+        };
+        let Some(work) = work else {
+            continue;
+        };
+        if !dispatch_legacy_scheduled_work(&state, work, &shutdown).await {
+            break;
+        }
+    }
+    scheduled_work_rx.close();
+    while let Some(work) = scheduled_work_rx.recv().await {
+        work.work.reject(legacy_dispatch_stop_message(&state));
+    }
+    while let Ok(crate::gpu_worker::LegacyOwnerEvent::FollowupReady(work)) =
+        owner_event_rx.try_recv()
+    {
+        work.work.reject(legacy_dispatch_stop_message(&state));
+    }
+    tracing::info!("legacy GPU utility dispatcher shutting down");
+}
+
+async fn dispatch_legacy_scheduled_work(
+    state: &AppState,
+    mut work: crate::scheduler::ScheduledOwnerWork,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
+    if let Err(error) = freeze_legacy_post_upscale_candidates(state, &mut work) {
+        work.work.reject(error);
+        return true;
+    }
+    let mut pending = Some(work);
+    let mut skip = Vec::new();
+    loop {
+        if !wait_for_legacy_dispatch(state, shutdown).await {
+            pending
+                .take()
+                .expect("legacy scheduled work remains pending")
+                .work
+                .reject(legacy_dispatch_stop_message(state));
+            return false;
+        }
+        let Some(current) = pending.as_ref() else {
+            return true;
+        };
+        if current.work.is_cancelled() {
+            return true;
+        }
+        if state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+        {
+            pending
+                .take()
+                .expect("legacy scheduled work remains pending")
+                .work
+                .reject("fatal CUDA error requires server restart".to_string());
+            return false;
+        }
+        let worker = if let Some(ordinal) = current.hard_ordinal {
+            state.gpu_pool.worker_by_ordinal(ordinal)
+        } else {
+            state.gpu_pool.select_worker_excluding(
+                &current.model_fingerprint,
+                current.estimated_vram_bytes,
+                &skip,
+            )
+        };
+        let Some(worker) = worker else {
+            if current.hard_ordinal.is_some() || state.gpu_pool.worker_count() == 0 {
+                pending
+                    .take()
+                    .expect("legacy scheduled work remains pending")
+                    .work
+                    .reject("requested GPU is unavailable".to_string());
+                return true;
+            }
+            skip.clear();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        };
+
+        let observation = build_observed_dispatch(
+            state,
+            ObservedDispatchInput {
+                work_id: &current.id,
+                work_kind: current.work.kind(),
+                model_fingerprint: &current.model_fingerprint,
+                estimated_vram_bytes: current.estimated_vram_bytes,
+                estimated_host_ram_bytes: current.estimated_host_ram_bytes,
+                request: None,
+                hard_ordinal: current.hard_ordinal,
+            },
+            &worker,
+        );
+        let mut current = pending.take().expect("legacy scheduled work is present");
+        if !current.utility_plans.is_empty() {
+            let selected = current.utility_plans.iter().find(|plan| {
+                matches!(
+                    plan.placement(),
+                    crate::gpu_pool::UtilityPlacement::Device { backend, ordinal }
+                        if backend == worker.gpu.backend && ordinal == worker.gpu.ordinal
+                )
+            });
+            let Some(selected) = selected.cloned() else {
+                current.work.reject(format!(
+                    "legacy GPU owner {} had no exact utility execution plan",
+                    worker.gpu.ordinal
+                ));
+                return true;
+            };
+            if let Err(error) = current.work.install_utility_plan(selected) {
+                current.work.reject(error);
+                return true;
+            }
+        }
+        let retry = crate::gpu_pool::OwnerWorkRetry {
+            model_fingerprint: current.model_fingerprint,
+            estimated_vram_bytes: current.estimated_vram_bytes,
+            estimated_host_ram_bytes: current.estimated_host_ram_bytes,
+            hard_ordinal: current.hard_ordinal,
+            priority: current.priority,
+            preferred_ordinal: current.preferred_ordinal,
+            candidate_plans: current.candidate_plans,
+            queue_rank: 0,
+            ready_at_ms: 0,
+            bypass_count: 0,
+            warm_wait_started_ms: None,
+            retry_not_before_ms: None,
+            utility_plans: current.utility_plans.clone(),
+        };
+        let fence = crate::scheduler::LeaseFence {
+            work_id: current.id,
+            device_id: crate::scheduler::worker_device_id(&worker),
+            owner_epoch: worker.owner_epoch,
+            state_version: 0,
+            plan_version: 0,
+            worker_generation: 0,
+            memory_sample_generation: 0,
+            memory_ledger_sequence: 0,
+        };
+        worker.reserve_legacy_transport();
+        let grant = Box::new(crate::gpu_pool::LeaseGrant {
+            fence,
+            work: current.work,
+            retry: Some(retry),
+        });
+        match worker.try_send_job(grant) {
+            Ok(()) => {
+                if let Some(observation) = observation {
+                    state.scheduled_work.observations().record(observation);
+                }
+                return true;
+            }
+            Err(error) => {
+                worker.settle_legacy_transport();
+                let grant = match error {
+                    std::sync::mpsc::TrySendError::Full(grant)
+                    | std::sync::mpsc::TrySendError::Disconnected(grant) => *grant,
+                };
+                let retry = grant
+                    .retry
+                    .expect("legacy scheduled work always carries retry metadata");
+                pending = Some(crate::scheduler::ScheduledOwnerWork {
+                    id: grant.fence.work_id,
+                    model_fingerprint: retry.model_fingerprint,
+                    estimated_vram_bytes: retry.estimated_vram_bytes,
+                    estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
+                    hard_ordinal: retry.hard_ordinal,
+                    priority: retry.priority,
+                    preferred_ordinal: retry.preferred_ordinal,
+                    candidate_plans: retry.candidate_plans,
+                    utility_plans: retry.utility_plans,
+                    work: grant.work,
+                });
+                if pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.hard_ordinal.is_none())
+                {
+                    skip.push(worker.gpu.ordinal);
+                    if skip.len() >= state.gpu_pool.worker_count().max(1) {
+                        skip.clear();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
+
+fn freeze_legacy_post_upscale_candidates(
+    state: &AppState,
+    work: &mut crate::scheduler::ScheduledOwnerWork,
+) -> Result<(), String> {
+    if !matches!(&work.work, crate::gpu_pool::OwnerWork::PostUpscale(_)) {
+        return Ok(());
+    }
+    #[cfg(feature = "expand")]
+    let base = work.utility_plans.iter().find_map(|plan| match plan {
+        crate::gpu_pool::UtilityExecutionPlan::Upscale(plan) => Some(plan),
+        crate::gpu_pool::UtilityExecutionPlan::PromptExpansion(_) => None,
+    });
+    #[cfg(not(feature = "expand"))]
+    let base = work.utility_plans.first().map(|plan| match plan {
+        crate::gpu_pool::UtilityExecutionPlan::Upscale(plan) => plan,
+    });
+    let base = base.ok_or_else(|| {
+        "post-generation upscaling lacked a frozen artifact candidate".to_string()
+    })?;
+    let placements = std::iter::once(crate::gpu_pool::UtilityPlacement::Cpu).chain(
+        state
+            .gpu_pool
+            .schedulable_workers()
+            .into_iter()
+            .map(|worker| crate::gpu_pool::UtilityPlacement::Device {
+                backend: worker.gpu.backend,
+                ordinal: worker.gpu.ordinal,
+            }),
+    );
+    work.utility_plans =
+        crate::scheduler::upscale_utility_candidates(&base.model_name, &base.weights, placements);
+    Ok(())
+}
+
+async fn wait_for_legacy_dispatch(
+    state: &AppState,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
+    if shutdown.is_cancelled()
+        || state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+    {
+        return false;
+    }
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = state.queue_pause.wait_if_paused() => {
+            !state.gpu_pool.workers.iter().any(|worker| {
+                worker.fatal_cuda_error.load(Ordering::SeqCst)
+            })
+        }
+    }
+}
+
+fn legacy_dispatch_stop_message(state: &AppState) -> String {
+    if state
+        .gpu_pool
+        .workers
+        .iter()
+        .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+    {
+        "fatal CUDA error requires server restart".to_string()
+    } else {
+        "GPU work was not started because the server is shutting down".to_string()
+    }
 }
 
 async fn run_queue_dispatcher_with_tuning(
@@ -1408,14 +1962,30 @@ async fn run_queue_dispatcher_with_tuning(
     state: AppState,
     buffer_size: usize,
     max_deferrals: usize,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
-    loop {
+    'dispatcher: loop {
+        if shutdown.is_cancelled()
+            || state
+                .gpu_pool
+                .workers
+                .iter()
+                .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+        {
+            break;
+        }
         // Hold new-job dispatch while paused; in-flight worker jobs continue.
-        state.queue_pause.wait_if_paused().await;
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
         if buffer.is_empty() {
-            match job_rx.recv().await {
+            match tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => None,
+                job = job_rx.recv() => job,
+            } {
                 Some(j) => buffer.push_back(BufferedJob::new(j)),
                 None => break,
             }
@@ -1424,7 +1994,9 @@ async fn run_queue_dispatcher_with_tuning(
         // Re-check after the recv: a pause that landed while this loop was
         // parked waiting for work must hold the job that woke it, not leak
         // it into dispatch.
-        state.queue_pause.wait_if_paused().await;
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
 
         // Honor user reorders (`PATCH /api/queue/:id {position}`) before the
         // model-swap picker runs — the registry is the single source of truth
@@ -1531,9 +2103,14 @@ async fn run_queue_dispatcher_with_tuning(
             output_dir: job.output_dir,
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            lease: None,
+            batch_child: job.batch_child,
         });
 
         let mut skip: Vec<usize> = if preferred_gpu.is_none() {
@@ -1549,6 +2126,19 @@ async fn run_queue_dispatcher_with_tuning(
         let mut dispatched = false;
 
         while !dispatched {
+            if shutdown.is_cancelled()
+                || state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+            {
+                if let Some(job) = gpu_job.take() {
+                    crate::gpu_pool::OwnerWork::Generation(Box::new(job))
+                        .reject(legacy_dispatch_stop_message(&state));
+                }
+                break 'dispatcher;
+            }
             if gpu_job
                 .as_ref()
                 .is_some_and(|pending| pending.result_tx.is_closed())
@@ -1601,24 +2191,57 @@ async fn run_queue_dispatcher_with_tuning(
                 break;
             };
 
-            // Increment in-flight BEFORE sending to reserve the slot.
-            worker.in_flight.fetch_add(1, Ordering::SeqCst);
+            let observed_dispatch = build_observed_dispatch(
+                &state,
+                ObservedDispatchInput {
+                    work_id: &job_id,
+                    work_kind: mold_scheduler::WorkKind::Generation,
+                    model_fingerprint: &model_name,
+                    estimated_vram_bytes: estimated_vram,
+                    estimated_host_ram_bytes: 0,
+                    request: gpu_job.as_ref().map(|job| &job.request),
+                    hard_ordinal: preferred_gpu,
+                },
+                &worker,
+            );
+
+            // Reserve rollback transport capacity before sending. Execution
+            // ownership remains the owner's binary claim after dequeue.
+            worker.reserve_legacy_transport();
             let pending = gpu_job.take().expect("gpu_job present in retry loop");
             if preferred_gpu.is_none() {
                 let _ = state
                     .job_registry
                     .set_target_gpu(&job_id, Some(worker.gpu.ordinal));
             }
-            match worker.job_tx.try_send(pending) {
+            let lease = crate::scheduler::LeaseFence {
+                work_id: pending.id.clone(),
+                device_id: crate::scheduler::worker_device_id(&worker),
+                owner_epoch: worker.owner_epoch,
+                state_version: 0,
+                plan_version: 0,
+                worker_generation: 1,
+                memory_sample_generation: 0,
+                memory_ledger_sequence: 0,
+            };
+            let grant = crate::gpu_pool::LeaseGrant {
+                fence: lease,
+                work: crate::gpu_pool::OwnerWork::Generation(Box::new(pending)),
+                retry: None,
+            };
+            match worker.try_send_job(Box::new(grant)) {
                 Ok(()) => {
+                    if let Some(observation) = observed_dispatch {
+                        state.scheduled_work.observations().record(observation);
+                    }
                     dispatched = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(j)) => {
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    worker.settle_legacy_transport();
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
-                    gpu_job = Some(j);
+                    gpu_job = Some(generation_from_legacy_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                         if skip.len() >= state.gpu_pool.worker_count().max(1) {
@@ -1630,7 +2253,7 @@ async fn run_queue_dispatcher_with_tuning(
                     }
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    worker.settle_legacy_transport();
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
@@ -1638,7 +2261,7 @@ async fn run_queue_dispatcher_with_tuning(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
                     );
-                    gpu_job = Some(j);
+                    gpu_job = Some(generation_from_legacy_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
@@ -1663,7 +2286,356 @@ async fn run_queue_dispatcher_with_tuning(
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
     }
+    for buffered in buffer {
+        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state));
+    }
+    job_rx.close();
+    while let Some(job) = job_rx.recv().await {
+        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+    }
     tracing::info!("multi-GPU queue dispatcher shutting down");
+}
+
+fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
+    if let Some(progress) = &job.progress_tx {
+        let _ = progress.send(SseMessage::Error(SseErrorEvent {
+            message: message.clone(),
+        }));
+    }
+    let job_id = job.id.clone();
+    let _ = job.result_tx.send(Err(message));
+    state.queue.decrement();
+    state.job_registry.remove(&job_id);
+}
+
+fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
+    match grant.work {
+        crate::gpu_pool::OwnerWork::Generation(job) => *job,
+        work => panic!("legacy dispatcher received {:?}", work.kind()),
+    }
+}
+
+pub(crate) struct ObservedDispatchInput<'a> {
+    pub work_id: &'a str,
+    pub work_kind: mold_scheduler::WorkKind,
+    pub model_fingerprint: &'a str,
+    pub estimated_vram_bytes: u64,
+    pub estimated_host_ram_bytes: u64,
+    pub request: Option<&'a mold_core::GenerateRequest>,
+    pub hard_ordinal: Option<usize>,
+}
+
+pub(crate) fn build_observed_dispatch(
+    state: &AppState,
+    input: ObservedDispatchInput<'_>,
+    legacy_worker: &crate::gpu_pool::GpuWorker,
+) -> Option<crate::dispatch_mode::DispatchObservation> {
+    let ObservedDispatchInput {
+        work_id,
+        work_kind,
+        model_fingerprint,
+        estimated_vram_bytes,
+        estimated_host_ram_bytes,
+        request,
+        hard_ordinal,
+    } = input;
+    if !state.scheduled_work.observes_v2_decisions() {
+        return None;
+    }
+    let now_ms = crate::scheduler::monotonic_ms();
+
+    let resource_snapshot = state.resources.latest();
+    let sampled_free = resource_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .gpus
+                .iter()
+                .map(|gpu| {
+                    (
+                        (gpu.backend, gpu.ordinal),
+                        (
+                            gpu.vram_total.saturating_sub(gpu.vram_used),
+                            gpu.vram_used_by_mold,
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let devices = state
+        .gpu_pool
+        .workers
+        .iter()
+        .map(|worker| {
+            let device_id = crate::scheduler::worker_device_id(&worker);
+            let sampled_available_vram = sampled_free
+                .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                .map(|(free, _)| *free);
+            let health = if worker.poisoned.load(Ordering::SeqCst)
+                || worker.fatal_cuda_error.load(Ordering::SeqCst)
+            {
+                mold_scheduler::DeviceHealth::Poisoned
+            } else if sampled_available_vram.is_none() {
+                // Observe mode has no reservation ledger of its own, so a
+                // missing current sample is unavailable comparison data, not
+                // permission to substitute discovery-time free memory.
+                mold_scheduler::DeviceHealth::Degraded
+            } else if worker.consecutive_failures.load(Ordering::SeqCst) >= 3
+                && worker
+                    .degraded_until
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some_and(|until| Instant::now() < until)
+            {
+                mold_scheduler::DeviceHealth::Degraded
+            } else {
+                mold_scheduler::DeviceHealth::Healthy
+            };
+            let activity = if worker.in_flight.load(Ordering::SeqCst) == 0 {
+                mold_scheduler::DeviceActivity::Idle
+            } else {
+                mold_scheduler::DeviceActivity::Busy
+            };
+            let sampled_available_vram_bytes = sampled_available_vram
+                // Observe comparisons are post-startup telemetry. Unlike the
+                // authoritative coordinator's explicitly documented bootstrap
+                // allowance, they must not turn a stale discovery sample into
+                // a claimed current placement.
+                .unwrap_or(0);
+            let measured_cache_bytes = worker
+                .model_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active_vram_bytes();
+            let reclaimable_cache_bytes = sampled_free
+                .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                .and_then(|(_, used_by_mold)| *used_by_mold)
+                .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
+                .unwrap_or(0);
+            let available_vram_bytes = crate::scheduler::effective_available_vram_bytes(
+                sampled_available_vram_bytes,
+                reclaimable_cache_bytes,
+                worker.gpu.total_vram_bytes,
+            );
+            let warm = worker
+                .resident_execution_fingerprint
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .into_iter()
+                .map(mold_scheduler::ExecutionFingerprint::new)
+                .collect::<BTreeSet<_>>();
+            mold_scheduler::DeviceSnapshot {
+                id: mold_scheduler::DeviceId::new(device_id),
+                backend: match worker.gpu.backend {
+                    mold_core::GpuBackend::Metal => mold_scheduler::Backend::Metal,
+                    _ => mold_scheduler::Backend::Cuda,
+                },
+                admin_state: mold_scheduler::DeviceAdminState::Enabled,
+                health,
+                activity,
+                // Observe mode uses the same documented static fallback as
+                // authoritative planning until learned Phase E estimates
+                // exist. It does not fabricate an observe-only duration.
+                available_at_ms: (activity == mold_scheduler::DeviceActivity::Busy).then(|| {
+                    now_ms.saturating_add(
+                        mold_scheduler::static_timing_for(work_kind).predicted_run_ms,
+                    )
+                }),
+                worker_generation: 0,
+                available_vram_bytes,
+                warm_execution_fingerprints: warm,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let candidates = if let Some(request) = request {
+        let device_facts = devices
+            .iter()
+            .filter(|device| device.is_schedulable())
+            .filter_map(|device| {
+                let worker = state.gpu_pool.workers.iter().find(|worker| {
+                    crate::scheduler::worker_device_id(worker) == device.id.as_str()
+                })?;
+                Some(crate::execution_plan::DeviceFact {
+                    id: device.id.to_string(),
+                    ordinal: worker.gpu.ordinal,
+                    backend: worker.gpu.backend,
+                    compute_capability: worker.gpu.compute_capability,
+                    available_vram_bytes: device.available_vram_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let config = match state.config.try_read() {
+            Ok(config) => config,
+            Err(_) => {
+                tracing::debug!(
+                    work_id,
+                    "configuration changed while computing read-only V2 observation"
+                );
+                return None;
+            }
+        };
+        let offload_requested = matches!(
+            mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        match crate::execution_plan::resolve_execution_plans(
+            &config,
+            request,
+            &device_facts,
+            offload_requested,
+        ) {
+            Ok(plans) => {
+                let failed = crate::gpu_pool::failed_ordinals_for_model(model_fingerprint);
+                plans
+                    .into_iter()
+                    .filter(|plan| !failed.contains(&plan.device_ordinal))
+                    .map(|plan| {
+                        mold_scheduler::CandidatePlacement::new(
+                            plan.device_id,
+                            plan.execution_fingerprint,
+                            plan.predicted_host_increment_bytes,
+                        )
+                        .with_execution_equivalence(plan.execution_equivalence_fingerprint)
+                        .with_vram(plan.predicted_vram_peak_bytes)
+                        .with_device_available_vram(plan.admitted_available_vram_bytes)
+                        .with_static_timing(mold_scheduler::WorkKind::Generation)
+                    })
+                    .collect()
+            }
+            Err(error) => {
+                tracing::debug!(
+                    work_id,
+                    error = %error,
+                    "generation has no valid read-only V2 execution plan"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        state
+            .gpu_pool
+            .workers
+            .iter()
+            .map(|worker| {
+                mold_scheduler::CandidatePlacement::new(
+                    crate::scheduler::worker_device_id(&worker),
+                    model_fingerprint,
+                    estimated_host_ram_bytes,
+                )
+                .with_vram(estimated_vram_bytes)
+                .with_device_available_vram(
+                    devices
+                        .iter()
+                        .find(|device| {
+                            device.id.as_str() == crate::scheduler::worker_device_id(&worker)
+                        })
+                        .map_or(0, |device| device.available_vram_bytes),
+                )
+                .with_static_timing(work_kind)
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut work = mold_scheduler::WorkSnapshot::new(work_id, 0, candidates);
+    work.kind = work_kind;
+    if let Some(ordinal) = hard_ordinal {
+        let hard_device_id = state
+            .gpu_pool
+            .worker_by_ordinal(ordinal)
+            .map(|worker| crate::scheduler::worker_device_id(&worker))
+            .unwrap_or_else(|| format!("unavailable:gpu:{ordinal}"));
+        work = work.with_hard_device(hard_device_id);
+    }
+    let work_id = mold_scheduler::WorkId::new(work_id);
+    let host_memory_headroom = resource_snapshot.as_ref().map_or(0, |snapshot| {
+        let available = snapshot.system_ram.available.unwrap_or_else(|| {
+            snapshot
+                .system_ram
+                .total
+                .saturating_sub(snapshot.system_ram.used)
+        });
+        let safety_floor = (snapshot.system_ram.total.saturating_mul(15) / 100).max(8 << 30);
+        available.saturating_sub(safety_floor)
+    });
+    let mut eligible_idle_device_ids =
+        work.candidate_placements
+            .iter()
+            .filter(|candidate| candidate.incremental_host_ram_bytes <= host_memory_headroom)
+            .filter_map(|candidate| {
+                let device = devices
+                    .iter()
+                    .find(|device| device.id == candidate.device_id)?;
+                let worker = state.gpu_pool.workers.iter().find(|worker| {
+                    crate::scheduler::worker_device_id(worker) == device.id.as_str()
+                })?;
+                (device.is_idle()
+                    && candidate.predicted_vram_bytes <= device.available_vram_bytes
+                    && hard_ordinal.is_none_or(|ordinal| ordinal == worker.gpu.ordinal))
+                .then(|| device.id.to_string())
+            })
+            .collect::<Vec<_>>();
+    eligible_idle_device_ids.sort();
+    let plan = match mold_scheduler::Planner::default().plan(&mold_scheduler::PlannerSnapshot::new(
+        1,
+        1,
+        now_ms,
+        host_memory_headroom,
+        devices,
+        vec![work],
+    )) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // Observation must never become dispatch authority. An invalid
+            // comparison snapshot is telemetry loss, not permission to delay
+            // or reject the legacy decision.
+            tracing::warn!(
+                work_id = %work_id,
+                error = %error,
+                "could not compute read-only V2 dispatch observation"
+            );
+            return None;
+        }
+    };
+    let v2_device_id = plan
+        .immediate_leases
+        .iter()
+        .find(|lease| lease.work_id == work_id)
+        .map(|lease| lease.device_id.to_string());
+    let blocked_reason = plan.blocked_reason(&work_id).copied();
+    let legacy_device_id = crate::scheduler::worker_device_id(legacy_worker);
+    let legacy_setup_warm = legacy_worker
+        .resident_model
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_deref()
+        == Some(model_fingerprint);
+    let v2_setup_warm = v2_device_id.as_deref().and_then(|device_id| {
+        state
+            .gpu_pool
+            .workers
+            .iter()
+            .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            .map(|worker| {
+                worker
+                    .resident_model
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_deref()
+                    == Some(model_fingerprint)
+            })
+    });
+    Some(crate::dispatch_mode::DispatchObservation {
+        work_id: work_id.to_string(),
+        work_kind,
+        legacy_device_id,
+        v2_device_id,
+        blocked_reason,
+        eligible_idle_device_ids,
+        legacy_setup_warm,
+        v2_setup_warm,
+    })
 }
 
 /// Rough VRAM estimate for a model (used for placement decisions).
@@ -1806,29 +2778,671 @@ mod tests {
         channel_size: usize,
     ) -> (
         Arc<GpuWorker>,
-        std::sync::mpsc::Receiver<crate::gpu_pool::GpuJob>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(channel_size);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
+                stable_id: Some(format!("cuda:{ordinal:032x}")),
+                raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
                 name: format!("gpu{ordinal}"),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
                 total_vram_bytes: 24_000_000_000,
                 free_vram_bytes: 24_000_000_000,
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
+            legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn observe_planning_is_read_only_until_legacy_transport_accepts_work() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: None,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+
+        let observation = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "observe-read-only",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "flux-dev:q4",
+                estimated_vram_bytes: 6_000_000_000,
+                estimated_host_ram_bytes: 1 << 30,
+                request: None,
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("observe mode should compute a comparison");
+
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(state.scheduled_work.observations().snapshot().total, 0);
+        assert_eq!(
+            observation.v2_device_id.as_deref(),
+            worker.gpu.stable_id.as_deref()
+        );
+
+        state.scheduled_work.observations().record(observation);
+        let snapshot = state.scheduled_work.observations().snapshot();
+        assert_eq!(snapshot.total, 1);
+        assert_eq!(snapshot.matched, 1);
+    }
+
+    #[test]
+    fn observe_generation_never_fabricates_a_candidate_without_an_execution_plan() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: None,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+        let request = fake_request("missing-model-with-no-artifacts");
+
+        let observation = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "missing-plan",
+                work_kind: mold_scheduler::WorkKind::Generation,
+                model_fingerprint: &request.model,
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: Some(&request),
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("invalid placement should still produce blocked telemetry");
+
+        assert_eq!(observation.v2_device_id, None);
+        assert!(observation.blocked_reason.is_some());
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn observe_busy_availability_is_absolute_and_preserves_warm_wait_economics() {
+        let (busy, _busy_rx) = test_worker(0, 1);
+        let (idle, _idle_rx) = test_worker(1, 1);
+        busy.in_flight.store(1, Ordering::SeqCst);
+        *busy
+            .resident_execution_fingerprint
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("utility-exec".to_string());
+
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![busy.clone(), idle.clone()].into(),
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: [0, 1]
+                .into_iter()
+                .map(|ordinal| mold_core::GpuSnapshot {
+                    ordinal,
+                    name: format!("gpu{ordinal}"),
+                    backend: mold_core::GpuBackend::Cuda,
+                    vram_total: 24_000_000_000,
+                    vram_used: 0,
+                    vram_used_by_mold: Some(0),
+                    vram_used_by_other: Some(0),
+                    gpu_utilization: Some(0),
+                })
+                .collect(),
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: Some(56 << 30),
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+
+        let observation = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "observe-absolute-busy-time",
+                work_kind: mold_scheduler::WorkKind::Generation,
+                model_fingerprint: "utility-exec",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &idle,
+        )
+        .expect("observe comparison");
+
+        assert_eq!(
+            observation.v2_device_id.as_deref(),
+            idle.gpu.stable_id.as_deref(),
+            "a 30s busy remainder plus the run must not be treated as an absolute timestamp"
+        );
+    }
+
+    #[test]
+    fn observe_utility_requires_current_telemetry_and_never_truncates_vram_demand() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+
+        let without_sample = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "no-current-sample",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "utility",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("missing telemetry should produce blocked comparison data");
+        assert_eq!(without_sample.v2_device_id, None);
+        assert!(without_sample.blocked_reason.is_some());
+
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 << 30,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: None,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+        let oversized = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "oversized-utility",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "utility",
+                estimated_vram_bytes: 30 << 30,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("oversized work should produce blocked comparison data");
+        assert_eq!(oversized.v2_device_id, None);
+        assert!(oversized.blocked_reason.is_some());
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn legacy_and_v2_modes_never_run_the_observe_hook() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::V2,
+        ] {
+            let (worker, worker_rx) = test_worker(0, 1);
+            let mut state = empty_test_state(mold_core::Config::default());
+            state.gpu_pool = Arc::new(GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work =
+                crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+
+            assert!(build_observed_dispatch(
+                &state,
+                ObservedDispatchInput {
+                    work_id: "disabled-observer",
+                    work_kind: mold_scheduler::WorkKind::Generation,
+                    model_fingerprint: "flux-dev:q4",
+                    estimated_vram_bytes: 6_000_000_000,
+                    estimated_host_ram_bytes: 0,
+                    request: None,
+                    hard_ordinal: None,
+                },
+                &worker,
+            )
+            .is_none());
+            assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                worker_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_records_only_after_legacy_transport_accepts_work() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: None,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+
+        worker.reserve_legacy_transport();
+        worker
+            .try_send_job(Box::new(crate::gpu_pool::LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "filler".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 0,
+                    plan_version: 0,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                },
+                work: crate::gpu_pool::OwnerWork::Probe {
+                    id: "filler".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(|| {}),
+                },
+                retry: None,
+            }))
+            .unwrap();
+
+        let work = crate::scheduler::ScheduledOwnerWork::new(
+            "observed-accepted",
+            "flux-dev:q4",
+            6_000_000_000,
+            crate::gpu_pool::OwnerWork::Probe {
+                id: "observed-accepted".to_string(),
+                kind: mold_scheduler::WorkKind::AdminModelLoad,
+                run: Box::new(|| {}),
+            },
+        );
+        let dispatch_state = state.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_legacy_scheduled_work(
+                &dispatch_state,
+                work,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(
+            state.scheduled_work.observations().snapshot().total,
+            0,
+            "a full legacy transport must not create a fake observation"
+        );
+
+        let filler = worker_rx.recv().expect("remove full-channel filler");
+        drop(filler);
+        worker.settle_legacy_transport();
+        let accepted = tokio::task::spawn_blocking(move || {
+            worker_rx.recv_timeout(std::time::Duration::from_secs(1))
+        })
+        .await
+        .unwrap()
+        .expect("legacy transport should accept after capacity opens");
+        let accepted_id = match accepted {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.id().to_string(),
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        assert_eq!(accepted_id, "observed-accepted");
+        dispatch.await.unwrap();
+        let snapshot = state.scheduled_work.observations().snapshot();
+        assert_eq!(snapshot.total, 1);
+        assert_eq!(snapshot.matched, 1);
+        worker.settle_legacy_transport();
+    }
+
+    #[tokio::test]
+    async fn legacy_scheduled_dispatch_honors_the_shared_pause_gate() {
+        let (worker, worker_rx) = test_worker(0, 2);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (scheduled_tx, scheduled_rx) = tokio::sync::mpsc::channel(2);
+        let (owner_event_tx, owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.queue_pause.pause();
+        scheduled_tx
+            .send(crate::scheduler::ScheduledOwnerWork::new(
+                "paused-utility",
+                "utility",
+                1,
+                crate::gpu_pool::OwnerWork::Probe {
+                    id: "paused-utility".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(|| {}),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(run_legacy_scheduled_work_dispatcher(
+            scheduled_rx,
+            owner_event_rx,
+            state.clone(),
+            shutdown.clone(),
+        ));
+        state.queue_pause.wait_until_blocked().await;
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        state.queue_pause.resume();
+        let command = tokio::task::spawn_blocking(move || {
+            worker_rx.recv_timeout(std::time::Duration::from_secs(1))
+        })
+        .await
+        .unwrap()
+        .expect("utility should dispatch only after resume");
+        assert!(matches!(
+            command,
+            crate::gpu_pool::GpuWorkerCommand::Grant(_)
+        ));
+        worker.settle_legacy_transport();
+        shutdown.cancel();
+        drop(scheduled_tx);
+        drop(owner_event_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_post_upscale_moves_to_idle_sibling_with_same_frozen_artifact_and_f0_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, b"frozen-but-not-a-real-upscaler").unwrap();
+        let cpu_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        let frozen_artifact = cpu_plan.weights.clone();
+
+        let (origin, _origin_rx) = test_worker(0, 1);
+        let (sibling, sibling_rx) = test_worker(1, 1);
+        origin.in_flight.store(1, Ordering::SeqCst);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![origin.clone(), sibling.clone()].into(),
+        });
+
+        let output_dir = root.path().join("gallery");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let mut request = fake_request("flux-dev:q4");
+        request.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let original = fake_image();
+        let generation = crate::gpu_pool::GpuJob {
+            id: "legacy-sibling-post-upscale".to_string(),
+            model: request.model.clone(),
+            request,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(output_dir.clone()),
+            config: state.config.clone(),
+            metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
+            queue: QueueHandle::new(queue_tx),
+            registry: state.job_registry.clone(),
+            events: state.events.clone(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            lease: None,
+            batch_child: None,
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            generation_time_ms: 1,
+            model: generation.model.clone(),
+            seed_used: 7,
+            gpu: Some(origin.gpu.ordinal),
+        };
+        let work = crate::scheduler::ScheduledOwnerWork::new(
+            "legacy-sibling-post-upscale",
+            "real-esrgan-x4plus:fp16",
+            1,
+            crate::gpu_pool::OwnerWork::PostUpscale(Box::new(
+                crate::gpu_pool::PostGenerationUpscaleJob {
+                    id: "legacy-sibling-post-upscale".to_string(),
+                    generation: Box::new(generation),
+                    response,
+                    image: original.clone(),
+                    cancellation: mold_inference::InferenceCancellationToken::default(),
+                    execution_plan: None,
+                },
+            )),
+        )
+        .with_utility_plans(vec![
+            crate::gpu_pool::UtilityExecutionPlan::Upscale(cpu_plan.clone()),
+            crate::gpu_pool::UtilityExecutionPlan::Upscale(
+                mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
+                    cpu_plan.model_name.clone(),
+                    cpu_plan.weights.clone(),
+                    mold_inference::upscaler::ExactUpscalePlacement::Device {
+                        backend: origin.gpu.backend,
+                        ordinal: origin.gpu.ordinal,
+                    },
+                ),
+            ),
+        ]);
+
+        // Drift after the dependency boundary. Every sibling candidate must
+        // retain the original artifact identity and fail closed at execution.
+        std::fs::write(&weights, b"changed-after-freeze").unwrap();
+        assert!(
+            dispatch_legacy_scheduled_work(
+                &state,
+                work,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        );
+        let command = sibling_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("idle sibling must receive the post-upscale followup");
+        let grant = match command {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        let selected = match &grant.work {
+            crate::gpu_pool::OwnerWork::PostUpscale(job) => job.execution_plan.as_ref().unwrap(),
+            _ => panic!("expected post-upscale work"),
+        };
+        assert_eq!(
+            selected.placement,
+            mold_inference::upscaler::ExactUpscalePlacement::Device {
+                backend: sibling.gpu.backend,
+                ordinal: sibling.gpu.ordinal,
+            }
+        );
+        assert_eq!(selected.weights, frozen_artifact);
+        assert!(
+            selected.validate().is_err(),
+            "artifact drift must invalidate"
+        );
+
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = crate::gpu_worker::spawn_legacy_gpu_thread(
+            sibling.clone(),
+            sibling_rx,
+            owner_event_tx,
+            std::time::Duration::from_secs(60),
+        );
+        sibling.try_send_job(grant).unwrap();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+            .await
+            .expect("post-upscale fallback must settle")
+            .expect("result sender must settle")
+            .expect("F0 keeps the original when exact upscale invalidates");
+        assert_eq!(completed.image.data, original.data);
+        assert_eq!(completed.image.width, original.width);
+        assert!(
+            std::fs::read_dir(&output_dir)
+                .unwrap()
+                .any(|entry| entry.unwrap().path().is_file()),
+            "F0 must still publish the original to the gallery"
+        );
+        sibling.request_shutdown();
+        owner.join().unwrap();
+    }
+
+    fn recv_worker_job(
+        rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+        timeout: std::time::Duration,
+    ) -> Result<crate::gpu_pool::GpuJob, std::sync::mpsc::RecvTimeoutError> {
+        match rx.recv_timeout(timeout)? {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                Ok(generation_from_legacy_grant(*grant))
+            }
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => {
+                panic!("unexpected worker shutdown command")
+            }
+            crate::gpu_pool::GpuWorkerCommand::Drain => {
+                panic!("unexpected worker drain command")
+            }
+        }
     }
 
     fn empty_test_state(config: mold_core::Config) -> crate::state::AppState {
@@ -1868,6 +3482,57 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_gallery_save_never_takes_a_batch_reserved_name() {
+        let tmp = TempDir::new().unwrap();
+        let reservations = tmp
+            .path()
+            .join(crate::batch_transaction::TRANSACTION_DIR)
+            .join("reservations");
+        std::fs::create_dir_all(&reservations).unwrap();
+        std::fs::write(reservations.join("same.png.reserve"), b"reserved").unwrap();
+
+        let (filename, path, _reservation) =
+            write_gallery_bytes_no_replace(tmp.path(), "same.png", b"ordinary").unwrap();
+
+        assert_eq!(filename, "same-1.png");
+        assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
+        assert!(!tmp.path().join("same.png").exists());
+    }
+
+    #[test]
+    fn ordinary_gallery_save_keeps_output_when_directory_sync_is_unsupported() {
+        let tmp = TempDir::new().unwrap();
+        let sync_attempts = AtomicUsize::new(0);
+        let unsupported_sync = |path: &std::path::Path| {
+            sync_attempts.fetch_add(1, Ordering::SeqCst);
+            crate::batch_transaction::tolerate_unsupported_ordinary_directory_sync(
+                path,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "injected unsupported directory fsync",
+                )
+                .into()),
+            )
+        };
+
+        let (filename, path, _reservation) = write_gallery_bytes_no_replace_with_directory_sync(
+            tmp.path(),
+            "ordinary.png",
+            b"generated output",
+            &unsupported_sync,
+        )
+        .unwrap();
+
+        assert_eq!(filename, "ordinary.png");
+        assert_eq!(std::fs::read(path).unwrap(), b"generated output");
+        assert_eq!(
+            sync_attempts.load(Ordering::SeqCst),
+            2,
+            "reservation and gallery directories both use the explicit best-effort policy"
+        );
+    }
+
+    #[test]
     fn save_image_to_dir_includes_batch_index_when_batch_size_gt_1() {
         let tmp = TempDir::new().unwrap();
         let mut img = fake_image();
@@ -1877,7 +3542,10 @@ mod tests {
 
         save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None, None);
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         let name = entries[0]
             .as_ref()
             .unwrap()
@@ -1932,6 +3600,7 @@ mod tests {
         upscaled.width = 2048;
         upscaled.height = 2048;
         upscaled.data = vec![4, 5, 6];
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_generated_image_outputs(
             tmp.path(),
@@ -1943,6 +3612,7 @@ mod tests {
             Some(1234),
             Some(&db),
             None,
+            &gallery_gate,
         );
 
         let rows = db.list(Some(tmp.path())).unwrap();
@@ -1985,7 +3655,13 @@ mod tests {
 
         // File still on disk, but no DB row recorded — both gates must hold
         // for the upsert to fire.
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
         assert_eq!(db.list(None).unwrap().len(), 0);
     }
 
@@ -2091,6 +3767,7 @@ mod tests {
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
         let events = crate::events::EventBroadcaster::new();
         let mut rx = events.subscribe();
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -2102,6 +3779,7 @@ mod tests {
             Some(5000),
             Some(&db),
             Some(&events),
+            &gallery_gate,
         );
 
         match rx.try_recv().unwrap() {
@@ -2125,6 +3803,7 @@ mod tests {
         // Minimal MP4-ish bytes: an `ftyp` box header. The helper writes
         // bytes verbatim — content validation happens at gallery scan time.
         let bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom".to_vec();
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -2136,9 +3815,13 @@ mod tests {
             Some(5000),
             Some(&db),
             None,
+            &gallery_gate,
         );
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
             .as_ref()
@@ -2155,6 +3838,53 @@ mod tests {
         assert_eq!(rows[0].metadata.frames, Some(25));
         assert_eq!(rows[0].metadata.fps, Some(24));
         assert_eq!(rows[0].generation_time_ms, Some(5000));
+        let archived = gallery_gate.committed_archive_index(tmp.path()).unwrap();
+        assert_eq!(
+            archived.get(&name).unwrap().record().metadata.frames,
+            Some(25),
+            "DB-enabled publications must retain archive authority for a later DB-disabled restart"
+        );
+    }
+
+    #[test]
+    fn named_video_replay_keeps_one_gallery_file_and_row() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req = fake_request("ltx-video:fp16");
+        let meta = OutputMetadata::from_generate_request(&req, 99, None, "test-version");
+        let filename = "chain-01TEST-take-1.mp4";
+        let bytes = b"stable chain bytes";
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+
+        for _ in 0..2 {
+            assert_eq!(
+                save_video_to_dir_named(
+                    tmp.path(),
+                    filename,
+                    bytes,
+                    OutputFormat::Mp4,
+                    &meta,
+                    None,
+                    Some(&db),
+                    None,
+                    &gallery_gate,
+                )
+                .unwrap(),
+                filename
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                .count(),
+            1
+        );
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, filename);
+        assert_eq!(std::fs::read(tmp.path().join(filename)).unwrap(), bytes);
     }
 
     #[test]
@@ -2162,6 +3892,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let req = fake_request("ltx-video:fp16");
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
 
         save_video_to_dir(
             tmp.path(),
@@ -2173,9 +3904,13 @@ mod tests {
             None,
             None,
             None,
+            &gallery_gate,
         );
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
             .as_ref()
@@ -2184,12 +3919,35 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(name.ends_with(".gif"), "{name}");
+        let archived = gallery_gate.committed_archive_index(tmp.path()).unwrap();
+        assert_eq!(archived.get(&name).unwrap().record().metadata, meta);
+
+        let restarted_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(crate::batch_transaction::recover_transactions(
+                tmp.path(),
+                &restarted_gate,
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(
+            restarted_gate
+                .committed_archive_index(tmp.path())
+                .unwrap()
+                .get(&name)
+                .unwrap()
+                .record()
+                .metadata,
+            meta
+        );
     }
 
     #[test]
     fn save_video_to_dir_invalid_path_does_not_panic() {
         let req = fake_request("ltx-video:fp16");
         let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
         save_video_to_dir(
             std::path::Path::new("/dev/null/nope"),
             b"x",
@@ -2200,6 +3958,7 @@ mod tests {
             None,
             None,
             None,
+            &gallery_gate,
         );
     }
 
@@ -2668,7 +4427,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -2684,17 +4443,23 @@ mod tests {
             output_dir: None,
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            lease: None,
+            batch_child: None,
         };
-        worker.job_tx.send(filler_job).unwrap();
+        worker.send_job(filler_job).unwrap();
 
         let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
             job_rx,
             state.clone(),
             8,
             DEFAULT_MAX_DEFERRALS,
+            tokio_util::sync::CancellationToken::new(),
         ));
 
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
@@ -2705,6 +4470,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -2717,8 +4483,7 @@ mod tests {
         let _filler = worker_rx
             .recv()
             .expect("filler job should occupy the local channel");
-        let dispatched = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(1))
             .expect("queued job should dispatch once capacity is available");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
@@ -2739,7 +4504,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -2753,6 +4518,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         queue.submit(job, 8).await.unwrap();
 
@@ -2769,8 +4535,7 @@ mod tests {
         worker.consecutive_failures.store(0, Ordering::SeqCst);
         *worker.degraded_until.write().unwrap() = None;
 
-        let dispatched = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(1))
             .expect("queued job should dispatch once a worker recovers");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
@@ -2832,6 +4597,7 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
+            batch_child: None,
         })
     }
 
@@ -2844,6 +4610,7 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
+            batch_child: None,
         })
     }
 
@@ -3074,6 +4841,7 @@ mod tests {
             }
             cache.insert(Box::new(Engine("a")), 0);
         }
+        worker.set_resident_model(Some("a"));
 
         let (job_tx, job_rx) = tokio::sync::mpsc::channel(8);
         let queue = QueueHandle::new(job_tx.clone());
@@ -3081,7 +4849,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -3098,6 +4866,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -3107,8 +4876,7 @@ mod tests {
 
         let mut order = Vec::new();
         for _ in 0..4 {
-            let dispatched = worker_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+            let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(2))
                 .expect("worker should receive the dispatched job");
             order.push(dispatched.model);
         }
@@ -3143,7 +4911,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -3169,6 +4937,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -3184,8 +4953,7 @@ mod tests {
 
         let mut order = Vec::new();
         for _ in 0..3 {
-            let dispatched = worker_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+            let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(2))
                 .expect("worker should receive the dispatched job");
             order.push(dispatched.model);
         }
@@ -3225,6 +4993,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             job_tx.send(job).await.unwrap();
         }
@@ -3284,7 +5053,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             32,
         );
@@ -3298,7 +5067,7 @@ mod tests {
         let drainer = std::thread::spawn(move || {
             let mut order = Vec::new();
             while order.len() < 10 {
-                match worker_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                match recv_worker_job(&worker_rx, std::time::Duration::from_secs(5)) {
                     Ok(j) => {
                         drain_worker.in_flight.fetch_sub(1, Ordering::SeqCst);
                         order.push(j.model);
@@ -3327,6 +5096,7 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
+                batch_child: None,
             };
             queue.submit(job, 32).await.unwrap();
         }
@@ -3434,7 +5204,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0, worker1],
+                workers: vec![worker0, worker1].into(),
             }),
             8,
         );
@@ -3458,11 +5228,11 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
-        let dispatched = rx1
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx1, std::time::Duration::from_secs(1))
             .expect("explicit placement should route to gpu 1");
         assert_eq!(dispatched.model, "flux-dev:q4");
         assert!(rx0.try_recv().is_err(), "gpu 0 should not receive the job");
@@ -3481,7 +5251,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0, worker1],
+                workers: vec![worker0, worker1].into(),
             }),
             8,
         );
@@ -3497,13 +5267,14 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
-        let (dispatched, ordinal) = match rx0.recv_timeout(std::time::Duration::from_secs(1)) {
+        let (dispatched, ordinal) = match recv_worker_job(&rx0, std::time::Duration::from_secs(1)) {
             Ok(job) => (job, 0),
             Err(_) => (
-                rx1.recv_timeout(std::time::Duration::from_secs(1))
+                recv_worker_job(&rx1, std::time::Duration::from_secs(1))
                     .expect("auto job should dispatch to one GPU"),
                 1,
             ),
@@ -3527,7 +5298,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0],
+                workers: vec![worker0].into(),
             }),
             8,
         );
@@ -3544,6 +5315,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -3556,13 +5328,75 @@ mod tests {
 
         // Resume → the queued job dispatches.
         assert!(state.queue_pause.resume());
-        let dispatched = rx0
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx0, std::time::Duration::from_secs(1))
             .expect("resumed dispatcher should dispatch the queued job");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
         drop(job_tx);
         dispatcher.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_legacy_dispatcher_rejects_all_accepted_generation_work() {
+        let (worker, worker_rx) = test_worker(0, 2);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx);
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            }),
+            8,
+        );
+        state.queue_pause.pause();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
+            job_rx,
+            state.clone(),
+            8,
+            DEFAULT_MAX_DEFERRALS,
+            shutdown.clone(),
+        ));
+
+        let mut results = Vec::new();
+        for id in ["shutdown-queued-1", "shutdown-queued-2"] {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            state.job_registry.register(id, "flux-dev:q4");
+            queue
+                .submit(
+                    crate::state::GenerationJob {
+                        id: id.to_string(),
+                        request: fake_request("flux-dev:q4"),
+                        completion_payload: SseCompletionPayload::Full,
+                        progress_tx: None,
+                        result_tx,
+                        output_dir: None,
+                        batch_child: None,
+                    },
+                    8,
+                )
+                .await
+                .unwrap();
+            results.push(result_rx);
+        }
+        state.queue_pause.wait_until_blocked().await;
+        shutdown.cancel();
+        dispatcher.await.unwrap();
+
+        for result in results {
+            let error = match result.await.expect("accepted generation must settle") {
+                Ok(_) => panic!("unstarted generation must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.contains("shutting down"));
+        }
+        assert_eq!(queue.pending(), 0);
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3578,7 +5412,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0],
+                workers: vec![worker0].into(),
             }),
             8,
         );
@@ -3597,6 +5431,7 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
+            batch_child: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -3607,8 +5442,7 @@ mod tests {
         );
 
         assert!(state.queue_pause.resume());
-        let dispatched = rx0
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx0, std::time::Duration::from_secs(1))
             .expect("resume should release the held job");
         assert_eq!(dispatched.model, "flux-dev:q4");
 

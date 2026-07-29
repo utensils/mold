@@ -11,8 +11,8 @@
     "build:mobile": "vue-tsc -b && vite build --config vite.mobile.config.ts",
     "preview": "vite preview",
     "tauri": "tauri",
-    "fmt": "prettier --write . ../ui",
-    "fmt:check": "prettier --check . ../ui",
+    "fmt": "prettier --write . ../ui ../studio",
+    "fmt:check": "prettier --check . ../ui ../studio",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -27,6 +27,7 @@ vi.mock("../lib/api/client", () => ({
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import { sseStream } from "../lib/api/sse";
 import { apiJsonTo } from "../lib/api/client";
+import { ipc } from "../lib/ipc";
 import { useConnectionStore } from "./connection";
 
 const caps = (available: boolean) =>
@@ -45,17 +46,75 @@ function connectWithBucket() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  vi.mocked(ipc.localGalleryList).mockResolvedValue({
+    images: [],
+    target: {
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-test-key",
+    },
+  });
 });
 
 describe("events subscription", () => {
   it("opens /api/events when the server advertises it", async () => {
     vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
     const events = useEventsStore();
 
     await events.subscribe();
 
     expect(events.live).toBe(true);
-    expect(sseStream).toHaveBeenCalledWith("/api/events", expect.anything());
+    expect(sseStream).toHaveBeenCalledWith(
+      "/api/events",
+      expect.objectContaining({
+        target: {
+          baseUrl: "http://127.0.0.1:49152",
+          apiKey: null,
+        },
+        terminalHttpStatuses: [401, 403, 404],
+      }),
+    );
+  });
+
+  it("refetches authoritative queue/device state on connect and invalidation events", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
+    const { useJobsStore } = await import("./jobs");
+    const jobs = useJobsStore();
+    const refreshHost = vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined);
+    const events = useEventsStore();
+
+    await events.subscribe();
+    const options = vi.mocked(sseStream).mock.calls[0]![1]!;
+    options.onOpen?.();
+    options.onEvent?.(
+      "message",
+      JSON.stringify({
+        type: "device_state_changed",
+        state: { devices: [], plan_version: 1 },
+      }),
+    );
+    options.onEvent?.(
+      "message",
+      JSON.stringify({
+        type: "queue_plan_changed",
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [],
+        },
+      }),
+    );
+
+    expect(refreshHost).toHaveBeenCalledTimes(3);
+    expect(refreshHost.mock.calls[0]![0]).toMatchObject({
+      id: "local",
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: null,
+    });
   });
 
   it("does not open the stream on servers without the capability", async () => {
@@ -71,6 +130,7 @@ describe("events subscription", () => {
 
   it("is idempotent", async () => {
     vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
     const events = useEventsStore();
 
     await events.subscribe();
@@ -125,6 +185,49 @@ describe("event routing", () => {
     events.apply({ type: "queue_resumed" });
     expect(jobs.queues["local"]?.paused).toBe(false);
   });
+
+  it("reactively applies versioned plans and treats device events as invalidations", async () => {
+    connectWithBucket();
+    const { useJobsStore } = await import("./jobs");
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: null,
+      gpuOrdinals: [],
+      devices: [],
+      plan: null,
+      error: null,
+    };
+    const events = useEventsStore();
+    const refreshHost = vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined);
+    const plan = {
+      plan_version: 7,
+      state_version: 9,
+      optimizer_state: "optimized",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [],
+    };
+    events.apply({ type: "queue_plan_changed", plan });
+    expect(jobs.queues["local"]?.plan).toEqual(plan);
+
+    events.apply({
+      type: "device_state_changed",
+      device_id: "cuda:stable",
+      desired_enabled: false,
+      admin_state: "draining",
+    });
+    expect(jobs.queues["local"]?.devices).toEqual([]);
+    expect(refreshHost).toHaveBeenCalledTimes(2);
+
+    events.apply({
+      type: "queue_plan_changed",
+      plan: { ...plan, plan_version: 6 },
+    });
+    expect(jobs.queues["local"]?.plan?.plan_version).toBe(7);
+  });
 });
 
 describe("old-server fallback poller", () => {
@@ -141,14 +244,14 @@ describe("old-server fallback poller", () => {
       // Queue busy → each tick refetches.
       generation.jobs.push({ status: "developing" } as never);
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJsonTo).toHaveBeenCalledTimes(1);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
 
       // Queue drains → exactly one trailing refetch, then quiet.
       generation.jobs.length = 0;
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJsonTo).toHaveBeenCalledTimes(2);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(10_200);
-      expect(apiJsonTo).toHaveBeenCalledTimes(2);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(2);
 
       events.unsubscribe();
     } finally {
@@ -166,6 +269,7 @@ describe("old-server fallback poller", () => {
       await events.subscribe();
       await vi.advanceTimersByTimeAsync(20_000);
 
+      expect(ipc.localGalleryList).not.toHaveBeenCalled();
       expect(apiJsonTo).not.toHaveBeenCalled();
       events.unsubscribe();
     } finally {

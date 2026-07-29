@@ -90,6 +90,21 @@ pub enum BackgroundEvent {
         host_id: String,
         status: Option<Box<ServerStatus>>,
     },
+    /// Per-host authoritative device inventory for Machines controls.
+    HostDevicesUpdate {
+        host_id: String,
+        devices: Option<mold_core::DeviceState>,
+    },
+    /// Accepted device mutation response. Applied immediately before the
+    /// follow-up inventory poll so restart-only success is never discarded.
+    HostDeviceMutationApplied {
+        host_id: String,
+        device: Box<mold_core::DeviceInfo>,
+    },
+    HostCapabilitiesUpdate {
+        host_id: String,
+        capabilities: Option<mold_core::ServerCapabilities>,
+    },
     /// Per-host queue snapshot for the selected Machines row.
     HostQueueUpdate {
         host_id: String,
@@ -1683,11 +1698,27 @@ impl App {
             match client.server_status().await {
                 Ok(status) => {
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+                    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        devices: client.devices().await.ok(),
+                    });
+                    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        capabilities: client.server_capabilities().await.ok(),
+                    });
                 }
                 Err(_) => {
                     // Server became unreachable — clear stale status so the UI
                     // stops showing the last-known hostname/memory.
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(None));
+                    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        devices: None,
+                    });
+                    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        capabilities: None,
+                    });
                 }
             }
         });
@@ -3528,6 +3559,64 @@ impl App {
                             job_id: job.id,
                         },
                     });
+                }
+            }
+            Action::MachinesNextDevice if self.active_view == View::Machines => {
+                self.machines.select_next_device();
+            }
+            Action::MachinesDevicePrev
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_prev_device();
+            }
+            Action::MachinesDeviceNext
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_next_device();
+            }
+            Action::MachinesToggleDevice
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                let Some(device) = self.machines.selected_device().cloned() else {
+                    return;
+                };
+                if device.admin_state == mold_core::DeviceAdminState::StartupExcluded {
+                    self.generate.error_message =
+                        Some("This GPU was excluded at startup and requires a restart".to_string());
+                    return;
+                }
+                if device.restart_required {
+                    return;
+                }
+                if !self.machines.can_mutate_selected_device() {
+                    self.generate.error_message = Some(
+                        "Live GPU controls require Scheduler V2; only a disabled GPU can be enabled for the next restart"
+                            .to_string(),
+                    );
+                    return;
+                }
+                let enabled = !device.desired_enabled;
+                let tx = self.bg_tx.clone();
+                match self.machines.selected_row() {
+                    crate::hosts::MachineRowId::Local => {
+                        if let Some(url) = self.server_url.clone() {
+                            self.tokio_handle
+                                .spawn(crate::hosts::set_local_device_enabled(
+                                    url, device.id, enabled, tx,
+                                ));
+                        }
+                    }
+                    crate::hosts::MachineRowId::Host(id) => {
+                        if let Some(entry) = self.machines.registry.get(&id).cloned() {
+                            self.tokio_handle
+                                .spawn(crate::hosts::set_host_device_enabled(
+                                    entry, device.id, enabled, tx,
+                                ));
+                        }
+                    }
                 }
             }
             Action::ScriptMoveDown => self.script.move_down(),
@@ -6019,6 +6108,18 @@ impl App {
                 BackgroundEvent::HostStatusUpdate { host_id, status } => {
                     self.machines.apply_status(host_id, status);
                 }
+                BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
+                    self.machines.apply_devices(host_id, devices);
+                }
+                BackgroundEvent::HostDeviceMutationApplied { host_id, device } => {
+                    self.machines.apply_device_mutation(host_id, *device);
+                }
+                BackgroundEvent::HostCapabilitiesUpdate {
+                    host_id,
+                    capabilities,
+                } => {
+                    self.machines.apply_capabilities(host_id, capabilities);
+                }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);
                 }
@@ -6164,6 +6265,12 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
         // Latent previews are for canvas clients (web SPA / desktop app);
         // the TUI progress bar already tracks DenoiseStep.
         SseProgressEvent::Preview { .. } => {}
+        SseProgressEvent::DependencyWait { dependency, reason } => {
+            progress.current_stage = Some(format!("Waiting for {dependency}: {reason}"));
+            progress.stage_started_at = None;
+            progress.clear_download();
+            progress.clear_weight();
+        }
         SseProgressEvent::StageStart { name } => {
             progress.current_stage = Some(name);
             // Each StageStart counts as a new pipeline step; tracking the
@@ -6436,6 +6543,34 @@ mod tests {
         let state = ProgressState::default();
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn dependency_wait_is_visible_without_counting_as_a_started_stage() {
+        let mut state = ProgressState {
+            stage_index: 3,
+            stage_started_at: Some(std::time::Instant::now()),
+            download_filename: "stale.safetensors".to_string(),
+            weight_component: "stale".to_string(),
+            ..Default::default()
+        };
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DependencyWait {
+                dependency: "ltx2.3-vae".to_string(),
+                reason: "download in progress".to_string(),
+            },
+        );
+
+        assert_eq!(
+            state.current_stage.as_deref(),
+            Some("Waiting for ltx2.3-vae: download in progress")
+        );
+        assert_eq!(state.stage_index, 3);
+        assert!(state.stage_started_at.is_none());
+        assert!(state.download_filename.is_empty());
+        assert!(state.weight_component.is_empty());
     }
 
     #[test]
@@ -11869,6 +12004,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machines_small_detail_reaches_device_sixty_three_and_queue() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        app.machines.select_next();
+        app.machines.focus = crate::hosts::MachinesFocus::Detail;
+        app.machines.apply_status(
+            "hal9000".into(),
+            Some(Box::new(mold_core::ServerStatus {
+                version: "0.20.2".into(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 60,
+                hostname: Some("hal9000".into()),
+                memory_status: None,
+                gpus: None,
+                queue_depth: Some(1),
+                queue_capacity: Some(64),
+                queue_paused: Some(false),
+                instance_id: Some("instance-64".into()),
+                models_disk: None,
+            })),
+        );
+        let devices = (0..64)
+            .map(|ordinal| mold_core::DeviceInfo {
+                id: format!("cuda:{ordinal:032x}"),
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: Some(ordinal),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: format!("Synthetic accelerator {ordinal}"),
+                pci_bus_id: None,
+                compute_capability: Some("10.0".into()),
+                memory: mold_core::DeviceMemoryInfo {
+                    total_bytes: Some(24 * 1024_u64.pow(3)),
+                    used_bytes: Some(ordinal as u64 * 1024),
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: mold_core::DeviceTelemetry {
+                    utilization_percent: Some(ordinal as u8),
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                restart_required: false,
+                admin_state: mold_core::DeviceAdminState::Enabled,
+                health: mold_core::DeviceHealth::Healthy,
+                activity: mold_core::DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: vec![],
+                active_work_id: None,
+                planned_work_ids: vec![],
+            })
+            .collect();
+        app.machines.apply_devices(
+            "hal9000".into(),
+            Some(mold_core::DeviceState {
+                devices,
+                plan_version: 1,
+            }),
+        );
+        app.machines.apply_queue(
+            "hal9000".into(),
+            Some(mold_core::QueueListingWire {
+                entries: vec![mold_core::QueueJobEntryWire {
+                    id: "queued-64".into(),
+                    model: "queue-visible-model".into(),
+                    state: "queued".into(),
+                    started_at_unix_ms: 0,
+                    position: 0,
+                    gpu: None,
+                    target_gpu: None,
+                    seed_pinned: None,
+                    metadata: None,
+                }],
+                plan: None,
+            }),
+        );
+
+        for _ in 0..63 {
+            app.dispatch_action(Action::MachinesDeviceNext);
+        }
+        assert_eq!(app.machines.device_selected, 63);
+
+        let text = render_view_to_string(&mut app, 100, 20);
+        assert!(
+            text.contains("Synthetic accelerator 63"),
+            "selected device must be visible in a small detail pane:\n{text}"
+        );
+        assert!(
+            text.contains("Queue") && text.contains("queue-visible-model"),
+            "queue detail must remain reachable below a large device inventory:\n{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn machines_status_shortcuts_advertise_the_key_map() {
         let mut app = make_settings_test_app();
         app.active_view = View::Machines;
@@ -12126,6 +12370,7 @@ mod tests {
                         metadata: None,
                     },
                 ],
+                plan: None,
             }),
         );
 

@@ -153,6 +153,26 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum GpuAction {
+    /// List all runtime-visible devices.
+    List {
+        /// Output the stable-ID device inventory as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop assigning new work to a device; active work drains first.
+    Disable {
+        /// Opaque stable ID (preferred) or current display ordinal.
+        device: String,
+    },
+    /// Return a disabled or draining device to service.
+    Enable {
+        /// Opaque stable ID (preferred) or current display ordinal.
+        device: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum RunpodAction {
     /// Check RunPod auth, endpoint, and account info
     Doctor,
@@ -738,7 +758,7 @@ Examples:
         #[arg(long, help_heading = "Server")]
         dry_run: bool,
 
-        /// Comma-separated GPU ordinals to use for local generation (default: all)
+        /// GPUs for local generation: all, none, ordinals, or stable cuda:/metal:/GPU-/MIG- IDs
         #[arg(long, env = "MOLD_GPUS", help_heading = "Advanced")]
         gpus: Option<String>,
 
@@ -924,7 +944,7 @@ environment before starting mold serve.")]
         #[arg(long)]
         log_file: bool,
 
-        /// Comma-separated GPU ordinals to use (default: all discovered)
+        /// GPUs to use: all, none, ordinals, or stable cuda:/metal:/GPU-/MIG- IDs
         #[arg(long, env = "MOLD_GPUS")]
         gpus: Option<String>,
 
@@ -1214,6 +1234,12 @@ Examples:
     /// Show server status and loaded models
     #[command(after_long_help = "Use 'mold unload' to free GPU memory when idle.")]
     Ps,
+
+    /// Inspect and administer server compute devices
+    Gpu {
+        #[command(subcommand)]
+        action: GpuAction,
+    },
 
     /// Show version information
     Version,
@@ -2033,6 +2059,11 @@ async fn run() -> anyhow::Result<()> {
         Commands::Ps => {
             commands::ps::run().await?;
         }
+        Commands::Gpu { action } => match action {
+            GpuAction::List { json } => commands::gpu::list(json).await?,
+            GpuAction::Disable { device } => commands::gpu::set(&device, false).await?,
+            GpuAction::Enable { device } => commands::gpu::set(&device, true).await?,
+        },
         Commands::Version => {
             println!("mold {}", mold_core::build_info::version_string());
         }
@@ -2227,6 +2258,24 @@ mod tests {
                 assert_eq!(prompt_rest, vec!["a", "red", "apple"]);
             }
             _ => panic!("expected Run command"),
+        }
+    }
+
+    #[test]
+    fn serve_reads_explicit_none_from_mold_gpus() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_GPUS");
+        std::env::set_var("MOLD_GPUS", "none");
+
+        let cli = parse(&["serve"]);
+
+        match previous {
+            Some(value) => std::env::set_var("MOLD_GPUS", value),
+            None => std::env::remove_var("MOLD_GPUS"),
+        }
+        match cli.command {
+            Commands::Serve { gpus, .. } => assert_eq!(gpus.as_deref(), Some("none")),
+            _ => panic!("expected Serve command"),
         }
     }
 

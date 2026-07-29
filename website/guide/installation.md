@@ -22,9 +22,19 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 
 Downloads the **latest tagged release** from
 [github.com/utensils/mold/releases/latest](https://github.com/utensils/mold/releases/latest)
-and installs it to `~/.local/bin/mold`. On Linux, the installer auto-detects
-your NVIDIA GPU architecture (RTX 40-series or RTX 50-series). macOS builds
-include Metal support.
+and installs it to `~/.local/bin/mold`. On Linux, the installer queries every
+GPU visible through `CUDA_VISIBLE_DEVICES` and selects a compatible release
+binary independent of device order. It supports any homogeneous device count,
+including RTX 3050/30-series, RTX 50-series, and named RTX PRO variants.
+macOS builds include Metal support.
+
+The installer downloads the exact release's `SHA256SUMS` and verifies the
+selected archive before extraction. Missing sm86, sm100, or sm120
+artifacts fail closed; a higher compute target is never substituted for a
+lower-capability GPU. Only sm89 may use an old release's unsuffixed archive,
+which was the historical name for that same target. Timeouts, authentication
+failures, server failures, duplicate checksums, and checksum mismatches stop
+installation.
 
 ### Options
 
@@ -38,13 +48,30 @@ curl -fsSL ... | MOLD_INSTALL_DIR=/usr/local/bin sh
 curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
 
 # Force a GPU architecture (default: auto-detect on Linux)
-curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Blackwell (RTX 50-series)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm86  sh   # Ampere (RTX 3090 / A40)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm89  sh   # Ada (RTX 40-series)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm100 sh   # Datacenter Blackwell (B200 / B300)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Consumer Blackwell (RTX 50-series)
 ```
 
 > **Note:** the env var has to be on the `sh` side of the pipe — with
 > `VAR=value curl ... | sh`, the variable only applies to `curl` and the
 > installer itself still sees the default.
+
+An explicit `MOLD_CUDA_ARCH` must equal the target selected for every visible
+GPU. Homogeneous 8.6 and 8.9 fleets use sm86 and sm89 respectively. A mixed
+8.6/8.9 fleet uses sm86: release CI requires exact sm86 PTX embedded in the
+final executable, which both Ampere and the forward-compatible Ada driver can
+JIT. Homogeneous 10.x and 12.x fleets use sm100 and sm120. Compute capability
+8.0, 9.x, and unproven mixed families fail closed
+because no release tarball is qualified for their floor. Narrow
+`CUDA_VISIBLE_DEVICES` or build from source with verified targets.
+
+PTX compatibility is forward-only toward equal-or-higher device compute
+capabilities. An sm86 artifact can JIT on sm86 or sm89, but sm89 PTX cannot JIT
+backward on an RTX 3090 (sm86). The RTX 3090 distribution gate therefore
+requires a successful sm86 generation and treats the same-source sm89 failure
+as an expected incompatibility regression, not a successful smoke.
 
 `MOLD_VERSION` accepts any tag that exists on the
 [releases page](https://github.com/utensils/mold/releases) — for example
@@ -72,7 +99,7 @@ Three packages on the [AUR](https://aur.archlinux.org/):
 
 ```bash
 paru -S mold-ai-bin     # Prebuilt binary, CUDA sm_89 (RTX 40-series). Fastest.
-paru -S mold-ai         # Builds from source — for Blackwell, prefix CUDA_COMPUTE_CAP=120
+paru -S mold-ai         # Builds from source — set CUDA_COMPUTE_CAP for other GPUs
 paru -S mold-ai-git     # Builds from main HEAD
 ```
 
@@ -92,13 +119,16 @@ have both installed simultaneously. If you need the linker for your build
 toolchain, install mold via Nix or the one-line installer (which targets
 `~/.local/bin`) instead.
 
-**Blackwell (RTX 50-series)**: The `mold-ai-bin` package ships the sm_89 (Ada)
-tarball. For sm_120 (Blackwell) use the source PKGBUILD with an explicit
-compute capability:
+The existing `mold-ai-bin` package deliberately remains on sm_89. Use the
+source PKGBUILD with an explicit compute capability for other families:
 
 ```bash
-CUDA_COMPUTE_CAP=120 paru -S mold-ai
+CUDA_COMPUTE_CAP=86 paru -S mold-ai   # RTX 3090 / A40
+CUDA_COMPUTE_CAP=100 paru -S mold-ai  # B200 / B300
+CUDA_COMPUTE_CAP=120 paru -S mold-ai  # RTX 50-series
 ```
+
+There is no `mold-ai-bin-sm100` package before real B200 qualification.
 
 To upgrade: `paru -Syu mold-ai-bin` (or `mold-ai` / `mold-ai-git`). `mold update`
 will detect a pacman-managed install and direct you here instead of attempting
@@ -108,11 +138,23 @@ To uninstall: `sudo pacman -R mold-ai-bin` (or whichever package you installed).
 
 ## Nix
 
+The flake is a source revision channel, not the self-updater's binary release
+channel. Pin the flake input or Git revision for reproducibility. Nix packages
+do not consult `MOLD_DISTRIBUTION_IMAGE_VERSION`; source and Nix-built cloud
+clients default to the mutable `latest*` container channel unless a release
+builder explicitly embeds an official distribution version.
+
 ```bash
 # Run directly — no install needed
 nix run github:utensils/mold -- run "a cat"
 
-# Blackwell / RTX 50-series
+# RTX 3090 / A40
+nix run github:utensils/mold#mold-sm86 -- run "a cat"
+
+# B200 / B300
+nix run github:utensils/mold#mold-sm100 -- run "a cat"
+
+# RTX 50-series
 nix run github:utensils/mold#mold-sm120 -- run "a cat"
 
 # Add to your system profile
@@ -120,6 +162,10 @@ nix profile install github:utensils/mold
 ```
 
 ## From Source
+
+Source builds likewise do not imply that a same-version GHCR image exists.
+They use rolling `latest*` cloud images by default. For local CUDA compilation,
+set `CUDA_COMPUTE_CAP` to the target required by the GPUs you intend to expose.
 
 ::: code-group
 
@@ -167,16 +213,29 @@ The one-line installer always targets the latest tag from the
 [releases page](https://github.com/utensils/mold/releases). Each release ships
 the following assets:
 
-| Platform                                       | File                                              |
-| ---------------------------------------------- | ------------------------------------------------- |
-| macOS Apple Silicon                            | `mold-aarch64-apple-darwin.tar.gz`                |
-| Linux x86_64 (Ada, RTX 4090 / 40-series)       | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
-| Linux x86_64 (Blackwell, RTX 5090 / 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+| Platform                                         | File                                              |
+| ------------------------------------------------ | ------------------------------------------------- |
+| macOS Apple Silicon                              | `mold-aarch64-apple-darwin.tar.gz`                |
+| Linux x86_64 (Ampere, RTX 3090 / A40)            | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz`  |
+| Linux x86_64 (Ada, RTX 4090 / 40-series)         | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
+| Linux x86_64 (datacenter Blackwell, B200 / B300) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+| Linux x86_64 (consumer Blackwell, RTX 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+B200 support is simulated, not hardware-qualified. The sm_100 artifact passes
+hosted build, CUDA-image, loader, NVML, archive, and synthetic scheduler checks;
+real 8×B200 and MIG qualification remain deferred.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+Current Linux release archives and containers are amd64-only.
 
 To install an older tag, put `MOLD_VERSION=<tag>` on the `sh` side of the
 pipe, e.g. `curl -fsSL ... | MOLD_VERSION=v0.8.0 sh`. Placing it on the
 `curl` side (`VAR=value curl ... | sh`) exports the variable to `curl` only;
 the installer still sees the default and installs the latest release.
+
+Pinned releases remain pinned. If an older tag lacks the selected native
+sm86, sm100, or sm120 asset, the installer and `mold update --version` fail
+closed. An old unsuffixed CUDA archive is considered only when the selected
+target is sm89, because that was the former filename for the same target.
 
 ## Shell Completions
 

@@ -11,6 +11,7 @@ defineProps<{
   locked?: boolean | undefined;
   /** Name of the env var that wins when locked. */
   lockedBy?: string | undefined;
+  lockedReason?: string | undefined;
   /** Changing this only takes effect after an engine restart. */
   needsEngineRestart?: boolean | undefined;
   /** Show the reset-to-default affordance. */
@@ -32,8 +33,11 @@ defineEmits<{ (e: "reset"): void }>();
       </div>
       <p v-if="help" class="mt-0.5 max-w-md text-caption text-ink-3">{{ help }}</p>
       <p v-if="locked" class="mt-0.5 text-caption text-halide">
-        Locked by <span class="data-mono">{{ lockedBy ?? "the environment" }}</span> — unset it to
-        edit here.
+        <template v-if="lockedReason">{{ lockedReason }}</template>
+        <template v-else>
+          Locked by <span class="data-mono">{{ lockedBy ?? "the environment" }}</span> — unset it to
+          edit here.
+        </template>
       </p>
     </div>
     <div class="flex shrink-0 items-center gap-2 pt-0.5">

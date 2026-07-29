@@ -10,7 +10,14 @@
  * current additive fields (`instance_id`, `models_disk`, `queue_paused`, queue
  * capabilities).
  */
-import { onBeforeUnmount, ref, type Ref } from "vue";
+import {
+  getCurrentInstance,
+  isRef,
+  onBeforeUnmount,
+  ref,
+  watch,
+  type Ref,
+} from "vue";
 import type {
   DownloadsListingWire,
   ModelInfoExtended,
@@ -21,6 +28,13 @@ import type {
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
 import { parseCurrentServerStatus } from "@studio/api/client";
+import {
+  listDevices,
+  setDeviceEnabled,
+  type DeviceInfo,
+  type DeviceListResponse,
+} from "@studio/api/devices";
+import { parseQueueListing } from "@studio/api/queuePlan";
 
 export type HostStatus = ServerStatus;
 export type HostCapabilities = ServerCapabilities;
@@ -80,6 +94,30 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
   return value as HostStatus;
 }
 
+/** Current servers expose the authoritative full device inventory here.
+ * Callers deliberately treat a failed probe as an older-server fallback. */
+export function hostDevices(
+  host: HostEntry,
+  signal?: AbortSignal,
+): Promise<DeviceListResponse> {
+  return listDevices(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    signal,
+  );
+}
+
+export function setHostDeviceEnabled(
+  host: HostEntry,
+  deviceId: string,
+  enabled: boolean,
+): Promise<DeviceInfo> {
+  return setDeviceEnabled(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    deviceId,
+    enabled,
+  );
+}
+
 export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
   return getJson<DiscoveryPeer[]>(host, "/api/discovery/peers", signal);
 }
@@ -111,7 +149,9 @@ export function hostResources(host: HostEntry, signal?: AbortSignal) {
 }
 
 export function hostQueue(host: HostEntry, signal?: AbortSignal) {
-  return getJson<QueueListing>(host, "/api/queue", signal);
+  return getJson<unknown>(host, "/api/queue", signal).then(
+    (value) => parseQueueListing(value) as QueueListing,
+  );
 }
 
 export function hostModels(host: HostEntry, signal?: AbortSignal) {
@@ -190,6 +230,9 @@ export function moveQueueJob(
 
 export interface HostPoll {
   status: Ref<HostStatus | null>;
+  /** Full current-server inventory, or null when the endpoint is unsupported. */
+  devices: Ref<DeviceInfo[] | null>;
+  deviceState: Ref<DeviceListResponse | null>;
   resources: Ref<ResourceSnapshot | null>;
   online: Ref<boolean>;
   /** Epoch ms of the last successful status read, or null before the first. */
@@ -209,15 +252,18 @@ export interface HostPollOptions {
 
 /**
  * Abortable status poll for one host. Sets `online` from the last status read
- * and stamps `lastSeen` on success. Offline hosts keep their last-good data so
- * the UI can dim it rather than blank out (spec §08 G4).
+ * and stamps `lastSeen` on success. A same-target failure keeps last-good data
+ * so the UI can dim it (spec §08 G4); changing id, URL, or key starts a clean
+ * target session immediately so one machine can never display another's data.
  */
 export function useHostPoll(
-  host: HostEntry,
+  host: HostEntry | Readonly<Ref<HostEntry | null>>,
   options: HostPollOptions = {},
 ): HostPoll {
   const intervalMs = options.intervalMs ?? 5000;
   const status = ref<HostStatus | null>(null);
+  const devices = ref<DeviceInfo[] | null>(null);
+  const deviceState = ref<DeviceListResponse | null>(null);
   const resources = ref<ResourceSnapshot | null>(null);
   const online = ref(false);
   const lastSeen = ref<number | null>(null);
@@ -227,21 +273,49 @@ export function useHostPoll(
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
+  const currentHost = () => (isRef(host) ? host.value : host);
+  const isCurrentTarget = (target: HostEntry) => {
+    const current = currentHost();
+    return (
+      current?.id === target.id &&
+      current.url === target.url &&
+      current.apiKey === target.apiKey
+    );
+  };
+  const clearTargetState = () => {
+    status.value = null;
+    devices.value = null;
+    deviceState.value = null;
+    resources.value = null;
+    online.value = false;
+    lastSeen.value = null;
+    error.value = null;
+    loading.value = true;
+  };
 
   async function refresh(): Promise<void> {
     controller?.abort();
     controller = new AbortController();
     const signal = controller.signal;
+    const target = currentHost();
+    if (!target) {
+      clearTargetState();
+      loading.value = false;
+      return;
+    }
     try {
-      const [nextStatus, nextResources] = await Promise.all([
-        hostStatus(host, signal),
+      const [nextStatus, nextResources, nextDevices] = await Promise.all([
+        hostStatus(target, signal),
         options.withResources
-          ? hostResources(host, signal).catch(() => null)
+          ? hostResources(target, signal).catch(() => null)
           : Promise.resolve(null),
+        hostDevices(target, signal).catch(() => null),
       ]);
+      if (signal.aborted || !isCurrentTarget(target)) return;
       status.value = nextStatus;
-      if (options.withResources && nextResources)
-        resources.value = nextResources;
+      deviceState.value = nextDevices;
+      devices.value = nextDevices?.devices ?? null;
+      if (options.withResources) resources.value = nextResources;
       online.value = true;
       lastSeen.value = Date.now();
       error.value = null;
@@ -268,8 +342,35 @@ export function useHostPoll(
     controller = null;
   }
 
+  if (isRef(host)) {
+    watch(
+      () => {
+        const target = currentHost();
+        return target
+          ? `${target.id}\u0000${target.url}\u0000${target.apiKey ?? ""}`
+          : null;
+      },
+      () => {
+        controller?.abort();
+        clearTargetState();
+        void refresh();
+      },
+      { flush: "sync" },
+    );
+  }
   void tick();
-  onBeforeUnmount(stop);
+  if (getCurrentInstance()) onBeforeUnmount(stop);
 
-  return { status, resources, online, lastSeen, error, loading, refresh, stop };
+  return {
+    status,
+    devices,
+    deviceState,
+    resources,
+    online,
+    lastSeen,
+    error,
+    loading,
+    refresh,
+    stop,
+  };
 }

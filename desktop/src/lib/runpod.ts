@@ -9,7 +9,7 @@ export interface RunPodGpu {
   id: string | null;
   displayName: string;
   gpuId?: string;
-  memoryInGb: number;
+  memoryInGb: number | null;
   secureCloud: boolean;
   communityCloud: boolean;
   stockStatus: string | null;
@@ -168,7 +168,15 @@ export function rankRunPodGpus(gpus: RunPodGpu[]): RunPodGpu[] {
   return [...gpus].sort((a, b) => {
     const stock =
       (STOCK_RANK[b.stockStatus ?? "None"] ?? 0) - (STOCK_RANK[a.stockStatus ?? "None"] ?? 0);
-    return stock || a.memoryInGb - b.memoryInGb || a.displayName.localeCompare(b.displayName);
+    const memory =
+      a.memoryInGb == null
+        ? b.memoryInGb == null
+          ? 0
+          : 1
+        : b.memoryInGb == null
+          ? -1
+          : a.memoryInGb - b.memoryInGb;
+    return stock || memory || a.displayName.localeCompare(b.displayName);
   });
 }
 

@@ -23,7 +23,7 @@ use super::text::prompt_encoder::NativePromptEncoder;
 use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
-use crate::progress::ProgressCallback;
+use crate::progress::{InferenceCancellationToken, ProgressCallback};
 
 /// Soft-conditioning strength for the cross-stage identity anchor on chain
 /// continuations. The denoise mask at the anchor token becomes
@@ -39,11 +39,11 @@ pub struct Ltx2Engine {
     loaded: bool,
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
+    cancellation: Option<InferenceCancellationToken>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
-    /// GPU ordinal this engine is pinned to. Every `Device::new_cuda` and
-    /// `reclaim_gpu_memory` call must use this ordinal — hardcoding `0` here
-    /// is what took down the process on <gpu-host> when LTX-2 ran alongside
-    /// SD3.5 on a multi-GPU host.
+    load_strategy: LoadStrategy,
+    /// GPU ordinal this engine is pinned to. Every CUDA device operation must
+    /// use this ordinal; hardcoding `0` can target a sibling worker's context.
     gpu_ordinal: usize,
     /// Optional preset hint used when the model name doesn't carry a
     /// recognisable family substring (`ltx-2.3`, `ltx-2`). Populated by
@@ -54,6 +54,7 @@ pub struct Ltx2Engine {
     /// Separate LTX-2.3 Gemma hidden-state projection used by diffusion-only
     /// and quantized checkpoints. Combined checkpoints leave this unset.
     text_projection_path: Option<PathBuf>,
+    gemma_variant: Option<String>,
 }
 
 fn validate_audio_output_request(req: &GenerateRequest, supported: bool) -> Result<()> {
@@ -85,8 +86,24 @@ impl Ltx2Engine {
     pub fn new(
         model_name: String,
         paths: ModelPaths,
-        _load_strategy: LoadStrategy,
+        load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+    ) -> Self {
+        Self::new_with_gemma_variant(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            crate::runtime_env::value("MOLD_LTX2_GEMMA_VARIANT"),
+        )
+    }
+
+    pub fn new_with_gemma_variant(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        gemma_variant: Option<String>,
     ) -> Self {
         let text_projection_path = paths
             .text_encoder_files
@@ -103,10 +120,13 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: None,
             on_progress: None,
+            cancellation: None,
             pending_placement: None,
+            load_strategy,
             gpu_ordinal,
             preset_hint: None,
             text_projection_path,
+            gemma_variant,
         }
     }
 
@@ -136,6 +156,24 @@ impl Ltx2Engine {
         paths: ModelPaths,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+    ) -> anyhow::Result<Self> {
+        Self::from_single_file_with_gemma_variant(
+            model_name,
+            checkpoint,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            crate::runtime_env::value("MOLD_LTX2_GEMMA_VARIANT"),
+        )
+    }
+
+    pub fn from_single_file_with_gemma_variant(
+        model_name: String,
+        checkpoint: PathBuf,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        gemma_variant: Option<String>,
     ) -> anyhow::Result<Self> {
         if !checkpoint.exists() {
             anyhow::bail!(
@@ -185,7 +223,13 @@ impl Ltx2Engine {
             ..paths
         };
 
-        let mut engine = Self::new(model_name, paths, load_strategy, gpu_ordinal);
+        let mut engine = Self::new_with_gemma_variant(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            gemma_variant,
+        );
         // Catalog (`cv:*`) IDs don't contain `ltx-2.3` / `ltx-2` substrings,
         // so `preset_for_model` would bail. The bundled `model_version`
         // from the safetensors `__metadata__` (e.g. `"2.3.0"`) is the
@@ -219,10 +263,13 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: Some(runtime),
             on_progress: None,
+            cancellation: None,
             pending_placement: None,
+            load_strategy: LoadStrategy::Sequential,
             gpu_ordinal: 0,
             preset_hint: None,
             text_projection_path: None,
+            gemma_variant: None,
         }
     }
 
@@ -242,6 +289,13 @@ impl Ltx2Engine {
         }
     }
 
+    fn checkpoint(&self) -> Result<()> {
+        if let Some(token) = &self.cancellation {
+            token.checkpoint()?;
+        }
+        Ok(())
+    }
+
     fn is_oom_error(err: &impl std::fmt::Display) -> bool {
         let msg = err.to_string().to_ascii_lowercase();
         msg.contains("out of memory")
@@ -251,12 +305,12 @@ impl Ltx2Engine {
 
     fn unload_runtime_state(&mut self) -> Option<usize> {
         self.loaded = false;
-        let should_reclaim = self
+        let had_cuda_state = self
             .native_runtime
             .as_ref()
-            .is_some_and(Ltx2RuntimeSession::needs_cuda_reclaim_on_unload);
+            .is_some_and(Ltx2RuntimeSession::has_cuda_state);
         self.native_runtime = None;
-        should_reclaim.then_some(self.gpu_ordinal)
+        had_cuda_state.then_some(self.gpu_ordinal)
     }
 
     fn gemma_root(&self) -> Result<PathBuf> {
@@ -412,7 +466,7 @@ impl Ltx2Engine {
                 Ok(device)
             }
             Ltx2Backend::Cpu => {
-                let forced_cpu = std::env::var("MOLD_DEVICE")
+                let forced_cpu = crate::runtime_env::value("MOLD_DEVICE")
                     .map(|value| value.eq_ignore_ascii_case("cpu"))
                     .unwrap_or(false);
                 if forced_cpu {
@@ -452,6 +506,7 @@ impl Ltx2Engine {
             &plan.preset,
             &prompt_device,
             dtype,
+            self.gemma_variant.as_deref(),
         )?;
         Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
         // Cross-device case (transformer on CUDA, encoder on CPU/sibling GPU)
@@ -481,9 +536,13 @@ impl Ltx2Engine {
         // Honor Tier 1 `text_encoders` override for the Gemma prompt encoder.
         // Auto falls back to whatever `native_device_for_backend(backend)` picks
         // (CUDA when available, else CPU). Explicit Cpu/Gpu skips that auto path.
-        let tier1 = self.pending_placement.as_ref().map(|p| p.text_encoders);
-        let device =
-            crate::device::resolve_device(tier1, || self.native_device_for_backend(backend))?;
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders.clone());
+        let device = crate::device::resolve_device(tier1.clone(), || {
+            self.native_device_for_backend(backend)
+        })?;
         if device.is_cuda() {
             configure_native_ltx2_cuda_device(&device)?;
         }
@@ -502,7 +561,7 @@ impl Ltx2Engine {
                     "Native LTX-2 prompt encoder ran out of CUDA memory; retrying Gemma on CPU \
                      while keeping the transformer and VAE on CUDA",
                 );
-                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
+                let _ = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
                 let (transformer_device, prompt_placement) =
                     prompt_encoder_oom_retry_placement(&device);
                 self.load_runtime_session_with_devices(
@@ -632,9 +691,11 @@ fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
 
 impl Ltx2Engine {
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.checkpoint()?;
         if !self.loaded {
             self.load()?;
         }
+        self.checkpoint()?;
         let start = Instant::now();
         self.emit("Preparing native LTX-2 request");
 
@@ -642,6 +703,7 @@ impl Ltx2Engine {
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let materialize_start = Instant::now();
         let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.materialize_request", materialize_start);
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
         self.emit(&format!(
@@ -668,11 +730,18 @@ impl Ltx2Engine {
 
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
         let prepare_start = Instant::now();
-        let prepared = runtime.prepare(&plan)?;
+        let prepared = runtime.prepare_with_progress(&plan, self.on_progress.as_ref())?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
         let render_start = Instant::now();
-        let rendered = runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref())?;
+        let rendered = runtime.render_native_video(
+            &plan,
+            &prepared,
+            self.on_progress.as_ref(),
+            self.cancellation.as_ref(),
+        )?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.render_runtime", render_start);
         let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
@@ -764,6 +833,9 @@ impl Ltx2Engine {
         carry: Option<&ChainTail>,
         motion_tail_pixel_frames: u32,
     ) -> Result<StageOutcome> {
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
         if motion_tail_pixel_frames == 0 {
             bail!("render_chain_stage: motion_tail_pixel_frames must be > 0");
         }
@@ -784,6 +856,9 @@ impl Ltx2Engine {
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
 
         // Inject carryover RGB frames as a StagedLatent at frame 0. The
         // runtime VAE-encodes them fresh on the receiving side so every
@@ -851,17 +926,27 @@ impl Ltx2Engine {
         };
 
         self.emit("Executing native LTX-2 chain stage runtime");
-        let prepared = match runtime.prepare(&plan) {
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
+        let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.native_runtime = Some(runtime);
                 return Err(err);
             }
         };
-        let render_result =
-            runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref());
+        let render_result = runtime.render_native_video(
+            &plan,
+            &prepared,
+            self.on_progress.as_ref(),
+            self.cancellation.as_ref(),
+        );
         self.native_runtime = Some(runtime);
         let rendered = render_result?;
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
 
         let frames = rendered.frames;
         let audio = rendered.audio_track;
@@ -953,7 +1038,7 @@ impl InferenceEngine for Ltx2Engine {
 
     fn unload(&mut self) {
         if let Some(ordinal) = self.unload_runtime_state() {
-            crate::reclaim_gpu_memory(ordinal);
+            let _ = crate::device::post_drop_free_vram_bytes(ordinal);
         }
     }
 
@@ -965,8 +1050,32 @@ impl InferenceEngine for Ltx2Engine {
         self.on_progress = None;
     }
 
+    fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.cancellation = Some(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.cancellation = None;
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("ltx2")
+            .expect("production LTX-2 batch capability must be registered")
+    }
+
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.paths)
+    }
+
+    fn configured_load_strategy(&self) -> Option<LoadStrategy> {
+        Some(self.load_strategy)
+    }
+
+    fn configured_block_offload(&self) -> Option<bool> {
+        // LTX-2 uses its native adaptive streaming runtime; the generic
+        // request-controlled block-offload flag is not part of its factory
+        // contract.
+        Some(false)
     }
 
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
@@ -1519,6 +1628,21 @@ mod tests {
     }
 
     #[test]
+    fn constructor_consumes_the_selected_load_mode_explicitly() {
+        let engine = Ltx2Engine::new(
+            "ltx-2:fp8".to_string(),
+            dummy_paths(),
+            LoadStrategy::Sequential,
+            3,
+        );
+        assert_eq!(
+            engine.configured_load_strategy(),
+            Some(LoadStrategy::Sequential)
+        );
+        assert_eq!(engine.configured_block_offload(), Some(false));
+    }
+
+    #[test]
     fn from_single_file_preserves_companion_paths() {
         // Regression: the original catalog route wired `cv:*` LTX-2 catalog entries into
         // `Ltx2Engine::from_single_file` but the constructor used to build
@@ -1762,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_unload_drops_runtime_and_requests_cuda_reclaim() {
+    fn ltx2_unload_drops_runtime_and_reports_cuda_state() {
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),
@@ -1777,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_unload_cpu_runtime_skips_cuda_reclaim() {
+    fn ltx2_unload_cpu_runtime_needs_no_cuda_synchronization() {
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),

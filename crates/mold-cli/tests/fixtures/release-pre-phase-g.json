@@ -1,0 +1,20 @@
+{
+  "tag_name": "v0.20.2",
+  "assets": [
+    {
+      "name": "mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz",
+      "browser_download_url": "https://fixtures.invalid/v0.20.2/sm89",
+      "size": 89
+    },
+    {
+      "name": "mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz",
+      "browser_download_url": "https://fixtures.invalid/v0.20.2/sm120",
+      "size": 120
+    },
+    {
+      "name": "mold-x86_64-unknown-linux-gnu-cuda.tar.gz",
+      "browser_download_url": "https://fixtures.invalid/v0.20.2/legacy",
+      "size": 1
+    }
+  ]
+}

@@ -143,6 +143,14 @@ pub enum Action {
     MachinesRefresh,
     /// Machines: cancel the selected queued job (confirmed).
     MachinesCancelJob,
+    /// Machines: move the device-detail selection to the next visible GPU.
+    MachinesNextDevice,
+    /// Machines: move the device-detail selection backward/forward without
+    /// changing queue selection.
+    MachinesDevicePrev,
+    MachinesDeviceNext,
+    /// Machines: enable or drain/disable the selected visible GPU.
+    MachinesToggleDevice,
     /// No action (key not mapped or consumed by text input).
     None,
 }

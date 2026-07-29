@@ -597,7 +597,11 @@ impl ZImageEngine {
                 progress.stage_start("Encoding prompt (Qwen3)");
                 let encode_start = Instant::now();
                 let (cap_feats, _token_count) = encoder.encode(prompt, device, dtype)?;
-                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (Qwen3)",
+                    encode_start.elapsed(),
+                );
                 Ok(cap_feats)
             })?;
         if cache_hit {
@@ -846,7 +850,7 @@ impl ZImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -898,8 +902,11 @@ impl ZImageEngine {
         // needs enough room for VAE weights at load time. Decode workspace is
         // allocated later after the large transformer has been released.
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_WEIGHT_LOAD_VRAM_THRESHOLD);
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -960,7 +967,11 @@ impl ZImageEngine {
             .progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-        let qwen3_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen3_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_te_device = if te_on_gpu {
             device.clone()
         } else {
@@ -1067,7 +1078,7 @@ impl ZImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1128,8 +1139,11 @@ impl ZImageEngine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-            let qwen3_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+            let qwen3_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen.clone(),
+                true,
+            );
             let auto_te_device = if te_on_gpu {
                 device.clone()
             } else {
@@ -1277,9 +1291,11 @@ impl ZImageEngine {
                 encode_vae_dtype,
             )?;
             let encoded = encode_vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             // Drop encoding VAE before loading transformer
             drop(encode_vae);
@@ -1353,6 +1369,7 @@ impl ZImageEngine {
         let previewer = crate::latent_preview::LatentPreviewer::zimage();
 
         for step in 0..num_steps {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
             let t = model_timestep(&scheduler);
             let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
@@ -1422,6 +1439,7 @@ impl ZImageEngine {
             }
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -1447,8 +1465,11 @@ impl ZImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -1485,9 +1506,11 @@ impl ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         // VAE dropped here
         let output_metadata = build_output_metadata(req, seed, None);
@@ -1711,7 +1734,11 @@ impl ZImageEngine {
                 vae_encode_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
 
@@ -1753,6 +1780,7 @@ impl ZImageEngine {
                 .expect("transformer must be loaded for denoising");
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = model_timestep(&scheduler);
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
@@ -1830,6 +1858,7 @@ impl ZImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete");
 
@@ -1894,7 +1923,7 @@ impl ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?; // Remove batch dimension → [3, H, W]
 
-        progress.stage_done("VAE decode", vae_start.elapsed());
+        progress.phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 9. Encode to output format
         let output_metadata = build_output_metadata(req, seed, None);
@@ -1928,6 +1957,7 @@ impl ZImageEngine {
 
 impl InferenceEngine for ZImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_zimage_loras(req);
         let result = self.generate_inner(req);
@@ -1949,6 +1979,13 @@ impl InferenceEngine for ZImageEngine {
         ZImageEngine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = ZImageEngine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
@@ -1960,6 +1997,19 @@ impl InferenceEngine for ZImageEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("z-image")
+            .expect("production Z-Image batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

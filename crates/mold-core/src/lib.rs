@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod config_keys;
 pub mod control;
+pub mod cuda_distribution;
 pub mod download;
 pub mod error;
 pub mod expand;

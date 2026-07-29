@@ -58,11 +58,20 @@ export const useEventsStore = defineStore("events", {
       await this.subscribe();
     },
     openStream() {
+      const primary = useHostsStore().primaryHost;
+      if (!primary?.baseUrl) {
+        this.live = false;
+        this.startPolling();
+        return;
+      }
       const abort = new AbortController();
       this.abort = abort;
       void sseStream("/api/events", {
+        target: { baseUrl: primary.baseUrl, apiKey: primary.apiKey },
         signal: abort.signal,
         retry: true,
+        terminalHttpStatuses: [401, 403, 404],
+        onOpen: () => this.refreshAuthoritativePrimary(),
         onEvent: (_event, data) => {
           try {
             this.apply(JSON.parse(data) as ServerEvent);
@@ -90,11 +99,30 @@ export const useEventsStore = defineStore("events", {
           if (queue) queue.paused = ev.type === "queue_paused";
           break;
         }
+        case "queue_plan_changed": {
+          const primary = useHostsStore().primaryHost;
+          const queue = primary ? useJobsStore().queues[primary.id] : undefined;
+          if (queue && (!queue.plan || queue.plan.plan_version < ev.plan.plan_version)) {
+            queue.plan = ev.plan;
+          }
+          this.refreshAuthoritativePrimary();
+          break;
+        }
+        case "device_state_changed": {
+          // This frame is deliberately a lean invalidation, not an
+          // authoritative inventory. Refetch against the exact primary.
+          this.refreshAuthoritativePrimary();
+          break;
+        }
         // job_* frames: the generation store tracks its own jobs via their
         // per-job streams; queue-wide UI can subscribe here later.
         default:
           break;
       }
+    },
+    refreshAuthoritativePrimary() {
+      const primary = useHostsStore().primaryHost;
+      if (primary) void useJobsStore().refreshHost(primary);
     },
     /**
      * Old-server fallback: while any generation is pending, refetch the

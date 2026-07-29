@@ -1,4 +1,64 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
+
+/// Attempt-scoped cooperative cancellation shared between a caller and one
+/// inference invocation.
+///
+/// Cancellation never interrupts a CUDA kernel. Engines poll the token only at
+/// explicit safe points, so Candle and CUDA objects remain owned and dropped by
+/// the same worker thread that started the invocation.
+#[derive(Clone, Debug, Default)]
+pub struct InferenceCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl InferenceCancellationToken {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn checkpoint(&self) -> Result<(), InferenceCancelled> {
+        if self.is_cancelled() {
+            Err(InferenceCancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Typed non-fatal result returned when an inference attempt observes its
+/// cooperative cancellation token at a safe point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InferenceCancelled;
+
+impl std::fmt::Display for InferenceCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("inference cancelled")
+    }
+}
+
+impl std::error::Error for InferenceCancelled {}
+
+pub fn is_inference_cancelled(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<InferenceCancelled>())
+}
+
+/// Machine-readable inference phase used by the scheduler's learned timing
+/// model. Display names remain independently evolvable client copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressPhase {
+    ModelLoad,
+    PromptEncode,
+    Vae,
+    Upscale,
+}
 
 /// Progress events emitted during model loading and inference.
 #[derive(Debug, Clone)]
@@ -7,6 +67,14 @@ pub enum ProgressEvent {
     StageStart { name: String },
     /// The most recent stage completed, with its elapsed time
     StageDone { name: String, elapsed: Duration },
+    /// A scheduler-observable phase completed. This maps to the same
+    /// StageDone SSE shape as a display-only stage but retains typed identity
+    /// inside the inference/server boundary.
+    PhaseDone {
+        phase: ProgressPhase,
+        name: String,
+        elapsed: Duration,
+    },
     /// Informational message (e.g. "CUDA detected, using GPU")
     Info { message: String },
     /// A cached artifact was reused instead of recomputed.
@@ -42,6 +110,7 @@ pub type ProgressCallback = Box<dyn Fn(ProgressEvent) + Send + Sync>;
 #[derive(Default)]
 pub struct ProgressReporter {
     callback: Option<ProgressCallback>,
+    cancellation: Option<InferenceCancellationToken>,
 }
 
 impl ProgressReporter {
@@ -59,6 +128,14 @@ impl ProgressReporter {
 
     pub fn stage_done(&self, name: &str, elapsed: Duration) {
         self.emit(ProgressEvent::StageDone {
+            name: name.to_string(),
+            elapsed,
+        });
+    }
+
+    pub fn phase_done(&self, phase: ProgressPhase, name: &str, elapsed: Duration) {
+        self.emit(ProgressEvent::PhaseDone {
+            phase,
             name: name.to_string(),
             elapsed,
         });
@@ -91,6 +168,22 @@ impl ProgressReporter {
     pub fn clear_callback(&mut self) {
         self.callback = None;
     }
+
+    pub fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.cancellation = Some(token);
+    }
+
+    pub fn clear_cancellation_token(&mut self) {
+        self.cancellation = None;
+    }
+
+    /// Return a typed cancellation result only at a caller-selected safe point.
+    pub fn checkpoint(&self) -> Result<(), InferenceCancelled> {
+        match &self.cancellation {
+            Some(token) => token.checkpoint(),
+            None => Ok(()),
+        }
+    }
 }
 
 impl From<ProgressEvent> for mold_core::SseProgressEvent {
@@ -98,6 +191,14 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
         match event {
             ProgressEvent::StageStart { name } => mold_core::SseProgressEvent::StageStart { name },
             ProgressEvent::StageDone { name, elapsed } => mold_core::SseProgressEvent::StageDone {
+                name,
+                elapsed_ms: elapsed.as_millis() as u64,
+            },
+            ProgressEvent::PhaseDone {
+                name,
+                elapsed,
+                phase: _,
+            } => mold_core::SseProgressEvent::StageDone {
                 name,
                 elapsed_ms: elapsed.as_millis() as u64,
             },
@@ -168,6 +269,58 @@ mod tests {
             elapsed: Duration::from_millis(5),
         });
         // Reaching this point without panic is the assertion.
+    }
+
+    #[test]
+    fn cancellation_token_is_shared_and_attempt_scoped() {
+        let first_attempt = InferenceCancellationToken::default();
+        let first_attempt_worker = first_attempt.clone();
+        let second_attempt = InferenceCancellationToken::default();
+
+        assert!(first_attempt_worker.checkpoint().is_ok());
+        first_attempt.cancel();
+
+        assert_eq!(first_attempt_worker.checkpoint(), Err(InferenceCancelled));
+        assert!(second_attempt.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn reporter_observes_and_clears_cooperative_cancellation() {
+        let token = InferenceCancellationToken::default();
+        let mut reporter = ProgressReporter::default();
+        reporter.set_cancellation_token(token.clone());
+
+        assert!(reporter.checkpoint().is_ok());
+        token.cancel();
+        let error = anyhow::Error::from(reporter.checkpoint().unwrap_err());
+        assert!(is_inference_cancelled(&error));
+
+        reporter.clear_cancellation_token();
+        assert!(reporter.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn denoise_loop_stops_at_the_next_safe_checkpoint_and_can_be_reused() {
+        let token = InferenceCancellationToken::default();
+        let mut reporter = ProgressReporter::default();
+        reporter.set_cancellation_token(token.clone());
+        let mut completed_steps = 0;
+
+        let result = (|| {
+            for step in 0..10 {
+                reporter.checkpoint()?;
+                completed_steps += 1;
+                if step == 3 {
+                    token.cancel();
+                }
+            }
+            Ok::<(), InferenceCancelled>(())
+        })();
+
+        assert_eq!(result, Err(InferenceCancelled));
+        assert_eq!(completed_steps, 4);
+        reporter.clear_cancellation_token();
+        assert!(reporter.checkpoint().is_ok());
     }
 
     #[test]
@@ -250,6 +403,24 @@ mod tests {
             "expected elapsed ~2.5s, got: {}",
             entries[0]
         );
+    }
+
+    #[test]
+    fn typed_phase_done_preserves_the_existing_sse_wire_shape() {
+        let wire: mold_core::SseProgressEvent = ProgressEvent::PhaseDone {
+            phase: ProgressPhase::Vae,
+            name: "Decoding video frames".to_string(),
+            elapsed: Duration::from_millis(37),
+        }
+        .into();
+
+        assert!(matches!(
+            wire,
+            mold_core::SseProgressEvent::StageDone {
+                name,
+                elapsed_ms: 37
+            } if name == "Decoding video frames"
+        ));
     }
 
     #[test]

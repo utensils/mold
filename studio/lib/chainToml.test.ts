@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CHAIN_SCHEMA, parseChainScript, serializeChainScript } from "./chainToml";
+import {
+  CHAIN_SCHEMA,
+  parseChainScript,
+  serializeChainScript,
+} from "./chainToml";
 import type { ChainScript } from "./api/chainTypes";
 
 function script(): ChainScript {
@@ -85,7 +89,9 @@ describe("serializeChainScript", () => {
     s.stages[1]!.seed_offset = "18446744073709551614";
     const toml = serializeChainScript(s);
     expect(toml).toContain("seed_offset = 18446744073709551614");
-    expect(parseChainScript(toml).stages[1]!.seed_offset).toBe("18446744073709551614");
+    expect(parseChainScript(toml).stages[1]!.seed_offset).toBe(
+      "18446744073709551614",
+    );
   });
 
   it("omits null and undefined fields", () => {
@@ -112,8 +118,12 @@ describe("serializeChainScript", () => {
     const s = script();
     s.stages[0]!.prompt = 'a "quoted" prompt\nwith C:\\paths';
     const toml = serializeChainScript(s);
-    expect(toml).toContain('prompt = "a \\"quoted\\" prompt\\nwith C:\\\\paths"');
-    expect(parseChainScript(toml).stages[0]!.prompt).toBe('a "quoted" prompt\nwith C:\\paths');
+    expect(toml).toContain(
+      'prompt = "a \\"quoted\\" prompt\\nwith C:\\\\paths"',
+    );
+    expect(parseChainScript(toml).stages[0]!.prompt).toBe(
+      'a "quoted" prompt\nwith C:\\paths',
+    );
   });
 });
 
@@ -164,7 +174,14 @@ describe("parseChainScript", () => {
 
   it("accepts the natural plural [[stages]] key from hand-written documents", () => {
     const parsed = parseChainScript(
-      ["[chain]", 'model = "m"', "", "[[stages]]", 'prompt = "a"', "frames = 25"].join("\n"),
+      [
+        "[chain]",
+        'model = "m"',
+        "",
+        "[[stages]]",
+        'prompt = "a"',
+        "frames = 25",
+      ].join("\n"),
     );
     expect(parsed.stages).toHaveLength(1);
     expect(parsed.stages[0]!.prompt).toBe("a");
@@ -186,9 +203,14 @@ describe("parseChainScript", () => {
 
   it("accepts the canonical source_image key and folds it into source_image_b64", () => {
     const parsed = parseChainScript(
-      ["[chain]", 'model = "m"', "", "[[stage]]", 'prompt = "a"', 'source_image = "aGk="'].join(
-        "\n",
-      ),
+      [
+        "[chain]",
+        'model = "m"',
+        "",
+        "[[stage]]",
+        'prompt = "a"',
+        'source_image = "aGk="',
+      ].join("\n"),
     );
     expect(parsed.stages[0]!.source_image_b64).toBe("aGk=");
   });
@@ -225,16 +247,24 @@ describe("parseChainScript", () => {
   });
 
   it("rejects malformed TOML, foreign schemas, and missing tables with friendly messages", () => {
-    expect(() => parseChainScript("not = [toml")).toThrow(/Couldn't parse the TOML/);
-    expect(() => parseChainScript('schema = "mold.chain.v2"')).toThrow(/mold\.chain\.v1/);
-    expect(() => parseChainScript('schema = "mold.chain.v2"\n[chain]\nmodel = "m"')).toThrow(
+    expect(() => parseChainScript("not = [toml")).toThrow(
+      /Couldn't parse the TOML/,
+    );
+    expect(() => parseChainScript('schema = "mold.chain.v2"')).toThrow(
       /mold\.chain\.v1/,
     );
-    expect(() => parseChainScript('schema = "mold.chain.v1"')).toThrow(/\[chain\]/);
-    expect(() => parseChainScript('schema = "mold.chain.v1"\n[chain]\nmodel = "m"')).toThrow(
+    expect(() =>
+      parseChainScript('schema = "mold.chain.v2"\n[chain]\nmodel = "m"'),
+    ).toThrow(/mold\.chain\.v1/);
+    expect(() => parseChainScript('schema = "mold.chain.v1"')).toThrow(
+      /\[chain\]/,
+    );
+    expect(() =>
+      parseChainScript('schema = "mold.chain.v1"\n[chain]\nmodel = "m"'),
+    ).toThrow(/\[\[stage\]\]/);
+    expect(() => parseChainScript('[chain]\nmodel = "m"')).toThrow(
       /\[\[stage\]\]/,
     );
-    expect(() => parseChainScript('[chain]\nmodel = "m"')).toThrow(/\[\[stage\]\]/);
   });
 
   it("coerces stage 0's transition to smooth and defaults unknown transitions", () => {

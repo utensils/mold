@@ -2,7 +2,7 @@ mod assets;
 mod backend;
 pub mod chain;
 mod conditioning;
-mod convrot;
+pub(crate) mod convrot;
 mod execution;
 mod guidance;
 mod lora;

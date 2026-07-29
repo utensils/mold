@@ -563,6 +563,8 @@
                 fi
               '';
 
+              passthru.moldCudaComputeCapability = computeCap;
+
               meta = with lib; {
                 description = "Mold — native desktop app for local AI image/video generation";
                 homepage = "https://github.com/utensils/mold";
@@ -638,6 +640,9 @@
                 # CLI smoke tests remain covered by non-sandbox CI.
                 cargoTestExtraArgs = "--bins";
               }
+              // {
+                passthru.moldCudaComputeCapability = computeCap;
+              }
             );
 
           mold = mkMold cudaComputeCap;
@@ -672,7 +677,10 @@
             default = mold;
           }
           // lib.optionalAttrs isLinux {
-            mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
+            mold-sm86 = mkMold "86"; # Ampere (RTX 3090/A40)
+            mold-sm100 = mkMold "100"; # Datacenter Blackwell (B200/B300)
+            mold-sm120 = mkMold "120"; # Consumer Blackwell (RTX 50-series)
+            mold-desktop-sm86 = mkMoldDesktop "86";
             mold-desktop-sm120 = mkMoldDesktop "120";
           };
 
@@ -734,6 +742,58 @@
             '';
           }
           // lib.optionalAttrs isLinux {
+            cuda-package-consistency =
+              let
+                moduleWarnings =
+                  cudaArch: package:
+                  (
+                    lib.nixosSystem {
+                      inherit system;
+                      modules = [
+                        ./nix/module.nix
+                        {
+                          services.mold = {
+                            enable = true;
+                            inherit cudaArch package;
+                          };
+                        }
+                      ];
+                    }
+                  ).config.warnings;
+                correctPairs = [
+                  {
+                    cudaArch = "ampere";
+                    package = mkMold "86";
+                  }
+                  {
+                    cudaArch = "ada";
+                    package = mold;
+                  }
+                  {
+                    cudaArch = "blackwell-datacenter";
+                    package = mkMold "100";
+                  }
+                  {
+                    cudaArch = "blackwell";
+                    package = mkMold "120";
+                  }
+                ];
+                correct = builtins.all (
+                  pair: moduleWarnings pair.cudaArch pair.package == [ ]
+                ) correctPairs;
+                mismatch = builtins.length (moduleWarnings "ada" (mkMold "86")) == 1;
+                unknownPackage =
+                  builtins.length (
+                    moduleWarnings "ada" (pkgs.writeShellScriptBin "mold" "exit 0")
+                  ) == 1;
+              in
+              assert correct;
+              assert mismatch;
+              assert unknownPackage;
+              pkgs.runCommand "mold-cuda-package-consistency-check" { } ''
+                touch "$out"
+              '';
+
             desktop-runtime-closure = pkgs.runCommand "mold-desktop-runtime-closure-check" { } ''
               set -eu
               runtime_path=${lib.escapeShellArg (lib.makeLibraryPath desktopLinuxRuntimeInputs)}

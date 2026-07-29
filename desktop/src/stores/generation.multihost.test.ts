@@ -37,7 +37,7 @@ vi.mock("../lib/notify", () => ({
 }));
 
 const saveOutputBytes = vi.fn().mockResolvedValue("saved.png");
-const localGalleryList = vi.fn().mockResolvedValue([]);
+const localGalleryList = vi.fn().mockResolvedValue({ images: [], target: null });
 vi.mock("../lib/ipc", () => ({
   inTauri: () => true,
   ipc: {

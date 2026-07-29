@@ -161,6 +161,20 @@ const ignoredEnvVars = new Set([
   // to set them in normal operation, which is wrong.
   'MOLD_FLUX2_DUMP_LATENT',
   'MOLD_NVFP4_PROBE_PATH',
+  // Batch transaction subprocess fixtures and their stdout marker. These are
+  // compiled only for Rust tests and are not supported runtime configuration.
+  'MOLD_RESERVATION_TEST',
+  'MOLD_TEST_BATCH_ATTEMPT_STATE',
+  'MOLD_TEST_BATCH_GENERATION',
+  'MOLD_TEST_BATCH_PARENT',
+  'MOLD_PARENT_AUTHORITY_TEST',
+  'MOLD_TEST_ARCHIVED_PARENT',
+  'MOLD_TEST_GALLERY_EXPECTED_NAME',
+  'MOLD_TEST_GALLERY_ACTION',
+  'MOLD_TEST_GALLERY_NAME',
+  'MOLD_TEST_GALLERY_OUTPUT',
+  'MOLD_TEST_INCOMPLETE_PARENT_TAIL',
+  'MOLD_TEST_PREDECESSOR_MODE',
   'MOLD_TEST_CLIP_TOKENIZER',
 ])
 const docsText = walk(websiteDir)

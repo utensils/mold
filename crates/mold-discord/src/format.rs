@@ -14,10 +14,19 @@ const COLOR_SUCCESS: u32 = 0x57F287; // green
 const COLOR_INFO: u32 = 0x5865F2; // blurple
 const COLOR_WARNING: u32 = 0xFEE75C; // yellow
 const COLOR_ERROR: u32 = 0xED4245; // red
+const DISCORD_EMBED_TITLE_MAX: usize = 256;
+const DISCORD_EMBED_DESCRIPTION_MAX: usize = 4096;
+const DISCORD_EMBED_FIELD_NAME_MAX: usize = 256;
+const DISCORD_EMBED_FIELD_VALUE_MAX: usize = 1024;
+const DISCORD_EMBED_FIELDS_MAX: usize = 25;
+const DISCORD_EMBED_TOTAL_MAX: usize = 6000;
 
 /// Format an SSE progress event into a human-readable status line.
 pub fn format_progress(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::DependencyWait { dependency, reason } => {
+            format!("Waiting for {dependency}: {reason}")
+        }
         SseProgressEvent::Queued { position, .. } => {
             if *position == 0 {
                 "Starting generation...".to_string()
@@ -166,6 +175,9 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
 
     // Preserve insertion order so tests/UI stay stable.
     fields.retain(|(_, v, _)| !v.is_empty());
+    if let Some(gpu) = resp.gpu {
+        fields.push(("Device".to_string(), format!("GPU {gpu}"), true));
+    }
 
     EmbedData {
         title,
@@ -252,6 +264,28 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
 
 /// Format server status into embed data.
 pub fn format_server_status(status: &ServerStatus) -> EmbedData {
+    format_server_status_with_devices(status, None, None)
+}
+
+pub fn format_server_status_with_devices(
+    status: &ServerStatus,
+    devices: Option<&mold_core::DeviceState>,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> EmbedData {
+    format_server_status_pages(status, devices, queue)
+        .into_iter()
+        .next()
+        .expect("status formatting always emits at least one page")
+}
+
+/// Discord caps every field and every embed independently. A 64-device host
+/// cannot fit in one legal embed, so status is deterministically paginated as
+/// one embed per follow-up message.
+pub fn format_server_status_pages(
+    status: &ServerStatus,
+    devices: Option<&mold_core::DeviceState>,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> Vec<EmbedData> {
     let uptime = format_duration_secs(status.uptime_secs);
     let version = match (&status.git_sha, &status.build_date) {
         (Some(sha), Some(date)) => format!("{} ({sha}, {date})", status.version),
@@ -274,7 +308,84 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
         ("Models Loaded".to_string(), loaded, false),
     ];
 
-    if let Some(gpu) = &status.gpu_info {
+    if let Some(devices) = devices.filter(|state| !state.devices.is_empty()) {
+        let lines = devices
+            .devices
+            .iter()
+            .map(|device| {
+                let ordinal = device
+                    .ordinal
+                    .map_or_else(|| "—".into(), |value| value.to_string());
+                let memory = match (device.memory.used_bytes, device.memory.total_bytes) {
+                    (Some(used), Some(total)) => {
+                        format!("{}/{}MB", used / 1024_u64.pow(2), total / 1024_u64.pow(2))
+                    }
+                    (_, Some(total)) => {
+                        format!("{}MB total, usage unknown", total / 1024_u64.pow(2))
+                    }
+                    _ => "VRAM unknown".to_string(),
+                };
+                let state = if device.admin_state == mold_core::DeviceAdminState::Draining {
+                    "finishing current work".to_string()
+                } else if device.health != mold_core::DeviceHealth::Healthy {
+                    device.health.as_str().to_string()
+                } else {
+                    device.admin_state.as_str().to_string()
+                };
+                let kind = if device.device_kind == mold_core::DeviceKind::Mig {
+                    format!(
+                        "MIG {}",
+                        device.mig_profile.as_deref().unwrap_or("profile unknown")
+                    )
+                } else {
+                    device.backend.as_str().to_ascii_uppercase()
+                };
+                truncate_chars(
+                    &format!(
+                        "GPU {ordinal} · {} · {kind} · `{}` · {state} · {memory}",
+                        device.name, device.id
+                    ),
+                    360,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, chunk) in chunk_lines(&lines, DISCORD_EMBED_FIELD_VALUE_MAX)
+            .into_iter()
+            .enumerate()
+        {
+            fields.push((format!("Devices {}", index + 1), chunk, false));
+        }
+    } else if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+        let mut groups: Vec<(&str, usize, u64, u64)> = Vec::new();
+        for gpu in gpus {
+            if let Some((_, count, used, total)) =
+                groups.iter_mut().find(|(name, _, _, _)| *name == gpu.name)
+            {
+                *count += 1;
+                *used += gpu.vram_used_bytes;
+                *total += gpu.vram_total_bytes;
+            } else {
+                groups.push((&gpu.name, 1, gpu.vram_used_bytes, gpu.vram_total_bytes));
+            }
+        }
+        let summary = groups
+            .into_iter()
+            .map(|(name, count, used, total)| {
+                let fleet = if count > 1 {
+                    format!("{count}× {name}")
+                } else {
+                    name.to_string()
+                };
+                format!(
+                    "{fleet} ({}MB / {}MB VRAM)",
+                    used / 1024_u64.pow(2),
+                    total / 1024_u64.pow(2)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fields.push(("GPUs".to_string(), summary, false));
+    } else if let Some(gpu) = &status.gpu_info {
         fields.push((
             "GPU".to_string(),
             format!(
@@ -284,17 +395,206 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
             false,
         ));
     }
+    if let Some(queue) = queue {
+        let blocked = queue
+            .plan
+            .as_ref()
+            .map(|plan| {
+                plan.work_items
+                    .iter()
+                    .filter(|work| work.blocked_reason.is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        let planned = queue.plan.as_ref().map_or(0, |plan| plan.work_items.len());
+        fields.push((
+            "Queue".to_string(),
+            format!(
+                "{} active/queued · {planned} planned · {blocked} blocked",
+                queue.entries.len()
+            ),
+            false,
+        ));
+        if let Some(plan) = queue.plan.as_ref() {
+            let lines = plan
+                .work_items
+                .iter()
+                .map(|work| {
+                    let order = work
+                        .lane_order
+                        .map(|order| order.to_string())
+                        .unwrap_or_else(|| "—".to_string());
+                    let lane = match work.planned_lane_kind.as_ref() {
+                        Some(mold_core::QueuePlannedLaneKind::HostUtility) => {
+                            format!("host utility/{order}")
+                        }
+                        Some(mold_core::QueuePlannedLaneKind::Device) => work
+                            .planned_device_id
+                            .as_deref()
+                            .map(|device| format!("{device}/{order}"))
+                            .unwrap_or_else(|| format!("device/{order}")),
+                        Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => {
+                            format!("assigned/{order}")
+                        }
+                        None if work.is_host_utility_lane()
+                            || work.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+                        {
+                            format!("host utility/{order}")
+                        }
+                        None => work
+                            .planned_device_id
+                            .as_deref()
+                            .map(|device| format!("{device}/{order}"))
+                            .unwrap_or_else(|| "unassigned".to_string()),
+                    };
+                    let finish = work
+                        .estimated_finish_unix_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let reason = work
+                        .blocked_reason
+                        .as_ref()
+                        .map(mold_core::QueueBlockedReason::as_str)
+                        .or(work.assignment_reason.as_deref())
+                        .unwrap_or("none");
+                    truncate_chars(
+                        &format!(
+                            "`{}` · {} · lane {lane} · finish {finish} · {} confidence · {reason}",
+                            work.work_id, work.activity_phase, work.estimate_confidence
+                        ),
+                        360,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (index, chunk) in chunk_lines(&lines, DISCORD_EMBED_FIELD_VALUE_MAX)
+                .into_iter()
+                .enumerate()
+            {
+                fields.push((format!("Queue lanes {}", index + 1), chunk, false));
+            }
+        }
+    }
 
-    EmbedData {
-        title: "Server Status".to_string(),
-        description: String::new(),
+    paginate_embed_fields(
+        "Server Status",
+        "",
         fields,
-        color: if status.busy {
+        if status.busy {
             COLOR_WARNING
         } else {
             COLOR_INFO
         },
+    )
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
     }
+    if max <= 3 {
+        return value.chars().take(max).collect();
+    }
+    format!("{}...", value.chars().take(max - 3).collect::<String>())
+}
+
+fn chunk_lines(lines: &[String], max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        for line_chunk in split_chars(line, max_chars) {
+            let separator = usize::from(!current.is_empty());
+            if current.chars().count() + separator + line_chunk.chars().count() > max_chars {
+                chunks.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&line_chunk);
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn split_chars(value: &str, max_chars: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec!["—".into()];
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn paginate_embed_fields(
+    title: &str,
+    description: &str,
+    fields: Vec<(String, String, bool)>,
+    color: u32,
+) -> Vec<EmbedData> {
+    let title = truncate_chars(title, DISCORD_EMBED_TITLE_MAX);
+    let description = truncate_chars(description, DISCORD_EMBED_DESCRIPTION_MAX);
+    let mut normalized = Vec::new();
+    for (name, value, inline) in fields {
+        let name = truncate_chars(&name, DISCORD_EMBED_FIELD_NAME_MAX);
+        let chunks = split_chars(&value, DISCORD_EMBED_FIELD_VALUE_MAX);
+        let chunk_count = chunks.len();
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let chunk_name = if chunk_count == 1 {
+                name.clone()
+            } else {
+                truncate_chars(
+                    &format!("{name} ({}/{chunk_count})", index + 1),
+                    DISCORD_EMBED_FIELD_NAME_MAX,
+                )
+            };
+            normalized.push((chunk_name, chunk, inline && chunk_count == 1));
+        }
+    }
+
+    let mut pages: Vec<Vec<(String, String, bool)>> = vec![Vec::new()];
+    // Reserve the maximum title width so adding "(N/M)" after pagination
+    // cannot push an otherwise-full page over Discord's aggregate cap.
+    let mut page_chars = DISCORD_EMBED_TITLE_MAX + description.chars().count();
+    for field in normalized {
+        let field_chars = field.0.chars().count() + field.1.chars().count();
+        let current = pages.last_mut().expect("status page exists");
+        if !current.is_empty()
+            && (current.len() >= DISCORD_EMBED_FIELDS_MAX
+                || page_chars + field_chars > DISCORD_EMBED_TOTAL_MAX)
+        {
+            pages.push(Vec::new());
+            page_chars = DISCORD_EMBED_TITLE_MAX;
+        }
+        page_chars += field_chars;
+        pages.last_mut().expect("status page exists").push(field);
+    }
+
+    let page_count = pages.len();
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(index, fields)| EmbedData {
+            title: if page_count == 1 {
+                title.clone()
+            } else {
+                truncate_chars(
+                    &format!("{title} ({}/{page_count})", index + 1),
+                    DISCORD_EMBED_TITLE_MAX,
+                )
+            },
+            description: if index == 0 {
+                description.clone()
+            } else {
+                String::new()
+            },
+            fields,
+            color,
+        })
+        .collect()
 }
 
 /// Format an expand result into embed data.
@@ -419,6 +719,18 @@ mod tests {
             id: String::new(),
         };
         assert_eq!(format_progress(&event), "Starting generation...");
+    }
+
+    #[test]
+    fn format_progress_dependency_wait() {
+        let event = SseProgressEvent::DependencyWait {
+            dependency: "ltx2.3-vae".to_string(),
+            reason: "download in progress".to_string(),
+        };
+        assert_eq!(
+            format_progress(&event),
+            "Waiting for ltx2.3-vae: download in progress"
+        );
     }
 
     #[test]
@@ -831,7 +1143,24 @@ mod tests {
             uptime_secs: 3661,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
-            gpus: None,
+            gpus: Some(vec![
+                mold_core::GpuWorkerStatus {
+                    ordinal: 0,
+                    name: "RTX 4090".to_string(),
+                    vram_total_bytes: 24 * 1024_u64.pow(3),
+                    vram_used_bytes: 8 * 1024_u64.pow(3),
+                    loaded_model: Some("flux-schnell:q8".to_string()),
+                    state: mold_core::GpuWorkerState::Generating,
+                },
+                mold_core::GpuWorkerStatus {
+                    ordinal: 1,
+                    name: "RTX 4090".to_string(),
+                    vram_total_bytes: 24 * 1024_u64.pow(3),
+                    vram_used_bytes: 4 * 1024_u64.pow(3),
+                    loaded_model: None,
+                    state: mold_core::GpuWorkerState::Idle,
+                },
+            ]),
             queue_depth: None,
             queue_capacity: None,
             queue_paused: None,
@@ -848,7 +1177,10 @@ mod tests {
             .fields
             .iter()
             .any(|(k, v, _)| k == "Uptime" && v == "1h 1m"));
-        assert!(embed.fields.iter().any(|(k, _, _)| k == "GPU"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| { k == "GPUs" && v == "2× RTX 4090 (12288MB / 49152MB VRAM)" }));
         assert_eq!(embed.color, COLOR_INFO);
     }
 
@@ -882,6 +1214,248 @@ mod tests {
             .iter()
             .any(|(k, v, _)| k == "Models Loaded" && v == "None"));
         assert_eq!(embed.color, COLOR_WARNING);
+    }
+
+    #[test]
+    fn sixty_four_device_status_paginates_within_every_discord_embed_limit() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q8".into()],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 60,
+            hostname: Some("fleet".into()),
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(64),
+            queue_capacity: Some(256),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let mut inventory = mold_core::DeviceState {
+            devices: (0..64)
+                .map(|ordinal| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": format!("cuda:{ordinal:032x}"),
+                        "backend": "cuda",
+                        "ordinal": ordinal,
+                        "device_kind": "full_gpu",
+                        "nvml_uuid": null,
+                        "physical_uuid": null,
+                        "mig_uuid": null,
+                        "mig_parent_uuid": null,
+                        "mig_profile": null,
+                        "name": format!("Synthetic accelerator {ordinal}"),
+                        "pci_bus_id": null,
+                        "compute_capability": "10.0",
+                        "memory": {
+                            "total_bytes": 192_u64 * 1024 * 1024 * 1024,
+                            "used_bytes": ordinal as u64 * 1024 * 1024,
+                            "mold_used_bytes": null,
+                            "other_used_bytes": null
+                        },
+                        "telemetry": {
+                            "utilization_percent": ordinal,
+                            "temperature_c": null,
+                            "power_w": null
+                        },
+                        "desired_enabled": true,
+                        "admin_state": "enabled",
+                        "health": "healthy",
+                        "activity": "idle",
+                        "schedulable": true,
+                        "unschedulable_reason": null,
+                        "loaded_models": [],
+                        "active_work_id": null,
+                        "planned_work_ids": []
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            plan_version: 7,
+        };
+        inventory.devices[1].desired_enabled = false;
+        inventory.devices[1].admin_state = mold_core::DeviceAdminState::Disabled;
+        inventory.devices[2].desired_enabled = false;
+        inventory.devices[2].admin_state = mold_core::DeviceAdminState::Draining;
+        inventory.devices[3].health = mold_core::DeviceHealth::Unavailable;
+        inventory.devices[3].schedulable = false;
+        inventory.devices[4].device_kind = mold_core::DeviceKind::Mig;
+        inventory.devices[4].mig_profile = Some("1g.23gb".into());
+        inventory.devices[5].memory = mold_core::DeviceMemoryInfo {
+            total_bytes: None,
+            used_bytes: None,
+            mold_used_bytes: None,
+            other_used_bytes: None,
+        };
+
+        let pages = format_server_status_pages(&status, Some(&inventory), None);
+        assert!(pages.len() > 1, "64 detailed devices must paginate");
+        let all_values = pages
+            .iter()
+            .flat_map(|page| page.fields.iter().map(|(_, value, _)| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for ordinal in 0..64 {
+            assert!(
+                all_values.contains(&format!("GPU {ordinal} ·")),
+                "GPU {ordinal} missing from Discord pages"
+            );
+        }
+        assert!(all_values.contains("disabled"));
+        assert!(all_values.contains("finishing current work"));
+        assert!(all_values.contains("unavailable"));
+        assert!(all_values.contains("MIG 1g.23gb"));
+        assert!(all_values.contains("VRAM unknown"));
+        assert!(!all_values.contains("0/0MB"));
+
+        for page in &pages {
+            assert!(page.title.chars().count() <= DISCORD_EMBED_TITLE_MAX);
+            assert!(page.description.chars().count() <= DISCORD_EMBED_DESCRIPTION_MAX);
+            assert!(page.fields.len() <= DISCORD_EMBED_FIELDS_MAX);
+            let total = page.title.chars().count()
+                + page.description.chars().count()
+                + page
+                    .fields
+                    .iter()
+                    .map(|(name, value, _)| {
+                        assert!(name.chars().count() <= DISCORD_EMBED_FIELD_NAME_MAX);
+                        assert!(value.chars().count() <= DISCORD_EMBED_FIELD_VALUE_MAX);
+                        name.chars().count() + value.chars().count()
+                    })
+                    .sum::<usize>();
+            assert!(total <= DISCORD_EMBED_TOTAL_MAX, "{total}");
+        }
+    }
+
+    #[test]
+    fn queue_summary_counts_only_typed_blocks_and_keeps_lane_observability() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: true,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 1,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(2),
+            queue_capacity: Some(8),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![],
+            plan: Some(mold_core::QueuePlan {
+                work_items: vec![
+                    mold_core::QueueWorkItem {
+                        work_id: "assigned".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Active,
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
+                        planned_device_id: Some("cuda:stable-a".into()),
+                        lane_order: Some(0),
+                        estimate_confidence: mold_core::QueueEstimateConfidence::High,
+                        assignment_reason: Some("warm_model".into()),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "blocked".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Blocked,
+                        blocked_reason: Some(mold_core::QueueBlockedReason::InsufficientVram),
+                        estimate_confidence: mold_core::QueueEstimateConfidence::Low,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        let fields = format_server_status_pages(&status, None, Some(&queue))
+            .iter()
+            .flat_map(|page| page.fields.iter())
+            .map(|(name, value, _)| format!("{name}: {value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fields.contains("2 planned · 1 blocked"));
+        assert!(fields.contains("cuda:stable-a/0"));
+        assert!(fields.contains("high confidence"));
+        assert!(fields.contains("warm_model"));
+        assert!(fields.contains("insufficient_vram"));
+    }
+
+    #[test]
+    fn queue_summary_hides_legacy_queued_host_utility_identity() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: true,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 1,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(3),
+            queue_capacity: Some(8),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![],
+            plan: Some(mold_core::QueuePlan {
+                work_items: vec![
+                    mold_core::QueueWorkItem {
+                        work_id: "legacy-upscale".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Queued,
+                        planned_lane_kind: None,
+                        planned_device_id: Some("cpu:utility:0".into()),
+                        lane_order: Some(1),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "typed-host".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::HostUtility),
+                        planned_device_id: Some("typed-host-internal".into()),
+                        lane_order: Some(2),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "future".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                            "remote_utility".into(),
+                        )),
+                        planned_device_id: Some("future-internal-id".into()),
+                        lane_order: Some(3),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        let fields = format_server_status_pages(&status, None, Some(&queue))
+            .iter()
+            .flat_map(|page| page.fields.iter())
+            .map(|(_, value, _)| value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fields.contains("host utility/1"));
+        assert!(fields.contains("host utility/2"));
+        assert!(fields.contains("assigned/3"));
+        assert!(!fields.contains("cpu:utility:0"));
+        assert!(!fields.contains("typed-host-internal"));
+        assert!(!fields.contains("future-internal-id"));
     }
 
     #[test]

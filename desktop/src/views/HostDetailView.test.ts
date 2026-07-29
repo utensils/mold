@@ -3,6 +3,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
+const { listDevices, setDeviceEnabled } = vi.hoisted(() => ({
+  listDevices: vi.fn(),
+  setDeviceEnabled: vi.fn(),
+}));
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {},
@@ -11,6 +15,10 @@ vi.mock("../lib/api/client", () => ({
   apiJson: vi.fn(),
   apiFetch: vi.fn(),
   currentTarget: () => ({ baseUrl: "http://127.0.0.1:49152", apiKey: null }),
+}));
+vi.mock("@studio/api/devices", () => ({
+  listDevices,
+  setDeviceEnabled,
 }));
 
 interface SseCall {
@@ -56,11 +64,48 @@ import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
-import type { ModelEntry, ServerStatus } from "../lib/api/types";
+import type { DeviceInfo } from "@studio/api/devices";
+import type { ModelEntry, ServerCapabilities, ServerStatus } from "../lib/api/types";
 
 const stub = { template: "<div />" };
 
 const REMOTE_ID = "hal9000-7680";
+
+const DEVICE: DeviceInfo = {
+  id: "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  backend: "cuda",
+  ordinal: 0,
+  device_kind: "full_gpu",
+  nvml_uuid: "GPU-a",
+  physical_uuid: "GPU-a",
+  mig_uuid: null,
+  mig_parent_uuid: null,
+  mig_profile: null,
+  name: "NVIDIA RTX 3090",
+  pci_bus_id: null,
+  compute_capability: "8.6",
+  memory: {
+    total_bytes: 24_000_000_000,
+    used_bytes: 4_000_000_000,
+    mold_used_bytes: null,
+    other_used_bytes: null,
+  },
+  telemetry: { utilization_percent: 10, temperature_c: null, power_w: null },
+  desired_enabled: true,
+  admin_state: "enabled",
+  health: "healthy",
+  activity: "idle",
+  schedulable: true,
+  unschedulable_reason: null,
+  loaded_models: [],
+  active_work_id: null,
+  planned_work_ids: [],
+};
+
+interface DeviceFixture {
+  devices: DeviceInfo[];
+  capabilities?: ServerCapabilities;
+}
 
 interface WireQueueEntry {
   id: string;
@@ -90,7 +135,10 @@ function installApi(
     if (path === "/api/models") return Promise.resolve(models);
     if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
     if (path === "/api/capabilities")
-      return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
+      return Promise.resolve({
+        queue: { can_pause: true, can_cancel_all: true },
+        events: { available: true },
+      });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
 }
@@ -112,10 +160,12 @@ function model(name: string, family: string): ModelEntry {
 }
 
 let router: Router;
+let mountedHosts: ReturnType<typeof useHostsStore>;
 
 async function mountView(
   path = `/hosts/${REMOTE_ID}`,
   entries: ModelEntry[] = [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
+  deviceFixture?: DeviceFixture,
 ) {
   router = createRouter({
     history: createMemoryHistory(),
@@ -138,6 +188,7 @@ async function mountView(
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
   conn.status = "ready";
   const hosts = useHostsStore();
+  mountedHosts = hosts;
   hosts.extras.push({
     id: REMOTE_ID,
     label: "hal9000",
@@ -153,9 +204,29 @@ async function mountView(
     version: "0.17.0",
     modelsLoaded: ["flux-dev:q8"],
     gpuInfo: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24_000, vram_used_mb: 6_000 },
+    gpuWorkers: [
+      {
+        ordinal: 0,
+        name: "NVIDIA GeForce RTX 4090",
+        vram_total_bytes: 24_000_000_000,
+        vram_used_bytes: 6_000_000_000,
+        state: "generating",
+      },
+      {
+        ordinal: 1,
+        name: "NVIDIA B200",
+        vram_total_bytes: 80_000_000_000,
+        vram_used_bytes: 20_000_000_000,
+        state: "idle",
+      },
+    ],
     instanceId: "0f7a2c31-instance-uuid",
     hostname: "hal9000",
+    ...(deviceFixture ? { devices: deviceFixture.devices } : {}),
   };
+  if (deviceFixture?.capabilities) {
+    hosts.capabilities[REMOTE_ID] = deviceFixture.capabilities;
+  }
   // fetchedAt now → the view's hostModels.refresh() skips these (not stale).
   const hostModels = useHostModelsStore();
   hostModels.byHost[REMOTE_ID] = {
@@ -179,6 +250,8 @@ function lastStream(path = "/api/resources/stream"): SseCall {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listDevices.mockRejectedValue(new Error("legacy server in tests"));
+  setDeviceEnabled.mockResolvedValue(undefined);
   unloadModel.mockResolvedValue(undefined);
   sseCalls.length = 0;
   appSettingsGet.mockResolvedValue({
@@ -187,6 +260,175 @@ beforeEach(() => {
     generateTargetHost: null,
   });
   installApi();
+});
+
+describe("HostDetailView GPU lifecycle controls", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((next) => {
+      resolve = next;
+    });
+    return { promise, resolve };
+  }
+
+  const authoritative: ServerCapabilities = {
+    gallery: { can_delete: true },
+    devices: { available: true, lifecycle: true, restart_enable: false },
+    dispatch: { active_mode: "v2", v2_authoritative: true, observes_v2_decisions: false },
+  };
+  const restartOnly: ServerCapabilities = {
+    gallery: { can_delete: true },
+    devices: { available: true, lifecycle: true, restart_enable: true },
+    dispatch: {
+      active_mode: "observe",
+      v2_authoritative: false,
+      observes_v2_decisions: true,
+    },
+  };
+
+  it("allows live disable only for an authoritative Scheduler V2 host", async () => {
+    const lifecycleDevices = [
+      DEVICE,
+      {
+        ...DEVICE,
+        id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ordinal: 1,
+        admin_state: "startup_excluded" as const,
+        desired_enabled: false,
+        schedulable: false,
+      },
+    ];
+    listDevices.mockResolvedValue({ devices: lifecycleDevices, plan_version: 1 });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: lifecycleDevices,
+      capabilities: authoritative,
+    });
+
+    const live = wrapper.get("[data-test='device-toggle-0']");
+    expect(live.attributes("disabled")).toBeUndefined();
+    expect(live.text()).toBe("Disable");
+    expect(wrapper.text()).toContain(
+      "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.",
+    );
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    await live.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+      DEVICE.id,
+      false,
+    );
+    expect(listDevices).toHaveBeenCalled();
+  });
+
+  it("does not let an older mutation clear a newer device's busy state", async () => {
+    const secondDevice = {
+      ...DEVICE,
+      id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ordinal: 1,
+    };
+    const devices = [DEVICE, secondDevice];
+    const first = deferred<void>();
+    const second = deferred<void>();
+    listDevices.mockResolvedValue({ devices, plan_version: 1 });
+    setDeviceEnabled.mockImplementation((_target, id) =>
+      id === DEVICE.id ? first.promise : second.promise,
+    );
+    const wrapper = await mountView(undefined, undefined, {
+      devices,
+      capabilities: authoritative,
+    });
+    const refresh = vi.spyOn(mountedHosts, "refresh").mockResolvedValue();
+
+    await wrapper.get("[data-test='device-toggle-0']").trigger("click");
+    await wrapper.get("[data-test='device-toggle-1']").trigger("click");
+    expect(wrapper.get("[data-test='device-toggle-0']").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    first.resolve();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(wrapper.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    second.resolve();
+    await vi.waitFor(() =>
+      expect(wrapper.findComponent({ name: "DevicePanel" }).props("busyDeviceIds")).toEqual([]),
+    );
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("blocks disable in Observe mode but offers disabled GPUs restart-only recovery", async () => {
+    const disabled = {
+      ...DEVICE,
+      desired_enabled: false,
+      admin_state: "disabled" as const,
+      schedulable: false,
+    };
+    const pendingRestart = {
+      ...DEVICE,
+      id: "cuda:cccccccccccccccccccccccccccccccc",
+      ordinal: 2,
+      restart_required: true,
+      health: "unavailable" as const,
+      schedulable: false,
+      unschedulable_reason: "device_unavailable",
+    };
+    listDevices.mockResolvedValue({
+      devices: [
+        DEVICE,
+        { ...disabled, id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ordinal: 1 },
+        pendingRestart,
+      ],
+      plan_version: 1,
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [
+        DEVICE,
+        { ...disabled, id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ordinal: 1 },
+        pendingRestart,
+      ],
+      capabilities: restartOnly,
+    });
+
+    const disable = wrapper.get("[data-test='device-toggle-0']");
+    expect(disable.text()).toBe("Disable");
+    expect(disable.attributes("disabled")).toBeDefined();
+    await disable.trigger("click");
+    expect(setDeviceEnabled).not.toHaveBeenCalled();
+
+    const restartEnable = wrapper.get("[data-test='device-toggle-1']");
+    expect(restartEnable.text()).toBe("Enable on restart");
+    expect(restartEnable.attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain(
+      "Live GPU controls require Scheduler V2. Disabled GPUs can be enabled for the next server restart.",
+    );
+    await restartEnable.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+      "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      true,
+    );
+
+    const pending = wrapper.get("[data-test='device-toggle-2']");
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).toContain("Restart required");
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).not.toContain("unavailable");
+  });
+
+  it("treats older hosts with missing lifecycle capabilities as unsupported", async () => {
+    listDevices.mockResolvedValue({ devices: [DEVICE], plan_version: 1 });
+    const wrapper = await mountView(undefined, undefined, { devices: [DEVICE] });
+    const button = wrapper.get("[data-test='device-toggle-0']");
+
+    expect(button.text()).toBe("Disable");
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("Live GPU controls are unavailable on this server.");
+    await button.trigger("click");
+    expect(setDeviceEnabled).not.toHaveBeenCalled();
+  });
 });
 
 describe("HostDetailView header", () => {
@@ -231,9 +473,13 @@ describe("HostDetailView telemetry", () => {
     expect(stream.path).toBe("/api/resources/stream");
     expect(stream.options.target).toEqual({ baseUrl: "http://hal9000:7680", apiKey: "sekrit" });
 
-    // Before any frame: the status-poll gpu_info fallback (MB → decimal GB).
-    expect(wrapper.get("[data-test='gpu-card']").text()).toContain("NVIDIA GeForce RTX 4090");
-    expect(wrapper.get("[data-test='gpu-card']").text()).toContain("6.0 GB/24.0 GB");
+    // Before any frame: every status-poll worker is visible.
+    const fallbackCards = wrapper.findAll("[data-test='gpu-card']");
+    expect(fallbackCards).toHaveLength(2);
+    expect(fallbackCards[0]!.text()).toContain("NVIDIA GeForce RTX 4090");
+    expect(fallbackCards[0]!.text()).toContain("6.0 GB/24.0 GB");
+    expect(fallbackCards[1]!.text()).toContain("NVIDIA B200");
+    expect(fallbackCards[1]!.text()).toContain("20.0 GB/80.0 GB");
     expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(false);
 
     stream.options.onEvent(
@@ -518,6 +764,7 @@ describe("HostDetailView models", () => {
     ).toHaveLength(1);
 
     const firstResourceStream = lastStream();
+    const firstDeviceStream = lastStream("/api/events");
     firstResourceStream.options.onEvent(
       "snapshot",
       JSON.stringify({
@@ -567,15 +814,16 @@ describe("HostDetailView models", () => {
     expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
       resourceStreamCount,
     );
-    // Two status readers per fetch round (the view's models-disk poll and the
-    // queue snapshot's paused/gpus join): mount = 2, the ready-flip = 2 more.
+    // The view status request and queue snapshot run at mount and ready-flip;
+    // the device-event onOpen adds one authoritative queue/device snapshot.
     // The error flip in between must add none.
-    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(4);
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(5);
 
     remote.apiKey = "rotated-key";
     await flushPromises();
 
     expect(firstResourceStream.options.signal.aborted).toBe(true);
+    expect(firstDeviceStream.options.signal.aborted).toBe(true);
     expect(lastStream().options.target).toEqual({
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
@@ -584,6 +832,20 @@ describe("HostDetailView models", () => {
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
     });
+    expect(lastStream("/api/events").options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
+
+    const queueReads = apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue").length;
+    lastStream("/api/events").options.onEvent(
+      "message",
+      JSON.stringify({ type: "device_state_changed" }),
+    );
+    await flushPromises();
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue")).toHaveLength(
+      queueReads + 1,
+    );
   });
 });
 

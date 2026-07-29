@@ -148,6 +148,25 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         env_var: Some("MOLD_EXPAND_THINKING"),
         section: "Expand",
     },
+    // Scheduler
+    ConfigKeyInfo {
+        key: "scheduler.replan_debounce_ms",
+        value_type: ValueType::U32,
+        env_var: None,
+        section: "Scheduler",
+    },
+    ConfigKeyInfo {
+        key: "scheduler.replan_max_delay_ms",
+        value_type: ValueType::U32,
+        env_var: None,
+        section: "Scheduler",
+    },
+    ConfigKeyInfo {
+        key: "scheduler.warm_wait_max_ms",
+        value_type: ValueType::U32,
+        env_var: None,
+        section: "Scheduler",
+    },
     // Logging
     ConfigKeyInfo {
         key: "logging.level",
@@ -430,6 +449,10 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         "expand.top_p" => ConfigValue::F64(config.expand.top_p),
         "expand.max_tokens" => ConfigValue::U32(config.expand.max_tokens),
         "expand.thinking" => ConfigValue::Bool(config.expand.thinking),
+        // Scheduler
+        "scheduler.replan_debounce_ms" => ConfigValue::U32(config.scheduler.replan_debounce_ms),
+        "scheduler.replan_max_delay_ms" => ConfigValue::U32(config.scheduler.replan_max_delay_ms),
+        "scheduler.warm_wait_max_ms" => ConfigValue::U32(config.scheduler.warm_wait_max_ms),
         // Logging
         "logging.level" => ConfigValue::String(config.logging.level.clone()),
         "logging.file" => ConfigValue::Bool(config.logging.file),
@@ -594,6 +617,20 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
         "expand.top_p" => config.expand.top_p = parse_f64(raw, 0.0, 1.0, key)?,
         "expand.max_tokens" => config.expand.max_tokens = parse_u32(raw, 1, 65535, key)?,
         "expand.thinking" => config.expand.thinking = parse_bool(raw, key)?,
+        // Scheduler
+        "scheduler.replan_debounce_ms"
+        | "scheduler.replan_max_delay_ms"
+        | "scheduler.warm_wait_max_ms" => {
+            let mut scheduler = config.scheduler;
+            let value = parse_u32(raw, 0, crate::config::SCHEDULER_TIMING_MAX_MS, key)?;
+            match key {
+                "scheduler.replan_debounce_ms" => scheduler.replan_debounce_ms = value,
+                "scheduler.replan_max_delay_ms" => scheduler.replan_max_delay_ms = value,
+                "scheduler.warm_wait_max_ms" => scheduler.warm_wait_max_ms = value,
+                _ => unreachable!("scheduler key match is exhaustive"),
+            }
+            config.scheduler = scheduler.validate()?;
+        }
         // Logging
         "logging.level" => {
             validate_enum(raw, &["trace", "debug", "info", "warn", "error"], key)?;
@@ -800,6 +837,7 @@ pub fn surface_for_key(key: &str) -> Surface {
     if key.starts_with("tui.")
         || key.starts_with("expand.")
         || key.starts_with("generate.")
+        || key.starts_with("scheduler.")
         || key.starts_with("model_prefs.")
     {
         return Surface::Db;
@@ -868,8 +906,27 @@ mod tests {
     fn is_known_key_accepts_static_and_model_keys() {
         assert!(is_known_key("server_port"));
         assert!(is_known_key("expand.enabled"));
+        assert!(is_known_key("scheduler.replan_debounce_ms"));
         assert!(is_known_key("models.flux-dev:q4.default_steps"));
         assert!(!is_known_key("definitely.not.a.key"));
         assert!(!is_known_key("models.flux-dev:q4.bogus_field"));
+    }
+
+    #[test]
+    fn scheduler_timings_validate_range_and_cross_field_order_atomically() {
+        let mut config = Config::default();
+        set_value(&mut config, "scheduler.replan_debounce_ms", "3000").unwrap();
+        assert_eq!(config.scheduler.replan_debounce_ms, 3_000);
+
+        let before = config.scheduler;
+        let error = set_value(&mut config, "scheduler.replan_max_delay_ms", "2999").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert_eq!(config.scheduler, before);
+
+        let error = set_value(&mut config, "scheduler.warm_wait_max_ms", "30001").unwrap_err();
+        assert!(error.to_string().contains("between 0 and 30000"));
+        assert_eq!(config.scheduler, before);
     }
 }

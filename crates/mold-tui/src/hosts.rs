@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use mold_core::{MoldClient, ServerStatus};
+use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerCapabilities, ServerStatus};
 use mold_db::settings::{self as keys, Settings};
 use mold_db::MetadataDb;
 
@@ -346,6 +346,17 @@ pub(crate) struct MachinesState {
     pub focus: MachinesFocus,
     /// Last-known status per host id.
     pub statuses: HashMap<String, HostStatus>,
+    /// Authoritative `/api/devices` snapshots, keyed by machine row id.
+    pub devices: HashMap<String, DeviceState>,
+    /// Capability gate paired with each device inventory.
+    pub capabilities: HashMap<String, ServerCapabilities>,
+    /// Last accepted lifecycle mutation, keyed by machine row id. This is
+    /// intentionally non-error feedback and survives the authoritative poll
+    /// that immediately follows the mutation response.
+    pub device_feedback: HashMap<String, String>,
+    /// Selected device in the detail pane. `g` cycles this independently of
+    /// the queue-row selection, preserving the existing Up/Down queue keys.
+    pub device_selected: usize,
     /// Queue snapshot for the selected remote host.
     pub queue: Option<(String, mold_core::QueueListingWire)>,
     /// Job selection inside the detail pane's queue lanes.
@@ -420,6 +431,7 @@ impl MachinesState {
     fn on_selection_changed(&mut self) {
         self.queue = None;
         self.queue_selected = 0;
+        self.device_selected = 0;
     }
 
     pub fn queue_select_prev(&mut self) {
@@ -445,6 +457,131 @@ impl MachinesState {
             Some((host_id.clone(), job.clone()))
         } else {
             None
+        }
+    }
+
+    fn selected_machine_id(&self) -> String {
+        match self.selected_row() {
+            MachineRowId::Local => LOCAL_HOST_ID.to_string(),
+            MachineRowId::Host(id) => id,
+        }
+    }
+
+    pub fn selected_device(&self) -> Option<&DeviceInfo> {
+        let id = self.selected_machine_id();
+        self.devices.get(&id)?.devices.get(self.device_selected)
+    }
+
+    pub fn can_mutate_selected_device(&self) -> bool {
+        let device = match self.selected_device() {
+            Some(device) => device,
+            None => return false,
+        };
+        if device.admin_state == mold_core::DeviceAdminState::StartupExcluded
+            || device.restart_required
+        {
+            return false;
+        }
+        let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
+            return false;
+        };
+        (capabilities.devices.lifecycle && capabilities.dispatch.v2_authoritative)
+            || (!device.desired_enabled && capabilities.devices.restart_enable)
+    }
+
+    pub fn selected_device_uses_restart_enable(&self) -> bool {
+        let Some(device) = self.selected_device() else {
+            return false;
+        };
+        if device.desired_enabled || device.restart_required {
+            return false;
+        }
+        let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
+            return false;
+        };
+        let live_lifecycle =
+            capabilities.devices.lifecycle && capabilities.dispatch.v2_authoritative;
+        !live_lifecycle && capabilities.devices.restart_enable
+    }
+
+    pub fn selected_device_restart_required(&self) -> bool {
+        self.selected_device()
+            .is_some_and(|device| device.restart_required)
+    }
+
+    pub fn select_next_device(&mut self) {
+        let id = self.selected_machine_id();
+        let len = self
+            .devices
+            .get(&id)
+            .map(|state| state.devices.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.device_selected = (self.device_selected + 1) % len;
+        }
+    }
+
+    pub fn select_prev_device(&mut self) {
+        let id = self.selected_machine_id();
+        let len = self
+            .devices
+            .get(&id)
+            .map(|state| state.devices.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.device_selected = (self.device_selected + len - 1) % len;
+        }
+    }
+
+    pub fn apply_devices(&mut self, host_id: String, devices: Option<DeviceState>) {
+        match devices {
+            Some(devices) => {
+                if self.device_selected >= devices.devices.len() {
+                    self.device_selected = devices.devices.len().saturating_sub(1);
+                }
+                self.devices.insert(host_id, devices);
+            }
+            None => {
+                self.devices.remove(&host_id);
+            }
+        }
+    }
+
+    pub fn apply_device_mutation(&mut self, host_id: String, device: DeviceInfo) {
+        let feedback = if device.restart_required {
+            format!("{} enabled on restart", device.name)
+        } else if device.desired_enabled {
+            format!("{} enabled", device.name)
+        } else if device.admin_state == mold_core::DeviceAdminState::Draining {
+            format!("{} will be disabled after current work", device.name)
+        } else {
+            format!("{} disabled", device.name)
+        };
+        let state = self.devices.entry(host_id.clone()).or_default();
+        if let Some(existing) = state
+            .devices
+            .iter_mut()
+            .find(|existing| existing.id == device.id)
+        {
+            *existing = device;
+        } else {
+            state.devices.push(device);
+        }
+        self.device_feedback.insert(host_id, feedback);
+    }
+
+    pub fn apply_capabilities(
+        &mut self,
+        host_id: String,
+        capabilities: Option<ServerCapabilities>,
+    ) {
+        match capabilities {
+            Some(capabilities) => {
+                self.capabilities.insert(host_id, capabilities);
+            }
+            None => {
+                self.capabilities.remove(&host_id);
+            }
         }
     }
 
@@ -541,12 +678,15 @@ impl MachinesState {
         self.registry.forget(id);
         self.registry.save();
         self.statuses.remove(id);
+        self.devices.remove(id);
         if let Some((qid, _)) = &self.queue {
             if qid == id {
                 self.queue = None;
                 self.queue_selected = 0;
             }
         }
+        self.capabilities.remove(id);
+        self.device_feedback.remove(id);
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
         }
@@ -721,19 +861,94 @@ pub(crate) async fn fetch_host_status(
 ) {
     let client = client_for_host(&entry);
     let status = client.server_status().await.ok().map(Box::new);
+    let devices = client.devices().await.ok();
+    let capabilities = client.server_capabilities().await.ok();
     let _ = tx.send(BackgroundEvent::HostStatusUpdate {
-        host_id: entry.id,
+        host_id: entry.id.clone(),
         status,
+    });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: entry.id.clone(),
+        devices,
+    });
+    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+        host_id: entry.id,
+        capabilities,
+    });
+}
+
+pub(crate) async fn set_host_device_enabled(
+    entry: HostEntry,
+    device_id: String,
+    enabled: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let client = client_for_host(&entry);
+    let result = client.set_device_enabled(&device_id, enabled).await;
+    match result {
+        Ok(device) => {
+            let _ = tx.send(BackgroundEvent::HostDeviceMutationApplied {
+                host_id: entry.id.clone(),
+                device: Box::new(device),
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "GPU lifecycle update failed: {error:#}"
+            )));
+        }
+    }
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: entry.id,
+        devices: client.devices().await.ok(),
+    });
+}
+
+pub(crate) async fn set_local_device_enabled(
+    url: String,
+    device_id: String,
+    enabled: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let api_key = std::env::var("MOLD_API_KEY").ok();
+    let client = client_for(&url, api_key.as_deref());
+    let result = client.set_device_enabled(&device_id, enabled).await;
+    match result {
+        Ok(device) => {
+            let _ = tx.send(BackgroundEvent::HostDeviceMutationApplied {
+                host_id: LOCAL_HOST_ID.to_string(),
+                device: Box::new(device),
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "GPU lifecycle update failed: {error:#}"
+            )));
+        }
+    }
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: LOCAL_HOST_ID.to_string(),
+        devices: client.devices().await.ok(),
     });
 }
 
 /// Fetch the queue listing for one host and report back.
 pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender<BackgroundEvent>) {
     let client = client_for_host(&entry);
-    let queue = client.list_queue().await.ok();
+    let (queue, devices, capabilities) =
+        tokio::join!(client.list_queue(), client.devices(), client.capabilities());
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
-        queue,
+        host_id: host_id.clone(),
+        queue: queue.ok(),
+    });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: host_id.clone(),
+        devices: devices.ok(),
+    });
+    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+        host_id,
+        capabilities: capabilities.ok(),
     });
 }
 
@@ -769,10 +984,13 @@ pub(crate) async fn cancel_host_job(
         let _ = tx.send(BackgroundEvent::Error(format!("Cancel failed: {e:#}")));
     }
     let queue = client.list_queue().await.ok();
+    let devices = client.devices().await.ok();
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
+        host_id: host_id.clone(),
         queue,
     });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
 }
 
 #[cfg(test)]
@@ -981,6 +1199,275 @@ mod tests {
         assert!(!st.select_next(), "selection clamps at the last row");
     }
 
+    fn test_device(id: &str, ordinal: usize) -> mold_core::DeviceInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": "cuda",
+            "ordinal": ordinal,
+            "device_kind": "full_gpu",
+            "nvml_uuid": null,
+            "physical_uuid": null,
+            "mig_uuid": null,
+            "mig_parent_uuid": null,
+            "mig_profile": null,
+            "name": format!("GPU {ordinal}"),
+            "pci_bus_id": null,
+            "compute_capability": null,
+            "memory": {
+                "total_bytes": null,
+                "used_bytes": null,
+                "mold_used_bytes": null,
+                "other_used_bytes": null
+            },
+            "telemetry": {
+                "utilization_percent": null,
+                "temperature_c": null,
+                "power_w": null
+            },
+            "desired_enabled": true,
+            "admin_state": "enabled",
+            "health": "healthy",
+            "activity": "idle",
+            "schedulable": true,
+            "unschedulable_reason": null,
+            "loaded_models": [],
+            "active_work_id": null,
+            "planned_work_ids": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stable_device_selection_is_independent_and_clamped() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0), test_device("cuda:second", 1)],
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
+        st.select_next_device();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:second");
+        st.select_next_device();
+        assert_eq!(st.device_selected, 0);
+        st.select_prev_device();
+        assert_eq!(st.device_selected, 1);
+        st.select_prev_device();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
+    }
+
+    #[test]
+    fn device_selection_cycles_without_stealing_queue_selection() {
+        let device = |ordinal: usize| mold_core::DeviceInfo {
+            id: format!("cuda:{ordinal:032x}"),
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: Some(ordinal),
+            device_kind: mold_core::DeviceKind::FullGpu,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            name: format!("GPU {ordinal}"),
+            pci_bus_id: None,
+            compute_capability: Some("8.6".into()),
+            memory: mold_core::DeviceMemoryInfo {
+                total_bytes: Some(24 * 1024_u64.pow(3)),
+                used_bytes: Some(0),
+                mold_used_bytes: None,
+                other_used_bytes: None,
+            },
+            telemetry: mold_core::DeviceTelemetry {
+                utilization_percent: Some(0),
+                temperature_c: None,
+                power_w: None,
+            },
+            desired_enabled: true,
+            restart_required: false,
+            admin_state: mold_core::DeviceAdminState::Enabled,
+            health: mold_core::DeviceHealth::Healthy,
+            activity: mold_core::DeviceActivity::Idle,
+            schedulable: true,
+            unschedulable_reason: None,
+            loaded_models: Vec::new(),
+            active_work_id: None,
+            planned_work_ids: Vec::new(),
+        };
+        let mut st = MachinesState {
+            queue_selected: 3,
+            ..Default::default()
+        };
+        st.apply_devices(
+            LOCAL_HOST_ID.to_string(),
+            Some(mold_core::DeviceState {
+                devices: vec![device(0), device(7)],
+                plan_version: 4,
+            }),
+        );
+
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(0));
+        st.select_next_device();
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(7));
+        st.select_next_device();
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(0));
+        assert_eq!(st.queue_selected, 3);
+
+        let mut legacy = mold_core::ServerCapabilities::default();
+        legacy.devices.restart_enable = true;
+        st.apply_capabilities(LOCAL_HOST_ID.to_string(), Some(legacy));
+        assert!(!st.can_mutate_selected_device());
+        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].desired_enabled = false;
+        assert!(st.can_mutate_selected_device());
+        assert!(st.selected_device_uses_restart_enable());
+
+        let capabilities = st.capabilities.get_mut(LOCAL_HOST_ID).unwrap();
+        capabilities.devices.lifecycle = true;
+        capabilities.dispatch.v2_authoritative = false;
+        assert!(st.can_mutate_selected_device());
+        assert!(
+            st.selected_device_uses_restart_enable(),
+            "restart recovery is still the only supported action without authoritative dispatch"
+        );
+
+        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].restart_required = true;
+        assert!(
+            !st.can_mutate_selected_device(),
+            "a pending restart is not another actionable enable request"
+        );
+        assert!(st.selected_device_restart_required());
+        assert!(!st.selected_device_uses_restart_enable());
+
+        let mut v2 = mold_core::ServerCapabilities::default();
+        v2.devices.lifecycle = true;
+        v2.dispatch.v2_authoritative = true;
+        st.apply_capabilities(LOCAL_HOST_ID.to_string(), Some(v2));
+        let selected = &mut st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0];
+        selected.desired_enabled = true;
+        selected.restart_required = false;
+        assert!(st.can_mutate_selected_device());
+        assert!(!st.selected_device_uses_restart_enable());
+    }
+
+    #[tokio::test]
+    async fn device_mutation_emits_accepted_state_before_authoritative_poll() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let accepted = mold_core::DeviceInfo {
+            id: "cuda:00000000000000000000000000000000".into(),
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: Some(0),
+            device_kind: mold_core::DeviceKind::FullGpu,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            name: "GPU 0".into(),
+            pci_bus_id: None,
+            compute_capability: Some("8.6".into()),
+            memory: mold_core::DeviceMemoryInfo {
+                total_bytes: Some(24 * 1024_u64.pow(3)),
+                used_bytes: Some(0),
+                mold_used_bytes: None,
+                other_used_bytes: None,
+            },
+            telemetry: mold_core::DeviceTelemetry {
+                utilization_percent: Some(0),
+                temperature_c: None,
+                power_w: None,
+            },
+            desired_enabled: true,
+            restart_required: true,
+            admin_state: mold_core::DeviceAdminState::Disabled,
+            health: mold_core::DeviceHealth::Unavailable,
+            activity: mold_core::DeviceActivity::Idle,
+            schedulable: false,
+            unschedulable_reason: Some("restart required".into()),
+            loaded_models: Vec::new(),
+            active_work_id: None,
+            planned_work_ids: Vec::new(),
+        };
+        let polled = mold_core::DeviceState {
+            devices: vec![accepted.clone()],
+            plan_version: 7,
+        };
+        let responses = vec![
+            (
+                "202 Accepted",
+                serde_json::to_string(&accepted).expect("serialize accepted device"),
+            ),
+            (
+                "200 OK",
+                serde_json::to_string(&polled).expect("serialize device poll"),
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 8192];
+                let _ = socket.read(&mut request).await.expect("read request");
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let entry = HostEntry {
+            id: "test-host".into(),
+            url: format!("http://{address}"),
+            name: Some("Test host".into()),
+            instance_id: None,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        set_host_device_enabled(entry, accepted.id.clone(), true, tx).await;
+
+        let first = rx.recv().await.expect("accepted response event");
+        match first {
+            BackgroundEvent::HostDeviceMutationApplied { host_id, device } => {
+                assert_eq!(host_id, "test-host");
+                assert!(device.restart_required);
+                let mut machines = MachinesState::default();
+                machines.apply_device_mutation(LOCAL_HOST_ID.to_string(), *device);
+                assert!(machines.selected_device_restart_required());
+                assert_eq!(
+                    machines
+                        .device_feedback
+                        .get(LOCAL_HOST_ID)
+                        .map(String::as_str),
+                    Some("GPU 0 enabled on restart")
+                );
+                machines.apply_devices(LOCAL_HOST_ID.to_string(), Some(polled.clone()));
+                assert!(
+                    machines.selected_device_restart_required(),
+                    "the authoritative poll preserves the accepted pending-restart presentation"
+                );
+            }
+            _ => panic!("expected accepted mutation event"),
+        }
+        let second = rx.recv().await.expect("poll event");
+        match second {
+            BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
+                assert_eq!(host_id, "test-host");
+                assert_eq!(devices.expect("polled devices"), polled);
+            }
+            _ => panic!("expected authoritative poll event"),
+        }
+        assert!(rx.try_recv().is_err());
+        server.await.expect("test server task");
+    }
+
     #[test]
     fn selection_change_clears_queue_snapshot() {
         let mut st = state_with_hosts(2);
@@ -989,6 +1476,60 @@ mod tests {
         assert!(st.queue.is_some());
         st.select_next();
         assert!(st.queue.is_none(), "stale queue must not leak across rows");
+        assert!(
+            !st.capabilities.contains_key("h1"),
+            "the selected host must not inherit another host's capabilities"
+        );
+    }
+
+    #[test]
+    fn lifecycle_actions_require_the_selected_hosts_device_and_capability() {
+        let mut st = state_with_hosts(2);
+        st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0)],
+                plan_version: 1,
+            }),
+        );
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        st.apply_capabilities("h0".into(), Some(capabilities.clone()));
+        assert!(!st.can_mutate_selected_device());
+
+        capabilities.devices.lifecycle = true;
+        capabilities.dispatch.v2_authoritative = true;
+        st.apply_capabilities("h1".into(), Some(capabilities.clone()));
+        assert!(
+            !st.can_mutate_selected_device(),
+            "a stale response for another host cannot expose controls"
+        );
+        st.apply_capabilities("h0".into(), Some(capabilities));
+        assert!(st.can_mutate_selected_device());
+    }
+
+    #[test]
+    fn device_inventory_supports_sixty_four_entries_and_lifecycle_shapes() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        let mut devices = (0..64)
+            .map(|ordinal| test_device(&format!("cuda:{ordinal:032x}"), ordinal))
+            .collect::<Vec<_>>();
+        devices[1].admin_state = mold_core::DeviceAdminState::Disabled;
+        devices[2].admin_state = mold_core::DeviceAdminState::Draining;
+        devices[3].health = mold_core::DeviceHealth::Unavailable;
+        devices[4].device_kind = mold_core::DeviceKind::Mig;
+        devices[4].mig_profile = Some("1g.10gb".into());
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices,
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.devices.get("h0").unwrap().devices.len(), 64);
+        st.device_selected = 63;
+        assert_eq!(st.selected_device().unwrap().ordinal, Some(63));
     }
 
     #[test]

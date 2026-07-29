@@ -9,7 +9,7 @@ linker and these packages simultaneously.
 | Package | Source | Update cadence | Audience |
 |---|---|---|---|
 | [`mold-ai-bin`](./mold-ai-bin/PKGBUILD) | Repackages the upstream `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` (RTX 40-series / Ada Lovelace) from GitHub Releases | Every tagged release (automatic via CI) | Most users — fastest install, no compile |
-| [`mold-ai`](./mold-ai/PKGBUILD) | Builds from the release tarball with CUDA features | Every tagged release (automatic via CI) | Users who need a different `CUDA_COMPUTE_CAP` (e.g. Blackwell sm_120) or non-Ada GPU |
+| [`mold-ai`](./mold-ai/PKGBUILD) | Builds from the release tarball with CUDA features | Every tagged release (automatic via CI) | Users who need a different `CUDA_COMPUTE_CAP` (for example sm_86, sm_100, or sm_120) |
 | [`mold-ai-git`](./mold-ai-git/PKGBUILD) | Builds from `main` HEAD | Pushed manually when the build recipe changes | Bleeding-edge users tracking `main` |
 
 The PKGBUILDs here are the source of truth. The AUR git repos
@@ -19,20 +19,26 @@ that CI force-publishes to on every release.
 ## Choosing a GPU variant
 
 The `mold-ai-bin` package ships the **sm_89 (Ada Lovelace)** tarball by
-default — that targets RTX 40-series cards. If you have an RTX 50-series
-(sm_120 / Blackwell) or anything older than Ada, install the source
-PKGBUILD with an explicit compute capability:
+default — that targets RTX 40-series cards. RTX 3090/A40, B200/B300, and RTX
+50-series users install the source PKGBUILD with an explicit compute
+capability:
 
 ```bash
-# RTX 50-series (Blackwell)
+# B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified)
+CUDA_COMPUTE_CAP=100 paru -S mold-ai
+
+# RTX 50-series (consumer Blackwell)
 CUDA_COMPUTE_CAP=120 paru -S mold-ai
 
-# Older NVIDIA (Ampere = 86, Turing = 75, etc. — see https://developer.nvidia.com/cuda-gpus)
+# RTX 3090 / A40 (Ampere)
 CUDA_COMPUTE_CAP=86 paru -S mold-ai
 ```
 
 `paru` forwards env vars to `makepkg`. With vanilla `makepkg`, run
-`CUDA_COMPUTE_CAP=120 makepkg -si` directly.
+`CUDA_COMPUTE_CAP=100 makepkg -si` directly. The existing `mold-ai-bin`
+package stays on sm_89. A separate sm_86 package waits for the real RTX 3090
+artifact gate, and an sm_100 binary package will not be published until the
+deferred real B200 qualification campaign passes.
 
 ## Release flow
 

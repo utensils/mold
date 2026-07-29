@@ -2,15 +2,25 @@ use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Resp
 
 static REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Request-scoped audit identifier installed before authentication and route
+/// handling.
+#[derive(Clone, Debug)]
+pub(crate) struct RequestId(pub(crate) String);
+
 /// Axum middleware that ensures every request/response has an `X-Request-ID` header.
 ///
 /// If the client sends one, it is preserved. Otherwise a UUID v4 is generated.
-pub async fn request_id_middleware(request: Request, next: Next) -> Response {
+pub async fn request_id_middleware(mut request: Request, next: Next) -> Response {
     let id = request
         .headers()
         .get(REQUEST_ID_HEADER)
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).unwrap());
+    let audit_id = id
+        .to_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    request.extensions_mut().insert(RequestId(audit_id));
 
     let mut response = next.run(request).await;
     response.headers_mut().insert(REQUEST_ID_HEADER, id);

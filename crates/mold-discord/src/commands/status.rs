@@ -8,12 +8,24 @@ use anyhow::Result;
 pub async fn status(ctx: Context<'_>) -> Result<()> {
     ctx.defer().await?;
 
-    match ctx.data().client.server_status().await {
+    let (status, devices, queue) = tokio::join!(
+        ctx.data().client.server_status(),
+        ctx.data().client.devices(),
+        ctx.data().client.list_queue()
+    );
+    match status {
         Ok(server_status) => {
-            let embed_data = format::format_server_status(&server_status);
-            let embed = handler::embed_data_to_create_embed(&embed_data);
-
-            ctx.send(poise::CreateReply::default().embed(embed)).await?;
+            let pages = format::format_server_status_pages(
+                &server_status,
+                devices.as_ref().ok(),
+                queue.as_ref().ok(),
+            );
+            for page in pages {
+                let embed = handler::embed_data_to_create_embed(&page);
+                // One embed per response/follow-up keeps Discord's 6000-char
+                // aggregate embed budget scoped to this page.
+                ctx.send(poise::CreateReply::default().embed(embed)).await?;
+            }
         }
         Err(e) => {
             let msg = if mold_core::MoldClient::is_connection_error(&e) {

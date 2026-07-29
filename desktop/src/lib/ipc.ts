@@ -7,6 +7,7 @@ import type {
   RunPodPod,
 } from "./runpod";
 import type { GalleryImage, OutputMetadata } from "./api/types";
+import type { ApiTarget } from "./api/client";
 import type { DesktopImageImport } from "./desktopImageDrop";
 import type { Theme, ThemeFamily } from "./theme";
 
@@ -253,9 +254,9 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("reveal_output_file", { filename });
   },
-  localGalleryList(): Promise<GalleryImage[]> {
-    if (!inTauri()) return Promise.resolve([]);
-    return invoke<GalleryImage[]>("local_gallery_list");
+  localGalleryList(): Promise<{ images: GalleryImage[]; target: ApiTarget | null }> {
+    if (!inTauri()) return Promise.resolve({ images: [], target: null });
+    return invoke<{ images: GalleryImage[]; target: ApiTarget | null }>("local_gallery_list");
   },
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();

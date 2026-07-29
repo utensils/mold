@@ -79,8 +79,14 @@ export function parseCurrentServerStatus(value: unknown): CurrentServerStatus {
     const candidate = (row as Record<string, unknown>)[key];
     if (!predicate(candidate)) missing.push(key);
   };
-  has("instance_id", (candidate) => typeof candidate === "string" && candidate.length > 0);
-  has("hostname", (candidate) => typeof candidate === "string" && candidate.length > 0);
+  has(
+    "instance_id",
+    (candidate) => typeof candidate === "string" && candidate.length > 0,
+  );
+  has(
+    "hostname",
+    (candidate) => typeof candidate === "string" && candidate.length > 0,
+  );
   has("queue_depth", (candidate) => typeof candidate === "number");
   if (missing.length > 0) throw new IncompatibleHostError(missing);
   return row as CurrentServerStatus;

@@ -8,6 +8,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use crate::theme;
+use mold_core::cuda_distribution::{
+    is_release_arch, release_arch_for_compute_caps, release_arch_supports_compute_caps,
+    visible_compute_capabilities_with_mig,
+};
 
 const GITHUB_REPO: &str = "utensils/mold";
 const GITHUB_API_BASE: &str = "https://api.github.com";
@@ -20,7 +24,7 @@ struct GitHubRelease {
     assets: Vec<GitHubAsset>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
@@ -57,11 +61,22 @@ fn is_newer(current: &str, remote: &str) -> bool {
 fn detect_asset_name() -> Result<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
+    let cuda_arch = match (os, arch) {
+        ("linux", "x86_64") => Some(detect_cuda_arch()?),
+        _ => None,
+    };
+    detect_asset_name_for_platform(os, arch, cuda_arch.as_deref())
+}
 
+fn detect_asset_name_for_platform(os: &str, arch: &str, cuda_arch: Option<&str>) -> Result<String> {
     match (os, arch) {
         ("macos", "aarch64") => Ok("mold-aarch64-apple-darwin.tar.gz".to_string()),
         ("linux", "x86_64") => {
-            let cuda_arch = detect_cuda_arch();
+            let cuda_arch = cuda_arch
+                .context("Linux x86_64 release selection requires an injected CUDA architecture")?;
+            if !is_release_arch(cuda_arch) {
+                bail!("unsupported CUDA release architecture: {cuda_arch}");
+            }
             Ok(format!(
                 "mold-x86_64-unknown-linux-gnu-cuda-{cuda_arch}.tar.gz"
             ))
@@ -71,39 +86,71 @@ fn detect_asset_name() -> Result<String> {
 }
 
 /// Detect CUDA GPU architecture via nvidia-smi, env override, or default.
-fn detect_cuda_arch() -> String {
-    if let Ok(arch) = std::env::var("MOLD_CUDA_ARCH") {
-        return arch;
-    }
-
+fn detect_cuda_arch() -> Result<String> {
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=index,uuid,compute_cap",
+            "--format=csv,noheader,nounits",
+        ])
         .output();
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let cc = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let parts: Vec<&str> = cc.split('.').collect();
-            if let Some(major) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
-                if major >= 12 {
-                    return "sm120".to_string();
-                }
+    let inventory = match output {
+        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).to_string()),
+        _ => None,
+    };
+    let mig_listing = std::process::Command::new("nvidia-smi")
+        .arg("-L")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string());
+    detect_cuda_arch_from_inventory(
+        std::env::var("MOLD_CUDA_ARCH").ok().as_deref(),
+        inventory.as_deref(),
+        mig_listing.as_deref(),
+        std::env::var("CUDA_VISIBLE_DEVICES").ok().as_deref(),
+    )
+}
+
+fn detect_cuda_arch_from_inventory(
+    override_arch: Option<&str>,
+    inventory_csv: Option<&str>,
+    mig_listing: Option<&str>,
+    cuda_visible_devices: Option<&str>,
+) -> Result<String> {
+    if let Some(arch) = override_arch {
+        if !is_release_arch(arch) {
+            bail!("unsupported MOLD_CUDA_ARCH={arch}; expected sm86, sm89, sm100, or sm120");
+        }
+        if let Some(inventory) = inventory_csv {
+            let caps = visible_compute_capabilities_with_mig(
+                inventory,
+                mig_listing.unwrap_or_default(),
+                cuda_visible_devices,
+            )
+            .map_err(anyhow::Error::msg)?;
+            if !caps.is_empty() {
+                release_arch_supports_compute_caps(arch, &caps).map_err(|error| {
+                    anyhow::anyhow!("MOLD_CUDA_ARCH={arch} is incompatible: {error}")
+                })?;
             }
-            "sm89".to_string()
         }
-        _ => {
-            eprintln!(
-                "{} Could not detect GPU architecture, defaulting to sm89",
-                theme::prefix_warning()
-            );
-            "sm89".to_string()
-        }
+        return Ok(arch.to_string());
     }
+
+    let inventory = inventory_csv.context(
+        "could not inspect NVIDIA GPUs with nvidia-smi; set MOLD_CUDA_ARCH only when \
+         intentionally installing for a known target",
+    )?;
+    let caps = visible_compute_capabilities_with_mig(
+        inventory,
+        mig_listing.unwrap_or_default(),
+        cuda_visible_devices,
+    )
+    .map_err(anyhow::Error::msg)?;
+    release_arch_for_compute_caps(&caps)
+        .map(str::to_string)
+        .map_err(anyhow::Error::msg)
 }
 
 // ── Package manager detection ───────────────────────────────────────────────
@@ -157,24 +204,38 @@ fn is_arch_linux(os_release: &str) -> bool {
 
 /// Parse a SHA256SUMS file and verify the checksum for `asset_name` against `data`.
 fn verify_checksum(sums_content: &str, asset_name: &str, data: &[u8]) -> Result<()> {
-    let expected = sums_content
+    let matches = sums_content
         .lines()
-        .find_map(|line| {
+        .filter_map(|line| {
             // Format: "{hash}  {filename}" (two-space separator, sha256sum convention)
             let (hash, name) = line.split_once("  ")?;
-            if name.trim() == asset_name {
+            let name = name.trim().trim_start_matches('*').trim_start_matches("./");
+            if name == asset_name {
                 Some(hash.trim().to_string())
             } else {
                 None
             }
         })
-        .with_context(|| format!("asset {asset_name} not found in SHA256SUMS"))?;
+        .collect::<Vec<_>>();
+    let [expected] = matches.as_slice() else {
+        if matches.is_empty() {
+            bail!("asset {asset_name} not found in SHA256SUMS");
+        }
+        bail!("duplicate entries for asset {asset_name} in SHA256SUMS");
+    };
+    anyhow::ensure!(
+        expected.len() == 64
+            && expected
+                .chars()
+                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character)),
+        "invalid SHA-256 checksum for {asset_name}"
+    );
 
     let mut hasher = Sha256::new();
     hasher.update(data);
     let actual = format!("{:x}", hasher.finalize());
 
-    if actual != expected {
+    if actual != *expected {
         bail!(
             "SHA-256 checksum mismatch for {asset_name}\n  expected: {expected}\n  actual:   {actual}"
         );
@@ -375,6 +436,26 @@ async fn download_asset(client: &reqwest::Client, url: &str, size: u64) -> Resul
     Ok(data)
 }
 
+fn select_release_asset<'a>(
+    assets: &'a [GitHubAsset],
+    desired_name: &str,
+    linux_x86_64: bool,
+) -> Option<&'a GitHubAsset> {
+    let exact = assets.iter().find(|asset| asset.name == desired_name);
+    if exact.is_some() || !linux_x86_64 {
+        return exact;
+    }
+    if !desired_name.ends_with("-sm89.tar.gz") {
+        return None;
+    }
+
+    // Only the historical unsuffixed artifact may substitute for sm89: it was
+    // the old name of that same release target. Never substitute an artifact
+    // compiled above a visible GPU's compute capability.
+    let legacy = "mold-x86_64-unknown-linux-gnu-cuda.tar.gz";
+    assets.iter().find(|asset| asset.name == legacy)
+}
+
 // ── Main command ────────────────────────────────────────────────────────────
 
 pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()> {
@@ -473,25 +554,26 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
     // Detect correct asset (with legacy fallback for pre-multi-arch releases)
     let asset_name = detect_asset_name()?;
 
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .or_else(|| {
-            // Legacy fallback: older releases used unsuffixed Linux asset name
-            if cfg!(target_os = "linux") {
-                let legacy = "mold-x86_64-unknown-linux-gnu-cuda.tar.gz";
-                release.assets.iter().find(|a| a.name == legacy)
-            } else {
-                None
-            }
-        })
-        .with_context(|| {
-            format!(
-                "release {} has no asset matching {asset_name}",
-                release.tag_name
-            )
-        })?;
+    let asset = select_release_asset(
+        &release.assets,
+        &asset_name,
+        cfg!(all(target_os = "linux", target_arch = "x86_64")),
+    )
+    .with_context(|| {
+        format!(
+            "release {} has no asset matching {asset_name}",
+            release.tag_name
+        )
+    })?;
+    if asset.name != asset_name {
+        eprintln!(
+            "{} Release {} predates {}; using compatibility asset {}",
+            theme::prefix_warning(),
+            release.tag_name,
+            asset_name,
+            asset.name
+        );
+    }
 
     let sums_asset = release
         .assets
@@ -507,6 +589,12 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         .send()
         .await
         .context("failed to download SHA256SUMS")?;
+    if !sums_resp.status().is_success() {
+        anyhow::bail!(
+            "failed to download SHA256SUMS: server returned HTTP {}",
+            sums_resp.status()
+        );
+    }
     let sums_content = sums_resp
         .text()
         .await
@@ -582,13 +670,27 @@ mod tests {
     // ── Platform detection ──────────────────────────────────────────────
 
     #[test]
-    fn test_detect_asset_name_current_platform() {
-        let name = detect_asset_name();
-        // This test just verifies it returns a valid result on the current platform
+    fn test_detect_asset_name_current_platform_without_gpu_probe() {
+        let injected_cuda_arch =
+            cfg!(all(target_os = "linux", target_arch = "x86_64")).then_some("sm89");
+        let name = detect_asset_name_for_platform(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            injected_cuda_arch,
+        );
         assert!(name.is_ok(), "detect_asset_name failed: {name:?}");
         let name = name.unwrap();
         assert!(name.starts_with("mold-"));
         assert!(name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn linux_asset_detection_is_hermetic_and_requires_an_injected_arch() {
+        assert_eq!(
+            detect_asset_name_for_platform("linux", "x86_64", Some("sm86")).unwrap(),
+            "mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz"
+        );
+        assert!(detect_asset_name_for_platform("linux", "x86_64", None).is_err());
     }
 
     // ── Tarball extraction ──────────────────────────────────────────────
@@ -615,6 +717,141 @@ mod tests {
         let archive = make_test_tarball(&[("mold", expected)]);
         let result = extract_binary_from_tarball(&archive).unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn cuda_release_architecture_matches_published_gpu_families() {
+        assert!(release_arch_for_compute_caps(["8.0"]).is_err());
+        assert_eq!(release_arch_for_compute_caps(["8.6"]).unwrap(), "sm86");
+        assert_eq!(release_arch_for_compute_caps(["8.9"]).unwrap(), "sm89");
+        assert!(release_arch_for_compute_caps(["9.0"]).is_err());
+        assert_eq!(release_arch_for_compute_caps(["10.0"]).unwrap(), "sm100");
+        assert_eq!(release_arch_for_compute_caps(["10.3"]).unwrap(), "sm100");
+        assert_eq!(release_arch_for_compute_caps(["12.0"]).unwrap(), "sm120");
+        assert_eq!(release_arch_for_compute_caps(["12.1"]).unwrap(), "sm120");
+        assert!(release_arch_for_compute_caps(["not-a-version"]).is_err());
+        assert!(is_release_arch("sm100"));
+        assert!(!is_release_arch("../unexpected"));
+    }
+
+    #[test]
+    fn updater_selects_for_the_full_visible_fleet_in_any_order() {
+        let first = "\
+0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 8.6
+1, GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, 8.9
+";
+        let reversed = "\
+0, GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, 8.9
+1, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 8.6
+";
+        assert_eq!(
+            detect_cuda_arch_from_inventory(None, Some(first), None, None).unwrap(),
+            "sm86"
+        );
+        assert_eq!(
+            detect_cuda_arch_from_inventory(None, Some(reversed), None, None).unwrap(),
+            "sm86"
+        );
+        assert_eq!(
+            detect_cuda_arch_from_inventory(
+                None,
+                Some(first),
+                None,
+                Some("GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            )
+            .unwrap(),
+            "sm86"
+        );
+    }
+
+    #[test]
+    fn updater_rejects_incompatible_mixed_fleets_and_bad_overrides() {
+        let mixed = "\
+0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 8.6
+1, GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, 10.0
+";
+        let error = detect_cuda_arch_from_inventory(None, Some(mixed), None, None).unwrap_err();
+        assert!(error.to_string().contains("source build"));
+        let error =
+            detect_cuda_arch_from_inventory(Some("sm86"), Some(mixed), None, None).unwrap_err();
+        assert!(error.to_string().contains("MOLD_CUDA_ARCH"));
+    }
+
+    #[test]
+    fn updater_selects_parent_architecture_for_visible_mig_instance() {
+        let inventory = "\
+0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, 10.0
+";
+        let listing = "\
+GPU 0: NVIDIA B200 (UUID: GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa)
+  MIG 1g.23gb Device 0: (UUID: MIG-11111111-1111-1111-1111-111111111111)
+";
+        assert_eq!(
+            detect_cuda_arch_from_inventory(
+                None,
+                Some(inventory),
+                Some(listing),
+                Some("MIG-11111111-1111-1111-1111-111111111111")
+            )
+            .unwrap(),
+            "sm100"
+        );
+        assert!(
+            detect_cuda_arch_from_inventory(None, Some(inventory), None, Some("MIG-unknown"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pre_phase_g_release_fails_closed_when_native_asset_is_absent() {
+        let release: GitHubRelease = serde_json::from_str(include_str!(
+            "../../tests/fixtures/release-pre-phase-g.json"
+        ))
+        .unwrap();
+
+        for desired in [
+            "mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz",
+            "mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz",
+        ] {
+            assert!(
+                select_release_asset(&release.assets, desired, true).is_none(),
+                "must not substitute sm89 for {desired}"
+            );
+        }
+        let without_sm120 = release
+            .assets
+            .iter()
+            .filter(|asset| !asset.name.ends_with("-sm120.tar.gz"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            select_release_asset(
+                &without_sm120,
+                "mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz",
+                true
+            )
+            .is_none(),
+            "an old release must not claim forward compatibility with sm120"
+        );
+    }
+
+    #[test]
+    fn ancient_release_never_substitutes_unsuffixed_for_native_asset() {
+        let release: GitHubRelease =
+            serde_json::from_str(include_str!("../../tests/fixtures/release-ancient.json"))
+                .unwrap();
+        assert!(select_release_asset(
+            &release.assets,
+            "mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz",
+            true,
+        )
+        .is_none());
+        assert!(select_release_asset(
+            &release.assets,
+            "mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz",
+            true,
+        )
+        .is_some());
     }
 
     #[test]
@@ -690,6 +927,26 @@ mod tests {
 
         assert!(verify_checksum(&sums, "file-a.tar.gz", data_a).is_ok());
         assert!(verify_checksum(&sums, "file-b.tar.gz", data_b).is_ok());
+    }
+
+    #[test]
+    fn test_verify_checksum_accepts_release_workflow_relative_path() {
+        let data = b"release bytes";
+        let expected = format!("{:x}", Sha256::digest(data));
+        let sums = format!("{expected}  ./mold-test.tar.gz\n");
+        verify_checksum(&sums, "mold-test.tar.gz", data).unwrap();
+    }
+
+    #[test]
+    fn test_verify_checksum_rejects_duplicate_asset_entries() {
+        let data = b"release bytes";
+        let expected = format!("{:x}", Sha256::digest(data));
+        let sums = format!(
+            "{expected}  mold-test.tar.gz\n{}  ./mold-test.tar.gz\n",
+            "0".repeat(64)
+        );
+        let error = verify_checksum(&sums, "mold-test.tar.gz", data).unwrap_err();
+        assert!(error.to_string().contains("duplicate"), "{error:#}");
     }
 
     // ── Package manager detection ───────────────────────────────────────

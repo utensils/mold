@@ -28,6 +28,18 @@ use crate::queue::save_video_to_dir;
 use crate::routes::{requested_sse_completion_payload, ApiError};
 use crate::state::{AppState, SseCompletionPayload};
 
+pub(crate) async fn freeze_chain_model(
+    state: &AppState,
+    model: &str,
+) -> Result<mold_core::chain_job::FrozenChainModel, ApiError> {
+    let config = state.config.read().await;
+    crate::execution_plan::freeze_chain_model(&config, model).map_err(|error| {
+        ApiError::validation(format!(
+            "cannot freeze concrete chain model companions for '{model}': {error}"
+        ))
+    })
+}
+
 /// Internal wire event used by the chain SSE stream before per-event
 /// serialization. Separate from [`crate::state::SseMessage`] because chain
 /// complete events carry a different payload (`SseChainCompleteEvent`) and
@@ -93,6 +105,7 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
             ephemeral: true,
+            frozen_model: Some(freeze_chain_model(state, &req.model).await?),
             request: req,
         },
     ) {
@@ -303,6 +316,7 @@ fn shim_build_response_and_cleanup(
         }
     };
     let (filename, output_metadata) = if let Some(dir) = output_dir {
+        let _gallery_writer = state.gallery_publication_gate.blocking_write();
         // The ephemeral shim job dir is deleted right after this response is
         // assembled, so a job id would dangle — record stage seeds only.
         let stage_seeds: Vec<u64> = manifest
@@ -325,6 +339,7 @@ fn shim_build_response_and_cleanup(
             Some(generation_time_ms as i64),
             Some(db),
             Some(&state.events),
+            &state.gallery_publication_gate,
         );
         (filename, Some(metadata))
     } else {
@@ -621,6 +636,9 @@ pub async fn generate_chain(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    if let Some(reason) = state.generation_unavailable() {
+        return ApiError::generation_unavailable(reason).into_response();
+    }
     let shim = match shim_start_job(&state, req).await {
         Ok(shim) => shim,
         Err(api_err) => return api_err.into_response(),
@@ -704,6 +722,9 @@ pub async fn generate_chain_stream(
     headers: HeaderMap,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     let completion_payload = requested_sse_completion_payload(&headers)?;
     if completion_payload == SseCompletionPayload::MetadataOnly
         && state.config.read().await.is_output_disabled()
@@ -975,6 +996,7 @@ mod tests {
                 updated_at_unix_ms: 2,
                 error: None,
                 ephemeral: true,
+                cancelling: false,
             },
             stages: request
                 .stages
@@ -1140,6 +1162,7 @@ mod tests {
             crate::chain_job_runner::CreateJobParams {
                 id: job_id.to_string(),
                 ephemeral: true,
+                frozen_model: None,
                 request: req.clone(),
             },
         )
@@ -1209,10 +1232,28 @@ mod tests {
         handle: Arc<crate::chain_job_runner::ChainJobRunnerHandle>,
         output_dir: &std::path::Path,
     ) -> AppState {
-        let config = mold_core::Config {
+        let model_dir = output_dir
+            .parent()
+            .expect("test output directory has a parent")
+            .join("chain-model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let transformer = model_dir.join("transformer.safetensors");
+        let vae = model_dir.join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let mut config = mold_core::Config {
             output_dir: Some(output_dir.to_string_lossy().into_owned()),
             ..Default::default()
         };
+        config.models.insert(
+            "ltx-2-19b-distilled:mock".into(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                transformer: Some(transformer.to_string_lossy().into_owned()),
+                vae: Some(vae.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
         let mut state = AppState::for_tests();
         state.config = Arc::new(tokio::sync::RwLock::new(config));
         state.metadata_db = Arc::new(Some(db));
@@ -1237,6 +1278,22 @@ mod tests {
     struct HandlerFailingExecutor;
 
     impl crate::chain_job_runner::StageExecutor for HandlerFailingExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(mold_core::chain_job::FrozenChainModel {
+                runtime_model_id: format!("mold-frozen-chain:{model}:fixture"),
+                model_fingerprint: "fixture".into(),
+                config: mold_core::ModelConfig {
+                    family: Some("ltx2".into()),
+                    transformer: Some("/test/transformer.safetensors".into()),
+                    vae: Some("/test/vae.safetensors".into()),
+                    ..Default::default()
+                },
+            })
+        }
+
         fn render_stage(
             &self,
             _model: &str,
@@ -1244,6 +1301,7 @@ mod tests {
             _carry: Option<&mold_inference::chain::ChainTail>,
             _motion_tail_frames: u32,
             progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
             let _ = progress(1, 2);
             if stage_req.prompt == "stage one" {
@@ -1404,6 +1462,7 @@ mod tests {
             crate::chain_job_runner::CreateJobParams {
                 id: "01JBR55WAITLIVE".into(),
                 ephemeral: true,
+                frozen_model: None,
                 request,
             },
         )
@@ -1450,6 +1509,7 @@ mod tests {
             crate::chain_job_runner::CreateJobParams {
                 id: "01JBR55WAITCLOSED".into(),
                 ephemeral: true,
+                frozen_model: None,
                 request,
             },
         )
@@ -1719,10 +1779,27 @@ mod tests {
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
             pause: None,
         };
         let handle = crate::chain_job_runner::spawn_runner(deps);
         let mut state = AppState::for_tests();
+        let transformer = dir.path().join("transformer.safetensors");
+        let vae = dir.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "ltx-2-19b-distilled:mock".into(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                transformer: Some(transformer.to_string_lossy().into_owned()),
+                vae: Some(vae.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        state.config = Arc::new(tokio::sync::RwLock::new(config));
         state.metadata_db = db;
         state.chain_jobs = Some(Arc::new(handle));
 

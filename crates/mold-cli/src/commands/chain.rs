@@ -29,6 +29,18 @@ use crate::theme;
 /// pipeline maxes at 97 pixel frames (13 latent frames) per clip.
 pub const LTX2_DISTILLED_CLIP_CAP: u32 = 97;
 
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+fn local_chain_planning_frames(request: &ChainRequest) -> u32 {
+    // Chain stages execute serially on one owner. Admission must budget the
+    // largest individual stage, not the stitched total.
+    request
+        .stages
+        .iter()
+        .map(|stage| stage.frames)
+        .max()
+        .unwrap_or(1)
+}
+
 /// Outcome of [`decide_chain_routing`]: either the caller should continue
 /// down the single-clip path, build a chain with the given settings, or
 /// reject the request because the model family can't be chained.
@@ -310,7 +322,10 @@ async fn run_chain_local(
     eager: bool,
     offload: bool,
 ) -> Result<VideoData> {
-    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
+    use super::local_engine::{
+        build_local_engine_from_plan, plan_local_batch, resolve_or_pull_model, EngineOverrides,
+        LocalBatchAdmission,
+    };
 
     // Normalise so we have expanded stages locally too.
     let req = chain_req.clone().normalise()?;
@@ -319,22 +334,37 @@ async fn run_chain_local(
 
     // Ensure the model is pulled + config rows are in place (also runs the
     // missing-assets repair pull the single-clip path gets).
-    let (paths, effective_config, _pulled) = resolve_or_pull_model(&model_name, config).await?;
-
-    let mut engine = build_local_engine(
-        &model_name,
-        paths,
-        &effective_config,
-        &EngineOverrides {
-            gpus,
-            t5_variant: t5_variant_override,
-            qwen3_variant: qwen3_variant_override,
-            qwen2_variant: qwen2_variant_override,
-            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
-            eager,
-            offload,
-        },
-    )?;
+    let (_paths, effective_config, _pulled) = resolve_or_pull_model(&model_name, config).await?;
+    let overrides = EngineOverrides {
+        gpus,
+        t5_variant: t5_variant_override,
+        qwen3_variant: qwen3_variant_override,
+        qwen2_variant: qwen2_variant_override,
+        qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+        eager,
+        offload,
+    };
+    let planning_request = req.synthetic_generate_request(
+        req.output_format,
+        local_chain_planning_frames(&req),
+        req.fps,
+    );
+    let local_plan = plan_local_batch(&planning_request, &effective_config, &overrides).await?;
+    let mut admission =
+        LocalBatchAdmission::new(&local_plan.candidates, 1, local_plan.host_headroom_bytes)?;
+    for candidate in &local_plan.candidates {
+        admission.owner_ready(candidate.ordinal)?;
+    }
+    let lease = admission
+        .lease_ready()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no local GPU can admit the frozen chain plan"))?;
+    let execution_plan = local_plan
+        .execution_plans
+        .get(&lease.ordinal)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("local chain lease has no frozen execution plan"))?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
     let stage_labels: Vec<StageLabel> = req.stages.iter().map(StageLabel::from_stage).collect();
@@ -344,8 +374,19 @@ async fn run_chain_local(
     let output_format = req.output_format;
     let total_frames_opt = Some(req.total_frames.unwrap_or(u32::MAX));
     let req_clone = req.clone();
+    let planning_request_clone = planning_request.clone();
+    let effective_config_clone = effective_config.clone();
 
     let handle = tokio::task::spawn_blocking(move || -> Result<VideoData> {
+        // Construction, load, render, and drop are all owned by this one
+        // device thread. The chain never constructs a CUDA/Metal engine on a
+        // Tokio runtime thread.
+        mold_inference::device::init_thread_gpu_ordinal(execution_plan.device_ordinal);
+        let mut engine = build_local_engine_from_plan(
+            &planning_request_clone,
+            &effective_config_clone,
+            &execution_plan,
+        )?;
         engine.load()?;
         let renderer = engine.as_chain_renderer().ok_or_else(|| {
             anyhow::anyhow!(
@@ -1145,6 +1186,11 @@ mod tests {
         assert_eq!(req.stages[1].transition, TransitionMode::Cut);
         assert_eq!(req.stages[2].transition, TransitionMode::Fade);
         assert_eq!(req.stages[2].fade_frames, Some(6));
+        assert_eq!(
+            local_chain_planning_frames(&req),
+            97,
+            "local admission budgets one serial stage, not the 291-frame stitch"
+        );
         // Auto-expand fields must be cleared by normalise so the server
         // can't confuse the two input shapes on receipt.
         assert!(req.prompt.is_none());

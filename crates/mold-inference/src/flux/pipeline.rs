@@ -806,8 +806,7 @@ enum LoraBypassMode {
 
 impl LoraBypassMode {
     fn from_env() -> Self {
-        match std::env::var("MOLD_LORA_BYPASS")
-            .ok()
+        match crate::runtime_env::value("MOLD_LORA_BYPASS")
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
@@ -1074,7 +1073,7 @@ impl FluxEngine {
     /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
     /// next rebuild, which is cheap on GPU.
     fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
-        if std::env::var("MOLD_FLUX_DELTA_CACHE")
+        if crate::runtime_env::value("MOLD_FLUX_DELTA_CACHE")
             .map(|v| v == "0")
             .unwrap_or(false)
         {
@@ -1300,7 +1299,7 @@ impl FluxEngine {
         let cpu = Device::Cpu;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1391,8 +1390,11 @@ impl FluxEngine {
 
         // Load VAE on GPU (small, ~300MB)
         // Tier 2: honor `advanced.vae` override.
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -1446,7 +1448,8 @@ impl FluxEngine {
             .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
         // Tier 2 (if `advanced.t5` populated) overrides Tier 1 text_encoders group knob.
-        let t5_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5, true);
+        let t5_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5.clone(), true);
         let auto_t5_device = if t5_on_gpu {
             device.clone()
         } else {
@@ -1494,8 +1497,11 @@ impl FluxEngine {
             free_after_t5,
             CLIP_VRAM_THRESHOLD,
         );
-        let clip_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| adv.clip_l, true);
+        let clip_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.clip_l.clone(),
+            true,
+        );
         let auto_clip_device = if clip_on_gpu {
             device.clone()
         } else {
@@ -1575,7 +1581,7 @@ impl FluxEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1658,7 +1664,8 @@ impl FluxEngine {
                 .progress
                 .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-            let t5_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5, true);
+            let t5_ref =
+                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5.clone(), true);
             let auto_t5_device = if t5_on_gpu {
                 device.clone()
             } else {
@@ -1714,9 +1721,11 @@ impl FluxEngine {
             // T5 output sitting on GPU. Idempotent on the GGUF path where T5
             // already produces CPU tensors.
             let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
-            self.base
-                .progress
-                .stage_done("Encoding prompt (T5)", encode_t5.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (T5)",
+                encode_t5.elapsed(),
+            );
 
             drop(t5);
             self.base.progress.info("Freed T5 encoder");
@@ -1732,8 +1741,11 @@ impl FluxEngine {
                 free_for_clip,
                 CLIP_VRAM_THRESHOLD,
             );
-            let clip_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.clip_l, true);
+            let clip_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.clip_l.clone(),
+                true,
+            );
             let auto_clip_device = if clip_on_gpu {
                 device.clone()
             } else {
@@ -1774,9 +1786,11 @@ impl FluxEngine {
                 let mut clip = clip;
                 park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?
             };
-            self.base
-                .progress
-                .stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (CLIP)",
+                encode_clip.elapsed(),
+            );
 
             self.base.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
@@ -2078,9 +2092,11 @@ impl FluxEngine {
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
             let encoded = vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             // Flow-matching img2img: interpolate between encoded latents and noise
             // at the exact noise level matching the first timestep in the schedule
@@ -2218,9 +2234,11 @@ impl FluxEngine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         // VAE dropped here
 
         let output_metadata = build_output_metadata(req, seed, None);
@@ -2495,7 +2513,11 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
-            progress.stage_done("Encoding prompt (T5)", encode_t5.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (T5)",
+                encode_t5.elapsed(),
+            );
             tracing::info!("T5 encoding complete");
 
             progress.stage_start("Encoding prompt (CLIP)");
@@ -2505,7 +2527,11 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
-            progress.stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (CLIP)",
+                encode_clip.elapsed(),
+            );
             tracing::info!("CLIP encoding complete");
             // CachedTensor::from_tensor already moves to CPU — passing CPU
             // tensors here avoids the round-trip on the GGUF path.
@@ -2589,6 +2615,7 @@ impl FluxEngine {
 
 impl InferenceEngine for FluxEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -2606,6 +2633,13 @@ impl InferenceEngine for FluxEngine {
 
     fn load(&mut self) -> Result<()> {
         FluxEngine::load(self)
+    }
+
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = FluxEngine::load(self);
+        self.pending_placement = None;
+        result
     }
 
     fn unload(&mut self) {
@@ -2627,6 +2661,19 @@ impl InferenceEngine for FluxEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("flux")
+            .expect("production FLUX batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
@@ -2692,7 +2739,11 @@ impl FluxEngine {
                 loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let noise = crate::engine::seeded_randn(
                 seed,
@@ -2801,7 +2852,7 @@ impl FluxEngine {
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        let keep_transformer_env = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
+        let keep_transformer_env = crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER")
             .map(|v| v == "1")
             .unwrap_or(false);
 
@@ -2884,7 +2935,11 @@ impl FluxEngine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
-        progress.stage_done("VAE decode", vae_decode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 10. Convert candle tensor to image bytes

@@ -31,6 +31,33 @@ const CHAIN_JOB_NOT_RESUMABLE: &str = "CHAIN_JOB_NOT_RESUMABLE";
 const RETAKE_SPLICE_REQUIRES_CUT_OR_FADE: &str = "RETAKE_SPLICE_REQUIRES_CUT_OR_FADE";
 pub const CHAIN_JOB_EPHEMERAL: &str = "CHAIN_JOB_EPHEMERAL";
 
+#[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
+pub struct ChainPlacementPreviewRequest {
+    pub request: ChainRequest,
+    #[serde(default = "default_preview_copies")]
+    pub copies: u32,
+}
+
+fn default_preview_copies() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ChainPlacementPreviewBody {
+    Wrapped(ChainPlacementPreviewRequest),
+    Legacy(ChainRequest),
+}
+
+impl ChainPlacementPreviewBody {
+    fn into_parts(self) -> (ChainRequest, u32) {
+        match self {
+            Self::Wrapped(body) => (body.request, body.copies),
+            Self::Legacy(request) => (request, 1),
+        }
+    }
+}
+
 /// 202. Validates ChainRequest::normalise + chain_limits caps + family
 /// chain-capability + audio gate. 503 CHAIN_JOBS_UNAVAILABLE when DB
 /// disabled (state.chain_jobs None). Creates job dir + manifest + rows,
@@ -46,6 +73,7 @@ pub async fn create_chain_job(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await?;
@@ -67,6 +95,7 @@ pub async fn create_chain_job(
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
             ephemeral: false,
+            frozen_model: Some(crate::routes_chain::freeze_chain_model(&state, &req.model).await?),
             request: req,
         },
     )
@@ -86,6 +115,65 @@ pub async fn create_chain_job(
     ))
 }
 
+/// Forward-compatible placement capability probe for a normalized durable
+/// sequence.
+///
+/// Until production chain stages retain frozen per-device execution plans,
+/// this deliberately returns `authoritative=false` and `outcome=unsupported`.
+/// It accepts both the preferred `{ request, copies }` body and the legacy raw
+/// `ChainRequest` without creating jobs, downloading assets, or touching CUDA.
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/placement-preview",
+    tag = "chain-jobs",
+    request_body = ChainPlacementPreviewRequest,
+    responses(
+        (status = 200, description = "Chain placement capability response", body = mold_core::GenerationPlacementPreview)
+    )
+)]
+pub async fn preview_chain_job_placement(
+    State(state): State<AppState>,
+    Json(body): Json<ChainPlacementPreviewBody>,
+) -> Json<mold_core::GenerationPlacementPreview> {
+    let (mut req, copies) = body.into_parts();
+    let unavailable = |reason: String| mold_core::GenerationPlacementPreview {
+        version: 1,
+        authoritative: true,
+        state_version: 0,
+        plan_version: 0,
+        outcome: "infeasible".to_string(),
+        reason: Some(reason),
+        candidate: None,
+        stage_candidates: Vec::new(),
+    };
+    if !(1..=64).contains(&copies) {
+        return Json(unavailable("copies must be between 1 and 64".to_string()));
+    }
+    if let Err(error) =
+        crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await
+    {
+        return Json(unavailable(error.error));
+    }
+    let req = match req.normalise() {
+        Ok(req) => req,
+        Err(error) => return Json(unavailable(error.to_string())),
+    };
+    // Production durable-chain stages do not yet retain the frozen per-device
+    // execution plans used by ordinary generation. A coarse model-size
+    // projection can choose a device that cannot execute the actual component
+    // placement on heterogeneous hosts, so it must never be advertised as
+    // authoritative. Keep the endpoint and copies=N wire contract available
+    // for forward compatibility, while older clients may still send a raw
+    // ChainRequest.
+    let _ = (state, req);
+    let mut response = unavailable(
+        "exact durable-chain placement requires frozen per-device stage plans".to_string(),
+    );
+    response.authoritative = false;
+    response.outcome = "unsupported".to_string();
+    Json(response)
+}
+
 #[utoipa::path(
     get,
     path = "/api/chain-jobs",
@@ -95,14 +183,19 @@ pub async fn create_chain_job(
 pub async fn list_chain_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<ChainJobListing>, ApiError> {
-    chain_jobs_handle(&state)?;
+    let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let rows = chain_jobs::list_jobs(db)
         .map_err(|e| ApiError::internal(format!("failed to list chain jobs: {e:#}")))?;
     let jobs = rows
         .into_iter()
-        .map(|row| summary_for_row(&row, read_manifest_optional(&row, &root).as_ref()))
+        .map(|row| {
+            let mut summary = summary_for_row(&row, read_manifest_optional(&row, &root).as_ref());
+            summary.cancelling =
+                row.state == ChainJobState::Running && handle.is_cancelling(&row.id);
+            summary
+        })
         .collect();
     Ok(Json(ChainJobListing { jobs }))
 }
@@ -119,13 +212,15 @@ pub async fn get_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChainJobDetail>, ApiError> {
-    chain_jobs_handle(&state)?;
+    let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
-    job_detail_for(db, &root, &id)
+    let mut detail = job_detail_for(db, &root, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
-        .map(Json)
-        .ok_or_else(|| not_found(&id))
+        .ok_or_else(|| not_found(&id))?;
+    detail.summary.cancelling =
+        detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
+    Ok(Json(detail))
 }
 
 /// subscribe() FIRST, then synthesize Snapshot from DB+manifest, then live.
@@ -146,9 +241,11 @@ pub async fn chain_job_events(
         .subscribe(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to subscribe to chain job: {e:#}")))?;
     let root = jobs_root()?;
-    let detail = job_detail_for(db, &root, &id)
+    let mut detail = job_detail_for(db, &root, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job snapshot: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
+    detail.summary.cancelling =
+        detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
     let snapshot = ChainJobEvent::Snapshot { job: detail };
     let stream = async_stream::stream! {
         yield Ok(sse_event(snapshot));
@@ -175,6 +272,7 @@ pub async fn resume_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
@@ -267,6 +365,7 @@ pub async fn retake_chain_job(
     Path(id): Path<String>,
     Json(req): Json<RetakeRequest>,
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
@@ -423,11 +522,15 @@ pub async fn cancel_chain_job(
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
-    let row = chain_jobs::get_job(db, &id)
+    let mut row = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
-    if row.state == ChainJobState::Running {
-        let _ = handle.request_cancel(&id);
+    let cancelling = if row.state == ChainJobState::Running {
+        let requested = handle.request_cancel(&id);
+        row = chain_jobs::get_job(db, &id)
+            .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
+            .ok_or_else(|| not_found(&id))?;
+        requested && row.state == ChainJobState::Running
     } else if row.state == ChainJobState::Queued {
         let changed = chain_jobs::try_transition(
             db,
@@ -443,19 +546,25 @@ pub async fn cancel_chain_job(
         } else {
             cancel_after_cas_loss(handle, db, &id)?;
         }
+        false
     } else if settled(row.state) {
         // Idempotent: settled jobs have already performed cancel/bus cleanup
         // on the winning settled CAS.
-    }
+        false
+    } else {
+        false
+    };
     let updated = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(summary_for_row(
-            &updated,
-            read_manifest_optional(&updated, &root).as_ref(),
-        )),
+        Json({
+            let mut summary =
+                summary_for_row(&updated, read_manifest_optional(&updated, &root).as_ref());
+            summary.cancelling = cancelling && updated.state == ChainJobState::Running;
+            summary
+        }),
     ))
 }
 
@@ -636,6 +745,7 @@ fn summary_for_row(row: &ChainJobRow, manifest: Option<&ChainJobManifest>) -> Ch
         updated_at_unix_ms: row.updated_at_ms.max(0) as u64,
         error: row.error.clone(),
         ephemeral: manifest.is_some_and(|manifest| manifest.ephemeral),
+        cancelling: false,
     }
 }
 
@@ -798,9 +908,51 @@ mod tests {
             _carry: Option<&ChainTail>,
             _motion_tail_frames: u32,
             _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
             anyhow::bail!("NoopExecutor should not render during route GC tests")
         }
+    }
+
+    #[test]
+    fn chain_placement_preview_body_accepts_wrapped_copies_and_legacy_raw_request() {
+        let request = req(OutputFormat::Mp4);
+        let wrapped: ChainPlacementPreviewBody = serde_json::from_value(serde_json::json!({
+            "request": request,
+            "copies": 8
+        }))
+        .unwrap();
+        let (wrapped_request, copies) = wrapped.into_parts();
+        assert_eq!(wrapped_request.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(copies, 8);
+
+        let legacy: ChainPlacementPreviewBody =
+            serde_json::from_value(serde_json::to_value(req(OutputFormat::Mp4)).unwrap()).unwrap();
+        let (legacy_request, copies) = legacy.into_parts();
+        assert_eq!(legacy_request.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(copies, 1);
+    }
+
+    #[tokio::test]
+    async fn chain_placement_preview_is_explicitly_non_authoritative_until_exact_stage_plans() {
+        let state = state_with(
+            Arc::new(Some(MetadataDb::open_in_memory().unwrap())),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let Json(response) = preview_chain_job_placement(
+            State(state),
+            Json(ChainPlacementPreviewBody::Wrapped(
+                ChainPlacementPreviewRequest {
+                    request: req(OutputFormat::Mp4),
+                    copies: 2,
+                },
+            )),
+        )
+        .await;
+        assert!(!response.authoritative);
+        assert_eq!(response.outcome, "unsupported");
+        assert!(response.candidate.is_none());
+        assert!(response.stage_candidates.is_empty());
     }
 
     struct NoopProbe;
@@ -819,13 +971,25 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let transformer = home.path().join("transformer.safetensors");
+        let vae = home.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        state.config.write().await.models.insert(
+            "route-chain-test".into(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "route-chain-test".into();
 
         let mut events_rx = state.events.subscribe();
         let (_status, Json(body)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(
-                State(state),
-                Json(req(OutputFormat::Mp4)),
-            ))
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
         })
         .unwrap();
 
@@ -841,6 +1005,41 @@ mod tests {
         assert_eq!(wire["type"], "chain_job_queued");
         assert_eq!(wire["id"], body.job_id.as_str());
         assert_eq!(wire["stage_count"].as_u64(), Some(row.stage_count as u64));
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_fails_closed_when_model_freeze_is_unresolvable() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "unfreezable-chain".into(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    home.path()
+                        .join("missing-transformer")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(home.path().join("missing-vae").display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "unfreezable-chain".into();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[tokio::test]
@@ -876,6 +1075,25 @@ mod tests {
         }
     }
 
+    async fn freezable_amend_request(state: &AppState, home: &std::path::Path) -> ChainRequest {
+        let transformer = home.join("amend-transformer.safetensors");
+        let vae = home.join("amend-vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        state.config.write().await.models.insert(
+            "route-chain-amend-test".into(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "route-chain-amend-test".into();
+        request
+    }
+
     #[tokio::test]
     async fn amend_chain_job_returns_202_with_preserved_stages_and_requeues() {
         let home = tempfile::tempdir().unwrap();
@@ -884,17 +1102,18 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
 
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
 
         let mut events_rx = state.events.subscribe();
-        let mut stages = req(OutputFormat::Mp4).stages;
+        let mut stages = request.stages;
         stages.push(ChainStage {
             prompt: "appended clip".into(),
             frames: 9,
@@ -939,10 +1158,11 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
@@ -953,7 +1173,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
-                Json(amend_body(req(OutputFormat::Mp4).stages)),
+                Json(amend_body(request.stages)),
             ))
         })
         .unwrap_err();
@@ -976,6 +1196,7 @@ mod tests {
                 crate::chain_job_runner::CreateJobParams {
                     id: job_id.into(),
                     ephemeral: true,
+                    frozen_model: None,
                     request: req(OutputFormat::Mp4).normalise().unwrap(),
                 },
             )
@@ -1007,15 +1228,16 @@ mod tests {
             db,
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
 
-        let mut stages = req(OutputFormat::Mp4).stages;
+        let mut stages = request.stages;
         stages[0].frames = 10; // not 8k+1
         let err = with_mold_home(home.path(), || {
             futures::executor::block_on(amend_chain_job(
@@ -1044,6 +1266,7 @@ mod tests {
                 crate::chain_job_runner::CreateJobParams {
                     id: job_id.into(),
                     ephemeral: true,
+                    frozen_model: None,
                     request: req(OutputFormat::Mp4).normalise().unwrap(),
                 },
             )
@@ -1081,6 +1304,8 @@ mod tests {
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
             pause: None,
         };
         let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));

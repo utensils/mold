@@ -7,6 +7,13 @@
 let
   cfg = config.services.mold;
   discordCfg = cfg.discord;
+  expectedCudaComputeCapability = {
+    ampere = "86";
+    ada = "89";
+    blackwell-datacenter = "100";
+    blackwell = "120";
+  };
+  packageCudaComputeCapability = cfg.package.moldCudaComputeCapability or null;
 in
 {
   options.services.mold = {
@@ -14,22 +21,26 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake. Use mold-sm120 for Blackwell GPUs. The module cannot auto-select the package; set it explicitly to match your GPU.";
+      description = "The mold package to use. Set it to the matching flake output: default (sm89), mold-sm86, mold-sm100, or mold-sm120. The module cannot auto-select the package.";
     };
 
     cudaArch = lib.mkOption {
       type = lib.types.nullOr (
         lib.types.enum [
+          "ampere"
           "ada"
           "blackwell"
+          "blackwell-datacenter"
         ]
       );
       default = null;
       description = ''
-        CUDA GPU architecture hint. Emits a warning if set to "blackwell"
-        to remind you to use the matching package variant.
+        CUDA GPU architecture hint. The module compares it with the selected
+        package's Mold CUDA capability metadata and warns only on mismatch.
+        - "ampere" — RTX 3090/A40 (sm_86): use packages.''${system}.mold-sm86
         - "ada" — RTX 40-series (Ada Lovelace, sm_89): use packages.''${system}.mold
-        - "blackwell" — RTX 50-series (Blackwell, sm_120): use packages.''${system}.mold-sm120
+        - "blackwell-datacenter" — B200/B300 (sm_100): use packages.''${system}.mold-sm100
+        - "blackwell" — RTX 50-series (consumer Blackwell, sm_120): use packages.''${system}.mold-sm120
         The module cannot auto-select flake packages; you must set `package` to match.
       '';
       example = "blackwell";
@@ -183,11 +194,11 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Which GPUs the server should use. Accepts a comma-separated list
-        of ordinals (e.g. "0,1") or "all". Null means auto-detect every
-        visible GPU. Sets MOLD_GPUS when non-null. Each GPU gets a
-        dedicated worker thread with its own ModelCache; jobs are routed
-        across workers using idle-first + VRAM-fit placement.
+        Which GPUs the server should use. Accepts "all", "none", or a
+        comma-separated list of visible ordinals and stable cuda:/metal:/
+        NVIDIA GPU-/MIG- device IDs. Null means auto-detect every visible
+        GPU. Sets MOLD_GPUS when non-null. Each selected GPU gets a dedicated
+        worker thread with its own ModelCache.
       '';
       example = "0,1";
     };
@@ -288,12 +299,25 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    warnings = lib.optionals (cfg.cudaArch == "blackwell") [
-      ''
-        services.mold.cudaArch is "blackwell" — make sure you set the matching package:
-          services.mold.package = inputs.mold.packages.''${system}.mold-sm120;
-        The module cannot auto-select flake packages; cudaArch is advisory.
-      ''
+    warnings = lib.optionals (
+      cfg.cudaArch != null
+      && packageCudaComputeCapability
+      != expectedCudaComputeCapability.${cfg.cudaArch}
+    ) [
+      (
+        ''
+          services.mold.cudaArch is "${cfg.cudaArch}" (sm_${expectedCudaComputeCapability.${cfg.cudaArch}})
+          but services.mold.package declares ${
+            if packageCudaComputeCapability == null then
+              "no Mold CUDA capability metadata"
+            else
+              "sm_${packageCudaComputeCapability}"
+          }. Set package to the matching Mold flake output.
+        ''
+        + lib.optionalString (cfg.cudaArch == "blackwell-datacenter") ''
+          B200/B300 support is simulated, not hardware-qualified.
+        ''
+      )
     ];
 
     services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";

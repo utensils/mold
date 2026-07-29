@@ -69,6 +69,26 @@ fn runpod_create_help_documents_flags() {
 }
 
 #[test]
+fn runpod_create_rejects_blank_gpu_before_network_access() {
+    let env = TestEnv::new();
+    env.cmd()
+        .env("RUNPOD_API_KEY", "fake-test-key")
+        .args([
+            "runpod",
+            "create",
+            "--gpu",
+            " \t ",
+            "--image-tag",
+            "latest",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("GPU type cannot be blank"));
+}
+
+#[test]
 fn runpod_run_help_documents_flags() {
     let env = TestEnv::new();
     env.cmd()

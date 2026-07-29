@@ -52,14 +52,14 @@ come from stdin.
 | `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                          |
 | `--local`                                                                                    | Skip the server and run local inference                                                            |
 | `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                               |
-| `--gpus <SPEC>`                                                                              | Local GPU ordinals (`0,1`) or `all`                                                                |
+| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                  |
 | `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                   |
 | `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                     |
 | `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                               |
 | `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                             |
 | `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                          |
-| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu`, or `gpu:N`                                        |
-| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides                                                                |
+| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                   |
+| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                 |
 | `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                    |
 
 ### Qwen Family Encoder Controls
@@ -134,7 +134,7 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-s
 | `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                                       |
 | `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                           |
 | `--models-dir <PATH>` | Override the models directory                                                                 |
-| `--gpus <SPEC>`       | GPU ordinals (`0,1`) or `all`; defaults to every visible GPU                                  |
+| `--gpus <SPEC>`       | `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs; defaults to `all`      |
 | `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                                    |
 | `--log-format <FMT>`  | `json` or `text`                                                                              |
 | `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                     |
@@ -143,6 +143,40 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-s
 
 `GET /api/status` returns `gpus[]` with per-worker state and
 `queue_depth`/`queue_capacity` for queue health.
+
+### Multi-GPU
+
+`--gpus all` (the default) starts every runtime-visible device with a stable
+identity. `none` starts no inference workers: the server remains available for
+inventory, telemetry, downloads, and settings, while generation and admin
+model-load requests return `503 GENERATION_UNAVAILABLE`.
+
+Specific selectors are comma-separated. Numeric ordinals such as `0,1` are
+process-local and kept for compatibility. Persistent configuration should use
+IDs returned by `GET /api/devices`: `cuda:<32-hex-uuid>` for CUDA devices or
+`metal:default` for Apple Metal. NVIDIA `GPU-...` and `MIG-...` UUID spellings
+are also accepted. CUDA/MIG UUID prefixes may be abbreviated only when they
+match exactly one runtime-visible device; ambiguous or missing selectors fail
+startup rather than choosing another GPU.
+
+Runtime controls target the serving host (`MOLD_HOST` and `MOLD_API_KEY`
+apply):
+
+```bash
+mold gpu list [--json]
+mold gpu disable <stable-id-or-ordinal>
+mold gpu enable <stable-id-or-ordinal>
+```
+
+Disable removes the device from future scheduling immediately. Active work
+finishes before Mold drops its device-backed caches on the owner thread and
+joins it. Re-enable starts a fresh owner thread; it never resets and reuses a
+CUDA primary context in-process. Desired enablement is machine-wide and
+persists across restarts and temporary device absence. A startup-excluded
+device still requires a restart with a broader `--gpus` selection.
+Live changes require Scheduler V2. In legacy or observe mode, `gpu enable`
+can recover a persistently-disabled, startup-selected device for the next
+server restart; live disable remains unavailable.
 
 ## `mold server discover`
 

@@ -161,6 +161,7 @@ where
 
     // If the image fits in a single tile, skip tiling overhead
     if img_w <= config.tile_size as usize && img_h <= config.tile_size as usize {
+        progress.checkpoint()?;
         progress.emit(crate::progress::ProgressEvent::DenoiseStep {
             step: 1,
             total: 1,
@@ -188,6 +189,7 @@ where
     let start = Instant::now();
 
     for (idx, tile) in tiles.iter().enumerate() {
+        progress.checkpoint()?;
         // Extract tile from input
         let tile_input = input.narrow(2, tile.y, tile.h)?.narrow(3, tile.x, tile.w)?;
 
@@ -256,6 +258,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_attempt_stops_before_first_upscale_tile() {
+        let device = Device::Cpu;
+        let input = Tensor::zeros((1, 3, 8, 8), DType::F32, &device).unwrap();
+        let config = TilingConfig {
+            tile_size: 16,
+            overlap: 0,
+            min_tile_size: 1,
+        };
+        let token = crate::progress::InferenceCancellationToken::default();
+        let mut progress = ProgressReporter::default();
+        progress.set_cancellation_token(token.clone());
+        token.cancel();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let error = upscale_with_tiling(
+            &input,
+            &|tensor| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(tensor.clone())
+            },
+            1,
+            &config,
+            &device,
+            &progress,
+        )
+        .unwrap_err();
+
+        assert!(crate::progress::is_inference_cancelled(&error));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn calculate_tiles_single() {

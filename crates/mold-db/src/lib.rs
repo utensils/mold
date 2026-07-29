@@ -10,6 +10,7 @@
 pub mod chain_jobs;
 pub mod config_sync;
 mod db;
+mod device_preferences;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
@@ -19,15 +20,18 @@ mod prompt_history;
 mod reconcile;
 mod record;
 pub mod scan;
+mod scheduler_estimates;
 pub mod settings;
 
 pub use db::MetadataDb;
+pub use device_preferences::{DevicePreference, DevicePreferences};
 pub use migrations::SCHEMA_VERSION;
 pub use model_prefs::ModelPrefs;
 pub use path::{canonical_dir, canonical_dir_string};
 pub use prompt_history::{HistoryEntry, PromptHistory};
 pub use reconcile::ReconcileStats;
 pub use record::{GenerationRecord, RecordSource};
+pub use scheduler_estimates::{SchedulerEstimateRecord, SchedulerEstimates};
 pub use settings::{resolve_active_profile, Settings, ValueType, DEFAULT_PROFILE};
 
 use std::path::PathBuf;

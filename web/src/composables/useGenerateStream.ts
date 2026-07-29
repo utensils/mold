@@ -158,6 +158,23 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
   job.lastProgressAt = Date.now();
   const p = job.progress;
   switch (evt.type) {
+    case "dependency_wait":
+      p.stage = `Waiting for ${evt.dependency}`;
+      break;
+    case "download_progress": {
+      const percent =
+        evt.bytes_total > 0
+          ? Math.round((evt.bytes_downloaded / evt.bytes_total) * 100)
+          : 0;
+      p.stage = `Downloading ${evt.filename} (${percent}%)`;
+      break;
+    }
+    case "download_done":
+      p.stage = `Dependency ready: ${evt.filename}`;
+      break;
+    case "pull_complete":
+      p.stage = `Dependency ready: ${evt.model}`;
+      break;
     case "stage_start":
       markWorkStarted(job);
       p.stage = evt.name;

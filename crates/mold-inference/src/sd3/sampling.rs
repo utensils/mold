@@ -115,6 +115,7 @@ pub fn euler_sample(
     }
 
     for (step, window) in sigmas.windows(2).enumerate() {
+        progress.checkpoint()?;
         let step_start = Instant::now();
         let (s_curr, s_prev) = match window {
             [a, b] => (a, b),
@@ -202,6 +203,7 @@ pub fn euler_sample(
             elapsed: step_start.elapsed(),
         });
     }
+    progress.checkpoint()?;
     Ok(x)
 }
 

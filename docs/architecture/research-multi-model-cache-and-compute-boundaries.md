@@ -44,24 +44,21 @@ LRU touch), `unload_active()`, `remove()`.
 
 **Key invariant**: At most ONE engine has `residency == Gpu` at a time.
 
-**Model lifecycle** (`model_manager.rs:87-175`): `ensure_model_ready()` checks cache first
-(fast path if cached + on GPU), reloads from cache if unloaded (parks active model first),
-or creates fresh engine if not cached. GPU memory reclaimed via `reclaim_gpu_memory()` only
-when there was a prior active model.
+**Model lifecycle** (`model_manager.rs` / `gpu_worker.rs`):
+`ensure_model_ready()` checks cache first (fast path if cached + on GPU),
+reloads from cache if unloaded (parks active model first), or creates a fresh
+engine if not cached. Device-backed values are dropped under the assigned
+worker, pending work is synchronized through supported context operations,
+and actual free VRAM is sampled again before the replacement load.
 
-### CUDA Context Reset (device.rs:151-192)
+### Reset-free CUDA reclamation
 
-```rust
-pub fn reclaim_gpu_memory() {
-    result::ctx::synchronize();                    // Flush pending GPU ops
-    let cu_device = result::device::get(0)?;       // Single-GPU assumption
-    unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) }  // Frees ALL allocations
-}
-```
-
-Called between model switches. **Critical constraint for shared caching**: this reset
-invalidates ALL GPU tensors, including any cached encoders. Shared GPU-resident components
-would require selective cleanup instead of full context reset.
+Mold never resets a CUDA primary context in-process. Candle/cudarc can retain
+live handles beyond any one engine, so a device-wide reset would invalidate
+unrelated tensors and sibling work. Model swaps and idle eviction selectively
+drop Mold-owned engines, tensors, and caches. Any bytes not returned in the
+post-drop driver sample remain unavailable pressure for admission rather than
+being assumed reclaimable.
 
 ### LoRA (mold-inference)
 
@@ -181,9 +178,10 @@ native stream parameter support.**
   CLIP-L+CLIP-G+T5 in `SD3TripleEncoder`.
 - **Drop-and-reload**: Sequential mode drops T5/CLIP after encoding to free VRAM for
   transformer (`pipeline.rs:1100-1170`). Eager mode keeps all resident.
-- **CUDA context reset invalidates everything**: `reclaim_gpu_memory()` calls
-  `cuDevicePrimaryCtxReset_v2` which frees ALL GPU allocations. Shared GPU-resident
-  components would need selective cleanup instead of full reset.
+- **CUDA primary-context resets invalidate everything**: shared GPU-resident
+  components require selective object cleanup. The runtime therefore preserves
+  the process-owned context and admits new work only against observed free
+  memory after owned objects are dropped.
 
 InvokeAI's submodel keying pattern (`model_key:text_encoder`) maps cleanly to this. Caching
 T5/CLIP/VAE independently would save ~10GB reload when switching FLUX variants.

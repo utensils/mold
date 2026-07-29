@@ -2,6 +2,13 @@
 
 mold provides a NixOS module for declarative server and Discord bot deployment.
 
+The flake follows a source revision, not GitHub's prebuilt binary release
+channel. Pin the input revision for reproducible deployments. Nix-built cloud
+clients default to mutable `latest*` container images because a Cargo package
+version is not evidence that a corresponding stable image was published; only
+official stable release builds embed a release version and resolve its exact
+published image digest.
+
 ## Flake Setup
 
 Add mold to your flake inputs and import the module:
@@ -56,7 +63,9 @@ works for SPA hot-iteration without recompiling Rust.
 
     # Package — must match your GPU architecture
     package = inputs.mold.packages.${system}.default;     # Ada (RTX 4090, sm_89)
-    # package = inputs.mold.packages.${system}.mold-sm120; # Blackwell (RTX 5090, sm_120)
+    # package = inputs.mold.packages.${system}.mold-sm86;  # RTX 3090/A40, sm_86
+    # package = inputs.mold.packages.${system}.mold-sm100; # B200/B300, sm_100
+    # package = inputs.mold.packages.${system}.mold-sm120; # RTX 5090, sm_120
 
     # Advisory hint — emits a build warning if package doesn't match
     # cudaArch = "blackwell";
@@ -128,7 +137,7 @@ works for SPA hot-iteration without recompiling Rust.
 | ------------------ | ----------- | ------------------- | -------------------------------------------------------------------- |
 | `enable`           | bool        | `false`             | Enable the mold server                                               |
 | `package`          | package     | —                   | The mold package (must set explicitly)                               |
-| `cudaArch`         | null/enum   | `null`              | `"ada"` or `"blackwell"` — advisory warning only                     |
+| `cudaArch`         | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below         |
 | `port`             | port        | `7680`              | HTTP server port                                                     |
 | `bindAddress`      | string      | `"0.0.0.0"`         | Address to bind                                                      |
 | `homeDir`          | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                           |
@@ -138,7 +147,7 @@ works for SPA hot-iteration without recompiling Rust.
 | `openFirewall`     | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
 | `mdns`             | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`        |
 | `defaultModel`     | null/string | `null`              | Default model name                                                   |
-| `gpus`             | null/string | `null`              | Which GPUs to use: `"0,1"` or `"all"` (null = every visible GPU)     |
+| `gpus`             | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs        |
 | `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
 | `outputDir`        | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
 | `hfTokenFile`      | null/path   | `null`              | Path to overridable default HuggingFace token                        |
@@ -150,6 +159,14 @@ works for SPA hot-iteration without recompiling Rust.
 | `logDir`           | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                  |
 | `logRetentionDays` | int         | `7`                 | Days to retain rotated log files                                     |
 | `environment`      | attrs       | `{}`                | Extra environment variables                                          |
+
+`cudaArch` does not select a package automatically. Set `package` to the
+matching flake output:
+
+- `"ampere"` → `packages.${system}.mold-sm86` (RTX 3090/A40, sm_86)
+- `"ada"` → `packages.${system}.mold` (RTX 40-series, sm_89)
+- `"blackwell-datacenter"` → `packages.${system}.mold-sm100` (B200/B300, sm_100)
+- `"blackwell"` → `packages.${system}.mold-sm120` (RTX 50-series, sm_120)
 
 ### Monitoring
 
@@ -191,13 +208,18 @@ so Prometheus/Grafana Agent can scrape it without an API key.
 The module **cannot auto-select** the flake package — you must set `package` to
 match your GPU:
 
-| GPU                       | Package                                     |
-| ------------------------- | ------------------------------------------- |
-| RTX 40-series (Ada)       | `inputs.mold.packages.${system}.default`    |
-| RTX 50-series (Blackwell) | `inputs.mold.packages.${system}.mold-sm120` |
+| GPU                                | Package                                     |
+| ---------------------------------- | ------------------------------------------- |
+| RTX 3090 / A40 (Ampere)            | `inputs.mold.packages.${system}.mold-sm86`  |
+| RTX 40-series (Ada)                | `inputs.mold.packages.${system}.mold`       |
+| B200 / B300 (datacenter Blackwell) | `inputs.mold.packages.${system}.mold-sm100` |
+| RTX 50-series (consumer Blackwell) | `inputs.mold.packages.${system}.mold-sm120` |
 
-Set `cudaArch = "blackwell"` as a reminder — it emits a build warning if you
-forget to switch the package.
+Set `cudaArch` to the matching `ampere`, `ada`, `blackwell-datacenter`, or
+`blackwell` value. This is an advisory consistency check: it emits a build
+warning if the package's Mold CUDA capability metadata does not match, but
+never switches the package itself. All four official package variants carry
+that metadata; custom packages without it warn rather than being assumed safe.
 
 ## Build Variants
 
@@ -207,11 +229,27 @@ forget to switch the package.
 nix build github:utensils/mold
 ```
 
-```bash [Blackwell]
+```bash [RTX 3090 / A40]
+nix build github:utensils/mold#mold-sm86
+```
+
+```bash [B200 / B300]
+nix build github:utensils/mold#mold-sm100
+```
+
+```bash [RTX 50-series]
 nix build github:utensils/mold#mold-sm120
 ```
 
 :::
+
+B200/B300 support is simulated, not hardware-qualified. Hosted release CI
+builds the sm_100 server package alongside sm_86 and the sm_86 desktop output;
+real B200 qualification remains deferred. There is intentionally no sm_100
+desktop package.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+The current Linux flake outputs are x86_64 and must not be selected for Grace
+systems.
 
 ## Development Shell
 

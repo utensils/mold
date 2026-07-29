@@ -27,7 +27,7 @@ vi.mock("../../lib/api/client", () => ({
 }));
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
-  ipc: { localGalleryList: vi.fn().mockResolvedValue([]) },
+  ipc: { localGalleryList: vi.fn().mockResolvedValue({ images: [], target: null }) },
 }));
 
 import HistoryDrawer from "./HistoryDrawer.vue";

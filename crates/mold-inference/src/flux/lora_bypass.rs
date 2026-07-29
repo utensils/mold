@@ -739,10 +739,7 @@ mod tests {
         let scale = 0.7f32;
 
         let to_bf16 = |t: &Tensor| t.to_device(&device).unwrap().to_dtype(DType::BF16).unwrap();
-        let inner = Linear::new(
-            to_bf16(inner_cpu.weight()),
-            inner_cpu.bias().map(|b| to_bf16(b)),
-        );
+        let inner = Linear::new(to_bf16(inner_cpu.weight()), inner_cpu.bias().map(&to_bf16));
         let down = to_bf16(&down_cpu);
         let up = to_bf16(&up_cpu);
         let merged_delta = up.matmul(&down).unwrap().affine(scale as f64, 0.0).unwrap();

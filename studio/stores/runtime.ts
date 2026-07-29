@@ -12,12 +12,16 @@ export const useStudioRuntimeStore = defineStore("studio-runtime", () => {
   const routes = ref<StudioHostRoute[]>([]);
   const selectedHostId = ref<string | null>(null);
   const selectedRoute = computed(
-    () => routes.value.find((route) => route.id === selectedHostId.value) ?? null,
+    () =>
+      routes.value.find((route) => route.id === selectedHostId.value) ?? null,
   );
 
   function replaceRoutes(next: StudioHostRoute[]) {
     routes.value = next;
-    if (!selectedHostId.value || !next.some((route) => route.id === selectedHostId.value)) {
+    if (
+      !selectedHostId.value ||
+      !next.some((route) => route.id === selectedHostId.value)
+    ) {
       selectedHostId.value = next[0]?.id ?? null;
     }
   }

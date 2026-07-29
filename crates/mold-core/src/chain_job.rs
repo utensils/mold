@@ -170,6 +170,11 @@ pub struct ChainJobManifest {
     pub ephemeral: bool,
     /// Full normalised [`ChainRequest`], canonically serde_json-encoded.
     pub request_json: String,
+    /// Exact resolved component paths and artifact identity captured when the
+    /// durable job is created. Older manifests omit this and are migrated on
+    /// their first safe resume before any stage is submitted.
+    #[serde(default)]
+    pub frozen_model: Option<FrozenChainModel>,
     #[serde(default)]
     pub stage_status: Vec<StageStatus>,
     /// Retake amendment history (spec §8.3). The original request stays
@@ -181,10 +186,31 @@ pub struct ChainJobManifest {
     /// Versioned finalize history (spec §8.3).
     #[serde(default)]
     pub finalizes: Vec<FinalizeRecord>,
+    /// Whether the current request/stage revision still needs a final output.
+    ///
+    /// `finalizes` is historical: retakes and amends keep earlier takes, so
+    /// non-emptiness cannot prove that the current revision is finalized.
+    /// `None` preserves the fact that a legacy manifest omitted this field.
+    /// That absence is intentionally not collapsed to `false`: pre-field
+    /// binaries already supported retakes/amends under the same schema, so a
+    /// historical finalize record may belong to an older revision.
+    #[serde(default)]
+    pub needs_finalize: Option<bool>,
     /// Amend history (spec §17): each entry snapshots the pre-amend
     /// EFFECTIVE request so any preserved stage remains attributable.
     #[serde(default)]
     pub amends: Vec<AmendRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenChainModel {
+    /// Synthetic runtime key used to bypass mutable manifest/sidecar
+    /// discovery. Empty in legacy manifests, which continue to use the
+    /// request's model key.
+    #[serde(default)]
+    pub runtime_model_id: String,
+    pub config: crate::ModelConfig,
+    pub model_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,11 +310,34 @@ impl ChainJobManifest {
             created_at_unix_ms,
             ephemeral: false,
             request_json,
+            frozen_model: None,
             stage_status,
             retakes: vec![],
             finalizes: vec![],
+            needs_finalize: Some(true),
             amends: vec![],
         })
+    }
+
+    /// True only when a finalize record belongs to the current manifest
+    /// revision rather than to a historical retake/amend take.
+    pub fn current_revision_is_finalized(&self, indexed_state: ChainJobState) -> bool {
+        if self.finalizes.is_empty()
+            || self
+                .stage_status
+                .iter()
+                .any(|stage| stage.state != StageState::Completed)
+        {
+            return false;
+        }
+        match self.needs_finalize {
+            Some(needs_finalize) => !needs_finalize,
+            // Legacy omission is ambiguous for a non-terminal DB row: it may
+            // be an accepted retake/amend whose replacement stages were
+            // checkpointed before finalization. Prefer one conservative
+            // re-finalization over silently losing that accepted revision.
+            None => indexed_state == ChainJobState::Completed,
+        }
     }
 
     /// Parsed-value access to the embedded request. Reconcile logic
@@ -553,6 +602,10 @@ mod u64_vec_as_strings {
 
 // ── Chain-job API wire types ──────────────────────────────────────────
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainJobSummary {
     pub id: String,
@@ -564,6 +617,10 @@ pub struct ChainJobSummary {
     pub updated_at_unix_ms: u64,
     pub error: Option<String>,
     pub ephemeral: bool,
+    /// Cooperative cancellation has been requested for the active stage and
+    /// will settle at its next safe engine boundary.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancelling: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -836,6 +893,7 @@ mod tests {
         let request = sample_request();
         let mut manifest =
             ChainJobManifest::new("01JBR55TEST".into(), 1_783_200_000_000, &request).unwrap();
+        assert_eq!(manifest.needs_finalize, Some(true));
         manifest.stage_status[1].state = StageState::Completed;
         manifest.stage_status[1].frames_emitted = Some(97);
         manifest.stage_status[1].generation_time_ms = Some(12_345);
@@ -862,6 +920,38 @@ mod tests {
         let round_tripped = ChainJobManifest::from_toml(&toml).unwrap();
         assert_eq!(round_tripped, manifest);
         assert_eq!(round_tripped.request().unwrap(), request);
+    }
+
+    #[test]
+    fn legacy_finalized_manifest_without_revision_flag_stays_finalized() {
+        let request = sample_request();
+        let mut manifest =
+            ChainJobManifest::new("01JBR55LEGACYFINAL".into(), 1_783_200_000_000, &request)
+                .unwrap();
+        for stage in &mut manifest.stage_status {
+            stage.state = StageState::Completed;
+        }
+        manifest.needs_finalize = Some(false);
+        manifest.finalizes.push(FinalizeRecord {
+            output: "final/output-1.mp4".into(),
+            at_unix_ms: 1_783_200_000_500,
+            stage_seeds: manifest
+                .stage_status
+                .iter()
+                .map(|stage| stage.seed)
+                .collect(),
+        });
+        let current = manifest.to_toml().unwrap();
+        let legacy = current.replace("needs_finalize = false\n", "");
+
+        let parsed = ChainJobManifest::from_toml(&legacy).unwrap();
+
+        assert_eq!(parsed.needs_finalize, None);
+        assert!(parsed.current_revision_is_finalized(ChainJobState::Completed));
+        assert!(
+            !parsed.current_revision_is_finalized(ChainJobState::Queued),
+            "a flag-less non-terminal revision must conservatively re-finalize"
+        );
     }
 
     #[test]
@@ -984,6 +1074,7 @@ tail_frames = 17
                 updated_at_unix_ms: manifest.created_at_unix_ms,
                 error: None,
                 ephemeral: false,
+                cancelling: false,
             },
             stages: manifest
                 .stage_status
@@ -1006,6 +1097,10 @@ tail_frames = 17
         let value = serde_json::to_value(ChainJobEvent::Snapshot { job: detail }).unwrap();
         assert_eq!(value["type"], "snapshot");
         assert_eq!(value["job"]["id"], "01JBR55EVENT");
+        assert!(
+            value["job"].get("cancelling").is_none(),
+            "false cancellation state must remain wire-compatible"
+        );
 
         let step = serde_json::to_value(ChainJobEvent::DenoiseStep {
             stage_idx: 2,
@@ -1022,6 +1117,17 @@ tail_frames = 17
                 "total": 8
             })
         );
+    }
+
+    #[test]
+    fn chain_job_summary_serializes_active_cancellation_additively() {
+        let mut detail = event_detail_fixture();
+        detail.summary.cancelling = true;
+
+        let value = serde_json::to_value(detail.summary).unwrap();
+
+        assert_eq!(value["state"], "running");
+        assert_eq!(value["cancelling"], true);
     }
 
     #[test]
@@ -1120,6 +1226,35 @@ request_json = "{}"
     }
 
     #[test]
+    fn frozen_chain_model_round_trips_and_old_manifest_defaults_to_unfrozen() {
+        let request = sample_request();
+        let mut manifest =
+            ChainJobManifest::new("frozen".into(), 1_783_200_000_000, &request).unwrap();
+        manifest.frozen_model = Some(FrozenChainModel {
+            runtime_model_id: "mold-frozen-chain:test".to_string(),
+            config: crate::ModelConfig {
+                transformer: Some("/models/original-transformer.safetensors".into()),
+                vae: Some("/models/original-vae.safetensors".into()),
+                text_encoder_files: Some(vec!["/models/original-projection.safetensors".into()]),
+                family: Some("ltx2".into()),
+                ..crate::ModelConfig::default()
+            },
+            model_fingerprint: "frozen-fingerprint".into(),
+        });
+        let encoded = manifest.to_toml().unwrap();
+        let decoded = ChainJobManifest::from_toml(&encoded).unwrap();
+        assert_eq!(decoded.frozen_model, manifest.frozen_model);
+
+        let legacy = encoded
+            .lines()
+            .take_while(|line| !line.starts_with("[frozen_model]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let decoded_legacy = ChainJobManifest::from_toml(&legacy).unwrap();
+        assert!(decoded_legacy.frozen_model.is_none());
+    }
+
+    #[test]
     fn job_dir_layout_paths_match_spec() {
         let root = PathBuf::from("/tmp/mold-job");
         let layout = JobDirLayout::new(root.clone());
@@ -1209,6 +1344,7 @@ request_json = "{}"
                 updated_at_unix_ms: 2,
                 error: None,
                 ephemeral: false,
+                cancelling: false,
             },
             stages: vec![ChainJobStageDetail {
                 idx: 0,

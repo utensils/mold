@@ -92,6 +92,7 @@ jobs:
           if [[ "$CHANNEL" == "stable" ]]; then
             version="$desktop_version"
             release_tag="v$version"
+            distribution_image_version="$desktop_version"
             if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "$release_tag" ]]; then
               echo "::error::tag $GITHUB_REF_NAME does not match desktop version $version"
               exit 1
@@ -100,6 +101,7 @@ jobs:
             version=$(scripts/create-desktop-nightly-version.sh \
               "$desktop_version" "$commit_count")
             release_tag="latest"
+            distribution_image_version="latest"
           fi
 
           updater_artifact_name="Mold_${version}_aarch64.app.tar.gz"
@@ -120,6 +122,7 @@ jobs:
             echo "MOLD_DESKTOP_VERSION=$version"
             echo "MOLD_DESKTOP_BUNDLE_VERSION=$bundle_version"
             echo "MOLD_DESKTOP_RELEASE_TAG=$release_tag"
+            echo "MOLD_DISTRIBUTION_IMAGE_VERSION=$distribution_image_version"
             echo "MOLD_UPDATER_ARTIFACT_NAME=$updater_artifact_name"
             echo "MOLD_DESKTOP_DMG_NAME=$dmg_name"
             echo "MOLD_UPDATER_MANIFEST_NAME=$manifest_name"

@@ -1,16 +1,42 @@
 use crate::engine::LoadStrategy;
 use crate::progress::ProgressReporter;
-use mold_core::types::GpuSelection;
+use mold_core::types::{GpuBackend, GpuSelection, GpuSelector};
 use std::cell::Cell;
+use std::collections::BTreeSet;
+
+/// A CUDA memory observation failed before Mold could make a safe admission
+/// decision.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceMemoryError {
+    /// The CUDA context reported an asynchronous fault that makes every
+    /// retained handle suspect. Callers must quarantine the owner and stop
+    /// issuing CUDA calls until process restart.
+    #[error("fatal CUDA error during {operation}: {message}")]
+    FatalCuda {
+        operation: &'static str,
+        message: String,
+    },
+    /// The driver could not provide an authoritative current-free reading.
+    /// Admission must fail closed; nominal capacity and host RAM are not
+    /// substitutes for CUDA free VRAM.
+    #[error("CUDA memory sample unavailable during {operation}: {message}")]
+    Unavailable {
+        operation: &'static str,
+        message: String,
+    },
+}
+
+impl DeviceMemoryError {
+    pub fn is_fatal_cuda(&self) -> bool {
+        matches!(self, Self::FatalCuda { .. })
+    }
+}
 
 // ── Thread-local GPU ordinal guard ─────────────────────────────────────────
 //
 // Each GPU worker thread is pinned to a single ordinal. We stash that ordinal
-// in a thread-local so cross-engine hotpaths (`create_device`, `reclaim_gpu_memory`)
-// can debug-assert the caller isn't drifting onto a sibling GPU's context —
-// the exact footgun that took the process down on <gpu-host> when LTX-2 had
-// `reclaim_gpu_memory(0)` hardcoded and nuked GPU 0's context while SD3.5
-// was still denoising there.
+// in a thread-local so cross-engine hotpaths can debug-assert the caller
+// isn't drifting onto a sibling GPU's context.
 //
 // Threads without a bound ordinal (tokio blocking pool, tests) see `None`
 // and the assert is skipped.
@@ -20,8 +46,8 @@ thread_local! {
 }
 
 /// Bind the current thread to a GPU ordinal. Call once from each GPU worker
-/// thread's entry point. Any subsequent `create_device` / `reclaim_gpu_memory`
-/// call on this thread must match `ordinal` (debug builds only).
+/// thread's entry point. Any subsequent device operation on this thread must
+/// match `ordinal` (debug builds only).
 pub fn init_thread_gpu_ordinal(ordinal: usize) {
     THREAD_GPU_ORDINAL.with(|c| c.set(Some(ordinal)));
 }
@@ -41,7 +67,7 @@ pub fn thread_gpu_ordinal() -> Option<usize> {
 /// A mismatch means a call site is ignoring its engine's `gpu_ordinal` and
 /// reaching for another GPU's context — the SD3.5/LTX-2 crash pattern.
 #[inline]
-fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
+pub(crate) fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
     if cfg!(debug_assertions) {
         if let Some(expected) = thread_gpu_ordinal() {
             assert_eq!(
@@ -59,9 +85,115 @@ fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
 #[derive(Debug, Clone)]
 pub struct DiscoveredGpu {
     pub ordinal: usize,
+    /// Opaque backend-qualified identity. CUDA IDs exist only when the driver
+    /// returns a UUID; ordinals are never substituted as durable identity.
+    pub stable_id: Option<String>,
+    /// Exact bytes returned by `cuDeviceGetUuid_v2`.
+    pub raw_cuda_uuid: Option<[u8; 16]>,
+    /// CUDA kind when this is a CUDA device. `None` identifies Metal.
+    pub device_kind: Option<CudaDeviceKind>,
+    /// Identity/discovery failure that makes an otherwise visible device
+    /// unavailable for worker startup.
+    pub identity_error: Option<String>,
+    pub backend: GpuBackend,
     pub name: String,
+    pub compute_capability: Option<(u16, u16)>,
+    pub pci_bus_id: Option<String>,
     pub total_vram_bytes: u64,
     pub free_vram_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaDeviceKind {
+    FullGpu,
+    Mig,
+    UnknownCuda,
+}
+
+/// Build the public opaque identity directly from CUDA's UUID bytes.
+pub fn stable_cuda_id(uuid: [u8; 16]) -> String {
+    let mut id = String::with_capacity("cuda:".len() + uuid.len() * 2);
+    id.push_str("cuda:");
+    for byte in uuid {
+        use std::fmt::Write as _;
+        write!(&mut id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    id
+}
+
+/// A UUID-form `CUDA_VISIBLE_DEVICES` token proves the textual CUDA kind.
+///
+/// Numeric entries and an unset variable still preserve UUID identity, but
+/// do not prove whether CUDA returned a full GPU or a MIG compute instance.
+pub fn cuda_device_kind_from_visible_token(token: Option<&str>) -> CudaDeviceKind {
+    let token = token.map(str::trim);
+    if token.is_some_and(|value| {
+        value
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+    }) {
+        CudaDeviceKind::Mig
+    } else if token.is_some_and(|value| {
+        value
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+    }) {
+        CudaDeviceKind::FullGpu
+    } else {
+        CudaDeviceKind::UnknownCuda
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_visible_token(ordinal: usize) -> Option<String> {
+    std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()?
+        .split(',')
+        .nth(ordinal)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(feature = "cuda")]
+fn raw_cuda_uuid_v2(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
+) -> Result<[u8; 16], candle_core::cuda_backend::cudarc::driver::DriverError> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    use std::mem::MaybeUninit;
+
+    let mut uuid = MaybeUninit::<sys::CUuuid>::uninit();
+    // SAFETY: `context.cu_device()` is a live CUdevice obtained by cudarc and
+    // `uuid` points to writable storage of the exact CUDA ABI type.
+    unsafe {
+        sys::cuDeviceGetUuid_v2(uuid.as_mut_ptr(), context.cu_device()).result()?;
+        Ok(uuid.assume_init().bytes.map(|byte| byte as u8))
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_pci_bus_id(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
+) -> Option<String> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    use std::ffi::CStr;
+
+    let mut buffer = [0_i8; 32];
+    // SAFETY: CUDA writes at most `buffer.len()` bytes and the CUdevice comes
+    // from the live cudarc context.
+    unsafe {
+        sys::cuDeviceGetPCIBusId(
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            context.cu_device(),
+        )
+        .result()
+        .ok()?;
+        CStr::from_ptr(buffer.as_ptr())
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
 }
 
 /// Discover all available GPUs on the system.
@@ -83,19 +215,68 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
                                 let name = ctx
                                     .name()
                                     .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
-                                // `CudaContext::new` binds the calling thread to
-                                // this ordinal, so `mem_get_info` returns this GPU's
-                                // VRAM.
-                                let (free, total) =
-                                    driver::result::mem_get_info().unwrap_or((0, 0));
+                                let compute_capability =
+                                    ctx.compute_capability().ok().and_then(|(major, minor)| {
+                                        Some((
+                                            u16::try_from(major).ok()?,
+                                            u16::try_from(minor).ok()?,
+                                        ))
+                                    });
+                                let pci_bus_id = cuda_pci_bus_id(&ctx);
+                                // The UUID call is the identity authority. A
+                                // failure leaves the record visible but
+                                // unavailable; no ordinal identity is minted.
+                                let (stable_id, raw_cuda_uuid, identity_error) =
+                                    match raw_cuda_uuid_v2(&ctx) {
+                                        Ok(uuid) => (Some(stable_cuda_id(uuid)), Some(uuid), None),
+                                        Err(error) => {
+                                            let message = format!(
+                                                "CUDA UUID lookup failed for visible device {ordinal}: {error}"
+                                            );
+                                            tracing::warn!("{message}");
+                                            (None, None, Some(message))
+                                        }
+                                    };
+                                // `CudaContext::new` binds the calling thread
+                                // to this ordinal, so this query is not
+                                // affected by physical-ordinal remapping.
+                                let (free, total) = ctx.mem_get_info().unwrap_or((0, 0));
                                 gpus.push(DiscoveredGpu {
                                     ordinal,
+                                    stable_id,
+                                    raw_cuda_uuid,
+                                    device_kind: Some(cuda_device_kind_from_visible_token(
+                                        cuda_visible_token(ordinal).as_deref(),
+                                    )),
+                                    identity_error,
+                                    backend: GpuBackend::Cuda,
                                     name,
+                                    compute_capability,
+                                    pci_bus_id,
                                     total_vram_bytes: total as u64,
                                     free_vram_bytes: free as u64,
                                 });
                             }
-                            Err(e) => tracing::warn!("failed to open CUDA device {ordinal}: {e}"),
+                            Err(error) => {
+                                let message =
+                                    format!("failed to open CUDA device {ordinal}: {error}");
+                                tracing::warn!("{message}");
+                                gpus.push(DiscoveredGpu {
+                                    ordinal,
+                                    stable_id: None,
+                                    raw_cuda_uuid: None,
+                                    device_kind: Some(cuda_device_kind_from_visible_token(
+                                        cuda_visible_token(ordinal).as_deref(),
+                                    )),
+                                    identity_error: Some(message),
+                                    backend: GpuBackend::Cuda,
+                                    name: format!("CUDA Device {ordinal}"),
+                                    compute_capability: None,
+                                    pci_bus_id: None,
+                                    total_vram_bytes: 0,
+                                    free_vram_bytes: 0,
+                                });
+                            }
                         }
                     }
                 }
@@ -112,7 +293,14 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
             let free = free_system_memory_bytes().unwrap_or(0);
             gpus.push(DiscoveredGpu {
                 ordinal: 0,
+                stable_id: Some("metal:default".to_string()),
+                raw_cuda_uuid: None,
+                device_kind: None,
+                identity_error: None,
+                backend: GpuBackend::Metal,
                 name: "Apple Metal GPU".to_string(),
+                compute_capability: None,
+                pci_bus_id: None,
                 total_vram_bytes: total,
                 free_vram_bytes: free,
             });
@@ -122,16 +310,179 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
     gpus
 }
 
-/// Filter discovered GPUs by user selection.
-pub fn filter_gpus(gpus: &[DiscoveredGpu], selection: &GpuSelection) -> Vec<DiscoveredGpu> {
+/// Resolve startup selectors against the current visible inventory.
+///
+/// UUID selectors are matched against raw CUDA identity and remain stable
+/// across `CUDA_VISIBLE_DEVICES` reordering. Invalid and ambiguous selectors
+/// fail instead of silently starting a different device set.
+pub fn resolve_gpu_selection(
+    gpus: &[DiscoveredGpu],
+    selection: &GpuSelection,
+) -> anyhow::Result<Vec<DiscoveredGpu>> {
     match selection {
-        GpuSelection::All => gpus.to_vec(),
-        GpuSelection::Specific(ordinals) => gpus
+        GpuSelection::None => Ok(Vec::new()),
+        GpuSelection::All => Ok(gpus
             .iter()
-            .filter(|g| ordinals.contains(&g.ordinal))
+            .filter(|gpu| gpu.stable_id.is_some())
             .cloned()
-            .collect(),
+            .collect()),
+        GpuSelection::Specific(selectors) => {
+            let mut selected_ids = BTreeSet::new();
+            for selector in selectors {
+                let matches = match selector {
+                    GpuSelector::Ordinal(ordinal) => {
+                        let Some(gpu) = gpus.iter().find(|gpu| gpu.ordinal == *ordinal) else {
+                            anyhow::bail!(
+                                "GPU ordinal {ordinal} did not match the current visible inventory; {}",
+                                visible_gpu_choices(gpus)
+                            );
+                        };
+                        if gpu.stable_id.is_none() {
+                            anyhow::bail!(
+                                "GPU ordinal {ordinal} is visible but has no stable CUDA identity: {}",
+                                gpu.identity_error.as_deref().unwrap_or("UUID unavailable")
+                            );
+                        }
+                        vec![gpu]
+                    }
+                    GpuSelector::Identifier(identifier) => {
+                        if identifier
+                            .get(..6)
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("metal:"))
+                        {
+                            gpus.iter()
+                                .filter(|gpu| {
+                                    gpu.stable_id.as_deref().is_some_and(|stable_id| {
+                                        stable_id.eq_ignore_ascii_case(identifier)
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            let normalized = normalize_uuid_selector(identifier)?;
+                            gpus.iter()
+                                .filter(|gpu| uuid_selector_matches(gpu, &normalized))
+                                .collect::<Vec<_>>()
+                        }
+                    }
+                };
+
+                if matches.is_empty() {
+                    anyhow::bail!(
+                        "GPU selector '{}' did not match any device; {}",
+                        gpu_selector_display(selector),
+                        visible_gpu_choices(gpus)
+                    );
+                }
+                if matches.len() > 1 {
+                    anyhow::bail!(
+                        "GPU selector '{}' is ambiguous; matches: {}",
+                        gpu_selector_display(selector),
+                        matches
+                            .iter()
+                            .filter_map(|gpu| gpu.stable_id.as_deref())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if let Some(id) = matches[0].stable_id.as_ref() {
+                    selected_ids.insert(id.clone());
+                }
+            }
+
+            Ok(gpus
+                .iter()
+                .filter(|gpu| {
+                    gpu.stable_id
+                        .as_ref()
+                        .is_some_and(|id| selected_ids.contains(id))
+                })
+                .cloned()
+                .collect())
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NvidiaUuidKind {
+    AnyCuda,
+    FullGpu,
+    Mig,
+}
+
+struct NormalizedUuidSelector {
+    hex_prefix: String,
+    kind: NvidiaUuidKind,
+}
+
+fn normalize_uuid_selector(identifier: &str) -> anyhow::Result<NormalizedUuidSelector> {
+    let identifier = identifier.trim();
+    let (suffix, kind) = if identifier
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cuda:"))
+    {
+        (&identifier[5..], NvidiaUuidKind::AnyCuda)
+    } else if identifier
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+    {
+        (&identifier[4..], NvidiaUuidKind::FullGpu)
+    } else if identifier
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+    {
+        (&identifier[4..], NvidiaUuidKind::Mig)
+    } else {
+        anyhow::bail!("invalid GPU selector '{identifier}': expected cuda:, GPU-, or MIG- UUID");
+    };
+    let hex_prefix = suffix
+        .chars()
+        .filter(|character| *character != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if hex_prefix.is_empty()
+        || hex_prefix.len() > 32
+        || !hex_prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!(
+            "invalid GPU UUID selector '{identifier}': expected 1 to 32 hexadecimal digits"
+        );
+    }
+    Ok(NormalizedUuidSelector { hex_prefix, kind })
+}
+
+fn uuid_selector_matches(gpu: &DiscoveredGpu, selector: &NormalizedUuidSelector) -> bool {
+    let Some(uuid) = gpu.raw_cuda_uuid else {
+        return false;
+    };
+    let kind_matches = match (selector.kind, gpu.device_kind) {
+        (NvidiaUuidKind::AnyCuda, _) => true,
+        (NvidiaUuidKind::FullGpu, Some(CudaDeviceKind::Mig)) => false,
+        (NvidiaUuidKind::Mig, Some(CudaDeviceKind::FullGpu)) => false,
+        (NvidiaUuidKind::FullGpu | NvidiaUuidKind::Mig, _) => true,
+    };
+    kind_matches && stable_cuda_id(uuid)["cuda:".len()..].starts_with(selector.hex_prefix.as_str())
+}
+
+fn gpu_selector_display(selector: &GpuSelector) -> String {
+    match selector {
+        GpuSelector::Ordinal(ordinal) => ordinal.to_string(),
+        GpuSelector::Identifier(identifier) => identifier.clone(),
+    }
+}
+
+fn visible_gpu_choices(gpus: &[DiscoveredGpu]) -> String {
+    let choices = gpus
+        .iter()
+        .map(|gpu| {
+            format!(
+                "{}={}",
+                gpu.ordinal,
+                gpu.stable_id.as_deref().unwrap_or("<uuid unavailable>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("visible choices: [{}]", choices)
 }
 
 /// Select the single best GPU (most free VRAM) for local CLI use.
@@ -150,7 +501,7 @@ pub fn create_device(
 ) -> anyhow::Result<candle_core::Device> {
     use candle_core::Device;
     // MOLD_DEVICE=cpu forces CPU inference (for debugging Metal issues)
-    let force_cpu = std::env::var("MOLD_DEVICE")
+    let force_cpu = crate::runtime_env::value("MOLD_DEVICE")
         .map(|v| v.eq_ignore_ascii_case("cpu"))
         .unwrap_or(false);
     if force_cpu {
@@ -171,6 +522,53 @@ pub fn create_device(
         progress.info("No GPU detected, using CPU");
         tracing::warn!("No GPU detected, falling back to CPU");
         Ok(Device::Cpu)
+    }
+}
+
+/// Construct exactly the backend and ordinal selected by an admitted plan.
+///
+/// Unlike [`create_device`], this function deliberately ignores `MOLD_DEVICE`
+/// and never falls back to CPU or another backend. Callers must propagate an
+/// error so the scheduler can explicitly replan.
+pub(crate) fn create_exact_gpu_device(
+    backend: mold_core::GpuBackend,
+    ordinal: usize,
+    progress: &ProgressReporter,
+) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "create_exact_gpu_device");
+    match backend {
+        mold_core::GpuBackend::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                progress.info(&format!("Using exact CUDA device {ordinal}"));
+                candle_core::Device::new_cuda(ordinal).map_err(|error| {
+                    anyhow::anyhow!("failed to open exact CUDA device {ordinal}: {error}")
+                })
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = progress;
+                anyhow::bail!(
+                    "exact CUDA device {ordinal} requested but this build has no CUDA support"
+                )
+            }
+        }
+        mold_core::GpuBackend::Metal => {
+            #[cfg(feature = "metal")]
+            {
+                progress.info(&format!("Using exact Metal device {ordinal}"));
+                candle_core::Device::new_metal(ordinal).map_err(|error| {
+                    anyhow::anyhow!("failed to open exact Metal device {ordinal}: {error}")
+                })
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                let _ = progress;
+                anyhow::bail!(
+                    "exact Metal device {ordinal} requested but this build has no Metal support"
+                )
+            }
+        }
     }
 }
 
@@ -515,13 +913,15 @@ impl LtxGemmaPlacement {
     }
 }
 
-/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder: active GPU first,
-/// then sibling GPUs in ordinal order, then CPU.
+/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder.
+///
+/// The encoder may use only the GPU already leased to this stage or CPU.
+/// Sibling GPUs are intentionally ignored: allocating there without a lease
+/// would violate the one-device-per-stage invariant and could double-book
+/// another worker.
 ///
 /// - `gpus` is the output of [`discover_gpus`] — ordinals in ascending order.
-/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto. We
-///   prefer co-residency (no cross-device tensor copy at encode time) but
-///   fall through to siblings when the active GPU is full.
+/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto.
 /// - A GPU is considered to fit when `free_vram_bytes > threshold` (strict
 ///   greater-than, mirrors [`select_expand_device`]).
 /// - Returns [`LtxGemmaPlacement::Cpu`] when no GPU has room.
@@ -530,19 +930,11 @@ pub fn select_ltx2_gemma_device(
     active_ordinal: usize,
     threshold: u64,
 ) -> LtxGemmaPlacement {
-    if let Some(g) = gpus
+    if let Some(gpu) = gpus
         .iter()
-        .find(|g| g.ordinal == active_ordinal && g.free_vram_bytes > threshold)
+        .find(|gpu| gpu.ordinal == active_ordinal && gpu.free_vram_bytes > threshold)
     {
-        return LtxGemmaPlacement::Gpu(g.ordinal);
-    }
-    for g in gpus {
-        if g.ordinal == active_ordinal {
-            continue;
-        }
-        if g.free_vram_bytes > threshold {
-            return LtxGemmaPlacement::Gpu(g.ordinal);
-        }
+        return LtxGemmaPlacement::Gpu(gpu.ordinal);
     }
     LtxGemmaPlacement::Cpu
 }
@@ -555,7 +947,22 @@ pub fn select_ltx2_gemma_device(
 /// The returned `Gpu` placement always points at `gpu_ordinal` — explicit
 /// `gpu` doesn't try to outsmart the user by walking siblings.
 pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemmaPlacement> {
-    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_DEVICE") {
+    resolve_ltx2_gemma_device_override_from_values(
+        crate::runtime_env::value("MOLD_LTX2_GEMMA_DEVICE").as_deref(),
+        crate::runtime_env::value("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").as_deref(),
+        gpu_ordinal,
+    )
+}
+
+/// Pure parser used by immutable scheduler plans and environment-isolated
+/// tests. Production callers normally use
+/// [`resolve_ltx2_gemma_device_override`].
+pub fn resolve_ltx2_gemma_device_override_from_values(
+    primary: Option<&str>,
+    legacy_force_cpu: Option<&str>,
+    gpu_ordinal: usize,
+) -> Option<LtxGemmaPlacement> {
+    if let Some(raw) = primary {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             let lower = trimmed.to_ascii_lowercase();
@@ -574,7 +981,7 @@ pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemma
         }
     }
 
-    if std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some() {
+    if legacy_force_cpu.is_some() {
         warn_once_legacy_force_cpu_prompt_encoder();
         return Some(LtxGemmaPlacement::Cpu);
     }
@@ -594,7 +1001,7 @@ fn warn_once_legacy_force_cpu_prompt_encoder() {
 }
 
 /// Resolve the LTX-2 Gemma encoder placement once, honoring the env override
-/// before falling through to the GPU-walk + CPU fallback. The runtime and
+/// before falling through to the assigned-GPU-or-CPU fallback. The runtime and
 /// the server-side preflight both call this so they reach the same decision
 /// for the same observation of free VRAM and env vars.
 pub fn resolve_ltx2_gemma_placement(gpu_ordinal: usize) -> LtxGemmaPlacement {
@@ -623,6 +1030,9 @@ const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 /// - `Some(Gpu { ordinal })` — try CUDA first, then Metal. Each backend is
 ///   gated by its candle feature flag so a CPU-only build returns a clear
 ///   error message instead of a build failure.
+/// - `Some(Device { id })` — open the ordinal already bound to the owner
+///   thread. Stable-ID eligibility must have been validated by the scheduler;
+///   inference never searches for or silently substitutes another device.
 pub fn resolve_device<F>(
     req: Option<mold_core::types::DeviceRef>,
     auto: F,
@@ -635,6 +1045,14 @@ where
         None | Some(DeviceRef::Auto) => auto(),
         Some(DeviceRef::Cpu) => Ok(candle_core::Device::Cpu),
         Some(DeviceRef::Gpu { ordinal }) => resolve_gpu_ordinal(ordinal),
+        Some(DeviceRef::Device { id }) => {
+            let ordinal = thread_gpu_ordinal().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "stable device placement '{id}' requires a scheduler-bound GPU owner thread"
+                )
+            })?;
+            resolve_gpu_ordinal(ordinal)
+        }
     }
 }
 
@@ -686,11 +1104,11 @@ pub fn effective_device_ref(
             return r;
         }
         if fallback_is_component_auto {
-            return placement.text_encoders;
+            return placement.text_encoders.clone();
         }
         DeviceRef::Auto
     } else {
-        placement.text_encoders
+        placement.text_encoders.clone()
     }
 }
 
@@ -799,56 +1217,52 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
 pub fn keep_te_in_ram() -> bool {
-    std::env::var("MOLD_KEEP_TE_RAM")
+    crate::runtime_env::value("MOLD_KEEP_TE_RAM")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
-// ── GPU memory reclamation ───────────────────────────────────────────────────
-
-/// Reclaim GPU memory by resetting the CUDA primary context for the specified device.
-///
-/// **Must only be called when no CUDA objects (tensors, devices, engines) exist on this device.**
-/// This resets CUDA state on the specified GPU: driver context, cuBLAS workspace caches,
-/// compiled kernel modules, and memory pools. After calling this, the next
-/// `Device::new_cuda(ordinal)` will create a fresh context.
-///
-/// On non-CUDA platforms, this is a no-op.
 #[cfg(feature = "cuda")]
-pub fn reclaim_gpu_memory(ordinal: usize) {
-    use candle_core::cuda_backend::cudarc::driver::{result, sys};
+fn fatal_cuda_driver_message(message: &str) -> bool {
+    [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_ASSERT",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+        "CUDA_ERROR_INVALID_PC",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
 
-    debug_assert_ordinal_matches_thread(ordinal, "reclaim_gpu_memory");
-
-    // Synchronize to ensure all async GPU work completes before reset.
-    let _ = result::ctx::synchronize();
-
-    // Get the CUdevice handle for the specified GPU ordinal.
-    let cu_device = match result::device::get(ordinal as i32) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("reclaim_gpu_memory: failed to get device {ordinal}: {e}");
-            return;
-        }
-    };
-
-    // Reset the primary context — frees all allocations, destroys cuBLAS/cuDNN
-    // workspace caches, and releases compiled kernel modules.
-    let result = unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) };
-    if result != sys::CUresult::CUDA_SUCCESS {
-        tracing::warn!(
-            "reclaim_gpu_memory: cuDevicePrimaryCtxReset for device {ordinal} returned {result:?}"
-        );
+#[cfg(feature = "cuda")]
+fn memory_error(operation: &'static str, error: impl std::fmt::Display) -> DeviceMemoryError {
+    let message = error.to_string();
+    if fatal_cuda_driver_message(&message) {
+        DeviceMemoryError::FatalCuda { operation, message }
     } else {
-        tracing::info!("CUDA primary context reset for device {ordinal}, GPU memory reclaimed");
+        DeviceMemoryError::Unavailable { operation, message }
     }
 }
 
-/// No-op on non-CUDA platforms.
-#[cfg(not(feature = "cuda"))]
-pub fn reclaim_gpu_memory(_ordinal: usize) {}
+/// Run an authoritative post-drop observation. Kept separate from the CUDA
+/// bindings so fault-ordering can be tested without inducing a real illegal
+/// access: a failed synchronize must prevent the memory callback from running.
+#[doc(hidden)]
+pub fn post_drop_free_vram_bytes_with(
+    synchronize: impl FnOnce() -> Result<(), DeviceMemoryError>,
+    sample_free: impl FnOnce() -> Result<u64, DeviceMemoryError>,
+) -> Result<u64, DeviceMemoryError> {
+    synchronize()?;
+    sample_free()
+}
 
-/// Best-effort CUDA device synchronize, ignoring errors.
+/// Synchronize pending CUDA work.
 ///
 /// After a `CUDA_ERROR_OUT_OF_MEMORY` the CUDA context may have in-flight work
 /// that hasn't been flushed; subsequent allocations can inherit a poisoned
@@ -856,20 +1270,62 @@ pub fn reclaim_gpu_memory(_ordinal: usize) {}
 /// any retry lets CUDA drain pending work and reset internal queues so the
 /// next allocation attempt starts clean.
 ///
-/// Errors are silently swallowed — this is a "best effort" hygiene step, not a
-/// hard requirement. The caller has already decided to surface an OOM error;
-/// a secondary synchronize failure shouldn't shadow the primary message.
-///
 /// On non-CUDA platforms this is a no-op.
 #[cfg(feature = "cuda")]
-pub fn try_synchronize_device(_ordinal: usize) {
-    use candle_core::cuda_backend::cudarc::driver::result;
-    let _ = result::ctx::synchronize();
+pub fn try_synchronize_device(ordinal: usize) -> Result<(), DeviceMemoryError> {
+    debug_assert_ordinal_matches_thread(ordinal, "try_synchronize_device");
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    context
+        .synchronize()
+        .map_err(|error| memory_error("device synchronize", error))
 }
 
 /// No-op on non-CUDA platforms.
 #[cfg(not(feature = "cuda"))]
-pub fn try_synchronize_device(_ordinal: usize) {}
+pub fn try_synchronize_device(_ordinal: usize) -> Result<(), DeviceMemoryError> {
+    Ok(())
+}
+
+/// Synchronize pending work after device-backed values have been dropped, then
+/// return the actual reserve-adjusted free VRAM reported by the driver.
+///
+/// Dropping Mold-owned objects does not imply that nominal total VRAM is
+/// available: driver workspaces, fragmentation, and external allocations
+/// remain unavailable pressure and are preserved in this measurement.
+#[cfg(feature = "cuda")]
+pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    debug_assert_ordinal_matches_thread(ordinal, "post_drop_free_vram_bytes");
+    // One retained context spans both calls. Using the global mem_get_info
+    // entry point after dropping this retain can sample whichever context the
+    // thread later binds and defeats the owner-thread invariant.
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    post_drop_free_vram_bytes_with(
+        || {
+            context
+                .synchronize()
+                .map_err(|error| memory_error("device synchronize", error))
+        },
+        || {
+            context
+                .mem_get_info()
+                .map(|(free, _)| usable_free_vram_from_raw(free as u64, reserved_vram_bytes()))
+                .map_err(|error| memory_error("free VRAM query", error))
+        },
+    )
+}
+
+/// Metal has unified memory and no CUDA stream to drain. The server deliberately
+/// does not use this as a second post-drop admission gate; this implementation
+/// remains useful to inference components that want a conservative observation.
+#[cfg(not(feature = "cuda"))]
+pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    usable_free_vram_bytes(ordinal).ok_or_else(|| DeviceMemoryError::Unavailable {
+        operation: "free GPU memory query",
+        message: "this backend does not expose a memory sample".to_string(),
+    })
+}
 
 // ── VRAM query ───────────────────────────────────────────────────────────────
 
@@ -880,14 +1336,11 @@ pub fn try_synchronize_device(_ordinal: usize) {}
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(feature = "cuda")]
 pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
-    // Create/bind the device context for the specified ordinal before querying.
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(free, _total)| free as u64)
-    } else {
-        None
-    }
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).ok()?;
+    context
+        .mem_get_info()
+        .ok()
+        .map(|(free, _total)| free as u64)
 }
 
 /// On macOS (unified memory), return available system memory (free + inactive).
@@ -913,8 +1366,8 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
 /// memory has its own headroom and the OS swap already accounts for desktop
 /// pressure). Override via `MOLD_RESERVE_VRAM_MB`.
 pub fn reserved_vram_bytes() -> u64 {
-    if let Ok(s) = std::env::var("MOLD_RESERVE_VRAM_MB") {
-        if let Ok(mb) = s.parse::<u64>() {
+    if let Some(s) = crate::runtime_env::value("MOLD_RESERVE_VRAM_MB") {
+        if let Some(mb) = crate::runtime_env::parse_u64(&s) {
             return mb.saturating_mul(1_000_000);
         }
     }
@@ -948,6 +1401,28 @@ pub fn usable_free_vram_bytes(ordinal: usize) -> Option<u64> {
     free_vram_bytes(ordinal).map(|free| usable_free_vram_from_raw(free, reserve))
 }
 
+/// Authoritative reserve-adjusted current-free reading used by CUDA admission.
+/// Unlike the compatibility `Option` API, failure is typed so callers cannot
+/// silently substitute host RAM or nominal device capacity.
+#[cfg(feature = "cuda")]
+pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    debug_assert_ordinal_matches_thread(ordinal, "usable_free_vram_bytes_result");
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    context
+        .mem_get_info()
+        .map(|(free, _)| usable_free_vram_from_raw(free as u64, reserved_vram_bytes()))
+        .map_err(|error| memory_error("free VRAM query", error))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    usable_free_vram_bytes(ordinal).ok_or_else(|| DeviceMemoryError::Unavailable {
+        operation: "free GPU memory query",
+        message: "this backend does not expose a memory sample".to_string(),
+    })
+}
+
 fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
     free.saturating_sub(reserve)
 }
@@ -960,14 +1435,10 @@ fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
 /// pre-load baseline and a post-load reading via [`vram_load_delta`].
 #[cfg(feature = "cuda")]
 pub fn vram_in_use_bytes(ordinal: usize) -> u64 {
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(free, total)| total as u64 - free as u64)
-            .unwrap_or(0)
-    } else {
-        0
-    }
+    candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .and_then(|context| context.mem_get_info())
+        .map(|(free, total)| total as u64 - free as u64)
+        .unwrap_or(0)
 }
 
 /// Non-CUDA stub — no VRAM tracking available.
@@ -978,23 +1449,21 @@ pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
 
 /// Total VRAM (bytes) physically present on the specified GPU ordinal.
 ///
-/// Used by the preflight memory guard to budget against the post-reclaim
-/// state: when an existing model is about to be unloaded and the CUDA
-/// primary context reset, the *entire* device returns to the OS, so the
-/// realistic upper bound is total VRAM, not `free + active_vram`.
+/// This is inventory/telemetry capacity, not an allocation promise. Memory
+/// admission must use the current free reading because driver workspaces,
+/// fragmentation, retained handles, and external processes may consume part
+/// of the total.
 ///
 /// Returns `None` when the device cannot be queried (CUDA disabled, ordinal
 /// out of range, driver error). Callers should fall back to a less generous
 /// budget in that case rather than treating `None` as unlimited.
 #[cfg(feature = "cuda")]
 pub fn total_vram_bytes(ordinal: usize) -> Option<u64> {
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(_free, total)| total as u64)
-    } else {
-        None
-    }
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).ok()?;
+    context
+        .mem_get_info()
+        .ok()
+        .map(|(_free, total)| total as u64)
 }
 
 /// Non-CUDA stub — no per-device total VRAM available outside CUDA.
@@ -1068,24 +1537,44 @@ pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
 /// Accepted values: `auto` (= unset), `bf16`, `fp16` / `f16`, `fp32` / `f32`.
 /// Any other value emits a one-shot warn and falls back to the default —
 /// loud enough to surface typos without failing the request.
-pub(crate) fn resolve_vae_dtype(default_dtype: candle_core::DType) -> candle_core::DType {
-    use candle_core::DType;
-    match std::env::var("MOLD_VAE_DTYPE")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        None | Some("") | Some("auto") => default_dtype,
-        Some("bf16") | Some("BF16") => DType::BF16,
-        Some("fp16") | Some("f16") | Some("FP16") | Some("F16") => DType::F16,
-        Some("fp32") | Some("f32") | Some("FP32") | Some("F32") => DType::F32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaeDtypePolicy {
+    Auto,
+    Bf16,
+    F16,
+    F32,
+}
+
+fn parse_vae_dtype_policy(value: Option<&str>) -> VaeDtypePolicy {
+    match value.map(str::trim) {
+        None | Some("") | Some("auto") => VaeDtypePolicy::Auto,
+        Some("bf16") | Some("BF16") => VaeDtypePolicy::Bf16,
+        Some("fp16") | Some("f16") | Some("FP16") | Some("F16") => VaeDtypePolicy::F16,
+        Some("fp32") | Some("f32") | Some("FP32") | Some("F32") => VaeDtypePolicy::F32,
         Some(other) => {
             tracing::warn!(
                 value = other,
                 "MOLD_VAE_DTYPE has unrecognised value; expected one of auto/bf16/fp16/fp32 — falling back to default"
             );
-            default_dtype
+            VaeDtypePolicy::Auto
         }
+    }
+}
+
+pub fn resolved_vae_dtype_policy() -> VaeDtypePolicy {
+    static CACHED: std::sync::OnceLock<VaeDtypePolicy> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        parse_vae_dtype_policy(crate::runtime_env::value("MOLD_VAE_DTYPE").as_deref())
+    })
+}
+
+pub(crate) fn resolve_vae_dtype(default_dtype: candle_core::DType) -> candle_core::DType {
+    use candle_core::DType;
+    match resolved_vae_dtype_policy() {
+        VaeDtypePolicy::Auto => default_dtype,
+        VaeDtypePolicy::Bf16 => DType::BF16,
+        VaeDtypePolicy::F16 => DType::F16,
+        VaeDtypePolicy::F32 => DType::F32,
     }
 }
 
@@ -1316,7 +1805,7 @@ pub(crate) fn preflight_memory_check(
     activation_bytes: u64,
 ) -> anyhow::Result<()> {
     // --eager or MOLD_EAGER=1 bypasses the check
-    if std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1") {
+    if crate::runtime_env::value("MOLD_EAGER").is_some_and(|v| v == "1") {
         return Ok(());
     }
 
@@ -1399,6 +1888,232 @@ pub fn memory_status_string() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identified_gpu(ordinal: usize, uuid: [u8; 16]) -> DiscoveredGpu {
+        DiscoveredGpu {
+            ordinal,
+            stable_id: Some(stable_cuda_id(uuid)),
+            raw_cuda_uuid: Some(uuid),
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: format!("gpu{ordinal}"),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: Some(format!("00000000:{ordinal:02x}:00.0")),
+            total_vram_bytes: 24 * GB,
+            free_vram_bytes: 20 * GB,
+        }
+    }
+
+    #[test]
+    fn stable_cuda_identity_uses_lowercase_raw_uuid_bytes() {
+        assert_eq!(
+            stable_cuda_id([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+                0x32, 0x10,
+            ]),
+            "cuda:0123456789abcdeffedcba9876543210"
+        );
+    }
+
+    #[test]
+    fn stable_metal_selector_resolves_the_advertised_device_id() {
+        let metal = DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some("metal:default".to_string()),
+            raw_cuda_uuid: None,
+            device_kind: None,
+            identity_error: None,
+            backend: GpuBackend::Metal,
+            name: "Apple Metal GPU".to_string(),
+            compute_capability: None,
+            pci_bus_id: None,
+            total_vram_bytes: 64_000_000_000,
+            free_vram_bytes: 48_000_000_000,
+        };
+        let selected = resolve_gpu_selection(
+            std::slice::from_ref(&metal),
+            &GpuSelection::parse("metal:default").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].stable_id.as_deref(), Some("metal:default"));
+        assert_eq!(selected[0].backend, GpuBackend::Metal);
+    }
+
+    #[test]
+    fn cuda_visible_tokens_prove_only_explicit_full_or_mig_kind() {
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("GPU-01234567-89ab-cdef-0123-456789abcdef")),
+            CudaDeviceKind::FullGpu
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("MIG-01234567-89ab-cdef-0123-456789abcdef")),
+            CudaDeviceKind::Mig
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("1")),
+            CudaDeviceKind::UnknownCuda
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(None),
+            CudaDeviceKind::UnknownCuda
+        );
+    }
+
+    #[test]
+    fn startup_selection_supports_none_all_and_legacy_ordinals() {
+        let gpus = vec![identified_gpu(0, [0x11; 16]), identified_gpu(1, [0x22; 16])];
+
+        assert!(resolve_gpu_selection(&gpus, &GpuSelection::None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &GpuSelection::All)
+                .unwrap()
+                .iter()
+                .map(|gpu| gpu.ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            resolve_gpu_selection(
+                &gpus,
+                &GpuSelection::Specific(vec![GpuSelector::Ordinal(1)])
+            )
+            .unwrap()[0]
+                .stable_id
+                .as_deref(),
+            Some("cuda:22222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn startup_selection_tracks_uuid_across_visible_ordinal_reordering() {
+        let first = vec![identified_gpu(0, [0xaa; 16]), identified_gpu(1, [0xbb; 16])];
+        let reordered = vec![identified_gpu(0, [0xbb; 16]), identified_gpu(1, [0xaa; 16])];
+        let selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )]);
+
+        assert_eq!(
+            resolve_gpu_selection(&first, &selection).unwrap()[0].ordinal,
+            0
+        );
+        assert_eq!(
+            resolve_gpu_selection(&reordered, &selection).unwrap()[0].ordinal,
+            1
+        );
+    }
+
+    #[test]
+    fn startup_selection_accepts_nvidia_gpu_and_mig_uuid_forms() {
+        let mut full = identified_gpu(
+            0,
+            [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ],
+        );
+        full.device_kind = Some(CudaDeviceKind::FullGpu);
+        let mut mig = identified_gpu(
+            1,
+            [
+                0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+                0x32, 0x10,
+            ],
+        );
+        mig.device_kind = Some(CudaDeviceKind::Mig);
+        let gpus = vec![full, mig];
+
+        let full_selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "GPU-01234567-89ab-cdef-0123-456789abcdef".to_string(),
+        )]);
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &full_selection).unwrap()[0].ordinal,
+            0
+        );
+
+        let mig_selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "MIG-fedcba98-7654-3210-fedc-ba9876543210".to_string(),
+        )]);
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &mig_selection).unwrap()[0].ordinal,
+            1
+        );
+    }
+
+    #[test]
+    fn startup_selection_rejects_ambiguous_or_missing_uuid_prefixes() {
+        let gpus = vec![
+            identified_gpu(0, [0xaa; 16]),
+            identified_gpu(1, [0xaa, 0xab, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        ];
+
+        let ambiguous =
+            GpuSelection::Specific(vec![GpuSelector::Identifier("cuda:aa".to_string())]);
+        let error = resolve_gpu_selection(&gpus, &ambiguous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ambiguous"));
+        assert!(error.contains("cuda:aaaaaaaa"));
+        assert!(error.contains("cuda:aaab0000"));
+
+        let missing = GpuSelection::Specific(vec![GpuSelector::Identifier("GPU-ff".to_string())]);
+        let error = resolve_gpu_selection(&gpus, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not match"));
+        assert!(error.contains("visible choices"));
+    }
+
+    #[test]
+    fn uuid_lookup_failures_never_fall_back_to_ordinal_identity() {
+        let unavailable = DiscoveredGpu {
+            ordinal: 0,
+            stable_id: None,
+            raw_cuda_uuid: None,
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: Some("UUID unavailable".to_string()),
+            backend: GpuBackend::Cuda,
+            name: "visible but unavailable".to_string(),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
+            total_vram_bytes: 24 * GB,
+            free_vram_bytes: 20 * GB,
+        };
+
+        assert!(
+            resolve_gpu_selection(std::slice::from_ref(&unavailable), &GpuSelection::All)
+                .unwrap()
+                .is_empty()
+        );
+        let error = resolve_gpu_selection(
+            &[unavailable],
+            &GpuSelection::Specific(vec![GpuSelector::Ordinal(0)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("stable CUDA identity"));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn live_cuda_discovery_uses_driver_uuid_identity_when_devices_exist() {
+        let gpus = discover_gpus();
+        for gpu in gpus {
+            assert_eq!(gpu.backend, GpuBackend::Cuda);
+            let raw = gpu
+                .raw_cuda_uuid
+                .unwrap_or_else(|| panic!("visible GPU {} has no raw CUDA UUID", gpu.ordinal));
+            let expected_id = stable_cuda_id(raw);
+            assert_eq!(gpu.stable_id.as_deref(), Some(expected_id.as_str()));
+            assert!(gpu.identity_error.is_none());
+            assert!(gpu.compute_capability.is_some());
+            assert!(gpu.pci_bus_id.as_deref().is_some_and(|id| id.contains(':')));
+        }
+    }
 
     // --- fmt_gb tests ---
 
@@ -1978,7 +2693,14 @@ mod tests {
     fn gpu(ordinal: usize, free_gb: u64) -> DiscoveredGpu {
         DiscoveredGpu {
             ordinal,
+            stable_id: Some(format!("cuda:{ordinal:032x}")),
+            raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
             name: format!("gpu{ordinal}"),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
             total_vram_bytes: 24 * GB,
             free_vram_bytes: free_gb * GB,
         }
@@ -2116,27 +2838,26 @@ mod tests {
         );
     }
 
-    /// Multi-GPU host: the active GPU is full (4 GB free), but a sibling
-    /// GPU has plenty of room. Encoder runs there and pays a single
-    /// cross-device copy at encode time.
+    /// Multi-GPU host: the assigned GPU is full even though a sibling has
+    /// room. The sibling is not leased to this stage, so auto placement must
+    /// fall back to CPU instead of allocating there behind the scheduler.
     #[test]
-    fn select_ltx2_gemma_device_picks_sibling_gpu_when_active_full() {
+    fn select_ltx2_gemma_device_never_uses_unleased_sibling() {
         let gpus = vec![gpu(0, 4), gpu(1, 25)];
         assert_eq!(
             select_ltx2_gemma_device(&gpus, 0, 24 * GB),
-            LtxGemmaPlacement::Gpu(1),
+            LtxGemmaPlacement::Cpu,
         );
     }
 
-    /// Three-GPU walk: the active GPU is GPU 1; both GPU 0 and GPU 2 have
-    /// room. The walk picks the first sibling in ordinal order (GPU 0)
-    /// rather than starting from `active_ordinal`.
+    /// No amount of sibling capacity changes the one-device-per-stage
+    /// contract when the assigned device cannot fit Gemma.
     #[test]
-    fn select_ltx2_gemma_device_walks_remaining_in_ordinal_order() {
+    fn select_ltx2_gemma_device_ignores_all_sibling_capacity() {
         let gpus = vec![gpu(0, 25), gpu(1, 4), gpu(2, 25)];
         assert_eq!(
             select_ltx2_gemma_device(&gpus, 1, 24 * GB),
-            LtxGemmaPlacement::Gpu(0),
+            LtxGemmaPlacement::Cpu,
         );
     }
 
@@ -2518,90 +3239,38 @@ mod tests {
         );
     }
 
-    // --- resolve_vae_dtype tests ---
-    //
-    // MOLD_VAE_DTYPE is process-global; tests serialize via a static mutex
-    // (mirrors the MOLD_LONG_PROMPTS / MOLD_CFG_PLUS test pattern elsewhere
-    // in the crate).
-
-    fn vae_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+    #[test]
+    fn parse_vae_dtype_unset_and_auto_preserve_default_policy() {
+        assert_eq!(parse_vae_dtype_policy(None), VaeDtypePolicy::Auto);
+        assert_eq!(parse_vae_dtype_policy(Some("auto")), VaeDtypePolicy::Auto);
     }
 
     #[test]
-    fn resolve_vae_dtype_unset_returns_default() {
-        let _g = vae_env_lock();
-        // SAFETY: serialized via vae_env_lock to avoid racing parallel tests.
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
-        assert_eq!(
-            resolve_vae_dtype(candle_core::DType::BF16),
-            candle_core::DType::BF16
-        );
-        assert_eq!(
-            resolve_vae_dtype(candle_core::DType::F16),
-            candle_core::DType::F16
-        );
+    fn parse_vae_dtype_fp32_forces_f32() {
+        assert_eq!(parse_vae_dtype_policy(Some("fp32")), VaeDtypePolicy::F32);
     }
 
     #[test]
-    fn resolve_vae_dtype_auto_returns_default() {
-        let _g = vae_env_lock();
-        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "auto") };
-        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
-        assert_eq!(resolved, candle_core::DType::BF16);
+    fn parse_vae_dtype_bf16_forces_bf16() {
+        assert_eq!(parse_vae_dtype_policy(Some("bf16")), VaeDtypePolicy::Bf16);
     }
 
     #[test]
-    fn resolve_vae_dtype_fp32_forces_f32_regardless_of_default() {
-        let _g = vae_env_lock();
-        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp32") };
-        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
-        assert_eq!(resolved, candle_core::DType::F32);
-    }
-
-    #[test]
-    fn resolve_vae_dtype_bf16_forces_bf16_even_when_default_is_f32() {
-        // CPU default is F32; user opts back into BF16 explicitly. Pins the
-        // contract that the env knob can both raise *and* lower precision.
-        let _g = vae_env_lock();
-        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "bf16") };
-        let resolved = resolve_vae_dtype(candle_core::DType::F32);
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
-        assert_eq!(resolved, candle_core::DType::BF16);
-    }
-
-    #[test]
-    fn resolve_vae_dtype_fp16_alias_recognised() {
-        // f16 / fp16 / F16 / FP16 must all resolve identically — different
-        // tools and shells normalise case differently.
-        let _g = vae_env_lock();
+    fn parse_vae_dtype_fp16_alias_recognised() {
         for value in ["fp16", "f16", "FP16", "F16"] {
-            unsafe { std::env::set_var("MOLD_VAE_DTYPE", value) };
-            let resolved = resolve_vae_dtype(candle_core::DType::BF16);
             assert_eq!(
-                resolved,
-                candle_core::DType::F16,
+                parse_vae_dtype_policy(Some(value)),
+                VaeDtypePolicy::F16,
                 "value `{value}` should resolve to F16"
             );
         }
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
     }
 
     #[test]
-    fn resolve_vae_dtype_invalid_value_falls_back_to_default() {
-        let _g = vae_env_lock();
-        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp64") };
-        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
-        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+    fn parse_vae_dtype_invalid_value_falls_back_to_auto() {
         assert_eq!(
-            resolved,
-            candle_core::DType::BF16,
+            parse_vae_dtype_policy(Some("fp64")),
+            VaeDtypePolicy::Auto,
             "invalid value must fall back, not error"
         );
     }
@@ -2617,5 +3286,50 @@ mod tests {
             "MEMORY_BUDGET_HEADROOM changed — update the rejection error message \
              in mold-server::model_manager::check_model_memory_budget to match"
         );
+    }
+
+    #[test]
+    fn fatal_post_drop_synchronize_prevents_memory_query() {
+        let sample_calls = std::cell::Cell::new(0);
+        let result = post_drop_free_vram_bytes_with(
+            || {
+                Err(DeviceMemoryError::FatalCuda {
+                    operation: "device synchronize",
+                    message: "CUDA_ERROR_ILLEGAL_ADDRESS".to_string(),
+                })
+            },
+            || {
+                sample_calls.set(sample_calls.get() + 1);
+                Ok(24_000_000_000)
+            },
+        );
+
+        assert!(result.unwrap_err().is_fatal_cuda());
+        assert_eq!(
+            sample_calls.get(),
+            0,
+            "fatal synchronize must fence every later CUDA callback"
+        );
+    }
+
+    #[test]
+    fn unavailable_post_drop_sample_stays_typed() {
+        let result = post_drop_free_vram_bytes_with(
+            || Ok(()),
+            || {
+                Err(DeviceMemoryError::Unavailable {
+                    operation: "free VRAM query",
+                    message: "driver unavailable".to_string(),
+                })
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DeviceMemoryError::Unavailable {
+                operation: "free VRAM query",
+                ..
+            })
+        ));
     }
 }

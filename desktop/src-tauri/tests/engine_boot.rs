@@ -15,7 +15,7 @@ async fn engine_boots_authenticates_and_shuts_down() {
     std::env::set_var("MOLD_API_KEY", "desktop-test-key");
 
     let port = server::allocate_port("127.0.0.1").unwrap();
-    let engine = server::start_engine(
+    let mut engine = server::start_engine(
         "127.0.0.1",
         port,
         models_dir.path().to_path_buf(),
@@ -65,10 +65,9 @@ async fn engine_boots_authenticates_and_shuts_down() {
 
     // …and reported dead once the thread exits, so the connection state
     // machine knows to restart instead of handing out a dead base URL.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while engine.is_alive() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    assert!(
+        engine.join(Duration::from_secs(15)),
+        "engine thread did not exit"
+    );
     assert!(!engine.is_alive(), "engine thread did not exit");
-    engine.join(Duration::from_secs(10));
 }

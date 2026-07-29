@@ -47,7 +47,7 @@ impl RecordSource {
 /// `id` is `None` for unpersisted records and `Some(_)` after `upsert`.
 /// `output_dir` is stored as an absolute path so we can disambiguate
 /// identical filenames in different gallery directories.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationRecord {
     pub id: Option<i64>,
     pub filename: String,

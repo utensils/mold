@@ -335,13 +335,11 @@ impl AvailabilityRow {
             .first()
             .map(|r| r.name.clone())
             .unwrap_or_default();
-        let image = if gpu_uses_unsupported_linux_arm64(&instance_type.specs.gpu_description)
-            || gpu_uses_unsupported_linux_arm64(&instance_type.name)
-        {
-            "unsupported: linux/arm64 host".to_string()
-        } else {
-            let tag = image_tag_for_gpu(&instance_type.specs.gpu_description, version);
-            format!("{image_repository}:{tag}")
+        let image = match image_tag_for_gpu(&instance_type.specs.gpu_description, version) {
+            Ok(tag) if !gpu_uses_unsupported_linux_arm64(&instance_type.name) => {
+                format!("{image_repository}:{tag}")
+            }
+            Ok(_) | Err(_) => "unsupported: linux/arm64 host".to_string(),
         };
         Self {
             instance_type: instance_type.name.clone(),
@@ -357,26 +355,15 @@ impl AvailabilityRow {
     }
 }
 
-pub fn image_tag_for_gpu(gpu_description: &str, _version: &str) -> String {
-    let lower = gpu_description.to_ascii_lowercase();
-    if lower.contains("a100")
-        || lower.contains("a10")
-        || lower.contains("a40")
-        || lower.contains("rtx 30")
-        || lower.contains("3090")
-    {
-        "latest-sm80".to_string()
-    } else if lower.contains("h100") || lower.contains("h200") || lower.contains("gh") {
-        "latest-sm90".to_string()
-    } else if lower.contains("b200") || lower.contains("5090") || lower.contains("blackwell") {
-        "latest-sm120".to_string()
-    } else {
-        "latest".to_string()
-    }
+pub fn image_tag_for_gpu(
+    gpu_description: &str,
+    version: &str,
+) -> Result<String, crate::cuda_distribution::UnsupportedPublishedImagePlatform> {
+    crate::cuda_distribution::image_tag_for_gpu_name(gpu_description, version)
 }
 
 pub fn gpu_uses_unsupported_linux_arm64(gpu_description: &str) -> bool {
-    gpu_description.to_ascii_lowercase().contains("gh200")
+    crate::cuda_distribution::gpu_name_uses_unsupported_grace_platform(gpu_description)
 }
 
 pub fn filesystem_name(settings: &LambdaSettings, region: &str) -> String {
@@ -696,47 +683,110 @@ mod tests {
 
     #[test]
     fn image_tag_maps_gpu_generations() {
+        for name in ["NVIDIA A30", "NVIDIA A100-SXM4-80GB", "Ampere"] {
+            assert_eq!(
+                image_tag_for_gpu(name, "0.10.0").unwrap(),
+                "0.10.0-sm80",
+                "{name}"
+            );
+        }
+        for name in [
+            "NVIDIA A10",
+            "NVIDIA A40",
+            "NVIDIA RTX A6000",
+            "NVIDIA A16",
+            "NVIDIA A2",
+            "NVIDIA RTX 3090",
+        ] {
+            assert_eq!(
+                image_tag_for_gpu(name, "0.10.0").unwrap(),
+                "0.10.0-sm86",
+                "{name}"
+            );
+        }
         assert_eq!(
-            image_tag_for_gpu("NVIDIA A100-SXM4-80GB", "0.10.0"),
-            "latest-sm80"
+            image_tag_for_gpu("NVIDIA L40S", "0.10.0").unwrap(),
+            "0.10.0"
         );
-        assert_eq!(image_tag_for_gpu("NVIDIA L40S", "0.10.0"), "latest");
+        for name in ["NVIDIA H100 PCIe", "NVIDIA H200 SXM"] {
+            assert_eq!(
+                image_tag_for_gpu(name, "0.10.0").unwrap(),
+                "0.10.0-sm90",
+                "{name}"
+            );
+        }
+        for name in ["NVIDIA B200", "NVIDIA B300"] {
+            assert_eq!(
+                image_tag_for_gpu(name, "0.10.0").unwrap(),
+                "0.10.0-sm100",
+                "{name}"
+            );
+        }
+        for name in ["NVIDIA GH200", "NVIDIA GB200", "NVIDIA GB300"] {
+            assert!(image_tag_for_gpu(name, "0.10.0").is_err(), "{name}");
+        }
+        for name in ["NVIDIA RTX PRO 6000", "NVIDIA GeForce RTX 5090"] {
+            assert_eq!(
+                image_tag_for_gpu(name, "v0.10.0").unwrap(),
+                "0.10.0-sm120",
+                "{name}"
+            );
+        }
         assert_eq!(
-            image_tag_for_gpu("NVIDIA H100 PCIe", "0.10.0"),
-            "latest-sm90"
+            image_tag_for_gpu("NVIDIA Blackwell", "latest").unwrap(),
+            "latest",
+            "generic Blackwell must not guess between incompatible sm100 and sm120"
         );
-        assert_eq!(image_tag_for_gpu("NVIDIA B200", "0.10.0"), "latest-sm120");
     }
 
     #[test]
-    fn gh200_is_not_supported_by_published_linux_images() {
-        assert!(gpu_uses_unsupported_linux_arm64("GH200 (96 GB)"));
-        assert!(gpu_uses_unsupported_linux_arm64("gpu_1x_gh200"));
+    fn grace_gpus_are_not_supported_by_published_linux_images() {
+        for name in [
+            "GH200 (96 GB)",
+            "gpu_1x_gh200",
+            "NVIDIA GB200",
+            "gpu_1x_gb300",
+            "Grace Hopper Superchip",
+            "Grace Blackwell Superchip",
+        ] {
+            assert!(gpu_uses_unsupported_linux_arm64(name), "{name}");
+        }
         assert!(!gpu_uses_unsupported_linux_arm64("NVIDIA H100 PCIe"));
         assert!(!gpu_uses_unsupported_linux_arm64("NVIDIA A100-SXM4-80GB"));
+        assert!(!gpu_uses_unsupported_linux_arm64("NVIDIA B200"));
+        assert!(!gpu_uses_unsupported_linux_arm64("NVIDIA B300"));
     }
 
     #[test]
-    fn availability_marks_gh200_as_unsupported() {
-        let ty = InstanceType {
-            name: "gpu_1x_gh200".into(),
-            description: "1x GH200".into(),
-            gpu_description: "GH200 (96 GB)".into(),
-            price_cents_per_hour: 229,
-            specs: InstanceTypeSpecs {
-                gpus: 1,
-                gpu_description: "GH200 (96 GB)".into(),
-                memory_gib: 432,
-                storage_gib: 4096,
-                ..Default::default()
-            },
-            regions_with_capacity_available: vec![Region {
-                name: "us-east-3".into(),
-                description: "Austin".into(),
-            }],
-        };
-        let row = AvailabilityRow::from_instance_type(&ty, "ghcr.io/utensils/mold", "0.10.0");
-        assert_eq!(row.image, "unsupported: linux/arm64 host");
+    fn availability_marks_every_grace_family_as_unsupported() {
+        for (instance_name, gpu_description) in [
+            ("gpu_1x_gh200", "GH200 (96 GB)"),
+            ("gpu_1x_gb200", "NVIDIA GB200"),
+            ("gpu_1x_gb300", "NVIDIA GB300"),
+        ] {
+            let ty = InstanceType {
+                name: instance_name.into(),
+                description: format!("1x {gpu_description}"),
+                gpu_description: gpu_description.into(),
+                price_cents_per_hour: 229,
+                specs: InstanceTypeSpecs {
+                    gpus: 1,
+                    gpu_description: gpu_description.into(),
+                    memory_gib: 432,
+                    storage_gib: 4096,
+                    ..Default::default()
+                },
+                regions_with_capacity_available: vec![Region {
+                    name: "us-east-3".into(),
+                    description: "Austin".into(),
+                }],
+            };
+            let row = AvailabilityRow::from_instance_type(&ty, "ghcr.io/utensils/mold", "0.10.0");
+            assert_eq!(
+                row.image, "unsupported: linux/arm64 host",
+                "{gpu_description}"
+            );
+        }
     }
 
     #[test]
@@ -760,7 +810,7 @@ mod tests {
         };
         let row = AvailabilityRow::from_instance_type(&ty, "ghcr.io/utensils/mold", "0.10.0");
         assert_eq!(row.generation_slots, 8);
-        assert_eq!(row.image, "ghcr.io/utensils/mold:latest-sm90");
+        assert_eq!(row.image, "ghcr.io/utensils/mold:0.10.0-sm90");
         assert_eq!(row.price_per_hour_usd, 159.20);
     }
 

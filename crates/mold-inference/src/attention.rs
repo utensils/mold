@@ -28,6 +28,16 @@ pub enum AttentionBackend {
     Flash,
 }
 
+/// Process-frozen override for math-attention query chunking. `Auto` retains
+/// the CUDA/sequence-length heuristic, `Off` forbids chunking, and `Size`
+/// fixes the maximum query rows per chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionChunkPolicy {
+    Auto,
+    Off,
+    Size(usize),
+}
+
 /// Tracks whether we've already emitted the "flash requested but unavailable"
 /// warning for this process. The dispatcher prints it at most once so a
 /// 50-step diffusion run doesn't spam the operator log with the same line.
@@ -43,7 +53,7 @@ impl AttentionBackend {
     pub fn resolve() -> AttentionBackend {
         static CACHED: OnceLock<AttentionBackend> = OnceLock::new();
         *CACHED.get_or_init(|| {
-            let backend = parse_backend_env(std::env::var("MOLD_ATTN").ok().as_deref());
+            let backend = parse_backend_env(crate::runtime_env::value("MOLD_ATTN").as_deref());
             tracing::info!(backend = ?backend, "attention backend selected");
             backend
         })
@@ -75,6 +85,28 @@ fn parse_backend_env(raw: Option<&str>) -> AttentionBackend {
         }
     }
     default_backend()
+}
+
+pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
+    static CACHED: OnceLock<AttentionChunkPolicy> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let raw = crate::runtime_env::value("MOLD_ATTN_CHUNK");
+        match raw.as_deref().map(str::trim) {
+            Some("0") => AttentionChunkPolicy::Off,
+            Some(value) if value.eq_ignore_ascii_case("off") => AttentionChunkPolicy::Off,
+            Some(value) => match value.parse::<usize>() {
+                Ok(size) if size > 0 => AttentionChunkPolicy::Size(size),
+                _ => {
+                    tracing::warn!(
+                        value,
+                        "MOLD_ATTN_CHUNK must be a positive integer, 0, or off; using default"
+                    );
+                    AttentionChunkPolicy::Auto
+                }
+            },
+            None => AttentionChunkPolicy::Auto,
+        }
+    })
 }
 
 /// Emit the "flash requested but FFI gate closed" warning at most once per
@@ -166,19 +198,10 @@ fn math_attention_impl(
 
 fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
     let q_len = q.dim(D::Minus2).ok()?;
-    if let Ok(raw) = std::env::var("MOLD_ATTN_CHUNK") {
-        let trimmed = raw.trim();
-        if trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
-            return None;
-        }
-        match trimmed.parse::<usize>() {
-            Ok(size) if size > 0 && size < q_len => return Some(size),
-            Ok(_) => return None,
-            Err(_) => tracing::warn!(
-                value = trimmed,
-                "MOLD_ATTN_CHUNK must be a positive integer, 0, or off; using default"
-            ),
-        }
+    match resolved_chunk_policy() {
+        AttentionChunkPolicy::Off => return None,
+        AttentionChunkPolicy::Size(size) => return (size < q_len).then_some(size),
+        AttentionChunkPolicy::Auto => {}
     }
 
     if matches!(q.device(), Device::Cuda(_)) && q_len > 1024 {

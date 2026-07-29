@@ -1,23 +1,22 @@
 use axum::{
-    extract::{Extension, Path, Request, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, DiskUsage, GenerateRequest, GpuBackend, GpuInfo,
-    GpuWorkerState, ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent,
-    SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, DeviceAdminState, DeviceMutationRequest,
+    DeviceState, DiskUsage, GenerateRequest, GpuWorkerState, ModelInfoExtended, ResourceSnapshot,
+    ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -28,6 +27,9 @@ fn submit_error_to_api(e: SubmitError) -> ApiError {
     match e {
         SubmitError::Full { pending, capacity } => {
             ApiError::queue_full(format!("generation queue is full ({pending}/{capacity})"))
+        }
+        SubmitError::Cancelled => {
+            ApiError::inference("generation cancelled before queue admission")
         }
         SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
     }
@@ -151,6 +153,22 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
+
+    pub fn generation_unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "GENERATION_UNAVAILABLE".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    pub fn no_schedulable_device(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "NO_SCHEDULABLE_DEVICE".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -175,6 +193,7 @@ use crate::queue::clean_error_message;
     paths(
         generate,
         generate_stream,
+        generate_placement_preview,
         expand_prompt,
         list_models,
         crate::catalog_api::list_loras,
@@ -183,7 +202,10 @@ use crate::queue::clean_error_message;
         unload_model,
         delete_model,
         create_gallery_media_token,
+        import_gallery_file,
         server_status,
+        list_devices,
+        patch_device,
         list_queue,
         patch_queue_job,
         cancel_queue_job,
@@ -205,6 +227,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
         crate::routes_chain_jobs::create_chain_job,
+        crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
         crate::routes_chain_jobs::chain_job_events,
@@ -219,6 +242,11 @@ use crate::queue::clean_error_message;
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
+        mold_core::GenerationPlacementPreviewRequest,
+        mold_core::GenerationPlacementPreview,
+        mold_core::GenerationPlacementCandidate,
+        mold_core::ChainStagePlacementCandidate,
+        crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
         mold_core::ImageData,
@@ -228,6 +256,14 @@ use crate::queue::clean_error_message;
         mold_core::ServerStatus,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
+        mold_core::DeviceState,
+        mold_core::DeviceInfo,
+        mold_core::DeviceKind,
+        mold_core::DeviceAdminState,
+        mold_core::DeviceHealth,
+        mold_core::DeviceActivity,
+        mold_core::DeviceMemoryInfo,
+        mold_core::DeviceTelemetry,
         mold_core::DiskUsage,
         mold_core::DiscoveryPeer,
         mold_core::SseProgressEvent,
@@ -297,6 +333,10 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/estimate", post(generate_estimate))
+        .route(
+            "/api/generate/placement-preview",
+            post(generate_placement_preview),
+        )
         .route("/api/generate/stream", post(generate_stream))
         .route(
             "/api/generate/chain",
@@ -310,6 +350,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chain-jobs",
             post(crate::routes_chain_jobs::create_chain_job)
                 .get(crate::routes_chain_jobs::list_chain_jobs),
+        )
+        .route(
+            "/api/chain-jobs/placement-preview",
+            post(crate::routes_chain_jobs::preview_chain_job_placement),
         )
         .route(
             "/api/chain-jobs/:id",
@@ -354,6 +398,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route("/api/gallery/media-token", post(create_gallery_media_token))
+        .route(
+            "/api/gallery/import/:filename",
+            put(import_gallery_file).layer(DefaultBodyLimit::max(
+                usize::try_from(
+                    MAX_GALLERY_IMPORT_FILE_BYTES
+                        + MAX_GALLERY_IMPORT_METADATA_BYTES as u64
+                        + GALLERY_IMPORT_HEADER_BYTES as u64,
+                )
+                .unwrap_or(usize::MAX),
+            )),
+        )
         .route(
             "/api/gallery/image/:filename",
             get(get_gallery_image).delete(delete_gallery_image),
@@ -400,6 +455,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/events", get(stream_events))
         .route("/api/status", get(server_status))
+        .route("/api/devices", get(list_devices))
+        .route("/api/devices/:id", patch(patch_device))
         .route("/api/queue", get(list_queue).delete(cancel_all_queue))
         .route("/api/queue/pause", post(pause_queue))
         .route("/api/queue/resume", post(resume_queue))
@@ -462,6 +519,7 @@ fn sse_message_to_event(msg: SseMessage) -> SseEvent {
     match msg {
         SseMessage::Progress(payload) => serialize_event("progress", &payload),
         SseMessage::Complete(payload) => serialize_event("complete", &payload),
+        SseMessage::BatchComplete(payload) => serialize_event("batch_complete", &payload),
         SseMessage::UpscaleComplete(payload) => serialize_event("complete", &payload),
         SseMessage::Error(payload) => serialize_event("error", &payload),
     }
@@ -496,6 +554,23 @@ fn save_image_to_dir(
 
 // ── Shared pre-queue validation ───────────────────────────────────────────────
 
+pub(crate) fn ensure_generation_available(state: &AppState) -> Result<(), ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
+    Ok(())
+}
+
+fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
+    ensure_generation_available(state)?;
+    if state.device_registry.has_devices() && state.gpu_pool.schedulable_worker_count() == 0 {
+        return Err(ApiError::no_schedulable_device(
+            "no enabled, healthy GPU device is available",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a generate request and resolve server-side defaults.
 ///
 /// Performs the identical pre-queue checks used by both `generate` and
@@ -505,11 +580,13 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
+    ensure_schedulable_device(state)?;
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
     // return `SubmitError::Full`, which is mapped to `ApiError::queue_full()`.
     apply_default_metadata_setting(state, request).await;
+    normalize_generation_placement(state, request).await;
 
     let preferred_gpu = validate_multi_gpu_placement(state, request.placement.as_ref())?;
 
@@ -539,7 +616,15 @@ async fn prepare_generation(
     // format and can gate on it correctly.
     request.normalise_output_format(resolved_family.as_deref());
 
-    if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
+    let mut singleton_validation;
+    let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
+        singleton_validation = request.clone();
+        singleton_validation.batch_size = 1;
+        &singleton_validation
+    } else {
+        &*request
+    };
+    if let Err(e) = validate_generate_request(validation_request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));
     }
 
@@ -562,6 +647,18 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning, preferred_gpu))
+}
+
+async fn normalize_generation_placement(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) {
+    let effective = state
+        .config
+        .read()
+        .await
+        .effective_placement(&request.model, request.placement.as_ref());
+    request.placement = Some(effective);
 }
 
 /// Record an accepted generation prompt into prompt history (best-effort;
@@ -617,16 +714,21 @@ pub(crate) async fn resolve_server_local_media_paths(
 }
 
 fn active_gpu_selection(state: &AppState) -> GpuSelection {
-    let ordinals: Vec<usize> = state
+    let selectors: Vec<mold_core::types::GpuSelector> = state
         .gpu_pool
         .workers
         .iter()
-        .map(|w| w.gpu.ordinal)
+        .map(|worker| {
+            worker.gpu.stable_id.as_ref().map_or_else(
+                || mold_core::types::GpuSelector::Ordinal(worker.gpu.ordinal),
+                |id| mold_core::types::GpuSelector::Identifier(id.clone()),
+            )
+        })
         .collect();
-    if ordinals.is_empty() {
-        GpuSelection::All
+    if selectors.is_empty() {
+        GpuSelection::None
     } else {
-        GpuSelection::Specific(ordinals)
+        GpuSelection::Specific(selectors)
     }
 }
 
@@ -640,38 +742,141 @@ fn validate_multi_gpu_placement(
         .map_err(ApiError::validation)
 }
 
-fn select_aux_worker(
-    state: &AppState,
-) -> Result<std::sync::Arc<crate::gpu_pool::GpuWorker>, ApiError> {
-    let mut workers: Vec<_> = state
-        .gpu_pool
-        .workers
-        .iter()
-        .filter(|w| !w.is_degraded())
-        .cloned()
-        .collect();
-    workers.sort_by_key(|w| {
-        (
-            w.in_flight.load(Ordering::SeqCst),
-            Reverse(w.gpu.total_vram_bytes),
-        )
-    });
-    workers
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("no GPU worker available for auxiliary workload"))
-}
-
-fn clear_global_upscaler_cache(state: &AppState) {
-    if let Ok(mut cache) = state.upscaler_cache.try_lock() {
-        if cache.is_some() {
-            *cache = None;
-            tracing::info!("upscaler cache cleared");
+async fn clear_global_upscaler_cache(state: &AppState) {
+    if state.gpu_pool.worker_count() > 0 {
+        // GPU-worker mode never populates the legacy global cache. All
+        // upscaler engines are created and dropped inside an owner command.
+        return;
+    }
+    let cache = state.upscaler_cache.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        if let Ok(mut cache) = cache.try_lock() {
+            if let Some(mut engine) = cache.take() {
+                engine.unload();
+                tracing::info!("upscaler cache cleared");
+            }
         }
+    })
+    .await
+    {
+        tracing::warn!(%error, "upscaler cache teardown task panicked");
     }
 }
 
+async fn schedule_standalone_upscale(
+    state: &AppState,
+    model: String,
+    weights_path: std::path::PathBuf,
+    request: mold_core::UpscaleRequest,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<mold_core::UpscaleResponse, ApiError> {
+    let id = format!("standalone-upscale-{}", uuid::Uuid::new_v4());
+    let estimated_vram_bytes = std::fs::metadata(&weights_path)
+        .map(|metadata| metadata.len().saturating_add(2 << 30))
+        .unwrap_or(2 << 30);
+    let utility_plans = crate::scheduler::upscale_candidates(state, &model, &weights_path)
+        .map_err(|error| {
+            ApiError::generation_unavailable(format!(
+                "upscaler execution plan could not be frozen: {error}"
+            ))
+        })?;
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let job = crate::gpu_pool::StandaloneUpscaleJob {
+        id: id.clone(),
+        model: model.clone(),
+        weights_path,
+        request,
+        progress_tx,
+        cancellation: mold_inference::InferenceCancellationToken::default(),
+        execution_plan: None,
+        result_tx,
+    };
+    let work = crate::gpu_pool::OwnerWork::StandaloneUpscale(Box::new(job));
+    state
+        .scheduled_work
+        .submit(
+            crate::scheduler::ScheduledOwnerWork::new(id, model, estimated_vram_bytes, work)
+                .with_utility_plans(utility_plans),
+        )
+        .await
+        .map_err(ApiError::generation_unavailable)?;
+    result_rx
+        .await
+        .map_err(|_| ApiError::internal("upscale owner worker dropped its result"))?
+        .map_err(|error| ApiError::internal(format!("upscale failed: {error}")))
+}
+
+async fn schedule_local_expansion(
+    state: &AppState,
+    config: mold_core::Config,
+    settings: mold_core::ExpandSettings,
+    prompt: String,
+    expand_config: mold_core::ExpandConfig,
+    preferred_gpu: Option<usize>,
+) -> Result<mold_core::ExpandResult, ApiError> {
+    let id = format!("prompt-expansion-{}", uuid::Uuid::new_v4());
+    let estimated_vram_bytes = 6_000_000_000;
+    let model = settings.model.clone();
+    #[cfg(feature = "expand")]
+    let utility_plans = crate::scheduler::prompt_expansion_candidates(state, &config, Some(&model))
+        .map_err(|error| {
+            ApiError::generation_unavailable(format!(
+                "prompt expansion execution plan could not be frozen: {error}"
+            ))
+        })?;
+    let cancellation = mold_inference::InferenceCancellationToken::default();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let work = crate::gpu_pool::OwnerWork::PromptExpansion(Box::new(
+        crate::gpu_pool::PromptExpansionJob {
+            id: id.clone(),
+            parent_id: id.clone(),
+            config,
+            settings,
+            prompt,
+            expand_config,
+            cancellation,
+            #[cfg(feature = "expand")]
+            execution_plan: None,
+            result_tx,
+        },
+    ));
+    state
+        .scheduled_work
+        .submit(
+            crate::scheduler::ScheduledOwnerWork::new(id, model, estimated_vram_bytes, work)
+                .with_hard_ordinal(preferred_gpu)
+                .with_utility_plans({
+                    #[cfg(feature = "expand")]
+                    {
+                        utility_plans
+                    }
+                    #[cfg(not(feature = "expand"))]
+                    {
+                        Vec::new()
+                    }
+                }),
+        )
+        .await
+        .map_err(ApiError::generation_unavailable)?;
+    result_rx
+        .await
+        .map_err(|_| ApiError::internal("prompt expansion owner worker dropped its result"))?
+        .map_err(|error| ApiError::internal(format!("prompt expansion failed: {error}")))
+}
+
 // ── /api/generate ─────────────────────────────────────────────────────────────
+
+fn validate_live_server_batch_admission(
+    request: &mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    crate::batch_runtime::validate_live_server_batch_size(request).map_err(|error| {
+        ApiError::with_code(
+            error.to_string(),
+            crate::batch_runtime::BATCH_OUTPUT_LIMIT_EXCEEDED_CODE,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    })
+}
 
 #[utoipa::path(
     post,
@@ -679,19 +884,20 @@ fn clear_global_upscaler_cache(state: &AppState) {
     tag = "generation",
     request_body = mold_core::GenerateRequest,
     responses(
-        (status = 200, description = "Generated image bytes", content_type = "image/png"),
+        (status = 200, description = "Singleton requests return generated media bytes with the matching image/video Content-Type; server-owned batches return application/json BatchGenerateResponse"),
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
         (status = 503, description = "Generation queue full"),
     )
 )]
-// The server always produces 1 image per request; batch looping (--batch N)
-// is handled client-side by the CLI, which sends N requests with incrementing seeds.
+// Singleton requests preserve the legacy raw-media response. Raw batch_size>1
+// requests use the authoritative scheduler and return one atomic JSON parent.
 async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
+    validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -701,6 +907,36 @@ async fn generate(
     );
     let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
+
+    if req.batch_size > 1 {
+        if !state.scheduled_work.v2_authoritative() {
+            return Err(ApiError::validation(
+                "server-owned batches require authoritative scheduler V2",
+            ));
+        }
+        let output_dir = output_dir.ok_or_else(|| {
+            ApiError::validation(
+                "server-owned atomic batches require server gallery output to be enabled",
+            )
+        })?;
+        let authority = crate::batch_runtime::register_server_batch(&state);
+        let completed = crate::batch_runtime::spawn_server_batch(
+            state.clone(),
+            authority,
+            req,
+            output_dir,
+            crate::batch_runtime::ServerBatchDelivery::Json,
+        )
+        .await
+        .map_err(|_| ApiError::internal("server batch supervisor exited without a result"))?
+        .map_err(|error| ApiError::inference(format!("server batch failed: {error:#}")))?;
+        let crate::batch_runtime::CompletedServerBatch::Json(response) = completed else {
+            return Err(ApiError::internal(
+                "server batch supervisor returned the wrong delivery shape",
+            ));
+        };
+        return Ok(batch_generate_response(response));
+    }
 
     tracing::info!(
         model = %req.model,
@@ -748,6 +984,7 @@ async fn generate(
         progress_tx: None,
         result_tx,
         output_dir,
+        batch_child: None,
     };
 
     let _position = state
@@ -841,7 +1078,7 @@ async fn generate(
             } else {
                 img.data
             };
-            Ok((headers, output_data))
+            Ok((headers, output_data).into_response())
         }
         Err(err_msg) => {
             // The multi-GPU dispatcher sends a queue-full error through result_tx
@@ -854,6 +1091,10 @@ async fn generate(
             }
         }
     }
+}
+
+pub(crate) fn batch_generate_response(response: mold_core::BatchGenerateResponse) -> Response {
+    Json(response).into_response()
 }
 
 fn validate_generate_request(
@@ -885,6 +1126,15 @@ async fn maybe_expand_prompt(
     let config = state.config.read().await;
     let config_snapshot = config.clone();
     let expand_settings = config.expand.clone().with_env_overrides();
+    if (state.scheduled_work.v2_authoritative() || state.gpu_pool.worker_count() > 0)
+        && expand_settings.is_local()
+    {
+        // The scheduler owns local expansion as a PromptExpansion dependency
+        // stage. Leaving the request untouched lets the parent enter the
+        // queue immediately; the coordinator freezes the expanded prompt
+        // before making Generation ready.
+        return Ok(());
+    }
 
     // Resolve model family for prompt style
     let model_family = config
@@ -938,18 +1188,16 @@ fn create_server_expander(
 
     #[cfg(feature = "expand")]
     {
-        if let Some(local) =
-            mold_inference::expand::LocalExpander::from_config(_config, Some(&settings.model))
-        {
-            return Ok(Box::new(
+        match mold_inference::expand::LocalExpander::from_config(_config, Some(&settings.model)) {
+            Some(local) => Ok(Box::new(
                 local
                     .with_gpu_selection(_gpu_selection)
                     .with_preferred_gpu(_preferred_gpu),
-            ));
+            )),
+            None => Err(ApiError::validation(
+                "local expand model not found — run: mold pull qwen3-expand".to_string(),
+            )),
         }
-        return Err(ApiError::validation(
-            "local expand model not found — run: mold pull qwen3-expand".to_string(),
-        ));
     }
 
     #[cfg(not(feature = "expand"))]
@@ -1005,6 +1253,22 @@ async fn expand_prompt(
     let config_snapshot = config.clone();
     drop(config);
 
+    if state.gpu_pool.worker_count() > 0 && expand_settings.is_local() {
+        let result = schedule_local_expansion(
+            &state,
+            config_snapshot,
+            expand_settings,
+            prompt,
+            expand_config,
+            None,
+        )
+        .await?;
+        return Ok(Json(mold_core::ExpandResponse {
+            original: req.prompt,
+            expanded: result.expanded,
+        }));
+    }
+
     let expander = create_server_expander(
         &config_snapshot,
         &expand_settings,
@@ -1028,6 +1292,10 @@ async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
+    ensure_generation_available(&state)?;
+    if !state.scheduled_work.v2_authoritative() {
+        ensure_schedulable_device(&state)?;
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1068,39 +1336,8 @@ async fn upscale(
     let model_name_owned = model_name.clone();
     drop(config);
 
-    let resp = if state.gpu_pool.worker_count() > 0 {
-        let worker = select_aux_worker(&state)?;
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
-        let worker_clone = worker.clone();
-        let joined =
-            tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
-                struct ThreadGpuGuard;
-                impl Drop for ThreadGpuGuard {
-                    fn drop(&mut self) {
-                        mold_inference::device::clear_thread_gpu_ordinal();
-                    }
-                }
-
-                mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
-                let _thread_gpu = ThreadGpuGuard;
-                let _load_lock = worker_clone.model_load_lock.lock().unwrap();
-                crate::gpu_worker::ensure_worker_not_poisoned(&worker_clone, &model_name_owned)?;
-                let mut engine = mold_inference::create_upscale_engine(
-                    model_name_owned,
-                    weights_path,
-                    mold_inference::LoadStrategy::Eager,
-                    worker_clone.gpu.ordinal,
-                )?;
-                engine.upscale(&req)
-            })
-            .await;
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-        let result =
-            joined.map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?;
-        if let Err(error) = &result {
-            crate::gpu_worker::quarantine_if_fatal_cuda_error(&worker, error);
-        }
-        result.map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
+    let resp = if state.scheduled_work.v2_authoritative() || state.gpu_pool.worker_count() > 0 {
+        schedule_standalone_upscale(&state, model_name_owned, weights_path, req, None).await?
     } else {
         let upscaler_cache = state.upscaler_cache.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
@@ -1117,6 +1354,9 @@ async fn upscale(
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
+                if let Some(mut old_engine) = cache.take() {
+                    old_engine.unload();
+                }
                 *cache = Some(new_engine);
             }
 
@@ -1136,6 +1376,10 @@ async fn upscale_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    ensure_generation_available(&state)?;
+    if !state.scheduled_work.v2_authoritative() {
+        ensure_schedulable_device(&state)?;
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1265,114 +1509,42 @@ async fn upscale_stream(
             return;
         };
 
-        let result = if state_clone.gpu_pool.worker_count() > 0 {
-            match select_aux_worker(&state_clone) {
-                Ok(worker) => {
-                    worker.in_flight.fetch_add(1, Ordering::SeqCst);
-                    let worker_clone = worker.clone();
-                    let tx_for_worker = tx.clone();
-                    let model_name_for_worker = model_name_owned.clone();
-                    let weights_path_for_worker = weights_path.clone();
-                    let req_for_worker = req.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        struct ThreadGpuGuard;
-                        impl Drop for ThreadGpuGuard {
-                            fn drop(&mut self) {
-                                mold_inference::device::clear_thread_gpu_ordinal();
-                            }
-                        }
-
-                        mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
-                        let _thread_gpu = ThreadGpuGuard;
-                        let _load_lock = worker_clone.model_load_lock.lock().unwrap();
-                        if let Err(error) = crate::gpu_worker::ensure_worker_not_poisoned(
-                            &worker_clone,
-                            &model_name_for_worker,
-                        ) {
-                            let _ =
-                                tx_for_worker.send(SseMessage::Error(mold_core::SseErrorEvent {
-                                    message: error.to_string(),
-                                }));
-                            return;
-                        }
-                        let _ = tx_for_worker.send(SseMessage::Progress(
-                            mold_core::SseProgressEvent::StageStart {
-                                name: format!(
-                                    "Loading upscaler model on GPU {}",
-                                    worker_clone.gpu.ordinal
-                                ),
-                            },
-                        ));
-                        let mut engine = match mold_inference::create_upscale_engine(
-                            model_name_for_worker,
-                            weights_path_for_worker,
-                            mold_inference::LoadStrategy::Eager,
-                            worker_clone.gpu.ordinal,
-                        ) {
-                            Ok(engine) => engine,
-                            Err(e) => {
-                                crate::gpu_worker::quarantine_if_fatal_cuda_error(
-                                    &worker_clone,
-                                    &e,
-                                );
-                                let _ = tx_for_worker.send(SseMessage::Error(
-                                    mold_core::SseErrorEvent {
-                                        message: format!("failed to load upscaler: {e}"),
-                                    },
-                                ));
-                                return;
-                            }
-                        };
-
-                        let tx_progress = tx_for_worker.clone();
-                        engine.set_on_progress(Box::new(move |event| {
-                            let sse_event: mold_core::SseProgressEvent = event.into();
-                            let _ = tx_progress.send(SseMessage::Progress(sse_event));
-                        }));
-
-                        match engine.upscale(&req_for_worker) {
-                            Ok(resp) => {
-                                let image_b64 = base64::engine::general_purpose::STANDARD
-                                    .encode(&resp.image.data);
-                                let _ = tx_for_worker.send(SseMessage::UpscaleComplete(
-                                    mold_core::SseUpscaleCompleteEvent {
-                                        image: image_b64,
-                                        format: resp.image.format,
-                                        model: resp.model,
-                                        scale_factor: resp.scale_factor,
-                                        original_width: resp.original_width,
-                                        original_height: resp.original_height,
-                                        upscale_time_ms: resp.upscale_time_ms,
-                                    },
-                                ));
-                            }
-                            Err(e) => {
-                                crate::gpu_worker::quarantine_if_fatal_cuda_error(
-                                    &worker_clone,
-                                    &e,
-                                );
-                                let _ = tx_for_worker.send(SseMessage::Error(
-                                    mold_core::SseErrorEvent {
-                                        message: format!("upscale failed: {e}"),
-                                    },
-                                ));
-                            }
-                        }
-
-                        engine.clear_on_progress();
-                    })
-                    .await;
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-                    result
+        if state_clone.scheduled_work.v2_authoritative() || state_clone.gpu_pool.worker_count() > 0
+        {
+            match schedule_standalone_upscale(
+                &state_clone,
+                model_name_owned,
+                weights_path,
+                req,
+                Some(tx.clone()),
+            )
+            .await
+            {
+                Ok(resp) => {
+                    let image_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
+                    let _ = tx.send(SseMessage::UpscaleComplete(
+                        mold_core::SseUpscaleCompleteEvent {
+                            image: image_b64,
+                            format: resp.image.format,
+                            model: resp.model,
+                            scale_factor: resp.scale_factor,
+                            original_width: resp.original_width,
+                            original_height: resp.original_height,
+                            upscale_time_ms: resp.upscale_time_ms,
+                        },
+                    ));
                 }
-                Err(e) => {
+                Err(error) => {
                     let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: e.error,
+                        message: error.error,
                     }));
-                    return;
                 }
             }
-        } else {
+            return;
+        }
+
+        let result = {
             let model_name_for_cache = model_name_owned.clone();
             let weights_path_for_cache = weights_path.clone();
             let req_for_cache = req.clone();
@@ -1395,6 +1567,9 @@ async fn upscale_stream(
                         0,
                     ) {
                         Ok(new_engine) => {
+                            if let Some(mut old_engine) = cache.take() {
+                                old_engine.unload();
+                            }
                             *cache = Some(new_engine);
                         }
                         Err(e) => {
@@ -1496,8 +1671,9 @@ async fn generate_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let completion_payload = requested_sse_completion_payload(&headers)?;
+    validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -1512,6 +1688,76 @@ async fn generate_stream(
         ));
     }
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
+
+    if req.batch_size > 1 {
+        if !state.scheduled_work.v2_authoritative() {
+            return Err(ApiError::validation(
+                "server-owned batches require authoritative scheduler V2",
+            ));
+        }
+        let output_dir = output_dir.ok_or_else(|| {
+            ApiError::validation(
+                "server-owned atomic batches require server gallery output to be enabled",
+            )
+        })?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+        if let Some(warning) = dim_warning {
+            let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
+                message: warning,
+            }));
+        }
+        let authority = crate::batch_runtime::register_server_batch(&state);
+        let parent_id = authority.id().to_string();
+        let position = state.job_registry.len();
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
+            position,
+            id: parent_id,
+        }));
+        let state_clone = state.clone();
+        let result_rx = crate::batch_runtime::spawn_server_batch(
+            state_clone,
+            authority,
+            req,
+            output_dir,
+            crate::batch_runtime::ServerBatchDelivery::Sse(completion_payload),
+        );
+        tokio::spawn(async move {
+            match result_rx.await {
+                Ok(completed) => match completed {
+                    Ok(completed) => {
+                        if let crate::batch_runtime::CompletedServerBatch::Sse(event) = completed {
+                            let _ = tx.send(SseMessage::BatchComplete(Box::new(event)));
+                        } else {
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                message:
+                                    "server batch supervisor returned the wrong delivery shape"
+                                        .to_string(),
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                            message: format!("server batch failed: {error:#}"),
+                        }));
+                    }
+                },
+                Err(_) => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: "server batch supervisor exited without a result".to_string(),
+                    }));
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+            .map(|message| Ok::<_, Infallible>(sse_message_to_event(message)));
+        return Ok(Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response());
+    }
 
     tracing::info!(
         model = %req.model,
@@ -1557,6 +1803,7 @@ async fn generate_stream(
         progress_tx: Some(tx.clone()),
         result_tx,
         output_dir,
+        batch_child: None,
     };
 
     let position = state
@@ -1607,11 +1854,13 @@ async fn generate_stream(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
-    ))
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response())
 }
 
 // ── /api/models ───────────────────────────────────────────────────────────────
@@ -1635,6 +1884,91 @@ async fn generate_estimate(
     Ok(Json(
         model_manager::estimate_generation_memory(&state, &req).await?,
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/generate/placement-preview",
+    tag = "generation",
+    request_body = mold_core::GenerationPlacementPreviewRequest,
+    responses(
+        (status = 200, description = "Read-only scheduler placement projection", body = mold_core::GenerationPlacementPreview)
+    )
+)]
+async fn generate_placement_preview(
+    State(state): State<AppState>,
+    Json(preview): Json<mold_core::GenerationPlacementPreviewRequest>,
+) -> Json<mold_core::GenerationPlacementPreview> {
+    Json(placement_preview_for_request(&state, preview.request, preview.copies).await)
+}
+
+pub(crate) async fn placement_preview_for_request(
+    state: &AppState,
+    request: GenerateRequest,
+    copies: u32,
+) -> mold_core::GenerationPlacementPreview {
+    let plan = state.scheduled_work.latest_plan();
+    let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
+        version: 1,
+        authoritative: false,
+        state_version: plan.as_ref().map_or(0, |plan| plan.state_version),
+        plan_version: plan.as_ref().map_or(0, |plan| plan.plan_version),
+        outcome: outcome.to_string(),
+        reason: Some(reason),
+        candidate: None,
+        stage_candidates: Vec::new(),
+    };
+    if !(1..=64).contains(&copies) {
+        let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
+        response.authoritative = true;
+        return response;
+    }
+    let has_post_upscale = request
+        .upscale_model
+        .as_deref()
+        .is_some_and(|model| !model.trim().is_empty());
+    let has_local_expansion = request.expand == Some(true)
+        && state
+            .config
+            .read()
+            .await
+            .expand
+            .clone()
+            .with_env_overrides()
+            .is_local();
+    if has_local_expansion || has_post_upscale {
+        return unavailable(
+            "unsupported",
+            "exact utility CPU/GPU placement plans are not available on this server".to_string(),
+        );
+    }
+    if !state.scheduled_work.v2_authoritative()
+        || !state.scheduled_work.placement_preview_available()
+    {
+        return unavailable(
+            "unsupported",
+            "authoritative scheduler placement preview is unavailable".to_string(),
+        );
+    }
+    let prepared =
+        match crate::variant_dependencies::prepare_execution_inputs_existing_only(state, &request)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let mut response = unavailable("infeasible", error);
+                response.authoritative = true;
+                return response;
+            }
+        };
+    match state
+        .scheduled_work
+        .preview_placement(request, copies, prepared)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => unavailable("temporarily_unavailable", error),
+    }
 }
 
 async fn model_components(
@@ -1674,6 +2008,7 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    ensure_schedulable_device(&state)?;
     if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
         return Err(model_manager::install_error_to_api_error(&e));
     }
@@ -1681,42 +2016,52 @@ async fn load_model(
 
     // Multi-GPU path: route through the pool.
     if state.gpu_pool.worker_count() > 0 {
-        let worker = match body.gpu {
-            Some(ordinal) => state
+        if let Some(ordinal) = body.gpu {
+            if !state
                 .gpu_pool
-                .workers
+                .schedulable_workers()
                 .iter()
-                .find(|w| w.gpu.ordinal == ordinal)
-                .cloned()
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("no GPU worker with ordinal {ordinal}"))
-                })?,
-            None => {
-                let est = crate::queue::estimate_model_vram(&body.model);
-                state
-                    .gpu_pool
-                    .select_worker(&body.model, est)
-                    .ok_or_else(|| {
-                        ApiError::internal(format!(
-                            "no GPU available to load model '{}'",
-                            body.model
-                        ))
-                    })?
+                .any(|worker| worker.gpu.ordinal == ordinal)
+            {
+                return Err(ApiError::not_found(format!(
+                    "no GPU worker with ordinal {ordinal}"
+                )));
             }
-        };
+        }
         let config_snapshot = state.config.read().await.clone();
         let model_name = body.model.clone();
-        let worker_clone = worker.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::gpu_worker::load_blocking(&worker_clone, &model_name, &config_snapshot)
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?
-        .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
+        let id = format!("admin-model-load-{}", uuid::Uuid::new_v4());
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work = crate::gpu_pool::OwnerWork::AdminModelLoad(Box::new(
+            crate::gpu_pool::AdminModelLoadJob {
+                id: id.clone(),
+                model: model_name.clone(),
+                config: config_snapshot,
+                result_tx,
+            },
+        ));
+        state
+            .scheduled_work
+            .submit(
+                crate::scheduler::ScheduledOwnerWork::new(
+                    id,
+                    model_name,
+                    crate::queue::estimate_model_vram(&body.model),
+                    work,
+                )
+                .with_hard_ordinal(body.gpu)
+                .with_priority(mold_scheduler::PriorityClass::Admin),
+            )
+            .await
+            .map_err(ApiError::generation_unavailable)?;
+        result_rx
+            .await
+            .map_err(|_| ApiError::internal("model-load owner worker dropped its result"))?
+            .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
 
         tracing::info!(
             model = %body.model,
-            gpu = worker.gpu.ordinal,
+            gpu = ?body.gpu,
             "model loaded via API"
         );
         return Ok(StatusCode::OK);
@@ -1973,8 +2318,6 @@ async fn unload_model(
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
-    clear_global_upscaler_cache(&state);
-
     // Multi-GPU path: target specific GPU or model across the pool.
     if state.gpu_pool.worker_count() > 0 {
         // Select the workers to unload from.
@@ -1984,22 +2327,20 @@ async fn unload_model(
                 .workers
                 .iter()
                 .filter(|w| w.gpu.ordinal == ordinal)
-                .cloned()
                 .collect(),
             (None, Some(model)) => state
                 .gpu_pool
                 .workers
                 .iter()
                 .filter(|w| {
-                    let cache = w.model_cache.lock().unwrap();
-                    cache
-                        .get(model)
-                        .map(|e| e.residency == crate::model_cache::ModelResidency::Gpu)
-                        .unwrap_or(false)
+                    w.resident_model
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_deref()
+                        == Some(model)
                 })
-                .cloned()
                 .collect(),
-            (None, None) => state.gpu_pool.workers.clone(),
+            (None, None) => state.gpu_pool.worker_snapshot(),
         };
 
         if targets.is_empty() {
@@ -2008,12 +2349,36 @@ async fn unload_model(
 
         let mut unloaded_pairs: Vec<(usize, String)> = Vec::new();
         for worker in targets {
-            let worker_clone = worker.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::gpu_worker::unload_blocking(&worker_clone)
-            })
-            .await
-            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?;
+            let id = format!("admin-model-unload-{}", uuid::Uuid::new_v4());
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let work = crate::gpu_pool::OwnerWork::AdminModelUnload(Box::new(
+                crate::gpu_pool::AdminModelUnloadJob {
+                    id: id.clone(),
+                    model: req.model.clone(),
+                    evict_cached: false,
+                    result_tx,
+                },
+            ));
+            state
+                .scheduled_work
+                .submit(
+                    crate::scheduler::ScheduledOwnerWork::new(
+                        id,
+                        req.model
+                            .clone()
+                            .unwrap_or_else(|| "admin-unload".to_string()),
+                        0,
+                        work,
+                    )
+                    .with_hard_ordinal(Some(worker.gpu.ordinal))
+                    .with_priority(mold_scheduler::PriorityClass::Admin),
+                )
+                .await
+                .map_err(ApiError::generation_unavailable)?;
+            let result = result_rx
+                .await
+                .map_err(|_| ApiError::internal("model-unload owner worker dropped its result"))?
+                .map_err(|error| ApiError::internal(format!("unload failed: {error}")))?;
             if let Some(name) = result {
                 unloaded_pairs.push((worker.gpu.ordinal, name));
             }
@@ -2032,6 +2397,7 @@ async fn unload_model(
     }
 
     // Legacy single-GPU path.
+    clear_global_upscaler_cache(&state).await;
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -2062,8 +2428,8 @@ async fn model_is_gpu_resident(state: &AppState, canonical: &str) -> bool {
                 return true;
             }
         }
-        if let Ok(cache) = worker.model_cache.lock() {
-            if cache.active_model() == Some(canonical) {
+        if let Ok(resident) = worker.resident_model.read() {
+            if resident.as_deref() == Some(canonical) {
                 return true;
             }
         }
@@ -2148,9 +2514,29 @@ async fn delete_model(
         let _ = cache.remove(&canonical);
     }
     for worker in &state.gpu_pool.workers {
-        if let Ok(mut cache) = worker.model_cache.lock() {
-            let _ = cache.remove(&canonical);
-        }
+        let id = format!("admin-model-evict-{}", uuid::Uuid::new_v4());
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work = crate::gpu_pool::OwnerWork::AdminModelUnload(Box::new(
+            crate::gpu_pool::AdminModelUnloadJob {
+                id: id.clone(),
+                model: Some(canonical.clone()),
+                evict_cached: true,
+                result_tx,
+            },
+        ));
+        state
+            .scheduled_work
+            .submit(
+                crate::scheduler::ScheduledOwnerWork::new(id, canonical.clone(), 0, work)
+                    .with_hard_ordinal(Some(worker.gpu.ordinal))
+                    .with_priority(mold_scheduler::PriorityClass::Admin),
+            )
+            .await
+            .map_err(ApiError::generation_unavailable)?;
+        result_rx
+            .await
+            .map_err(|_| ApiError::internal("model-eviction owner worker dropped its result"))?
+            .map_err(|error| ApiError::internal(format!("model eviction failed: {error}")))?;
     }
 
     let kept = plan
@@ -2238,31 +2624,14 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
 
-    // Aggregate worker state from the pool, then overlay physical memory from
-    // the always-on NVML/nvidia-smi resource sampler. CUDA context queries can
-    // fail after an illegal-access Xid and used to turn a real 35 GB leak into
-    // a misleading zero in /api/status.
-    let mut gpu_statuses = state.gpu_pool.gpu_status();
-    if let Some(resources) = state.resources.latest() {
-        let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
-        for status in &mut gpu_statuses {
-            let Some(physical_ordinal) = crate::resources::physical_ordinal_for_worker(
-                status.ordinal,
-                visible_devices.as_deref(),
-            ) else {
-                continue;
-            };
-            if let Some(snapshot) = resources
-                .gpus
-                .iter()
-                .find(|gpu| gpu.ordinal == physical_ordinal)
-            {
-                status.vram_total_bytes = snapshot.vram_total;
-                status.vram_used_bytes = snapshot.vram_used;
-            }
-        }
-    }
+    // One registry snapshot backs both the additive device API and legacy
+    // status projections. It reads only the 1 Hz telemetry cache and worker
+    // atomics/locks; status never shells out or queries CUDA.
+    let devices = current_device_state(&state);
+    let gpu_statuses =
+        crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(&devices);
     let has_gpus = !gpu_statuses.is_empty();
+    let has_device_inventory = !devices.devices.is_empty();
 
     // Collect loaded models from GPU workers.
     let gpu_models_loaded: Vec<String> = gpu_statuses
@@ -2328,17 +2697,289 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         models_loaded,
         busy,
         current_generation,
-        gpu_info: query_gpu_info(),
+        gpu_info: crate::device_registry::DeviceRegistry::legacy_gpu_info(&devices),
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
-        memory_status: mold_inference::device::memory_status_string(),
-        gpus: if has_gpus { Some(gpu_statuses) } else { None },
+        memory_status: crate::device_registry::DeviceRegistry::legacy_memory_status(&devices),
+        gpus: if has_device_inventory {
+            Some(gpu_statuses)
+        } else {
+            None
+        },
         queue_depth: Some(state.queue.pending()),
         queue_capacity: Some(state.queue_capacity),
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
     })
+}
+
+/// Stable read-only inventory of every runtime-visible device. Unsupported
+/// telemetry stays null and the handler never performs device discovery.
+#[utoipa::path(
+    get,
+    path = "/api/devices",
+    tag = "server",
+    responses(
+        (status = 200, description = "Runtime-visible device inventory", body = DeviceState),
+    )
+)]
+async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
+    Json(current_device_state(&state))
+}
+
+pub(crate) fn current_device_state(state: &AppState) -> DeviceState {
+    let resources = state.resources.latest();
+    let mut snapshot =
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let authoritative_v2 = state.scheduled_work.v2_authoritative();
+    if !authoritative_v2 {
+        // Legacy and observe modes keep their restart-time workers as the
+        // runtime authority. A persisted V2 preference must never make an
+        // actively dispatching legacy worker appear disabled.
+        for device in &mut snapshot.devices {
+            let live_worker = device
+                .ordinal
+                .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal));
+            if live_worker.is_some() {
+                // Only administrative ownership rolls back outside
+                // authoritative V2. Health, cooldowns, routing eligibility,
+                // and their reason remain the registry's authority.
+                device.admin_state = mold_core::DeviceAdminState::Enabled;
+            }
+        }
+    }
+    annotate_restart_required(state, &mut snapshot);
+    if authoritative_v2 {
+        if let Some(plan) = state.scheduled_work.latest_plan() {
+            snapshot.plan_version = plan.plan_version;
+            for device in &mut snapshot.devices {
+                device.planned_work_ids = plan
+                    .work_items
+                    .iter()
+                    .filter(|work| work.planned_device_id.as_deref() == Some(device.id.as_str()))
+                    .map(|work| work.work_id.clone())
+                    .collect();
+            }
+        }
+    }
+    snapshot
+}
+
+fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
+    if state.scheduled_work.v2_authoritative() {
+        return;
+    }
+    let live_owners: std::collections::BTreeSet<String> = state
+        .gpu_pool
+        .worker_snapshot()
+        .iter()
+        .map(|worker| crate::scheduler::worker_device_id(worker))
+        .collect();
+    for device in &mut snapshot.devices {
+        device.restart_required = device.desired_enabled
+            && device.admin_state != DeviceAdminState::StartupExcluded
+            && !live_owners.contains(&device.id)
+            && !state.gpu_pool.workers.is_starting(&device.id);
+    }
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/devices/{id}",
+    tag = "server",
+    params(("id" = String, Path, description = "Opaque stable device ID")),
+    request_body = DeviceMutationRequest,
+    responses(
+        (status = 200, description = "Requested lifecycle state reached"),
+        (status = 202, description = "Device is draining or starting"),
+        (status = 404, description = "Unknown stable device ID"),
+        (status = 409, description = "Runtime lifecycle unavailable in this dispatch mode"),
+        (status = 503, description = "Fresh owner thread could not be started"),
+    )
+)]
+async fn patch_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    request_id: Option<Extension<crate::request_id::RequestId>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(request): Json<DeviceMutationRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    let discovered = state
+        .device_registry
+        .discovered_device(&device_id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown device '{device_id}'")))?;
+    if request.enabled && !discovered.startup_allowed {
+        return Err(ApiError::with_code(
+            format!(
+                "device '{device_id}' was excluded by startup selection and requires a restart"
+            ),
+            "DEVICE_STARTUP_EXCLUDED",
+            StatusCode::CONFLICT,
+        ));
+    }
+
+    // A non-authoritative runtime cannot touch live owners, but it must let an
+    // operator recover a persistently-disabled GPU for the next restart.
+    if !state.scheduled_work.v2_authoritative() && request.enabled {
+        let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+        let already_enabled = state.device_registry.desired_enabled(&device_id);
+        if !already_enabled {
+            state
+                .device_registry
+                .set_desired_enabled(&device_id, true)
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to persist device preference: {error:#}"))
+                })?;
+        }
+        let resources = state.resources.latest();
+        let mut snapshot = state.device_registry.snapshot(
+            &state.gpu_pool,
+            resources.as_ref(),
+            &state.job_registry,
+        );
+        annotate_restart_required(&state, &mut snapshot);
+        let device = snapshot
+            .devices
+            .into_iter()
+            .find(|device| device.id == device_id)
+            .ok_or_else(|| ApiError::internal("device disappeared during preference mutation"))?;
+        let status = if device.restart_required && !already_enabled {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        return Ok((status, Json(device)).into_response());
+    }
+    if !state.scheduled_work.v2_authoritative() {
+        return Err(ApiError::with_code(
+            "disabling a live GPU requires an authoritative scheduler V2 runtime",
+            "DEVICE_LIFECYCLE_MODE_CONFLICT",
+            StatusCode::CONFLICT,
+        ));
+    }
+
+    let old_desired = state.device_registry.desired_enabled(&device_id);
+    let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+    state
+        .device_registry
+        .set_desired_enabled(&device_id, request.enabled)
+        .map_err(|error| {
+            ApiError::internal(format!("failed to persist device preference: {error:#}"))
+        })?;
+
+    let mut asynchronous = false;
+    let mut started_epoch = None;
+    if request.enabled {
+        if !state.gpu_pool.workers.cancel_drain(&device_id) {
+            if state
+                .gpu_pool
+                .worker_snapshot()
+                .iter()
+                .any(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            {
+                // The old owner already committed to exit. Its exact Stopped
+                // reduction observes desired=true and creates the replacement.
+                asynchronous = true;
+            } else {
+                started_epoch =
+                    Some(state.gpu_pool.workers.start(&device_id).map_err(|error| {
+                        ApiError::with_code(
+                            format!("device '{device_id}' remains unavailable: {error}"),
+                            "NO_SCHEDULABLE_DEVICE",
+                            StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                    })?);
+                asynchronous = true;
+            }
+        }
+    } else if let Some(worker) = state
+        .gpu_pool
+        .worker_snapshot()
+        .into_iter()
+        .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+    {
+        let owner_epoch = worker.owner_epoch;
+        let busy = state
+            .gpu_pool
+            .workers
+            .request_disable(&device_id)
+            .map_err(ApiError::internal)?;
+        if busy {
+            asynchronous = true;
+        } else {
+            let pool = state.gpu_pool.clone();
+            let id = device_id.clone();
+            tokio::task::spawn_blocking(move || pool.workers.wait_and_reap(&id, owner_epoch))
+                .await
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to join GPU owner thread: {error}"))
+                })?;
+        }
+    }
+
+    let resources = state.resources.latest();
+    let snapshot =
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let device = snapshot
+        .devices
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
+    if let Some(owner_epoch) = started_epoch {
+        match state
+            .gpu_pool
+            .workers
+            .announce_start(&device_id, owner_epoch)
+        {
+            crate::gpu_pool::StartAnnouncement::Ready => {
+                state
+                    .events
+                    .publish(mold_core::ServerEvent::DeviceStateChanged {
+                        device_id: device.id.clone(),
+                        desired_enabled: true,
+                        admin_state: DeviceAdminState::Enabled,
+                    });
+            }
+            crate::gpu_pool::StartAnnouncement::Failed(error) => {
+                tracing::error!(
+                    device_id,
+                    owner_epoch,
+                    %error,
+                    "GPU owner failed during asynchronous lifecycle start"
+                );
+            }
+            crate::gpu_pool::StartAnnouncement::Pending => {}
+        }
+    }
+    tracing::info!(
+        device_id,
+        old_desired_enabled = old_desired,
+        desired_enabled = request.enabled,
+        result = ?device.admin_state,
+        request_id = request_id.as_ref().map(|id| id.0.0.as_str()),
+        authenticated_key = authenticated
+            .as_ref()
+            .map(|identity| identity.0.identity.as_str()),
+        remote_addr = ?connect.map(|address| address.0),
+        "device lifecycle mutation"
+    );
+
+    let status = if asynchronous
+        || matches!(
+            device.admin_state,
+            DeviceAdminState::Draining | DeviceAdminState::Starting
+        ) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(device)).into_response())
 }
 
 // ── /health ───────────────────────────────────────────────────────────────────
@@ -2370,7 +3011,9 @@ async fn health() -> impl IntoResponse {
     )
 )]
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
-    Json(state.job_registry.snapshot())
+    let mut listing = state.job_registry.snapshot();
+    listing.plan = state.scheduled_work.latest_plan();
+    Json(listing)
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -2393,6 +3036,12 @@ struct QueuePatchRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<usize>)]
     target_gpu: Option<Option<usize>>,
+    /// Preferred stable device ID. Absent leaves the pin unchanged; `null`
+    /// means Auto. Stable IDs are the durable API and take the place of
+    /// ordinal pins for new clients.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    hard_pinned_device_id: Option<Option<String>>,
     /// New 0-based index for the job among the queued jobs. Clamped into range
     /// (a large value sends it to the back). Absent means no reorder.
     #[serde(default)]
@@ -2428,11 +3077,41 @@ async fn patch_queue_job(
             )));
         }
     }
+    let stable_target_gpu = match req.hard_pinned_device_id.as_ref() {
+        Some(Some(id)) => {
+            let state_now = current_device_state(&state);
+            let device = state_now
+                .devices
+                .iter()
+                .find(|device| device.id == *id)
+                .ok_or_else(|| {
+                    ApiError::validation(format!("device {id} is not visible on this server"))
+                })?;
+            Some(Some(device.ordinal.ok_or_else(|| {
+                ApiError::validation(format!("device {id} has no schedulable worker ordinal"))
+            })?))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    if let (Some(legacy), Some(stable)) = (req.target_gpu, stable_target_gpu) {
+        if legacy != stable {
+            return Err(ApiError::validation(
+                "target_gpu and hard_pinned_device_id resolve to different devices",
+            ));
+        }
+    }
+    let resolved_target_gpu = stable_target_gpu.or(req.target_gpu);
+
+    // A mutation response is also the scheduler acknowledgement: the final
+    // lease claim takes this same fence, so no plan built from the old lane or
+    // order can grant after this guard is acquired.
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
 
     // Both edits are independent and additive — apply whichever the request
     // supplied. `target_gpu` only when the field was present (absent leaves the
     // lane untouched); `position` only when a reorder was requested.
-    if let Some(target_gpu) = req.target_gpu {
+    if let Some(target_gpu) = resolved_target_gpu {
         state
             .job_registry
             .set_target_gpu(&id, target_gpu)
@@ -2471,11 +3150,11 @@ async fn patch_queue_job(
     Ok(Json(entry))
 }
 
-/// Cancel a still-queued generation job. Only queued jobs are cancelable —
-/// once a GPU worker owns the job there is no safe preemption point, so
-/// running jobs return 409. The waiting client observes the cancellation as
-/// a 499 `CANCELLED` error (blocking `POST /api/generate`) or a terminal
-/// SSE `error` event (`POST /api/generate/stream`).
+/// Cancel a still-queued singleton generation or an active server-owned batch
+/// by its public parent ID. Ordinary running jobs return 409 because CUDA work
+/// cannot be safely preempted. A batch cancellation instead closes parent
+/// authority immediately, removes queued siblings, lets running siblings
+/// drain privately, and forbids publication.
 #[utoipa::path(
     delete,
     path = "/api/queue/{id}",
@@ -2491,6 +3170,7 @@ async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     state.job_registry.cancel_queued(&id).map_err(|e| match e {
         crate::job_registry::QueuedJobCancelError::NotFound => {
             ApiError::queue_job_not_found(format!("queue job {id} not found"))
@@ -2526,11 +3206,22 @@ struct QueueCancelAllResponse {
         (status = 200, description = "Queue dispatch paused", body = QueuePauseResponse),
     )
 )]
-async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
-    if state.queue_pause.pause() {
+async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    let v2_authoritative = state.scheduled_work.v2_authoritative();
+    let changed = if v2_authoritative {
+        state
+            .scheduled_work
+            .set_queue_paused(true)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.queue_pause.pause()
+    };
+    if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueuePaused);
     }
-    Json(QueuePauseResponse { paused: true })
+    Ok(Json(QueuePauseResponse { paused: true }))
 }
 
 /// Resume dispatch of new generation jobs. Idempotent — repeat resumes return
@@ -2543,17 +3234,29 @@ async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> 
         (status = 200, description = "Queue dispatch resumed", body = QueuePauseResponse),
     )
 )]
-async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
-    if state.queue_pause.resume() {
+async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    let v2_authoritative = state.scheduled_work.v2_authoritative();
+    let changed = if v2_authoritative {
+        state
+            .scheduled_work
+            .set_queue_paused(false)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.queue_pause.resume()
+    };
+    if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
-    Json(QueuePauseResponse { paused: false })
+    Ok(Json(QueuePauseResponse { paused: false }))
 }
 
-/// Cancel every still-queued generation job. Running jobs are left untouched
-/// (same rule as `DELETE /api/queue/:id`). Returns the number of jobs
-/// cancelled; each waiting client observes the same cancellation signal as a
-/// single-job cancel.
+/// Cancel every still-queued generation job and close every active
+/// server-owned batch authority. Ordinary running jobs are left untouched;
+/// running batch children drain privately and cannot publish. The returned
+/// count remains the number of queued rows removed, preserving the established
+/// queue API contract.
 #[utoipa::path(
     delete,
     path = "/api/queue",
@@ -2563,6 +3266,7 @@ async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse>
     )
 )]
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
     Json(QueueCancelAllResponse { cancelled })
 }
@@ -2722,6 +3426,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         expand_settings.is_local() && config.manifest_model_is_downloaded(&expand_settings.model);
     let expand = expand_capabilities(&expand_settings, expand_model_present);
 
+    let server_batch = state.scheduled_work.v2_authoritative() && !config.is_output_disabled();
     Json(mold_core::ServerCapabilities {
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
@@ -2743,9 +3448,46 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_pause: true,
             can_cancel_all: true,
             can_reorder: true,
+            stable_device_pins: true,
+            cooperative_cancellation: false,
+            server_batch,
+            server_batch_max_outputs: server_batch
+                .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),
         },
+        devices: device_capabilities(&state.scheduled_work),
+        dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
+}
+
+fn device_capabilities(
+    handle: &crate::scheduler::ScheduledWorkHandle,
+) -> mold_core::DeviceCapabilities {
+    let v2_authoritative = handle.v2_authoritative();
+    mold_core::DeviceCapabilities {
+        available: true,
+        lifecycle: v2_authoritative,
+        restart_enable: !v2_authoritative,
+        stable_pins: true,
+        planned_lanes: v2_authoritative,
+        learned_eta: v2_authoritative,
+    }
+}
+
+fn dispatch_capabilities(
+    handle: &crate::scheduler::ScheduledWorkHandle,
+) -> mold_core::DispatchCapabilities {
+    mold_core::DispatchCapabilities {
+        modes: ["legacy", "observe", "v2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        active_mode: Some(handle.dispatch_mode().as_str().to_string()),
+        v2_authoritative: handle.v2_authoritative(),
+        observes_v2_decisions: handle.observes_v2_decisions(),
+        request_placement_preview: handle.v2_authoritative()
+            && handle.placement_preview_available(),
+    }
 }
 
 /// Derive the wire capability without constructing an expander or probing an
@@ -2900,6 +3642,607 @@ async fn shutdown_server(State(state): State<AppState>, request: Request) -> imp
 
 // ── /api/gallery ──────────────────────────────────────────────────────────────
 
+const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
+const GALLERY_IMPORT_HEADER_BYTES: usize = 12;
+const MAX_GALLERY_IMPORT_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_GALLERY_IMPORT_FILE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GalleryImportResponse {
+    filename: String,
+}
+
+fn invalid_gallery_import(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(
+        message,
+        "INVALID_GALLERY_IMPORT",
+        StatusCode::UNPROCESSABLE_ENTITY,
+    )
+}
+
+fn gallery_import_too_large(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(
+        message,
+        "GALLERY_IMPORT_TOO_LARGE",
+        StatusCode::PAYLOAD_TOO_LARGE,
+    )
+}
+
+fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> {
+    let path = std::path::Path::new(filename);
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || path.components().count() != 1
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(ApiError::validation(
+            "gallery filename must be one normal path component",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GalleryImportDescriptor {
+    metadata: mold_core::OutputMetadata,
+    metadata_synthetic: bool,
+}
+
+struct ParsedGalleryImport {
+    descriptor: GalleryImportDescriptor,
+    file_len: u64,
+    pending_file_bytes: axum::body::Bytes,
+    stream: axum::body::BodyDataStream,
+}
+
+async fn parse_gallery_import_prefix(
+    output_dir: &std::path::Path,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<ParsedGalleryImport, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type != Some(GALLERY_IMPORT_CONTENT_TYPE) {
+        return Err(ApiError::with_code(
+            format!("gallery imports require Content-Type {GALLERY_IMPORT_CONTENT_TYPE}"),
+            "UNSUPPORTED_GALLERY_IMPORT",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ));
+    }
+    let maximum_body = MAX_GALLERY_IMPORT_FILE_BYTES
+        .saturating_add(MAX_GALLERY_IMPORT_METADATA_BYTES as u64)
+        .saturating_add(GALLERY_IMPORT_HEADER_BYTES as u64);
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > maximum_body)
+    {
+        return Err(gallery_import_too_large(format!(
+            "gallery import body exceeds {maximum_body} bytes"
+        )));
+    }
+
+    let mut stream = body.into_data_stream();
+    let mut prefix = Vec::with_capacity(GALLERY_IMPORT_HEADER_BYTES);
+    let mut metadata_len: Option<usize> = None;
+    let mut file_len: Option<u64> = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| invalid_gallery_import(format!("import body failed: {error}")))?;
+        let mut offset = 0;
+        if prefix.len() < GALLERY_IMPORT_HEADER_BYTES {
+            let take = (GALLERY_IMPORT_HEADER_BYTES - prefix.len()).min(chunk.len());
+            prefix.extend_from_slice(&chunk[..take]);
+            offset += take;
+            if prefix.len() == GALLERY_IMPORT_HEADER_BYTES {
+                let declared_metadata =
+                    u32::from_be_bytes(prefix[..4].try_into().expect("four-byte prefix")) as usize;
+                if declared_metadata == 0 {
+                    return Err(invalid_gallery_import(
+                        "gallery import descriptor cannot be empty",
+                    ));
+                }
+                if declared_metadata > MAX_GALLERY_IMPORT_METADATA_BYTES {
+                    return Err(gallery_import_too_large(format!(
+                        "gallery import metadata exceeds {MAX_GALLERY_IMPORT_METADATA_BYTES} bytes"
+                    )));
+                }
+                let declared_file =
+                    u64::from_be_bytes(prefix[4..].try_into().expect("eight-byte prefix"));
+                if declared_file == 0 {
+                    return Err(invalid_gallery_import(
+                        "gallery import file payload cannot be empty",
+                    ));
+                }
+                if declared_file > MAX_GALLERY_IMPORT_FILE_BYTES {
+                    return Err(gallery_import_too_large(format!(
+                        "gallery import file exceeds {MAX_GALLERY_IMPORT_FILE_BYTES} bytes"
+                    )));
+                }
+                metadata_len = Some(declared_metadata);
+                file_len = Some(declared_file);
+                prefix.reserve(declared_metadata);
+                let dir = output_dir.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    crate::batch_transaction::preflight_disk_space(&dir, declared_file)
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::internal(format!("gallery import preflight task failed: {error}"))
+                })?
+                .map_err(|error| {
+                    ApiError::with_code(
+                        format!("gallery import disk preflight failed: {error:#}"),
+                        "GALLERY_IMPORT_DISK_FULL",
+                        StatusCode::INSUFFICIENT_STORAGE,
+                    )
+                })?;
+            }
+        }
+        if let Some(declared_metadata) = metadata_len {
+            let descriptor_end = GALLERY_IMPORT_HEADER_BYTES + declared_metadata;
+            if prefix.len() < descriptor_end {
+                let take = (descriptor_end - prefix.len()).min(chunk.len() - offset);
+                prefix.extend_from_slice(&chunk[offset..offset + take]);
+                offset += take;
+            }
+            if prefix.len() == descriptor_end {
+                let descriptor = serde_json::from_slice(&prefix[GALLERY_IMPORT_HEADER_BYTES..])
+                    .map_err(|error| {
+                        invalid_gallery_import(format!(
+                            "invalid gallery import descriptor: {error}"
+                        ))
+                    })?;
+                return Ok(ParsedGalleryImport {
+                    descriptor,
+                    file_len: file_len.expect("file length parsed with metadata length"),
+                    pending_file_bytes: chunk.slice(offset..),
+                    stream,
+                });
+            }
+        }
+    }
+    Err(invalid_gallery_import(
+        "gallery import ended before its descriptor was complete",
+    ))
+}
+
+async fn stream_gallery_import_file(
+    transaction: &crate::batch_transaction::BatchTransaction,
+    mut parsed: ParsedGalleryImport,
+) -> Result<(GalleryImportDescriptor, u64), ApiError> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_path)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "failed to create gallery import staging file: {error}"
+            ))
+        })?;
+    let mut written = parsed.pending_file_bytes.len() as u64;
+    if written > parsed.file_len {
+        return Err(invalid_gallery_import(
+            "gallery import contains bytes after its declared file payload",
+        ));
+    }
+    file.write_all(&parsed.pending_file_bytes)
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to stage gallery import: {error}")))?;
+    while let Some(chunk) = parsed.stream.next().await {
+        let chunk = chunk
+            .map_err(|error| invalid_gallery_import(format!("import body failed: {error}")))?;
+        let next = written.saturating_add(chunk.len() as u64);
+        if next > parsed.file_len {
+            return Err(invalid_gallery_import(
+                "gallery import contains bytes after its declared file payload",
+            ));
+        }
+        file.write_all(&chunk).await.map_err(|error| {
+            ApiError::internal(format!("failed to stage gallery import: {error}"))
+        })?;
+        written = next;
+    }
+    if written != parsed.file_len {
+        return Err(invalid_gallery_import(format!(
+            "gallery import file ended at {written} bytes; expected {}",
+            parsed.file_len
+        )));
+    }
+    file.flush().await.map_err(|error| {
+        ApiError::internal(format!(
+            "failed to flush gallery import staging file: {error}"
+        ))
+    })?;
+    file.sync_all().await.map_err(|error| {
+        ApiError::internal(format!(
+            "failed to fsync gallery import staging file: {error}"
+        ))
+    })?;
+    Ok((parsed.descriptor, parsed.file_len))
+}
+
+fn files_match(left: &std::path::Path, right: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::Read as _;
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    let mut left = std::io::BufReader::new(std::fs::File::open(left)?);
+    let mut right = std::io::BufReader::new(std::fs::File::open(right)?);
+    let mut left_buf = [0_u8; 64 * 1024];
+    let mut right_buf = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left.read(&mut left_buf)?;
+        let right_read = right.read(&mut right_buf)?;
+        if left_read != right_read || left_buf[..left_read] != right_buf[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Stream an already-encoded image/video into the server-owned gallery.
+///
+/// The fixed binary envelope is `u32 metadata_len`, `u64 file_len`, metadata
+/// JSON, then exactly `file_len` bytes. It lets native mirroring preserve
+/// metadata and cross-host filename identity without buffering large videos
+/// in the server. Authentication is the ordinary API-key middleware; media
+/// reads remain on the existing short-lived ticket endpoint.
+#[utoipa::path(
+    put,
+    path = "/api/gallery/import/{filename}",
+    tag = "gallery",
+    params(("filename" = String, Path, description = "Preferred gallery basename")),
+    responses(
+        (status = 200, description = "An identical existing file was retained", body = GalleryImportResponse),
+        (status = 201, description = "Imported through journaled atomic no-replace publication", body = GalleryImportResponse),
+        (status = 409, description = "Identical bytes conflict with existing metadata"),
+        (status = 413, description = "Metadata or file exceeds the bounded import envelope"),
+        (status = 415, description = "Unsupported import content type"),
+        (status = 422, description = "Invalid filename, framing, metadata, or output format"),
+    )
+)]
+async fn import_gallery_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+    body: Body,
+) -> Result<(StatusCode, Json<GalleryImportResponse>), ApiError> {
+    validate_gallery_filename(&filename)?;
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+    let format = mold_db::metadata_io::format_from_path(std::path::Path::new(&filename))
+        .ok_or_else(|| {
+            invalid_gallery_import("gallery import must be PNG, JPEG, WebP, GIF, APNG, or MP4")
+        })?;
+    let parsed_import = parse_gallery_import_prefix(&output_dir, &headers, body).await?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let descriptor = parsed_import.descriptor.clone();
+    let mut record = mold_db::GenerationRecord::from_save(
+        &output_dir,
+        &filename,
+        format,
+        descriptor.metadata.clone(),
+        mold_db::RecordSource::Backfill,
+        i64::try_from(timestamp.saturating_mul(1000)).unwrap_or(i64::MAX),
+    );
+    record.metadata_synthetic = descriptor.metadata_synthetic;
+    let parent_id = format!("gallery-import-{}", uuid::Uuid::new_v4());
+    let begin_dir = output_dir.clone();
+    let requested_filename = filename.clone();
+    let mut transaction = tokio::task::spawn_blocking(move || {
+        crate::batch_transaction::BatchTransaction::begin(
+            &begin_dir,
+            &parent_id,
+            0,
+            serde_json::json!({
+                "kind": "gallery_import",
+                "requested_filename": requested_filename,
+            }),
+            vec![record],
+        )
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import begin task failed: {error}")))?
+    .map_err(|error| {
+        ApiError::internal(format!("failed to begin atomic gallery import: {error:#}"))
+    })?;
+
+    let (descriptor, declared_file_len) =
+        match stream_gallery_import_file(&transaction, parsed_import).await {
+            Ok(import) => import,
+            Err(error) => {
+                let _ =
+                    tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+                return Err(error);
+            }
+        };
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    let descriptor_for_validation = descriptor.clone();
+    let validation = tokio::task::spawn_blocking(move || {
+        let valid =
+            mold_db::metadata_io::is_valid_gallery_file(&staged_path, format, declared_file_len);
+        let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
+        let embedded_matches = embedded
+            .as_ref()
+            .is_none_or(|embedded| embedded == &descriptor_for_validation.metadata);
+        (valid, embedded_matches, embedded.is_some())
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "gallery import metadata validation task failed: {error}"
+        ))
+    })?;
+    if !validation.0 {
+        let _ = tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+        return Err(ApiError::with_code(
+            "gallery import payload is not a valid gallery media file",
+            "INVALID_GALLERY_MEDIA",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    if !validation.1 || (descriptor.metadata_synthetic && validation.2) {
+        let _ = tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+        return Err(ApiError::with_code(
+            "embedded gallery metadata conflicts with the immutable import descriptor or its synthetic flag",
+            "GALLERY_METADATA_CONFLICT",
+            StatusCode::CONFLICT,
+        ));
+    }
+    transaction = tokio::task::spawn_blocking(move || {
+        if let Err(error) = transaction
+            .seal_staged_file(0)
+            .and_then(|()| transaction.mark_prepared())
+        {
+            let cleanup = transaction.rollback_unpublished();
+            return Err(error.context(format!(
+                "rolling back failed with: {}",
+                cleanup
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .unwrap_or_else(|| "clean rollback".to_string())
+            )));
+        }
+        Ok::<_, anyhow::Error>(transaction)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import seal task failed: {error}")))?
+    .map_err(|error| {
+        ApiError::internal(format!("failed to seal atomic gallery import: {error:#}"))
+    })?;
+
+    let gallery_writer = state.gallery_publication_gate.write().await;
+    let db = state.metadata_db.clone();
+    let events = state.events.clone();
+    let db_for_existing = db.clone();
+    let archive_for_existing = state.gallery_publication_gate.clone();
+    let filename_for_task = filename.clone();
+    let dir_for_task = output_dir.clone();
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    enum PreparedGalleryImport {
+        Existing(String),
+        Transaction {
+            transaction: Box<crate::batch_transaction::BatchTransaction>,
+            filename: String,
+        },
+    }
+    let prepared = tokio::task::spawn_blocking(move || {
+        let desired_path = dir_for_task.join(&filename_for_task);
+        let identical = if desired_path.is_file() {
+            match files_match(&desired_path, &staged_path) {
+                Ok(identical) => identical,
+                Err(error) => {
+                    let _ = transaction.rollback_unpublished();
+                    return Err(ApiError::internal(format!(
+                        "failed to compare existing gallery file: {error}"
+                    )));
+                }
+            }
+        } else {
+            false
+        };
+        let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
+        if !identical {
+            let filename = transaction.manifest().children[0].final_name.clone();
+            return Ok(PreparedGalleryImport::Transaction {
+                transaction: Box::new(transaction),
+                filename,
+            });
+        }
+
+        let recorded = match db_for_existing
+            .as_ref()
+            .as_ref()
+            .map(|db| db.get(&dir_for_task, &filename_for_task))
+            .transpose()
+        {
+            Ok(recorded) => recorded.flatten(),
+            Err(error) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::internal(format!(
+                    "failed to inspect existing gallery metadata: {error:#}"
+                )));
+            }
+        };
+        let recorded_missing = recorded.is_none();
+        let recorded_descriptor =
+            recorded.map(|record| (record.metadata, record.metadata_synthetic));
+        let archive_index = match archive_for_existing.committed_archive_index(&dir_for_task) {
+            Ok(index) => index,
+            Err(error) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::internal(format!(
+                    "failed to validate committed gallery metadata: {error:#}"
+                )));
+            }
+        };
+        let archived_descriptor = archive_index.get(&filename_for_task).map(|entry| {
+            (
+                entry.record().metadata.clone(),
+                entry.record().metadata_synthetic,
+            )
+        });
+        let can_backfill_missing_row = recorded_missing && embedded.is_some();
+        let embedded_descriptor = embedded.map(|metadata| (metadata, false));
+        let available_descriptors = [
+            embedded_descriptor.as_ref(),
+            archived_descriptor.as_ref(),
+            recorded_descriptor.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if available_descriptors
+            .windows(2)
+            .any(|pair| pair[0] != pair[1])
+        {
+            let _ = transaction.rollback_unpublished();
+            return Err(ApiError::with_code(
+                "existing gallery metadata authorities disagree",
+                "GALLERY_METADATA_CONFLICT",
+                StatusCode::CONFLICT,
+            ));
+        }
+        let authoritative = embedded_descriptor
+            .as_ref()
+            .or(archived_descriptor.as_ref())
+            .or(recorded_descriptor.as_ref());
+        match authoritative {
+            Some((metadata, synthetic))
+                if metadata == &descriptor.metadata
+                    && synthetic == &descriptor.metadata_synthetic => {}
+            Some(_) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::with_code(
+                    "identical gallery bytes already exist with different metadata",
+                    "GALLERY_METADATA_CONFLICT",
+                    StatusCode::CONFLICT,
+                ));
+            }
+            None => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::with_code(
+                    "identical gallery bytes exist but their metadata cannot be verified",
+                    "GALLERY_METADATA_CONFLICT",
+                    StatusCode::CONFLICT,
+                ));
+            }
+        }
+        let metadata = embedded_descriptor
+            .map(|(metadata, _)| metadata)
+            .or_else(|| recorded_descriptor.map(|(metadata, _)| metadata))
+            .unwrap_or_else(|| descriptor.metadata.clone());
+        if db_for_existing.as_ref().as_ref().is_some() && can_backfill_missing_row {
+            let image = db_for_existing.as_ref().as_ref().and_then(|db| {
+                mold_db::persist::record_saved_output_returning(
+                    db,
+                    &dir_for_task,
+                    &filename_for_task,
+                    &desired_path,
+                    &mold_db::persist::OutputRecordParams {
+                        format,
+                        metadata: &metadata,
+                        source: mold_db::RecordSource::Backfill,
+                        generation_time_ms: None,
+                        backend: None,
+                    },
+                )
+                .map(|record| Box::new(record.to_gallery_image()))
+            });
+            events.publish(mold_core::ServerEvent::GalleryAdded {
+                filename: filename_for_task.clone(),
+                image,
+            });
+        }
+        transaction.rollback_unpublished().map_err(|error| {
+            ApiError::internal(format!(
+                "failed to retire idempotent gallery import transaction: {error:#}"
+            ))
+        })?;
+        Ok::<_, ApiError>(PreparedGalleryImport::Existing(filename_for_task))
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import task failed: {error}")))??;
+    drop(gallery_writer);
+
+    let (saved_name, created) = match prepared {
+        PreparedGalleryImport::Existing(filename) => (filename, false),
+        PreparedGalleryImport::Transaction {
+            mut transaction,
+            filename,
+        } => {
+            if let Err(error) = transaction
+                .commit(&state.gallery_publication_gate, db.clone())
+                .await
+            {
+                let message = error.to_string();
+                if error.entered_committing() {
+                    tracing::error!(%message, "atomic gallery import commit is unresolved");
+                    drop(error);
+                    unreachable!("unresolved commit aborts the process");
+                }
+                return Err(ApiError::internal(format!(
+                    "atomic gallery import commit failed before publication: {message}"
+                )));
+            }
+            let image = db
+                .as_ref()
+                .as_ref()
+                .and_then(|db| db.get(&output_dir, &filename).ok().flatten())
+                .map(|record| Box::new(record.to_gallery_image()));
+            state.events.publish(mold_core::ServerEvent::GalleryAdded {
+                filename: filename.clone(),
+                image,
+            });
+            (filename, true)
+        }
+    };
+    Ok((
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(GalleryImportResponse {
+            filename: saved_name,
+        }),
+    ))
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GalleryMediaTokenRequest {
     path: String,
@@ -2932,10 +4275,12 @@ pub struct GalleryMediaTokenResponse {
     )
 )]
 async fn create_gallery_media_token(
+    State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(request): Json<GalleryMediaTokenRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     if !crate::auth::is_gallery_image_path(&request.path) {
         return Err(ApiError::validation(
             "media token path must match /api/gallery/image/:filename",
@@ -2982,6 +4327,10 @@ async fn create_gallery_media_token(
 async fn list_gallery(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
+    // Query-time DB recovery is serialized by the DB recovery lock. The
+    // shared gallery side excludes an atomic batch publication without
+    // needlessly serializing ordinary listings and media reads.
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Ok(Json(Vec::new()));
@@ -2996,27 +4345,35 @@ async fn list_gallery(
     if state.metadata_db.is_some() {
         let db_arc = state.metadata_db.clone();
         let dir = output_dir.clone();
+        let gallery_archive = state.gallery_publication_gate.clone();
         let listed = tokio::task::spawn_blocking(move || {
-            db_arc
+            let rows = db_arc
                 .as_ref()
                 .as_ref()
                 .map(|db| db.list(Some(&dir)))
-                .transpose()
+                .transpose()?;
+            let archive = gallery_archive.committed_archive_index(&dir)?;
+            Ok::<_, anyhow::Error>((rows, archive))
         })
         .await
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
-        if let Some(rows) = listed {
+        if let (Some(rows), archive) = listed {
             if !rows.is_empty() {
-                let images = rows.iter().map(|r| r.to_gallery_image()).collect();
+                let images = archive.overlay_db_gallery(&rows);
                 return Ok(Json(images));
             }
         }
     }
 
-    let images = tokio::task::spawn_blocking(move || scan_gallery_dir(&output_dir))
-        .await
-        .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?;
+    let gallery_archive = state.gallery_publication_gate.clone();
+    let images = tokio::task::spawn_blocking(move || {
+        let archive_index = gallery_archive.committed_archive_index(&output_dir)?;
+        Ok::<_, anyhow::Error>(scan_gallery_dir_with_archive(&output_dir, &archive_index))
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("gallery archive validation failed: {e:#}")))?;
 
     Ok(Json(images))
 }
@@ -3035,6 +4392,7 @@ async fn get_gallery_image(
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3207,6 +4565,7 @@ async fn delete_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_writer = state.gallery_publication_gate.write().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3227,13 +4586,42 @@ async fn delete_gallery_image(
     // call — run the whole batch on the blocking pool so a slow disk can't
     // stall an async worker thread mid-generation.
     let db = state.metadata_db.clone();
+    let archive = state.gallery_publication_gate.clone();
     let name = clean_name.clone();
     let dir = output_dir.clone();
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         let path = dir.join(&name);
+        let archive_disposition =
+            crate::batch_transaction::tombstone_committed_archive_filename(
+                &dir, &name, &archive,
+            )
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to retire committed gallery metadata before delete: {error:#}"
+                ))
+            })?;
+        if archive_disposition
+            == crate::batch_transaction::ArchiveDeleteDisposition::PreservedReplacement
+        {
+            return Err(ApiError::with_code(
+                "gallery file changed since publication; the replacement was preserved and quarantined",
+                "GALLERY_DELETE_IDENTITY_CHANGED",
+                StatusCode::CONFLICT,
+            ));
+        }
         if path.is_file() {
             std::fs::remove_file(&path)
                 .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
+            crate::batch_transaction::sync_ordinary_gallery_directory(&dir).map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to make gallery deletion durable: {error:#}"
+                ))
+            })?;
+        }
+        if archive_disposition
+            == crate::batch_transaction::ArchiveDeleteDisposition::NoArchive
+        {
+            archive.retire_committed_filename(&name);
         }
 
         // Also remove server-side thumbnail (both legacy no-suffix and current
@@ -3250,17 +4638,35 @@ async fn delete_gallery_image(
         // Drop the matching metadata row if the DB is enabled. Errors here are
         // logged — they don't roll back the disk delete since the file is the
         // source of truth and reconciliation will re-sync on the next restart.
-        if let Some(db) = db.as_ref().as_ref() {
+        let projection_complete = if let Some(db) = db.as_ref().as_ref() {
             match db.delete(&dir, &name) {
-                Ok(true) => {}
+                Ok(true) => true,
                 Ok(false) => {
-                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display())
+                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display());
+                    true
                 }
-                Err(e) => tracing::warn!(
-                    "metadata DB delete failed for {}: {e:#}",
-                    dir.join(&name).display()
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        "metadata DB delete failed for {}: {e:#}",
+                        dir.join(&name).display()
+                    );
+                    false
+                }
             }
+        } else {
+            true
+        };
+        if projection_complete
+            && archive_disposition
+                == crate::batch_transaction::ArchiveDeleteDisposition::SafeToUnlink
+        {
+            archive
+                .acknowledge_retirement_projections(&dir, [name.clone()])
+                .map_err(|error| {
+                    ApiError::internal(format!(
+                        "failed to checkpoint gallery deletion projection: {error:#}"
+                    ))
+                })?;
         }
         Ok(())
     })
@@ -3282,6 +4688,7 @@ async fn get_gallery_thumbnail(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3398,6 +4805,7 @@ async fn get_gallery_preview(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3524,55 +4932,88 @@ fn generate_video_thumbnail(
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.
-pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
+fn warm_gallery_thumbnails(
+    output_dir: &std::path::Path,
+    thumb_dir: &std::path::Path,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+    after_acquire: &dyn Fn(usize),
+    after_release: &dyn Fn(usize),
+) {
+    let mut walker = walkdir::WalkDir::new(output_dir).max_depth(1).into_iter();
+    let mut observation = 0_usize;
+    loop {
+        // One read authority owns the full observation: directory iterator
+        // advance, entry metadata, format classification, and source decode.
+        // A publisher can therefore run only before or after one entry, never
+        // in the middle of deciding what that entry contains.
+        let gallery_reader = gallery_gate.blocking_read();
+        after_acquire(observation);
+        let entry = walker.next();
+        let done = entry.is_none();
+        if let Some(Ok(entry)) = entry {
+            let path = entry.path();
+            if path.is_file() {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_lowercase());
+                let is_raster = matches!(
+                    ext.as_deref(),
+                    Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
+                );
+                let is_video = matches!(ext.as_deref(), Some("mp4"));
+                if is_raster || is_video {
+                    let filename = path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let thumb_path = thumb_dir.join(format!("{filename}.png"));
+                    if !thumb_path.is_file() {
+                        let result = if is_video {
+                            generate_video_thumbnail(path, &thumb_path)
+                        } else {
+                            generate_server_thumbnail(path, &thumb_path)
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!(
+                                "failed to generate thumbnail for {}: {e}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        drop(gallery_reader);
+        after_release(observation);
+        observation += 1;
+        if done {
+            break;
+        }
+    }
+}
+
+pub fn spawn_thumbnail_warmup(
+    config: &mold_core::Config,
+    gallery_gate: crate::batch_transaction::GalleryPublicationGate,
+) -> Option<tokio::task::JoinHandle<()>> {
     if !thumbnail_warmup_enabled() {
         tracing::info!("thumbnail warmup disabled; thumbnails will be generated on demand");
-        return;
+        return None;
     }
 
     let output_dir = config.effective_output_dir();
-    std::thread::spawn(move || {
-        if !output_dir.is_dir() {
-            return;
-        }
-        let thumb_dir = server_thumbnail_dir();
-        let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
-        for entry in walker.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase());
-            let is_raster = matches!(
-                ext.as_deref(),
-                Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
-            );
-            let is_video = matches!(ext.as_deref(), Some("mp4"));
-            if !is_raster && !is_video {
-                continue;
-            }
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let thumb_path = thumb_dir.join(format!("{filename}.png"));
-            if thumb_path.is_file() {
-                continue;
-            }
-            let result = if is_video {
-                generate_video_thumbnail(path, &thumb_path)
-            } else {
-                generate_server_thumbnail(path, &thumb_path)
-            };
-            if let Err(e) = result {
-                tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
-            }
+    Some(tokio::spawn(async move {
+        let join = tokio::task::spawn_blocking(move || {
+            let thumb_dir = server_thumbnail_dir();
+            warm_gallery_thumbnails(&output_dir, &thumb_dir, &gallery_gate, &|_| {}, &|_| {});
+        })
+        .await;
+        if let Err(error) = join {
+            tracing::warn!(%error, "thumbnail warmup task failed");
         }
         tracing::info!("thumbnail warmup complete");
-    });
+    }))
 }
 
 fn thumbnail_warmup_enabled() -> bool {
@@ -3599,13 +5040,30 @@ fn thumbnail_warmup_enabled() -> bool {
 /// that passes the check can still be corrupt mid-stream (e.g. broken
 /// IDAT CRC). Those fall through to the thumbnail endpoint which serves
 /// the raw bytes as a last resort.
+#[cfg(test)]
 fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
+    scan_gallery_dir_with_archive(
+        dir,
+        &crate::batch_transaction::CommittedArchiveIndex::default(),
+    )
+}
+
+fn scan_gallery_dir_with_archive(
+    dir: &std::path::Path,
+    archive_index: &crate::batch_transaction::CommittedArchiveIndex,
+) -> Vec<mold_core::GalleryImage> {
     let mut images: Vec<mold_core::GalleryImage> = mold_db::scan::scan_output_dir(dir)
         .filter_map(|item| match item {
             mold_db::scan::ScanItem::Valid(file) => Some(file),
             _ => None,
         })
-        .map(|file| {
+        .filter_map(|file| {
+            if archive_index.is_retired(&file.filename) {
+                return None;
+            }
+            if let Some(entry) = archive_index.get(&file.filename) {
+                return Some(entry.record().to_gallery_image());
+            }
             let timestamp = file.timestamp_secs();
             let size_bytes = file.size_u64();
             let (metadata, synthetic) = mold_db::metadata_io::read_or_synthesize(
@@ -3614,14 +5072,14 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 &file.filename,
                 timestamp,
             );
-            mold_core::GalleryImage {
+            Some(mold_core::GalleryImage {
                 filename: file.filename,
                 metadata,
                 timestamp,
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
                 metadata_synthetic: synthetic,
-            }
+            })
         })
         .collect();
 
@@ -3708,62 +5166,6 @@ async fn scalar_docs() -> impl IntoResponse {
 </body>
 </html>"#,
     )
-}
-
-// ── GPU info ──────────────────────────────────────────────────────────────────
-
-fn query_gpu_info() -> Option<GpuInfo> {
-    query_cuda_gpu_info().or_else(query_metal_gpu_info)
-}
-
-fn query_cuda_gpu_info() -> Option<GpuInfo> {
-    let nvidia_smi = if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
-        "/run/current-system/sw/bin/nvidia-smi"
-    } else {
-        "nvidia-smi"
-    };
-
-    let output = std::process::Command::new(nvidia_smi)
-        .args([
-            "--query-gpu=name,memory.total,memory.used",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8(output.stdout).ok()?;
-    let line = text.lines().next()?;
-    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    Some(GpuInfo {
-        name: parts[0].to_string(),
-        vram_total_mb: parts[1].parse().ok()?,
-        vram_used_mb: parts[2].parse().ok()?,
-        backend: Some(GpuBackend::Cuda),
-    })
-}
-
-/// Metal fallback (macOS only elsewhere returns an empty snapshot): unified
-/// memory means "VRAM" is the addressable system RAM — same convention as
-/// `/api/resources`. Gives Macs a non-null `gpu_info` so clients can rank
-/// hosts by backend/VRAM without a resources stream.
-fn query_metal_gpu_info() -> Option<GpuInfo> {
-    let gpu = crate::resources::metal_snapshot().into_iter().next()?;
-    Some(GpuInfo {
-        name: gpu.name,
-        // Resource snapshots are bytes; GpuInfo is MB (1 MB = 1_000_000,
-        // matching `parse_nvidia_smi_line`).
-        vram_total_mb: gpu.vram_total / 1_000_000,
-        vram_used_mb: gpu.vram_used / 1_000_000,
-        backend: Some(GpuBackend::Metal),
-    })
 }
 
 // ─── Downloads UI (Agent A) ──────────────────────────────────────────────────
@@ -3967,12 +5369,12 @@ fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
 }
 
 /// `GET /api/events` — SSE stream of server-wide [`mold_core::ServerEvent`]s:
-/// job lifecycle (queued/started/ended, mirrored off the job registry) and
-/// gallery mutations (added/removed). One connection observes the whole
-/// server, so clients don't need a held stream per job to know when the
-/// gallery changed. Deltas only — bootstrap current state from
-/// `GET /api/queue` + `GET /api/gallery` after subscribing. Event name:
-/// `event`. Feature-detect via `capabilities.events.available`.
+/// job lifecycle, gallery mutations, queue replans, and semantic device
+/// lifecycle/health transitions. One connection observes the whole server.
+/// Deltas only — bootstrap or repair gaps from `GET /api/queue`,
+/// `GET /api/devices`, and `GET /api/gallery`. Raw utilization/memory
+/// telemetry remains on `/api/resources/stream`. Event name: `event`.
+/// Feature-detect via `capabilities.events.available`.
 #[utoipa::path(
     get,
     path = "/api/events",
@@ -4020,6 +5422,134 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    struct TrackingUpscaler {
+        unloaded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        unloaded_on: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    }
+
+    impl mold_inference::UpscaleEngine for TrackingUpscaler {
+        fn upscale(
+            &mut self,
+            _req: &mold_core::UpscaleRequest,
+        ) -> anyhow::Result<mold_core::UpscaleResponse> {
+            unreachable!("cleanup test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            "tracking-upscaler"
+        }
+
+        fn is_loaded(&self) -> bool {
+            !self.unloaded.load(Ordering::SeqCst)
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {
+            *self.unloaded_on.lock().unwrap() = Some(std::thread::current().id());
+            self.unloaded.store(true, Ordering::SeqCst);
+        }
+
+        fn scale_factor(&self) -> u32 {
+            4
+        }
+
+        fn set_on_progress(&mut self, _callback: mold_inference::progress::ProgressCallback) {}
+
+        fn clear_on_progress(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn clearing_upscaler_cache_unloads_before_drop() {
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(queue_tx),
+            AppState::empty_gpu_pool_for_test(),
+            1,
+        );
+        let unloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let unloaded_on = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let runtime_thread = std::thread::current().id();
+        *state.upscaler_cache.lock().unwrap() = Some(Box::new(TrackingUpscaler {
+            unloaded: unloaded.clone(),
+            unloaded_on: unloaded_on.clone(),
+        }));
+
+        clear_global_upscaler_cache(&state).await;
+
+        assert!(unloaded.load(Ordering::SeqCst));
+        assert_ne!(
+            unloaded_on.lock().unwrap().as_ref(),
+            Some(&runtime_thread),
+            "upscaler teardown must not run on the async runtime thread"
+        );
+        assert!(state.upscaler_cache.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn generation_placement_normalization_honors_request_over_persisted_defaults() {
+        let mut config = mold_core::Config::default();
+        config.set_model_placement(
+            "flux-dev:q4",
+            Some(mold_core::types::DevicePlacement {
+                text_encoders: mold_core::types::DeviceRef::Cpu,
+                advanced: None,
+            }),
+        );
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(queue_tx),
+            AppState::empty_gpu_pool_for_test(),
+            1,
+        );
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1,
+            "strength": 0.75
+        }))
+        .unwrap();
+
+        normalize_generation_placement(&state, &mut request).await;
+        assert_eq!(
+            request
+                .placement
+                .as_ref()
+                .expect("persisted placement applied")
+                .text_encoders,
+            mold_core::types::DeviceRef::Cpu
+        );
+
+        request.placement = Some(mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Auto,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::types::DeviceRef::device(
+                    "cuda:0123456789abcdef0123456789abcdef",
+                ),
+                ..Default::default()
+            }),
+        });
+        normalize_generation_placement(&state, &mut request).await;
+        let effective = request.placement.expect("request placement retained");
+        assert_eq!(effective.text_encoders, mold_core::types::DeviceRef::Auto);
+        assert!(matches!(
+            effective
+                .advanced
+                .expect("request advanced placement")
+                .transformer,
+            mold_core::types::DeviceRef::Device { .. }
+        ));
+    }
 
     #[test]
     fn expand_config_for_request_threads_style() {
@@ -4077,6 +5607,64 @@ mod tests {
         assert_eq!(capability.backend, mold_core::ExpandBackend::Api);
         assert!(!capability.configured);
         assert_eq!(capability.model_present, None);
+    }
+
+    #[test]
+    fn dispatch_capability_reports_authority_without_implying_live_cutover() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let legacy_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Legacy,
+        );
+        let legacy = dispatch_capabilities(&legacy_handle);
+        assert_eq!(legacy.active_mode.as_deref(), Some("legacy"));
+        assert!(!legacy.v2_authoritative);
+        assert!(!legacy.observes_v2_decisions);
+        let legacy_devices = device_capabilities(&legacy_handle);
+        assert!(!legacy_devices.lifecycle);
+        assert!(!legacy_devices.planned_lanes);
+        assert!(!legacy_devices.learned_eta);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let observe_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        let observe = dispatch_capabilities(&observe_handle);
+        assert_eq!(observe.active_mode.as_deref(), Some("observe"));
+        assert!(!observe.v2_authoritative);
+        assert!(observe.observes_v2_decisions);
+        let observe_devices = device_capabilities(&observe_handle);
+        assert!(!observe_devices.lifecycle);
+        assert!(!observe_devices.planned_lanes);
+        assert!(!observe_devices.learned_eta);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let v2_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let v2 = dispatch_capabilities(&v2_handle);
+        assert_eq!(v2.active_mode.as_deref(), Some("v2"));
+        assert!(v2.v2_authoritative);
+        assert!(!v2.observes_v2_decisions);
+        assert_eq!(v2.modes, ["legacy", "observe", "v2"]);
+        let v2_devices = device_capabilities(&v2_handle);
+        assert!(v2_devices.lifecycle);
+        assert!(v2_devices.planned_lanes);
+        assert!(v2_devices.learned_eta);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let maintenance = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            false,
+            false,
+        );
+        let maintenance = dispatch_capabilities(&maintenance);
+        assert_eq!(maintenance.active_mode.as_deref(), Some("v2"));
+        assert!(!maintenance.v2_authoritative);
+        assert!(!maintenance.observes_v2_decisions);
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {
@@ -4549,5 +6137,74 @@ mod tests {
         assert!(entry.metadata_synthetic);
         assert_eq!(entry.metadata.width, 128);
         assert_eq!(entry.metadata.height, 96);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thumbnail_warmup_observes_one_entry_atomically_and_yields_to_writer() {
+        let output = TempDir::new("warmup-output");
+        let thumbs = TempDir::new("warmup-thumbs");
+        std::fs::write(output.path().join("print.png"), make_png_bytes(32, 32)).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let worker_gate = gate.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let (warm_done_tx, warm_done_rx) = std::sync::mpsc::channel();
+        let output_path = output.path().to_path_buf();
+        let thumbs_path = thumbs.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let release_rx = release_rx.clone();
+            warm_gallery_thumbnails(
+                &output_path,
+                &thumbs_path,
+                &worker_gate,
+                &|observation| {
+                    if observation == 0 {
+                        entered_tx.send(()).unwrap();
+                        release_rx.lock().unwrap().recv().unwrap();
+                    }
+                },
+                &|_| {},
+            );
+            warm_done_tx.send(()).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let (writer_acquired_tx, writer_acquired_rx) = tokio::sync::oneshot::channel();
+        let (writer_release_tx, writer_release_rx) = tokio::sync::oneshot::channel();
+        let writer_gate = gate.clone();
+        let writer = tokio::spawn(async move {
+            let _writer = writer_gate.write().await;
+            let _ = writer_acquired_tx.send(());
+            let _ = writer_release_rx.await;
+        });
+        let mut writer_acquired_rx = writer_acquired_rx;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                &mut writer_acquired_rx
+            )
+            .await
+            .is_err(),
+            "writer observed the directory while one warmup entry was only partially inspected"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_acquired_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                warm_done_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "warmup reacquired the reader instead of yielding between entries"
+        );
+        let _ = writer_release_tx.send(());
+        writer.await.unwrap();
+        worker.join().unwrap();
     }
 }

@@ -38,6 +38,7 @@ pub struct ActiveGenerationSnapshot {
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
     Complete(Box<mold_core::SseCompleteEvent>),
+    BatchComplete(Box<mold_core::SseBatchCompleteEvent>),
     UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }
@@ -69,6 +70,23 @@ pub struct GenerationJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<GenerationJobResult, String>>,
     /// Pre-resolved output directory for server-side image saving.
     pub output_dir: Option<PathBuf>,
+    /// Server-owned adaptive-batch child authority. Public singleton and
+    /// client-owned prepared siblings leave this absent.
+    pub batch_child: Option<BatchChildExecution>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchChildExecution {
+    pub lease: crate::batch_parent::BatchChildLease,
+    /// Attempt-scoped cooperative cancellation authority. Cancelling the
+    /// parent signals every active child through the exact token returned by
+    /// its durable lease grant.
+    pub cancellation: mold_inference::InferenceCancellationToken,
+    /// Parent-level deterministic execution identity. The coordinator filters
+    /// every later re-resolution through this fence.
+    pub execution_equivalence_fingerprint: String,
+    /// Concrete dependency variants frozen once for the whole parent.
+    pub prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
 }
 
 pub struct GenerationJobResult {
@@ -81,13 +99,19 @@ pub struct GenerationJobResult {
 pub struct QueueHandle {
     job_tx: tokio::sync::mpsc::Sender<GenerationJob>,
     pending_count: Arc<AtomicUsize>,
+    capacity_notify: Arc<tokio::sync::Notify>,
+    capacity_waiter: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Reason a `QueueHandle::submit` attempt failed.
 #[derive(Debug)]
 pub enum SubmitError {
     /// Queue is at capacity — caller should return 503 with `Retry-After`.
-    Full { pending: usize, capacity: usize },
+    Full {
+        pending: usize,
+        capacity: usize,
+    },
+    Cancelled,
     /// Receiving end is gone (server shutting down).
     Shutdown,
 }
@@ -97,6 +121,8 @@ impl QueueHandle {
         Self {
             job_tx,
             pending_count: Arc::new(AtomicUsize::new(0)),
+            capacity_notify: Arc::new(tokio::sync::Notify::new()),
+            capacity_waiter: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -116,6 +142,7 @@ impl QueueHandle {
         }
         if self.job_tx.send(job).await.is_err() {
             self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            self.capacity_notify.notify_waiters();
             return Err(SubmitError::Shutdown);
         }
         #[cfg(feature = "metrics")]
@@ -126,8 +153,65 @@ impl QueueHandle {
         Ok(prev)
     }
 
+    /// Wait for shared queue capacity without converting temporary occupancy
+    /// into a terminal batch failure. Cancellation before transport drops the
+    /// unsubmitted job and releases any reserved counter slot.
+    pub async fn submit_when_available(
+        &self,
+        job: GenerationJob,
+        capacity: usize,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<usize, SubmitError> {
+        let mut job = Some(job);
+        let waiter = self.capacity_waiter.lock();
+        tokio::pin!(waiter);
+        let _waiter = tokio::select! {
+            guard = &mut waiter => guard,
+            _ = cancellation.cancelled() => return Err(SubmitError::Cancelled),
+        };
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(SubmitError::Cancelled);
+            }
+            let notified = self.capacity_notify.notified();
+            let previous = self.pending_count.fetch_add(1, Ordering::SeqCst);
+            if previous < capacity {
+                let send = self
+                    .job_tx
+                    .send(job.take().expect("batch queue job submitted once"));
+                tokio::pin!(send);
+                return tokio::select! {
+                    result = &mut send => {
+                        if result.is_err() {
+                            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                            self.capacity_notify.notify_waiters();
+                            Err(SubmitError::Shutdown)
+                        } else {
+                            Ok(previous)
+                        }
+                    }
+                    _ = cancellation.cancelled() => {
+                        self.pending_count.fetch_sub(1, Ordering::SeqCst);
+                        self.capacity_notify.notify_waiters();
+                        Err(SubmitError::Cancelled)
+                    }
+                };
+            }
+            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            tokio::select! {
+                _ = notified => {}
+                _ = cancellation.cancelled() => return Err(SubmitError::Cancelled),
+            }
+        }
+    }
+
     pub fn decrement(&self) {
-        self.pending_count.fetch_sub(1, Ordering::SeqCst);
+        let _ = self
+            .pending_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
+                Some(pending.saturating_sub(1))
+            });
+        self.capacity_notify.notify_one();
     }
 
     pub fn pending(&self) -> usize {
@@ -176,6 +260,13 @@ pub struct AppState {
     // ── Multi-GPU fields ────────────────────────────────────────────────────
     /// GPU worker pool for multi-GPU dispatch.
     pub gpu_pool: Arc<GpuPool>,
+    /// `Some` means inference is intentionally unavailable (for example
+    /// `--gpus none`, or a GPU build whose visible devices have no usable
+    /// stable identity). Read routes and downloads remain available.
+    pub generation_unavailable_reason: Arc<RwLock<Option<String>>>,
+    /// Read-only authoritative device inventory and preference projection.
+    /// Dispatch remains on `gpu_pool` until scheduler V2 lands.
+    pub device_registry: Arc<crate::device_registry::DeviceRegistry>,
     /// Maximum queue capacity (for status reporting and 503 responses).
     pub queue_capacity: usize,
 
@@ -193,11 +284,22 @@ pub struct AppState {
     pub pull_lock: Arc<Mutex<()>>,
     /// Generation request queue.
     pub queue: QueueHandle,
+    /// Scheduler-owned ingress for GPU-consuming utility and administrative
+    /// work. In GPU-worker mode this is the only route to an owner thread.
+    pub scheduled_work: crate::scheduler::ScheduledWorkHandle,
     /// Authoritative registry of in-flight jobs (queued + running). Powers
     /// `GET /api/queue` so the SPA can reconcile persisted "running" cards
     /// against server reality and dead-letter zombies whose SSE stream
     /// silently dropped.
     pub job_registry: SharedJobRegistry,
+    /// Serializes queue mutations with the scheduler's final lease claim.
+    ///
+    /// The registry's own lock protects each edit, but the scheduler also
+    /// needs pause state and its final worker send to be one transaction.
+    /// Mutation routes await this fence before returning, so a successful
+    /// response is an acknowledgement that no older plan can still grant the
+    /// pre-mutation state.
+    pub scheduler_mutation_fence: Arc<tokio::sync::Mutex<()>>,
     /// Dispatch pause gate toggled by `POST /api/queue/pause` /
     /// `POST /api/queue/resume`. The dispatch loops park on this at the top of
     /// each iteration; a job already running on a worker finishes untouched.
@@ -212,6 +314,10 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    /// Global logical publication barrier for every gallery observer and
+    /// mutator. Batch commits take the writer side until files, DB rows, and
+    /// the durable manifest agree.
+    pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
     /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
@@ -425,6 +531,8 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -433,12 +541,15 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -457,11 +568,38 @@ impl AppState {
         gpu_pool: Arc<GpuPool>,
         queue_capacity: usize,
     ) -> Self {
+        let discovered = gpu_pool
+            .worker_snapshot()
+            .into_iter()
+            .map(|worker| worker.gpu.clone())
+            .collect::<Vec<_>>();
+        let device_registry = if discovered.is_empty() {
+            crate::device_registry::DeviceRegistry::empty()
+        } else {
+            Arc::new(
+                crate::device_registry::DeviceRegistry::from_worker_inventory(
+                    discovered,
+                    Arc::new(None),
+                ),
+            )
+        };
+        Self::empty_with_device_registry(config, queue, gpu_pool, queue_capacity, device_registry)
+    }
+
+    pub(crate) fn empty_with_device_registry(
+        config: Config,
+        queue: QueueHandle,
+        gpu_pool: Arc<GpuPool>,
+        queue_capacity: usize,
+        device_registry: Arc<crate::device_registry::DeviceRegistry>,
+    ) -> Self {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
+            device_registry,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
@@ -470,12 +608,15 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -491,7 +632,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn empty_gpu_pool() -> Arc<GpuPool> {
         Arc::new(GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         })
     }
 
@@ -501,6 +642,26 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn empty_gpu_pool_for_test() -> Arc<GpuPool> {
         Self::empty_gpu_pool()
+    }
+
+    pub fn set_generation_unavailable(&self, reason: impl Into<String>) {
+        *self
+            .generation_unavailable_reason
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.into());
+    }
+
+    pub fn generation_unavailable(&self) -> Option<String> {
+        if self.device_registry.all_startup_allowed_devices_disabled() {
+            return Some(
+                "generation is unavailable because all GPU devices are disabled (maintenance mode)"
+                    .to_string(),
+            );
+        }
+        self.generation_unavailable_reason
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     #[cfg(test)]
@@ -514,6 +675,8 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -522,12 +685,15 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -553,6 +719,8 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -561,12 +729,15 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -590,8 +761,10 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Arc::new(GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
@@ -600,12 +773,15 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -629,6 +805,27 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue_job(id: &str) -> GenerationJob {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "queue",
+            "model": "flux-dev:q8",
+            "width": 64,
+            "height": 64,
+            "steps": 1
+        }))
+        .unwrap();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        GenerationJob {
+            id: id.to_string(),
+            request,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+            batch_child: None,
+        }
+    }
 
     #[test]
     fn models_disk_cache_serves_last_good_and_single_flights_refreshes() {
@@ -728,6 +925,88 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(16);
         let handle = QueueHandle::new(tx);
         assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn queue_handle_decrement_saturates_at_zero() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(1);
+        let handle = QueueHandle::new(tx);
+
+        handle.decrement();
+        handle.decrement();
+
+        assert_eq!(handle.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn waitable_submission_backpressures_on_unrelated_occupancy() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = QueueHandle::new(tx);
+        handle.submit(queue_job("ordinary"), 1).await.unwrap();
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let waiting = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                handle
+                    .submit_when_available(queue_job("batch"), 1, &cancellation)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            handle.pending(),
+            1,
+            "waiting must not reserve over capacity"
+        );
+
+        assert_eq!(rx.recv().await.unwrap().id, "ordinary");
+        handle.decrement();
+        assert_eq!(waiting.await.unwrap().unwrap(), 0);
+        assert_eq!(rx.recv().await.unwrap().id, "batch");
+        assert_eq!(handle.pending(), 1);
+    }
+
+    #[tokio::test]
+    async fn waitable_submission_is_fifo_and_cancellation_releases_its_turn() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let handle = QueueHandle::new(tx);
+        handle.submit(queue_job("occupied"), 1).await.unwrap();
+
+        let first_cancel = tokio_util::sync::CancellationToken::new();
+        let first = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = first_cancel.clone();
+            async move {
+                handle
+                    .submit_when_available(queue_job("first"), 1, &cancellation)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .submit_when_available(
+                        queue_job("second"),
+                        1,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        first_cancel.cancel();
+        assert!(matches!(first.await.unwrap(), Err(SubmitError::Cancelled)));
+        assert_eq!(handle.pending(), 1);
+
+        assert_eq!(rx.recv().await.unwrap().id, "occupied");
+        handle.decrement();
+        assert_eq!(second.await.unwrap().unwrap(), 0);
+        assert_eq!(rx.recv().await.unwrap().id, "second");
     }
 
     #[test]

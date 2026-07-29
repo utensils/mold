@@ -35,9 +35,11 @@ Version-pinned DMGs and `SHA256SUMS` are on the
 from source with the devshell commands below.
 
 Linux builds are currently source/CI distributions: `nix build
-.#mold-desktop` produces the native sm_89 package (`.#mold-desktop-sm120` for
-Blackwell). `desktop-build` produces that native package on NixOS and a CUDA
-AppImage on conventional Linux. Tagged releases do not publish the AppImage yet.
+.#mold-desktop` produces the native sm_89 package, with
+`.#mold-desktop-sm86` for RTX 3090/A40 and `.#mold-desktop-sm120` for RTX
+50-series. B200/sm100 is server-only; desktop connects to it remotely.
+`desktop-build` produces the native package on NixOS and a CUDA AppImage on
+conventional Linux. Tagged releases do not publish the AppImage yet.
 
 ## What it is
 
@@ -409,8 +411,12 @@ wire types as the CLI and web UI:
 
 - **Host detail** — click a host in the Machines workspace to open its detail view:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
-  models, current queue state, active model-download progress, and a freshly
-  fetched inventory of the models installed on that host.
+  models, every GPU's utilization, VRAM and lifecycle state, current queue
+  state, active model-download progress, and a freshly fetched inventory of
+  the models installed on that host. Each GPU can be enabled or disabled from
+  host detail. This device also exposes the same controls under **Settings →
+  Advanced**. A busy disable drains its current stage before the owner thread
+  exits; enabling starts a fresh owner thread.
 - **Launch reconnect** — every remembered host is attempted immediately on
   every app launch, in parallel with This Mac. An unreachable host stays in
   the Machines workspace as an errored row and periodic polling lets it self-heal.
@@ -434,9 +440,10 @@ ios-check          # Rust check for the Apple Silicon simulator target
 ios-build          # archive/export for App Store Connect
 ```
 
-On Linux, `nix build .#mold-desktop` builds the sm_89 native package and
-`nix build .#mold-desktop-sm120` targets Blackwell. `CUDA_COMPUTE_CAP` controls
-local dev/AppImage compilation. `desktop-release` remains the macOS
+On Linux, `nix build .#mold-desktop` builds the sm_89 native package,
+`nix build .#mold-desktop-sm86` targets RTX 3090/A40, and
+`nix build .#mold-desktop-sm120` targets RTX 50-series. `CUDA_COMPUTE_CAP`
+controls local dev/AppImage compilation. `desktop-release` remains the macOS
 sign/notarize path and intentionally exits on Linux.
 
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from

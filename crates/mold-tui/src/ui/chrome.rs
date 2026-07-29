@@ -128,6 +128,13 @@ pub(crate) fn remote_backend(status: &mold_core::ServerStatus) -> Option<&'stati
         .gpu_info
         .as_ref()
         .map(|g| g.name.to_ascii_lowercase())
+        .or_else(|| {
+            status
+                .gpus
+                .as_ref()
+                .and_then(|gpus| gpus.first())
+                .map(|gpu| gpu.name.to_ascii_lowercase())
+        })
         .unwrap_or_default();
     if name.contains("nvidia")
         || name.contains("rtx")
@@ -451,5 +458,36 @@ mod tests {
             let c = f.chars().next().unwrap();
             assert!(('\u{2800}'..='\u{28FF}').contains(&c), "{f} not braille");
         }
+    }
+
+    #[test]
+    fn remote_backend_uses_worker_names_when_legacy_gpu_info_is_absent() {
+        let status = mold_core::ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: None,
+            memory_status: None,
+            gpus: Some(vec![mold_core::GpuWorkerStatus {
+                ordinal: 7,
+                name: "NVIDIA B200".into(),
+                vram_total_bytes: 80 * 1024_u64.pow(3),
+                vram_used_bytes: 0,
+                loaded_model: None,
+                state: mold_core::GpuWorkerState::Idle,
+            }]),
+            queue_depth: None,
+            queue_capacity: None,
+            queue_paused: None,
+            instance_id: None,
+            models_disk: None,
+        };
+
+        assert_eq!(remote_backend(&status), Some("CUDA"));
     }
 }

@@ -321,7 +321,10 @@ pub fn validate_generate_request_with_family(
     if req.batch_size == 0 {
         return Err("batch_size must be >= 1".to_string());
     }
-    // No upper limit on batch_size — users can batch as many as they want.
+    // The shared inference/planning contract intentionally has no generic
+    // upper limit. Live atomic HTTP delivery has a separate server-advertised
+    // materialization bound because its durable manifest and response are
+    // still O(batch_size).
     if req.guidance < 0.0 {
         return Err(format!("guidance ({}) must be >= 0.0", req.guidance));
     }

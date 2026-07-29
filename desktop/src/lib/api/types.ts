@@ -82,6 +82,21 @@ export interface ServerCapabilities {
   discovery?: { can_browse: boolean } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Live lifecycle and restart-only recovery support. */
+  devices?: {
+    available?: boolean;
+    lifecycle?: boolean;
+    restart_enable?: boolean;
+    stable_pins?: boolean;
+    planned_lanes?: boolean;
+    learned_eta?: boolean;
+  } | null;
+  dispatch?: {
+    active_mode?: string | null;
+    v2_authoritative?: boolean;
+    observes_v2_decisions?: boolean;
+    request_placement_preview?: boolean;
+  } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
 }
@@ -173,6 +188,22 @@ export interface KeyframeConditionWire {
 export interface LoraWeight {
   path: string;
   scale: number;
+}
+
+export type DeviceRef = { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
+
+export interface AdvancedPlacement {
+  transformer: DeviceRef;
+  vae: DeviceRef;
+  clip_l?: DeviceRef | null;
+  clip_g?: DeviceRef | null;
+  t5?: DeviceRef | null;
+  qwen?: DeviceRef | null;
+}
+
+export interface DevicePlacement {
+  text_encoders: DeviceRef;
+  advanced?: AdvancedPlacement | null;
 }
 
 /** Installed LoRA adapter (`GET /api/loras`). Mirrors mold-core `LoraInfo`. */
@@ -274,11 +305,13 @@ export interface GenerateRequest {
   retake_range?: TimeRange;
   spatial_upscale?: Ltx2SpatialUpscale;
   temporal_upscale?: Ltx2TemporalUpscale;
+  placement?: DevicePlacement | null;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
 export type ProgressEvent =
   | { type: "queued"; position: number; id?: string }
+  | { type: "dependency_wait"; dependency: string; reason: string }
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }
   | { type: "info"; message: string }
@@ -510,7 +543,14 @@ export type ServerEvent =
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
   | { type: "gallery_removed"; filename: string }
   | { type: "queue_paused" }
-  | { type: "queue_resumed" };
+  | { type: "queue_resumed" }
+  | { type: "queue_plan_changed"; plan: import("@studio/api/queuePlan").QueuePlan }
+  | {
+      type: "device_state_changed";
+      device_id: string;
+      desired_enabled: boolean;
+      admin_state: "startup_excluded" | "starting" | "enabled" | "draining" | "disabled";
+    };
 
 // ── Catalog ───────────────────────────────────────────────────────────────
 
@@ -628,6 +668,8 @@ export interface ConfigRow {
   profile?: string | null;
   /** Name of the environment variable that wins when source is "env". */
   env_var?: string | null;
+  /** The persisted value applies when the engine/coordinator restarts. */
+  restart_required?: boolean;
 }
 
 /** `GET /api/config/profiles`. */
@@ -675,6 +717,7 @@ export interface ChainRequest {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  placement?: DevicePlacement | null;
 }
 
 /**

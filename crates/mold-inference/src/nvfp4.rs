@@ -39,7 +39,7 @@ pub(crate) enum Nvfp4Backend {
 /// native backend must not silently activate until it has passed numerical and
 /// generation validation on sm_120/Blackwell hardware.
 pub(crate) fn resolve_nvfp4_backend(device: &Device) -> candle_core::Result<Nvfp4Backend> {
-    let value = std::env::var("MOLD_NVFP4_BACKEND").ok();
+    let value = crate::runtime_env::value("MOLD_NVFP4_BACKEND");
     resolve_nvfp4_backend_value(device, value.as_deref())
 }
 

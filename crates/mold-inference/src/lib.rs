@@ -1,6 +1,8 @@
 pub(crate) mod adaptive_offload;
+pub mod artifact_format;
 pub mod attention;
 pub mod audio;
+mod batch;
 mod cache;
 pub(crate) mod cfg_plus_ddim;
 pub mod chain;
@@ -26,6 +28,7 @@ pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;
 pub mod qwen_image;
+pub mod runtime_env;
 pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
@@ -37,21 +40,34 @@ pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
 
-pub use device::reclaim_gpu_memory;
-pub use engine::{InferenceEngine, LoadStrategy};
+pub use batch::{
+    batch_execution_capability_for_family, production_batch_capabilities,
+    production_family_capabilities, production_family_capability_for_family,
+    validate_runtime_batch_capability, BackendApplicability, BackendQualification,
+    ComponentPlacementCapability, DeterminismGuarantee, FamilyBatchCapability, MediaKind,
+    QualificationReference, SeedContract, TiledVaeCapability, WorkflowCapabilities,
+};
+pub use engine::{
+    with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,
+};
 pub use error::InferenceError;
-pub use factory::{create_engine, create_engine_with_pool};
+pub use factory::{
+    create_engine, create_engine_with_frozen_config, create_engine_with_pool, FrozenEngineConfig,
+};
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;
-pub use progress::ProgressEvent;
+pub use progress::{
+    is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressEvent,
+    ProgressPhase,
+};
 pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;
 pub use sdxl::SDXLEngine;
-pub use upscaler::{create_upscale_engine, UpscaleEngine};
+pub use upscaler::{create_upscale_engine, with_upscale_cancellation, UpscaleEngine};
 pub use wuerstchen::WuerstchenEngine;
 pub use zimage::ZImageEngine;
 

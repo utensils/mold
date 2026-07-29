@@ -598,7 +598,7 @@ impl SDXLEngine {
         let tier1 = self
             .pending_placement
             .as_ref()
-            .map(|p| p.text_encoders)
+            .map(|p| p.text_encoders.clone())
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
@@ -951,6 +951,7 @@ impl SDXLEngine {
         let denoise_start = Instant::now();
 
         for (step_idx, &t) in active_timesteps.iter().enumerate() {
+            self.base.progress.checkpoint()?;
             let step_start = std::time::Instant::now();
             let latent_input = if use_cfg {
                 Tensor::cat(&[&*latents, &*latents], 0)?
@@ -995,6 +996,7 @@ impl SDXLEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -1056,9 +1058,11 @@ impl SDXLEngine {
                 // denoise loop stays at its natural precision.
                 let encoded = encoded.to_dtype(dtype)?;
 
-                self.base
-                    .progress
-                    .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::Vae,
+                    "Encoding source image (VAE)",
+                    encode_start.elapsed(),
+                );
                 Ok(encoded)
             },
         )?;
@@ -1128,17 +1132,21 @@ impl SDXLEngine {
                 let encode_l_start = Instant::now();
                 let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, clip_device)?;
                 let text_emb_l = clip_l.forward(&tokens_l)?;
-                self.base
-                    .progress
-                    .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP-L)",
+                    encode_l_start.elapsed(),
+                );
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-G)");
                 let encode_g_start = Instant::now();
                 let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, clip_device)?;
                 let text_emb_g = clip_g.forward(&tokens_g)?;
-                self.base
-                    .progress
-                    .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP-G)",
+                    encode_g_start.elapsed(),
+                );
 
                 let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
 
@@ -1250,7 +1258,7 @@ impl SDXLEngine {
             let tier1 = self
                 .pending_placement
                 .as_ref()
-                .map(|p| p.text_encoders)
+                .map(|p| p.text_encoders.clone())
                 .unwrap_or_default();
             let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
@@ -1503,9 +1511,11 @@ impl SDXLEngine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         // VAE dropped here
         let output_metadata = build_output_metadata(req, seed, Some(sched));
@@ -1719,7 +1729,7 @@ impl SDXLEngine {
 
         self.base
             .progress
-            .stage_done("VAE decode", vae_start.elapsed());
+            .phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 8. Encode to image format
         let output_metadata = build_output_metadata(req, seed, Some(sched));
@@ -1753,6 +1763,7 @@ impl SDXLEngine {
 
 impl InferenceEngine for SDXLEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = super::lora::effective_sdxl_loras(req);
         let result = self.generate_inner(req);
@@ -1774,6 +1785,13 @@ impl InferenceEngine for SDXLEngine {
         SDXLEngine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = SDXLEngine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
@@ -1788,6 +1806,19 @@ impl InferenceEngine for SDXLEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::batch_execution_capability_for_family("sdxl")
+            .expect("production SDXL batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

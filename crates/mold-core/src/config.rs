@@ -14,8 +14,8 @@ static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 const BOOTSTRAP_ONLY_BANNER: &str = "\
 # mold config — bootstrap-only surface.
 #
-# User preferences (expand.*, generate.default_*, per-model generation
-# defaults, lora, scheduler) live in SQLite at <MOLD_HOME>/mold.db.
+# User preferences (expand.*, scheduler.*, generate.default_*, per-model generation
+# defaults, LoRA, and generation scheduler) live in SQLite at <MOLD_HOME>/mold.db.
 # Edit them via:
 #   mold config set <key> <value>
 #   mold config get <key>
@@ -38,6 +38,7 @@ const STRIPPED_GLOBAL_KEYS: &[&str] = &[
     "t5_variant",
     "qwen3_variant",
     "expand",
+    "scheduler",
 ];
 
 const STRIPPED_MODEL_KEYS: &[&str] = &[
@@ -125,7 +126,7 @@ pub struct DefaultModelResolution {
 }
 
 /// Per-model file path + default settings configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct ModelConfig {
     // --- paths ---
     pub transformer: Option<String>,
@@ -287,7 +288,7 @@ impl ModelConfig {
 /// For upscaler models, only `transformer` (weights) is required; `vae` is empty.
 /// For utility models, only `transformer` is required; `vae` may be empty.
 /// Other paths are optional — each engine validates what it needs at load time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPaths {
     pub transformer: PathBuf,
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
@@ -313,10 +314,18 @@ pub struct ModelPaths {
 }
 
 impl ModelPaths {
+    const FROZEN_MODEL_PREFIX: &'static str = "\0mold-frozen-chain:";
+
     /// Resolve paths for a model. Checks config, then env vars.
     /// Returns None if transformer and VAE paths can't be resolved.
     /// All other paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
+        if let Some(model_cfg) = config
+            .models
+            .get(&format!("{}{model_name}", Self::FROZEN_MODEL_PREFIX))
+        {
+            return Self::resolve_from_model_config_exact(model_cfg);
+        }
         if let Some(model_cfg) = config.discovered_manifest_model_config(model_name) {
             return Self::resolve_from_model_config(Some(&model_cfg));
         }
@@ -328,6 +337,40 @@ impl ModelPaths {
 
         let model_cfg = config.lookup_model_config(model_name);
         Self::resolve_from_model_config(model_cfg.as_ref())
+    }
+
+    /// Resolve only the paths captured in `model_cfg`.
+    ///
+    /// This intentionally does not consult `MOLD_*_PATH` environment variables,
+    /// manifests, sidecars, or model discovery. Durable chain jobs use it after
+    /// admission so a restart cannot silently substitute different artifacts.
+    pub fn resolve_from_model_config_exact(model_cfg: &ModelConfig) -> Option<Self> {
+        let path = |value: Option<&str>| value.map(PathBuf::from);
+        Some(Self {
+            transformer: PathBuf::from(model_cfg.transformer.as_deref()?),
+            transformer_shards: model_cfg
+                .transformer_shards
+                .as_ref()
+                .map(|paths| paths.iter().map(PathBuf::from).collect())
+                .unwrap_or_default(),
+            vae: PathBuf::from(model_cfg.vae.as_deref()?),
+            spatial_upscaler: path(model_cfg.spatial_upscaler.as_deref()),
+            temporal_upscaler: path(model_cfg.temporal_upscaler.as_deref()),
+            distilled_lora: path(model_cfg.distilled_lora.as_deref()),
+            t5_encoder: path(model_cfg.t5_encoder.as_deref()),
+            clip_encoder: path(model_cfg.clip_encoder.as_deref()),
+            t5_tokenizer: path(model_cfg.t5_tokenizer.as_deref()),
+            clip_tokenizer: path(model_cfg.clip_tokenizer.as_deref()),
+            clip_encoder_2: path(model_cfg.clip_encoder_2.as_deref()),
+            clip_tokenizer_2: path(model_cfg.clip_tokenizer_2.as_deref()),
+            text_encoder_files: model_cfg
+                .text_encoder_files
+                .as_ref()
+                .map(|paths| paths.iter().map(PathBuf::from).collect())
+                .unwrap_or_default(),
+            text_tokenizer: path(model_cfg.text_tokenizer.as_deref()),
+            decoder: path(model_cfg.decoder.as_deref()),
+        })
     }
 
     fn resolve_from_model_config(model_cfg: Option<&ModelConfig>) -> Option<Self> {
@@ -481,6 +524,11 @@ pub struct Config {
     #[serde(default)]
     pub expand: ExpandSettings,
 
+    /// Profile-scoped scheduler behavior. Persisted in `mold.db`; the
+    /// serialized field exists only for one-shot import of older/manual TOML.
+    #[serde(default)]
+    pub scheduler: SchedulerSettings,
+
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -493,9 +541,12 @@ pub struct Config {
     #[serde(default)]
     pub lambda: crate::lambda::LambdaSettings,
 
-    /// GPU ordinals to use (None = all available).
+    /// GPUs to use at startup (None = all visible).
+    ///
+    /// Accepts legacy ordinal arrays, stable/NVIDIA UUID string arrays, and
+    /// explicit `"all"` / `"none"` keywords.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpus: Option<Vec<usize>>,
+    pub gpus: Option<crate::types::GpuSelection>,
 
     /// Max queued requests before 503 (default: 200).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -524,6 +575,87 @@ pub struct LoggingConfig {
     /// Number of days to retain log files. Default: 7.
     #[serde(default = "default_log_max_days")]
     pub max_days: u32,
+}
+
+pub const SCHEDULER_TIMING_MAX_MS: u32 = 30_000;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub struct SchedulerSettings {
+    #[serde(default = "default_replan_debounce_ms")]
+    pub replan_debounce_ms: u32,
+    #[serde(default = "default_replan_max_delay_ms")]
+    pub replan_max_delay_ms: u32,
+    #[serde(default = "default_warm_wait_max_ms")]
+    pub warm_wait_max_ms: u32,
+}
+
+impl<'de> Deserialize<'de> for SchedulerSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default = "default_replan_debounce_ms")]
+            replan_debounce_ms: u32,
+            #[serde(default = "default_replan_max_delay_ms")]
+            replan_max_delay_ms: u32,
+            #[serde(default = "default_warm_wait_max_ms")]
+            warm_wait_max_ms: u32,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        SchedulerSettings {
+            replan_debounce_ms: wire.replan_debounce_ms,
+            replan_max_delay_ms: wire.replan_max_delay_ms,
+            warm_wait_max_ms: wire.warm_wait_max_ms,
+        }
+        .validate()
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+const fn default_replan_debounce_ms() -> u32 {
+    2_000
+}
+
+const fn default_replan_max_delay_ms() -> u32 {
+    5_000
+}
+
+const fn default_warm_wait_max_ms() -> u32 {
+    2_000
+}
+
+impl SchedulerSettings {
+    pub fn validate(self) -> anyhow::Result<Self> {
+        for (key, value) in [
+            ("scheduler.replan_debounce_ms", self.replan_debounce_ms),
+            ("scheduler.replan_max_delay_ms", self.replan_max_delay_ms),
+            ("scheduler.warm_wait_max_ms", self.warm_wait_max_ms),
+        ] {
+            anyhow::ensure!(
+                value <= SCHEDULER_TIMING_MAX_MS,
+                "{key} must be between 0 and {SCHEDULER_TIMING_MAX_MS}"
+            );
+        }
+        anyhow::ensure!(
+            self.replan_max_delay_ms >= self.replan_debounce_ms,
+            "scheduler.replan_max_delay_ms must be greater than or equal to \
+             scheduler.replan_debounce_ms"
+        );
+        Ok(self)
+    }
+}
+
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            replan_debounce_ms: default_replan_debounce_ms(),
+            replan_max_delay_ms: default_replan_max_delay_ms(),
+            warm_wait_max_ms: default_warm_wait_max_ms(),
+        }
+    }
 }
 
 fn default_log_level() -> String {
@@ -589,6 +721,7 @@ impl Default for Config {
             media_roots: None,
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
+            scheduler: SchedulerSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
             lambda: crate::lambda::LambdaSettings::default(),
@@ -600,14 +733,29 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Install an immutable model snapshot for one in-memory execution.
+    ///
+    /// The private sentinel makes [`ModelPaths::resolve`] choose the exact
+    /// captured paths before any mutable manifest, sidecar, or environment
+    /// source. The ordinary model entry is also replaced so engine-shaping
+    /// defaults (family, LoRA, scheduler, dtype flags) remain frozen while the
+    /// semantic model name is preserved.
+    pub fn install_frozen_model_config(&mut self, model_name: &str, model: ModelConfig) {
+        self.models.insert(
+            format!("{}{model_name}", ModelPaths::FROZEN_MODEL_PREFIX),
+            model.clone(),
+        );
+        self.models.insert(model_name.to_string(), model);
+    }
+
+    pub fn has_frozen_model_config(&self, model_name: &str) -> bool {
+        self.models
+            .contains_key(&format!("{}{model_name}", ModelPaths::FROZEN_MODEL_PREFIX))
+    }
+
     /// Build a `GpuSelection` from the config's `gpus` field.
     pub fn gpu_selection(&self) -> crate::types::GpuSelection {
-        match &self.gpus {
-            Some(ordinals) if !ordinals.is_empty() => {
-                crate::types::GpuSelection::Specific(ordinals.clone())
-            }
-            _ => crate::types::GpuSelection::All,
-        }
+        self.gpus.clone().unwrap_or_default()
     }
 
     /// Return the configured queue size or the default (200).
@@ -1224,6 +1372,24 @@ impl Config {
         placement
     }
 
+    /// Normalize placement at the request boundary.
+    ///
+    /// An explicit request placement is a complete user decision, including
+    /// any `Auto` fields it contains, and therefore wins wholly over
+    /// environment and persisted defaults. Without a request override,
+    /// `resolved_placement` applies environment over persisted values. The
+    /// final fallback is an all-`Auto` placement.
+    pub fn effective_placement(
+        &self,
+        model_name: &str,
+        request: Option<&crate::types::DevicePlacement>,
+    ) -> crate::types::DevicePlacement {
+        request
+            .cloned()
+            .or_else(|| self.resolved_placement(model_name))
+            .unwrap_or_default()
+    }
+
     /// Persist a placement for `model_name`, creating the model entry if
     /// missing. `None` clears the placement (and leaves the rest of the
     /// entry intact).
@@ -1442,28 +1608,54 @@ fn resolved_manifest_paths_exist(
     })
 }
 
-/// Parse a device-placement string (`auto`, `cpu`, `gpu`, `gpu:N`) into a
-/// `DeviceRef`. Case-insensitive, whitespace-trimmed. Used by env-var and CLI
-/// parsers alike so all three surfaces (TOML, env, CLI flag) accept the same
-/// forms.
+/// Parse a device-placement string into a `DeviceRef`.
+///
+/// Keywords and the legacy `gpu:N` prefix are case-insensitive. Durable IDs
+/// preserve their spelling and accept `device:<id>` plus direct `cuda:` and
+/// `metal:` forms. Raw NVIDIA `GPU-`/`MIG-` selectors belong to startup GPU
+/// selection; component placement uses the exact opaque ID advertised by
+/// `/api/devices`.
 pub fn parse_device_ref_str(raw: &str) -> Result<crate::types::DeviceRef, String> {
     use crate::types::DeviceRef;
-    let raw = raw.trim().to_lowercase();
-    if raw == "auto" {
+    let raw = raw.trim();
+    let normalized = raw.to_ascii_lowercase();
+    if normalized == "auto" {
         Ok(DeviceRef::Auto)
-    } else if raw == "cpu" {
+    } else if normalized == "cpu" {
         Ok(DeviceRef::Cpu)
-    } else if raw == "gpu" {
+    } else if normalized == "gpu" {
         Ok(DeviceRef::gpu(0))
-    } else if let Some(rest) = raw.strip_prefix("gpu:") {
+    } else if let Some(rest) = normalized.strip_prefix("gpu:") {
         rest.parse::<usize>()
             .map(DeviceRef::gpu)
-            .map_err(|_| format!("invalid device '{raw}' (expected auto|cpu|gpu[:N])"))
+            .map_err(|_| invalid_device_ref(raw))
+    } else if normalized.starts_with("device:") {
+        parse_stable_device_id(&raw["device:".len()..])
+    } else if is_stable_device_id(raw) {
+        Ok(DeviceRef::device(raw))
     } else {
-        Err(format!(
-            "invalid device '{raw}' (expected auto|cpu|gpu[:N])"
-        ))
+        Err(invalid_device_ref(raw))
     }
+}
+
+fn parse_stable_device_id(raw: &str) -> Result<crate::types::DeviceRef, String> {
+    if is_stable_device_id(raw) {
+        Ok(crate::types::DeviceRef::device(raw))
+    } else {
+        Err(invalid_device_ref(raw))
+    }
+}
+
+fn is_stable_device_id(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    (lower.starts_with("cuda:") && raw.len() > "cuda:".len())
+        || (lower.starts_with("metal:") && raw.len() > "metal:".len())
+}
+
+fn invalid_device_ref(raw: &str) -> String {
+    format!(
+        "invalid device '{raw}' (expected auto|cpu|gpu[:N]|device:<stable-id>|cuda:<id>|metal:<id>)"
+    )
 }
 
 fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
@@ -1474,5 +1666,25 @@ fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
             eprintln!("mold: ignoring {key}={raw}: {msg}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_settings_tests {
+    use super::SchedulerSettings;
+
+    #[test]
+    fn scheduler_settings_defaults_and_rejects_invalid_toml() {
+        let defaults: SchedulerSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, SchedulerSettings::default());
+
+        let error = toml::from_str::<SchedulerSettings>(
+            "replan_debounce_ms = 5000\nreplan_max_delay_ms = 4999",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replan_max_delay_ms must be greater than or equal"));
+        assert!(toml::from_str::<SchedulerSettings>("warm_wait_max_ms = 30001").is_err());
     }
 }

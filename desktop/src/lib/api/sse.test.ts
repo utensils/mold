@@ -37,7 +37,7 @@ describe("sseStream", () => {
     );
   });
 
-  it("reports the first successful connection only once across reconnects", async () => {
+  it("reports every successful connection so consumers can refetch after reconnects", async () => {
     const onOpen = vi.fn();
     fetchEventSource.mockImplementation(async (_url: string, options: { onopen: Function }) => {
       const response = new Response(null, { status: 200 });
@@ -52,6 +52,39 @@ describe("sseStream", () => {
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: null },
     });
 
-    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledTimes(2);
   });
+
+  for (const status of [401, 403, 404]) {
+    it(`makes HTTP ${status} terminal when the consumer marks it non-retryable`, async () => {
+      fetchEventSource.mockImplementation(
+        async (
+          _url: string,
+          options: {
+            onopen: (response: Response) => Promise<void>;
+            onerror: (error: Error) => void;
+          },
+        ) => {
+          let failure: Error;
+          try {
+            await options.onopen(new Response(null, { status }));
+            throw new Error("expected onopen to reject");
+          } catch (error) {
+            failure = error as Error;
+          }
+          expect(() => options.onerror(failure)).toThrow(`HTTP ${status}`);
+        },
+      );
+
+      await sseStream("/api/events", {
+        signal: new AbortController().signal,
+        onEvent: vi.fn(),
+        retry: true,
+        terminalHttpStatuses: [401, 403, 404],
+        target: { baseUrl: "http://host", apiKey: "stale" },
+      });
+
+      expect(fetchEventSource).toHaveBeenCalledTimes(1);
+    });
+  }
 });
