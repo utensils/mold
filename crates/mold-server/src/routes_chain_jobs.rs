@@ -1232,17 +1232,22 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
-        let (_status, Json(created)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(
-                State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
-            ))
-        })
-        .unwrap();
-        let db_ref = db.as_ref().as_ref().unwrap();
-        let row = chain_jobs::get_job(db_ref, &created.job_id)
-            .unwrap()
+        let job_id = "stage-media-route-test";
+        with_mold_home(home.path(), || {
+            crate::chain_job_runner::create_job_with_params(
+                db.as_ref().as_ref().unwrap(),
+                &home.path().join("jobs"),
+                crate::chain_job_runner::CreateJobParams {
+                    id: job_id.into(),
+                    ephemeral: false,
+                    frozen_model: None,
+                    request: req(OutputFormat::Mp4).normalise().unwrap(),
+                },
+            )
             .unwrap();
+        });
+        let db_ref = db.as_ref().as_ref().unwrap();
+        let row = chain_jobs::get_job(db_ref, job_id).unwrap().unwrap();
         let layout = JobDirLayout::new(row.job_dir.clone());
         std::fs::create_dir_all(layout.tail_dir(0)).unwrap();
         std::fs::write(layout.segment_path(0), b"0123456789").unwrap();
@@ -1254,7 +1259,7 @@ mod tests {
         manifest.stage_status[0].raw_segment = true;
         manifest.write_atomic(&row.job_dir).unwrap();
 
-        let detail = job_detail_for(db_ref, home.path(), &created.job_id)
+        let detail = job_detail_for(db_ref, home.path(), job_id)
             .unwrap()
             .unwrap();
         assert!(detail.stages[0].has_media);
@@ -1262,7 +1267,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
-        let response = chain_job_stage_media(State(state), headers, Path((created.job_id, 0)))
+        let response = chain_job_stage_media(State(state), headers, Path((job_id.into(), 0)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);

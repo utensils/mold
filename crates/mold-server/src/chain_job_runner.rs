@@ -1069,7 +1069,7 @@ async fn run_v2_loop(
                 tokio::task::yield_now().await;
             }
             _ = daily.tick() => {
-                if let Err(error) = run_gc_for_runner(deps.clone()).await {
+                if let Err(error) = run_gc_for_runner(deps.clone(), false).await {
                     tracing::warn!("daily chain job GC failed: {error}");
                 }
             }
