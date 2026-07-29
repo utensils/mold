@@ -16,7 +16,11 @@
  * half-built script when there is nothing editable.
  */
 
-import type { ChainJobStageDetail, ChainScript, ChainScriptStage } from "./api/chainTypes";
+import type {
+  ChainJobStageDetail,
+  ChainScript,
+  ChainScriptStage,
+} from "./api/chainTypes";
 import type { SequenceTransition } from "./sequence";
 
 function num(v: unknown): number | undefined {
@@ -74,7 +78,11 @@ export function normalizeServerChainScript(raw: unknown): ChainScript | null {
     return stage;
   });
 
-  const script: ChainScript = { schema: "mold.chain.v1", chain: { model }, stages };
+  const script: ChainScript = {
+    schema: "mold.chain.v1",
+    chain: { model },
+    stages,
+  };
   const width = num(c.width);
   if (width !== undefined) script.chain.width = width;
   const height = num(c.height);
@@ -94,7 +102,9 @@ export function normalizeServerChainScript(raw: unknown): ChainScript | null {
 }
 
 /** Leading completed stages of a job — the edit session's cache ceiling. */
-export function countLeadingCompletedStages(stages: readonly ChainJobStageDetail[]): number {
+export function countLeadingCompletedStages(
+  stages: readonly ChainJobStageDetail[],
+): number {
   const ordered = [...stages].sort((a, b) => a.idx - b.idx);
   let count = 0;
   for (const stage of ordered) {

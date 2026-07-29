@@ -77,10 +77,16 @@ function tomlInt(value: string | number): string {
  * omitting fields that are null/undefined.
  */
 export function serializeChainScript(
-  script: ChainScript & { chain: { strength?: number; output_format?: string } },
+  script: ChainScript & {
+    chain: { strength?: number; output_format?: string };
+  },
 ): string {
   const c = script.chain;
-  const lines: string[] = [`schema = ${tomlString(CHAIN_SCHEMA)}`, "", "[chain]"];
+  const lines: string[] = [
+    `schema = ${tomlString(CHAIN_SCHEMA)}`,
+    "",
+    "[chain]",
+  ];
   lines.push(`model = ${tomlString(c.model)}`);
   if (c.width != null) lines.push(`width = ${c.width}`);
   if (c.height != null) lines.push(`height = ${c.height}`);
@@ -89,7 +95,8 @@ export function serializeChainScript(
   if (c.steps != null) lines.push(`steps = ${c.steps}`);
   if (c.guidance != null) lines.push(`guidance = ${tomlFloat(c.guidance)}`);
   lines.push(`strength = ${tomlFloat(c.strength ?? 1.0)}`);
-  if (c.motion_tail_frames != null) lines.push(`motion_tail_frames = ${c.motion_tail_frames}`);
+  if (c.motion_tail_frames != null)
+    lines.push(`motion_tail_frames = ${c.motion_tail_frames}`);
   lines.push(`output_format = ${tomlString(c.output_format ?? "mp4")}`);
   if (c.enable_audio != null) lines.push(`enable_audio = ${c.enable_audio}`);
 
@@ -98,7 +105,10 @@ export function serializeChainScript(
     lines.push(`prompt = ${tomlString(stage.prompt)}`);
     if (stage.frames != null) lines.push(`frames = ${stage.frames}`);
     lines.push(`transition = ${tomlString(stage.transition ?? "smooth")}`);
-    if ((stage.transition ?? "smooth") === "fade" && stage.fade_frames != null) {
+    if (
+      (stage.transition ?? "smooth") === "fade" &&
+      stage.fade_frames != null
+    ) {
       lines.push(`fade_frames = ${stage.fade_frames}`);
     }
     if (stage.negative_prompt) {
@@ -107,7 +117,8 @@ export function serializeChainScript(
     if (stage.source_image_b64) {
       lines.push(`source_image_b64 = ${tomlString(stage.source_image_b64)}`);
     }
-    if (stage.seed_offset != null) lines.push(`seed_offset = ${tomlInt(stage.seed_offset)}`);
+    if (stage.seed_offset != null)
+      lines.push(`seed_offset = ${tomlInt(stage.seed_offset)}`);
   }
 
   return `${lines.join("\n")}\n`;
@@ -120,10 +131,15 @@ export function serializeChainScript(
  * `source_image_path` is rejected — the composer has no script folder to
  * resolve it against.
  */
-function stageSourceImage(s: Record<string, unknown>, idx: number): string | undefined {
-  const present = ["source_image", "source_image_path", "source_image_b64"].filter(
-    (key) => s[key] != null,
-  );
+function stageSourceImage(
+  s: Record<string, unknown>,
+  idx: number,
+): string | undefined {
+  const present = [
+    "source_image",
+    "source_image_path",
+    "source_image_b64",
+  ].filter((key) => s[key] != null);
   if (present.length > 1) {
     throw new Error(
       `Stage ${idx + 1}: set at most one of source_image, source_image_path, source_image_b64.`,
@@ -152,14 +168,21 @@ export function parseChainScript(text: string): ChainScript {
   let doc: Record<string, unknown>;
   try {
     // u64 seeds overflow JS numbers; "asNeeded" promotes only those to bigint.
-    doc = parseToml(text, { integersAsBigInt: "asNeeded" }) as Record<string, unknown>;
+    doc = parseToml(text, { integersAsBigInt: "asNeeded" }) as Record<
+      string,
+      unknown
+    >;
   } catch (e) {
-    throw new Error(`Couldn't parse the TOML: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(
+      `Couldn't parse the TOML: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   const schema = doc.schema;
   if (schema != null && schema !== CHAIN_SCHEMA) {
-    throw new Error(`Unsupported chain schema "${String(schema)}" (expected ${CHAIN_SCHEMA}).`);
+    throw new Error(
+      `Unsupported chain schema "${String(schema)}" (expected ${CHAIN_SCHEMA}).`,
+    );
   }
   const chain = doc.chain;
   if (chain == null || typeof chain !== "object") {
@@ -169,7 +192,9 @@ export function parseChainScript(text: string): ChainScript {
   // The canonical key is `stage` (Rust serde rename); the natural plural is
   // accepted too so hand-written documents open.
   const stageTables = doc.stage ?? doc.stages;
-  const rawStages = Array.isArray(stageTables) ? (stageTables as Record<string, unknown>[]) : [];
+  const rawStages = Array.isArray(stageTables)
+    ? (stageTables as Record<string, unknown>[])
+    : [];
   if (rawStages.length === 0) {
     throw new Error("Chain TOML is missing its [[stage]] entries.");
   }

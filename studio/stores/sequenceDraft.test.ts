@@ -221,7 +221,10 @@ describe("sequence draft store", () => {
     // also survive a reload taken before the user edits anything.
     const reloaded = freshStore();
     reloaded.hydrate();
-    expect(reloaded.clips.map((clip) => clip.prompt)).toEqual(["opening", "landing"]);
+    expect(reloaded.clips.map((clip) => clip.prompt)).toEqual([
+      "opening",
+      "landing",
+    ]);
   });
 
   it("tracks an edit session without persisting it", () => {

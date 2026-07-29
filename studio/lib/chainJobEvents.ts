@@ -35,17 +35,25 @@ function withStageState(
   hasPreview?: boolean,
 ): ChainJobDetail | null {
   if (!detail) return detail;
-  const stages = detail.stages.map(
-    (s): ChainJobStageDetail =>
-      s.idx === idx ? { ...s, state, has_preview: hasPreview ?? s.has_preview } : s,
+  const stages = detail.stages.map((s): ChainJobStageDetail =>
+    s.idx === idx
+      ? { ...s, state, has_preview: hasPreview ?? s.has_preview }
+      : s,
   );
   return { ...detail, stages };
 }
 
-export function applyChainJobEvent(state: ChainJobLive, ev: ChainJobEvent): ChainJobLive {
+export function applyChainJobEvent(
+  state: ChainJobLive,
+  ev: ChainJobEvent,
+): ChainJobLive {
   switch (ev.type) {
     case "snapshot":
-      return { detail: ev.job, progress: {}, activeStage: firstRunningStage(ev.job) };
+      return {
+        detail: ev.job,
+        progress: {},
+        activeStage: firstRunningStage(ev.job),
+      };
     case "stage_start":
       return {
         ...state,
@@ -55,13 +63,22 @@ export function applyChainJobEvent(state: ChainJobLive, ev: ChainJobEvent): Chai
     case "denoise_step":
       return {
         ...state,
-        progress: { ...state.progress, [ev.stage_idx]: { step: ev.step, total: ev.total } },
+        progress: {
+          ...state.progress,
+          [ev.stage_idx]: { step: ev.step, total: ev.total },
+        },
       };
     case "stage_done":
       return {
         ...state,
-        activeStage: state.activeStage === ev.stage_idx ? null : state.activeStage,
-        detail: withStageState(state.detail, ev.stage_idx, "completed", ev.has_preview),
+        activeStage:
+          state.activeStage === ev.stage_idx ? null : state.activeStage,
+        detail: withStageState(
+          state.detail,
+          ev.stage_idx,
+          "completed",
+          ev.has_preview,
+        ),
       };
     case "state_changed":
       return {

@@ -10,7 +10,9 @@ import {
 } from "./sequenceForm";
 import type { ChainScript } from "./api/chainTypes";
 
-function shared(extra: Partial<SequenceSharedParams> = {}): SequenceSharedParams {
+function shared(
+  extra: Partial<SequenceSharedParams> = {},
+): SequenceSharedParams {
   return {
     model: "ltx-2-19b-distilled:fp8",
     family: "ltx2",
@@ -213,7 +215,10 @@ describe("stageInvalidation", () => {
   });
 
   it("appended clips render as new; the old prefix stays cached", () => {
-    const current = [...baseline.map((c) => ({ ...c })), clip({ prompt: "four" })];
+    const current = [
+      ...baseline.map((c) => ({ ...c })),
+      clip({ prompt: "four" }),
+    ];
     const p = plan(current);
     expect(p.firstDirtyStage).toBe(3);
     expect(p.perClip).toEqual(["cached", "cached", "cached", "new"]);

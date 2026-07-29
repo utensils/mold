@@ -12,7 +12,9 @@ import {
 } from "./activity";
 import type { ChainJobSummary } from "./api/chainTypes";
 
-function print(extra: Partial<ActivityJobVM & { kind: "print" }> = {}): ActivityJobVM {
+function print(
+  extra: Partial<ActivityJobVM & { kind: "print" }> = {},
+): ActivityJobVM {
   return {
     kind: "print",
     key: "print:1",
@@ -50,7 +52,11 @@ describe("sequenceActions", () => {
     expect(sequenceActions("running")).toEqual(["watch", "cancel"]);
     expect(sequenceActions("completed")).toEqual(["watch", "edit", "delete"]);
     // Resumability is a server feature the strip must surface.
-    expect(sequenceActions("interrupted")).toEqual(["resume", "edit", "delete"]);
+    expect(sequenceActions("interrupted")).toEqual([
+      "resume",
+      "edit",
+      "delete",
+    ]);
     expect(sequenceActions("failed")).toEqual(["resume", "edit", "delete"]);
     expect(sequenceActions("cancelled")).toEqual(["resume", "edit", "delete"]);
   });
@@ -86,8 +92,16 @@ describe("sequenceToVM", () => {
 
 describe("mergeActivity", () => {
   it("orders active work first, then by recency", () => {
-    const settledPrint = print({ key: "print:1", phase: "done", createdAtMs: 400 });
-    const runningPrint = print({ key: "print:2", phase: "running", createdAtMs: 100 });
+    const settledPrint = print({
+      key: "print:1",
+      phase: "done",
+      createdAtMs: 400,
+    });
+    const runningPrint = print({
+      key: "print:2",
+      phase: "running",
+      createdAtMs: 100,
+    });
     const queuedSeq = sequenceToVM(summary({ created_at_unix_ms: 300 }), {
       hostId: "plato",
       hostLabel: "plato",
@@ -97,7 +111,10 @@ describe("mergeActivity", () => {
       { hostId: "plato", hostLabel: "plato" },
     );
 
-    const merged = mergeActivity([settledPrint, runningPrint], [queuedSeq, settledSeq]);
+    const merged = mergeActivity(
+      [settledPrint, runningPrint],
+      [queuedSeq, settledSeq],
+    );
     expect(merged.map((vm) => vm.key)).toEqual([
       "print:2", // running first
       "seq:plato:c1", // queued second
@@ -111,15 +128,22 @@ describe("mergeActivity", () => {
   // merge, fatal the moment a failed print keeps a row — a counter always
   // loses to a ~1.7e12 epoch stamp and sorts to the bottom forever.
   it("sorts prints against sequences on a real wall clock", () => {
-    const freshPrint = print({ key: "print:new", phase: "failed", createdAtMs: 1_700_000_100_000 });
+    const freshPrint = print({
+      key: "print:new",
+      phase: "failed",
+      createdAtMs: 1_700_000_100_000,
+    });
     const olderSeq = sequenceToVM(
-      summary({ id: "old", state: "failed", created_at_unix_ms: 1_700_000_000_000 }),
+      summary({
+        id: "old",
+        state: "failed",
+        created_at_unix_ms: 1_700_000_000_000,
+      }),
       { hostId: "plato", hostLabel: "plato" },
     );
-    expect(mergeActivity([freshPrint], [olderSeq]).map((vm) => vm.key)).toEqual([
-      "print:new",
-      "seq:plato:old",
-    ]);
+    expect(mergeActivity([freshPrint], [olderSeq]).map((vm) => vm.key)).toEqual(
+      ["print:new", "seq:plato:old"],
+    );
   });
 });
 
@@ -157,9 +181,15 @@ describe("partitionActivity", () => {
     sequenceToVM(summary(extra), { hostId, hostLabel: hostId });
 
   it("puts queued and running rows in active and never in attention", () => {
-    const rows = [seq({ id: "q", state: "queued" }), seq({ id: "r", state: "running" })];
+    const rows = [
+      seq({ id: "q", state: "queued" }),
+      seq({ id: "r", state: "running" }),
+    ];
     const part = partitionActivity(rows, { nowMs: NOW });
-    expect(part.active.map((vm) => vm.key)).toEqual(["seq:plato:q", "seq:plato:r"]);
+    expect(part.active.map((vm) => vm.key)).toEqual([
+      "seq:plato:q",
+      "seq:plato:r",
+    ]);
     expect(part.attention).toEqual([]);
     expect(part.settledSequences).toBe(0);
   });
@@ -192,7 +222,13 @@ describe("partitionActivity", () => {
     expect(fresh.settledSequences).toBe(0);
 
     const stale = partitionActivity(
-      [seq({ id: "f", state: "failed", updated_at_unix_ms: NOW - SETTLED_VISIBLE_MS - 1 })],
+      [
+        seq({
+          id: "f",
+          state: "failed",
+          updated_at_unix_ms: NOW - SETTLED_VISIBLE_MS - 1,
+        }),
+      ],
       { nowMs: NOW },
     );
     expect(stale.attention).toEqual([]);
@@ -210,12 +246,20 @@ describe("partitionActivity", () => {
   it("gives a failed print its own attention row, keyed distinctly", () => {
     const part = partitionActivity(
       [
-        print({ key: "print:9", phase: "failed", createdAtMs: NOW, settledAtMs: NOW - 5_000 }),
+        print({
+          key: "print:9",
+          phase: "failed",
+          createdAtMs: NOW,
+          settledAtMs: NOW - 5_000,
+        }),
         seq({ id: "f", state: "failed", updated_at_unix_ms: NOW - 1_000 }),
       ],
       { nowMs: NOW },
     );
-    expect(part.attention.map((vm) => vm.key)).toEqual(["seq:plato:f", "print:9"]);
+    expect(part.attention.map((vm) => vm.key)).toEqual([
+      "seq:plato:f",
+      "print:9",
+    ]);
   });
 
   it("keeps the newest rows at the cap and reports the overflow", () => {
@@ -224,17 +268,28 @@ describe("partitionActivity", () => {
       seq({ id: "b", state: "failed", updated_at_unix_ms: NOW - 2_000 }),
       seq({ id: "c", state: "failed", updated_at_unix_ms: NOW - 1_000 }),
     ];
-    const part = partitionActivity(rows, { nowMs: NOW, maxAttentionRows: MAX_ATTENTION_ROWS });
-    expect(part.attention.map((vm) => vm.key)).toEqual(["seq:plato:c", "seq:plato:b"]);
+    const part = partitionActivity(rows, {
+      nowMs: NOW,
+      maxAttentionRows: MAX_ATTENTION_ROWS,
+    });
+    expect(part.attention.map((vm) => vm.key)).toEqual([
+      "seq:plato:c",
+      "seq:plato:b",
+    ]);
     expect(part.hiddenAttention).toBe(1);
     // Overflow is a failure count, not a settled-sequence count.
     expect(part.settledSequences).toBe(0);
   });
 
   it("drops dismissed rows without moving them into the settled count", () => {
-    const rows = [seq({ id: "f", state: "failed", updated_at_unix_ms: NOW - 1_000 })];
+    const rows = [
+      seq({ id: "f", state: "failed", updated_at_unix_ms: NOW - 1_000 }),
+    ];
     const kept = partitionActivity(rows, { nowMs: NOW });
-    const dropped = partitionActivity(rows, { nowMs: NOW, dismissed: ["seq:plato:f"] });
+    const dropped = partitionActivity(rows, {
+      nowMs: NOW,
+      dismissed: ["seq:plato:f"],
+    });
     expect(kept.attention).toHaveLength(1);
     expect(dropped.attention).toEqual([]);
     expect(dropped.hiddenAttention).toBe(0);
@@ -244,19 +299,23 @@ describe("partitionActivity", () => {
 
 describe("activityDigestLabel", () => {
   it("stays silent when the strip is showing everything", () => {
-    expect(activityDigestLabel({ settledSequences: 0, hiddenAttention: 0 })).toBeNull();
+    expect(
+      activityDigestLabel({ settledSequences: 0, hiddenAttention: 0 }),
+    ).toBeNull();
   });
 
   it("names settled sequences, hidden failures, or both", () => {
-    expect(activityDigestLabel({ settledSequences: 4, hiddenAttention: 0 })).toBe(
-      "4 settled sequences",
-    );
-    expect(activityDigestLabel({ settledSequences: 1, hiddenAttention: 0 })).toBe(
-      "1 settled sequence",
-    );
-    expect(activityDigestLabel({ settledSequences: 4, hiddenAttention: 1 })).toBe(
-      "1 failed · 4 settled sequences",
-    );
-    expect(activityDigestLabel({ settledSequences: 0, hiddenAttention: 3 })).toBe("3 failed");
+    expect(
+      activityDigestLabel({ settledSequences: 4, hiddenAttention: 0 }),
+    ).toBe("4 settled sequences");
+    expect(
+      activityDigestLabel({ settledSequences: 1, hiddenAttention: 0 }),
+    ).toBe("1 settled sequence");
+    expect(
+      activityDigestLabel({ settledSequences: 4, hiddenAttention: 1 }),
+    ).toBe("1 failed · 4 settled sequences");
+    expect(
+      activityDigestLabel({ settledSequences: 0, hiddenAttention: 3 }),
+    ).toBe("3 failed");
   });
 });

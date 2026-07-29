@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { countLeadingCompletedStages, normalizeServerChainScript } from "./chainScriptWire";
+import {
+  countLeadingCompletedStages,
+  normalizeServerChainScript,
+} from "./chainScriptWire";
 import type { ChainJobStageDetail } from "./api/chainTypes";
 
 describe("normalizeServerChainScript", () => {
@@ -22,8 +25,19 @@ describe("normalizeServerChainScript", () => {
         output_format: "mp4",
       },
       stage: [
-        { prompt: "opening", frames: 25, transition: "smooth", source_image: "aGk=" },
-        { prompt: "next", frames: 25, transition: "fade", fade_frames: 8, negative_prompt: "x" },
+        {
+          prompt: "opening",
+          frames: 25,
+          transition: "smooth",
+          source_image: "aGk=",
+        },
+        {
+          prompt: "next",
+          frames: 25,
+          transition: "fade",
+          fade_frames: 8,
+          negative_prompt: "x",
+        },
       ],
     });
     expect(script?.schema).toBe("mold.chain.v1");
@@ -38,8 +52,14 @@ describe("normalizeServerChainScript", () => {
       seed: "42",
     });
     expect(script?.stages).toHaveLength(2);
-    expect(script?.stages[0]).toMatchObject({ prompt: "opening", source_image_b64: "aGk=" });
-    expect(script?.stages[1]).toMatchObject({ transition: "fade", fade_frames: 8 });
+    expect(script?.stages[0]).toMatchObject({
+      prompt: "opening",
+      source_image_b64: "aGk=",
+    });
+    expect(script?.stages[1]).toMatchObject({
+      transition: "fade",
+      fade_frames: 8,
+    });
   });
 
   it("passes through the studio shape (stages key, source_image_b64) unchanged", () => {
@@ -91,7 +111,10 @@ describe("normalizeServerChainScript", () => {
 });
 
 describe("countLeadingCompletedStages", () => {
-  const stage = (idx: number, state: ChainJobStageDetail["state"]): ChainJobStageDetail => ({
+  const stage = (
+    idx: number,
+    state: ChainJobStageDetail["state"],
+  ): ChainJobStageDetail => ({
     idx,
     state,
   });
