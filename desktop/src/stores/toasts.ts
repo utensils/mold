@@ -10,6 +10,8 @@ export interface Toast {
   id: number;
   message: string;
   kind: "info" | "error";
+  /** Optional supporting copy rendered below the primary message. */
+  description?: string;
   /** Optional trailing action button (Undo, View…). Running it dismisses the toast. */
   action?: ToastAction;
   /** Optional body-click handler (e.g. navigate). Defaults to dismiss. */
@@ -19,6 +21,7 @@ export interface Toast {
 }
 
 export interface ToastOptions {
+  description?: string;
   action?: ToastAction;
   onClick?: () => void;
   sticky?: boolean;
@@ -45,6 +48,7 @@ export const useToastStore = defineStore("toasts", {
         id: nextId++,
         message,
         kind,
+        ...(options.description ? { description: options.description } : {}),
         ...(options.action ? { action: options.action } : {}),
         ...(options.onClick ? { onClick: options.onClick } : {}),
         ...(options.sticky ? { sticky: true } : {}),

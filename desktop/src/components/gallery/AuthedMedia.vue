@@ -45,6 +45,7 @@ onMounted(load);
     :controls="controls"
     loop
     playsinline
+    disablepictureinpicture
   />
   <img v-else-if="src" :src="src" :alt="alt" class="h-full w-full object-cover" draggable="false" />
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">

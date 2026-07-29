@@ -15,4 +15,11 @@ describe("desktop host bootstrap", () => {
     expect(reconnect).toBeLessThan(waitForBoth);
     expect(local).toBeLessThan(waitForBoth);
   });
+
+  it("keeps offline hosts actionable from the compact toast", () => {
+    expect(source).toContain("It stays listed for reconnect.");
+    expect(source).toContain('label: "Open Machines"');
+    expect(source).toContain('router.push("/machines")');
+    expect(source).toContain("sticky: true");
+  });
 });
