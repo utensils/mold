@@ -10,14 +10,14 @@ const props = withDefaults(
     mutable?: boolean;
     restartEnable?: boolean;
     showControls?: boolean;
-    busyDeviceId?: string | null;
+    busyDeviceIds?: readonly string[];
   }>(),
   {
     plan: null,
     mutable: false,
     restartEnable: false,
     showControls: false,
-    busyDeviceId: null,
+    busyDeviceIds: () => [],
   },
 );
 
@@ -36,7 +36,9 @@ const cpuUtilityWork = computed(
     props.plan?.work_items
       .filter(
         (work) =>
-          work.planned_lane_kind === "host_utility" && !blockedReason(work),
+          work.planned_lane_kind === "host_utility" &&
+          !hasUnmatchedDevice(work) &&
+          !blockedReason(work),
       )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
 );
@@ -48,28 +50,38 @@ const otherComputeWork = computed(
           work.planned_lane_kind != null &&
           work.planned_lane_kind !== "device" &&
           work.planned_lane_kind !== "host_utility" &&
+          !hasUnmatchedDevice(work) &&
           !blockedReason(work),
       )
+      .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
+);
+const unassignedDeviceWork = computed(
+  () =>
+    props.plan?.work_items
+      .filter((work) => hasUnmatchedDevice(work) && !blockedReason(work))
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
 );
 const compact = computed(
   () =>
     props.devices.length +
       Number(cpuUtilityWork.value.length > 0) +
-      Number(otherComputeWork.value.length > 0) <=
+      Number(otherComputeWork.value.length > 0) +
+      Number(unassignedDeviceWork.value.length > 0) <=
     1,
 );
 const hasComputeLanes = computed(
   () =>
     props.devices.length > 0 ||
     cpuUtilityWork.value.length > 0 ||
-    otherComputeWork.value.length > 0,
+    otherComputeWork.value.length > 0 ||
+    unassignedDeviceWork.value.length > 0,
 );
 const laneCount = computed(
   () =>
     props.devices.length +
     Number(cpuUtilityWork.value.length > 0) +
-    Number(otherComputeWork.value.length > 0),
+    Number(otherComputeWork.value.length > 0) +
+    Number(unassignedDeviceWork.value.length > 0),
 );
 const lifecycleNote = computed(() => {
   if (!props.showControls || props.devices.length === 0) return null;
@@ -108,13 +120,21 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
     props.plan?.work_items
       .filter(
         (work) =>
-          (work.planned_lane_kind === "device" ||
-            work.planned_lane_kind == null) &&
+          isDeviceLane(work) &&
           work.planned_device_id === device.id &&
           !blockedReason(work),
       )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? []
   );
+}
+
+function isDeviceLane(work: QueueWorkItem): boolean {
+  return work.planned_lane_kind === "device" || work.planned_lane_kind == null;
+}
+
+function hasUnmatchedDevice(work: QueueWorkItem): boolean {
+  if (work.planned_device_id == null) return isDeviceLane(work);
+  return !props.devices.some((device) => device.id === work.planned_device_id);
 }
 
 function blockedReason(work: QueueWorkItem): string | null {
@@ -163,7 +183,7 @@ function canToggle(): boolean {
 function toggleDisabled(device: DeviceInfo): boolean {
   return (
     device.admin_state === "startup_excluded" ||
-    props.busyDeviceId === device.id ||
+    props.busyDeviceIds.includes(device.id) ||
     (!props.mutable && !(props.restartEnable && !device.desired_enabled))
   );
 }
@@ -277,6 +297,25 @@ onBeforeUnmount(() => {
         >
           {{ toggleLabel(device) }}
         </button>
+      </article>
+      <article
+        v-if="unassignedDeviceWork.length"
+        class="device-card device-card--utility"
+        data-test="unassigned-device-lane"
+      >
+        <div class="device-card__title">
+          <span class="device-card__name">Unassigned / unknown device</span>
+          <span class="device-card__badge">UNKNOWN</span>
+        </div>
+        <div class="device-card__meta">
+          <span>No matching compute device in this snapshot</span>
+        </div>
+        <ol class="device-card__lane">
+          <li v-for="work in unassignedDeviceWork" :key="work.work_id">
+            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
+            {{ eta(work) }}
+          </li>
+        </ol>
       </article>
       <article
         v-if="cpuUtilityWork.length"

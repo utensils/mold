@@ -90,6 +90,26 @@ describe("DevicePanel", () => {
     expect(wrapper.emitted("toggle")?.[0]).toEqual([device(0).id, false]);
   });
 
+  it("disables every device with an in-flight mutation", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [device(0), device(1), device(2)],
+        mutable: true,
+        busyDeviceIds: [device(0).id, device(2).id],
+      },
+    });
+
+    expect(
+      wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      wrapper.get('[data-test="device-toggle-2"]').attributes("disabled"),
+    ).toBeDefined();
+  });
+
   it("hides lifecycle mutations when the host does not advertise them", () => {
     const wrapper = mount(DevicePanel, {
       props: { devices: [device(0)], mutable: false },
@@ -338,6 +358,120 @@ describe("DevicePanel", () => {
     expect(
       wrapper.get('[data-test="other-compute-lane"]').text(),
     ).not.toContain("HOST");
+  });
+
+  it("partitions unmatched device work into an explicit unknown lane", () => {
+    const visible = device(0);
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [visible],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "known-device-work",
+              parent_id: "known-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: visible.id,
+              planned_lane_kind: "device",
+              lane_order: 0,
+              estimate_confidence: "high",
+            },
+            {
+              work_id: "missing-device-work",
+              parent_id: "missing-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 1,
+              bypass_count: 0,
+              planned_device_id: "cuda:not-in-this-snapshot",
+              planned_lane_kind: "device",
+              lane_order: 1,
+              estimate_confidence: "medium",
+            },
+            {
+              work_id: "unassigned-legacy-work",
+              parent_id: "unassigned-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 2,
+              bypass_count: 0,
+              planned_device_id: null,
+              planned_lane_kind: null,
+              lane_order: 2,
+              estimate_confidence: "low",
+            },
+            {
+              work_id: "future-lane-missing-device",
+              parent_id: "future-parent",
+              work_kind: "future_utility",
+              priority_class: "user",
+              queue_rank: 3,
+              bypass_count: 0,
+              planned_device_id: "cuda:future-device-not-in-snapshot",
+              planned_lane_kind: "future_accelerator_lane",
+              lane_order: 3,
+              estimate_confidence: "low",
+            },
+            {
+              work_id: "host-utility-work",
+              parent_id: "utility-parent",
+              work_kind: "prompt_expansion",
+              priority_class: "user",
+              queue_rank: 4,
+              bypass_count: 0,
+              planned_device_id: null,
+              planned_lane_kind: "host_utility",
+              lane_order: 0,
+              estimate_confidence: "low",
+            },
+            {
+              work_id: "blocked-unassigned-work",
+              parent_id: "blocked-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 5,
+              bypass_count: 0,
+              planned_device_id: null,
+              planned_lane_kind: "device",
+              lane_order: 3,
+              estimate_confidence: "low",
+              blocked_reason: "no_capacity",
+            },
+          ],
+        },
+      },
+    });
+
+    const known = wrapper.get('[data-test="device-lane"]');
+    const unknown = wrapper.get('[data-test="unassigned-device-lane"]');
+    const utility = wrapper.get('[data-test="cpu-utility-lane"]');
+    const blocked = wrapper.get('[data-test="blocked-work"]');
+
+    expect(known.text()).toContain("known-device-work");
+    expect(unknown.text()).toContain("Unassigned / unknown device");
+    expect(unknown.text()).toContain("missing-device-work");
+    expect(unknown.text()).toContain("unassigned-legacy-work");
+    expect(unknown.text()).toContain("future-lane-missing-device");
+    expect(utility.text()).toContain("host-utility-work");
+    expect(blocked.text()).toContain("blocked-unassigned-work");
+    for (const workId of [
+      "known-device-work",
+      "missing-device-work",
+      "unassigned-legacy-work",
+      "future-lane-missing-device",
+      "host-utility-work",
+      "blocked-unassigned-work",
+    ]) {
+      expect(wrapper.text().match(new RegExp(workId, "g"))).toHaveLength(1);
+    }
   });
 
   it("does not invent a host utility card without CPU-planned work", () => {

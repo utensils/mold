@@ -672,6 +672,34 @@ describe("HostDetailPage — queue", () => {
     expect(poll.refresh).toHaveBeenCalled();
   });
 
+  it("does not let an older mutation clear a newer device's busy state", async () => {
+    poll.devices.value = [makeDevice(0), makeDevice(1)];
+    const first = deferred<DeviceInfo>();
+    const second = deferred<DeviceInfo>();
+    setDeviceEnabled.mockImplementation((_target: unknown, id: string) =>
+      id === "cuda:0" ? first.promise : second.promise,
+    );
+    const w = await mountDetail();
+
+    await w.get('[data-test="device-toggle-0"]').trigger("click");
+    await w.get('[data-test="device-toggle-1"]').trigger("click");
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    first.resolve(makeDevice(0, { desired_enabled: false }));
+    await flushPromises();
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    second.resolve(makeDevice(1, { desired_enabled: false }));
+    await flushPromises();
+    expect(
+      w.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeUndefined();
+  });
+
   it("gates legacy live controls and offers only restart recovery", async () => {
     caps = {
       queue: { can_reorder: false },

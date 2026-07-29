@@ -482,7 +482,7 @@ onBeforeUnmount(() => {
             "
             :restart-enable="deviceCapabilities?.devices?.restart_enable === true"
             show-controls
-            :busy-device-id="[...deviceMutations][0] ?? null"
+            :busy-device-ids="[...deviceMutations]"
             @unpin="unpinWork"
             @toggle="toggleDeviceById"
           />

@@ -182,7 +182,9 @@ async function onToggleDevice(deviceId: string, enabled: boolean) {
       `Couldn't ${enabled ? "enable" : "disable"} device: ${errMsg(e)}`,
     );
   } finally {
-    mutatingDeviceId.value = null;
+    if (mutatingDeviceId.value === deviceId) {
+      mutatingDeviceId.value = null;
+    }
   }
 }
 
@@ -613,7 +615,7 @@ onBeforeUnmount(() => {
             "
             :restart-enable="caps?.devices?.restart_enable === true"
             show-controls
-            :busy-device-id="mutatingDeviceId"
+            :busy-device-ids="mutatingDeviceId ? [mutatingDeviceId] : []"
             @unpin="onUnpinWork"
             @toggle="onToggleDevice"
           />

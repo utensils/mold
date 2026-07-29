@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
           deviceCapabilities?.devices?.lifecycle === true &&
           deviceCapabilities?.dispatch?.v2_authoritative === true
         "
-        :busy-device-id="[...deviceMutations][0] ?? null"
+        :busy-device-ids="[...deviceMutations]"
         @unpin="unpinWork"
         @toggle="toggleDeviceById"
       />

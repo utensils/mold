@@ -272,7 +272,9 @@ async function toggleDeviceById(deviceId: string, enabled: boolean) {
       }`,
     );
   } finally {
-    mutatingDeviceId.value = null;
+    if (mutatingDeviceId.value === deviceId) {
+      mutatingDeviceId.value = null;
+    }
   }
 }
 
@@ -678,7 +680,7 @@ async function forget() {
                 "
                 :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
                 show-controls
-                :busy-device-id="mutatingDeviceId"
+                :busy-device-ids="mutatingDeviceId ? [mutatingDeviceId] : []"
                 @unpin="unpinWork"
                 @toggle="toggleDeviceById"
               />

@@ -21,7 +21,7 @@ const toasts = useToastStore();
 const connection = useConnectionStore();
 const devices = ref<DeviceInfo[]>([]);
 const plan = ref<QueuePlan | null>(null);
-const mutatingDeviceId = ref<string | null>(null);
+const mutatingDeviceIds = ref(new Set<string>());
 const lifecycleMutable = ref(false);
 const restartEnable = ref(false);
 let deviceEventsAbort: AbortController | null = null;
@@ -69,7 +69,7 @@ async function loadDevices() {
 async function toggleDevice(deviceId: string, enabled: boolean) {
   const apiTarget = target();
   if (!apiTarget) return;
-  mutatingDeviceId.value = deviceId;
+  mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
   try {
     const accepted = await setDeviceEnabled(apiTarget, deviceId, enabled);
     devices.value = devices.value.map((device) => (device.id === accepted.id ? accepted : device));
@@ -77,7 +77,9 @@ async function toggleDevice(deviceId: string, enabled: boolean) {
   } catch (error) {
     toasts.push(`Device state was not changed: ${String(error)}`, "error");
   } finally {
-    mutatingDeviceId.value = null;
+    const next = new Set(mutatingDeviceIds.value);
+    next.delete(deviceId);
+    mutatingDeviceIds.value = next;
   }
 }
 
@@ -138,7 +140,7 @@ async function reset(row: ConfigRow) {
       :mutable="lifecycleMutable"
       :restart-enable="restartEnable"
       show-controls
-      :busy-device-id="mutatingDeviceId"
+      :busy-device-ids="[...mutatingDeviceIds]"
       @unpin="unpinWork"
       @toggle="toggleDevice"
     />

@@ -160,6 +160,7 @@ function model(name: string, family: string): ModelEntry {
 }
 
 let router: Router;
+let mountedHosts: ReturnType<typeof useHostsStore>;
 
 async function mountView(
   path = `/hosts/${REMOTE_ID}`,
@@ -187,6 +188,7 @@ async function mountView(
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
   conn.status = "ready";
   const hosts = useHostsStore();
+  mountedHosts = hosts;
   hosts.extras.push({
     id: REMOTE_ID,
     label: "hal9000",
@@ -261,6 +263,14 @@ beforeEach(() => {
 });
 
 describe("HostDetailView GPU lifecycle controls", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((next) => {
+      resolve = next;
+    });
+    return { promise, resolve };
+  }
+
   const authoritative: ServerCapabilities = {
     gallery: { can_delete: true },
     devices: { available: true, lifecycle: true, restart_enable: false },
@@ -310,6 +320,40 @@ describe("HostDetailView GPU lifecycle controls", () => {
       false,
     );
     expect(listDevices).toHaveBeenCalled();
+  });
+
+  it("does not let an older mutation clear a newer device's busy state", async () => {
+    const secondDevice = {
+      ...DEVICE,
+      id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ordinal: 1,
+    };
+    const devices = [DEVICE, secondDevice];
+    const first = deferred<void>();
+    const second = deferred<void>();
+    listDevices.mockResolvedValue({ devices, plan_version: 1 });
+    setDeviceEnabled.mockImplementation((_target, id) =>
+      id === DEVICE.id ? first.promise : second.promise,
+    );
+    const wrapper = await mountView(undefined, undefined, {
+      devices,
+      capabilities: authoritative,
+    });
+    const refresh = vi.spyOn(mountedHosts, "refresh").mockResolvedValue();
+
+    await wrapper.get("[data-test='device-toggle-0']").trigger("click");
+    await wrapper.get("[data-test='device-toggle-1']").trigger("click");
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    first.resolve();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    second.resolve();
+    await vi.waitFor(() =>
+      expect(wrapper.findComponent({ name: "DevicePanel" }).props("busyDeviceIds")).toEqual([]),
+    );
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeUndefined();
   });
 
   it("blocks disable in Observe mode but offers disabled GPUs restart-only recovery", async () => {

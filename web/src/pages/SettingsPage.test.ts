@@ -17,18 +17,19 @@ vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
 const originalFetch = globalThis.fetch;
 
-function deviceWire(enabled = true, adminState = "enabled") {
+function deviceWire(enabled = true, adminState = "enabled", ordinal = 0) {
+  const suffix = String.fromCharCode("a".charCodeAt(0) + ordinal);
   return {
-    id: "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    id: `cuda:${suffix.repeat(32)}`,
     backend: "cuda",
-    ordinal: 0,
+    ordinal,
     device_kind: "full_gpu",
-    nvml_uuid: "GPU-a",
-    physical_uuid: "GPU-a",
+    nvml_uuid: `GPU-${suffix}`,
+    physical_uuid: `GPU-${suffix}`,
     mig_uuid: null,
     mig_parent_uuid: null,
     mig_profile: null,
-    name: "NVIDIA RTX 3090",
+    name: `NVIDIA RTX 3090 #${ordinal}`,
     pci_bus_id: null,
     compute_capability: "8.6",
     memory: {
@@ -637,6 +638,74 @@ describe("SettingsPage", () => {
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
     refresh();
     await vi.waitFor(() => expect(wrapper.text()).not.toContain("stale-work"));
+  });
+
+  it("keeps concurrent device mutations busy through out-of-order completion", async () => {
+    const first = deviceWire(true, "enabled", 0);
+    const second = deviceWire(true, "enabled", 1);
+    const firstPatch = deferred<Response>();
+    const secondPatch = deferred<Response>();
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (init?.method === "PATCH") {
+        return url.includes(encodeURIComponent(first.id))
+          ? firstPatch.promise
+          : secondPatch.promise;
+      }
+      const body = url.endsWith("/api/devices")
+        ? { devices: [first, second], plan_version: 1 }
+        : url.endsWith("/api/capabilities")
+          ? {
+              devices: { available: true, lifecycle: true },
+              dispatch: { active_mode: "v2", v2_authoritative: true },
+            }
+          : url.endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : url.endsWith("/api/catalog/credentials")
+              ? {
+                  hf: { configured: false, source: null, masked: null },
+                  civitai: { configured: false, source: null, masked: null },
+                }
+              : { entries: [], plan: null };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() =>
+      expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(2),
+    );
+
+    await wrapper.get('[data-test="device-toggle-0"]').trigger("click");
+    await wrapper.get('[data-test="device-toggle-1"]').trigger("click");
+    expect(
+      wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get('[data-test="device-toggle-1"]').attributes("disabled"),
+    ).toBeDefined();
+
+    secondPatch.resolve({
+      ok: true,
+      json: async () => ({ ...second, desired_enabled: false }),
+    } as Response);
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get('[data-test="device-toggle-1"]').attributes("disabled"),
+      ).toBeUndefined(),
+    );
+    expect(
+      wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+
+    firstPatch.resolve({
+      ok: true,
+      json: async () => ({ ...first, desired_enabled: false }),
+    } as Response);
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get('[data-test="device-toggle-0"]').attributes("disabled"),
+      ).toBeUndefined(),
+    );
   });
 
   it("controls the origin server GPU from Advanced settings", async () => {
