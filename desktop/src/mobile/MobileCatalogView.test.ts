@@ -1024,7 +1024,9 @@ describe("MobileCatalogView", () => {
     expect(startCatalogDownload).not.toHaveBeenCalled();
     const status = wrapper.get("[data-test='mobile-catalog-action-status']");
     expect(status.attributes("role")).toBe("alert");
-    expect(status.text()).toContain("Could not pull Catalog model on Studio: HTTP 401");
+    expect(status.text()).toContain(
+      "Could not pull Catalog model on Studio: Studio didn’t accept the API key.",
+    );
   });
 
   it("repairs an installed model on its owning host and labels component presence in text", async () => {

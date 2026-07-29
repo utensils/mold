@@ -54,6 +54,7 @@ watch(
     @keydown.escape="emit('close')"
   >
     <div class="ms-drawer__panel" :style="{ width: `${width}px` }" @click.stop>
+      <slot name="leading" />
       <div class="ms-drawer__header">
         <slot name="header">
           <span v-if="title" class="ms-drawer__title">{{ title }}</span>
@@ -107,6 +108,7 @@ watch(
 }
 
 .ms-drawer__panel {
+  position: relative;
   max-width: 100%;
   height: 100%;
   box-sizing: border-box;

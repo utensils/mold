@@ -1,6 +1,7 @@
 /**
  * Resizable panel widths (px). Pure math — no DOM. The persisted value lives
- * in settings.json (`navRailWidth` / `generateParamsWidth`, null = default);
+ * in settings.json (`navRailWidth` / `generateParamsWidth` /
+ * `historyDrawerWidth`, null = default);
  * these helpers own the clamping so every surface agrees on the limits.
  */
 export const PANEL_LIMITS = {
@@ -8,6 +9,8 @@ export const PANEL_LIMITS = {
   navRail: { min: 160, def: 210, max: 320 },
   // 340 keeps all five 52px aspect controls on one row after 18px side padding.
   generateParams: { min: 280, def: 340, max: 480 },
+  // Wide enough for History tabs; sequence actions wrap below their metadata.
+  historyDrawer: { min: 420, def: 620, max: 960 },
 } as const;
 
 export type PanelId = keyof typeof PANEL_LIMITS;

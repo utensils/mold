@@ -309,6 +309,8 @@ export const useGenerationStore = defineStore("generation", {
     jobs: [] as Job[],
     nextClientId: 1,
     nextBatchId: 1,
+    /** Explicit canvas/job selection; null follows the automatic active job. */
+    selectedClientId: null as number | null,
     /** Batches whose settled consumers have not yet had a microtask turn. */
     pendingConsumerBatchIds: [] as number[],
   }),
@@ -320,6 +322,10 @@ export const useGenerationStore = defineStore("generation", {
      */
     active(state): Job | null {
       const jobs = state.jobs;
+      if (state.selectedClientId !== null) {
+        const selected = jobs.find((job) => job.clientId === state.selectedClientId);
+        if (selected) return selected;
+      }
       const latest = (pred: (j: Job) => boolean) => {
         for (let i = jobs.length - 1; i >= 0; i--) {
           if (pred(jobs[i]!)) return jobs[i]!;
@@ -354,6 +360,10 @@ export const useGenerationStore = defineStore("generation", {
     },
   },
   actions: {
+    select(clientId: number | null) {
+      this.selectedClientId =
+        clientId !== null && this.jobs.some((job) => job.clientId === clientId) ? clientId : null;
+    },
     /**
      * Submit a batch: every sibling is created with seeds `base + i`, but at
      * most two hold an SSE stream open at once. A browser's per-host HTTP/1.1
@@ -369,6 +379,7 @@ export const useGenerationStore = defineStore("generation", {
       chainRouting: ChainRoutingDecision | null = null,
       requestOptions: BatchRequestOptions = {},
     ): { jobs: Job[]; settled: Promise<Job[]> } {
+      this.selectedClientId = null;
       if (chainRouting?.kind === "reject") throw new Error(chainRouting.reason);
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
@@ -541,6 +552,12 @@ export const useGenerationStore = defineStore("generation", {
         chainRoutes.delete(job.clientId);
       }
       this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
+      if (
+        this.selectedClientId !== null &&
+        !this.jobs.some((job) => job.clientId === this.selectedClientId)
+      ) {
+        this.selectedClientId = null;
+      }
     },
     /** Acquire or renew the filename-backed URL for an opted-in mobile result. */
     async refreshRemoteResultUrl(clientId: number, force = false): Promise<void> {
@@ -622,6 +639,7 @@ export const useGenerationStore = defineStore("generation", {
       targets.clear();
       chainRoutes.clear();
       this.pendingConsumerBatchIds = [];
+      this.selectedClientId = null;
       this.jobs = [];
     },
     startJob(req: GenerateRequest): Job {

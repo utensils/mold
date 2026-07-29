@@ -14,6 +14,7 @@ export type ComposerPrefill = GeneratePrefill;
  * A sequence handed to Create from somewhere else in the app.
  *
  * - `edit` re-enters a durable job in place, preserving its cached clips.
+ * - `inspect` loads and watches an exact job without granting amend authority.
  * - `reuse` starts a FRESH draft from a print's recorded per-clip provenance
  *   (`metadata.chain`) — a new sequence, no edit session, nothing cached.
  *
@@ -21,7 +22,9 @@ export type ComposerPrefill = GeneratePrefill;
  * sequence intent per arrival, and two slots could disagree.
  */
 export type SequenceHandoff =
-  { kind: "edit"; hostId: string; jobId: string } | { kind: "reuse"; metadata: OutputMetadata };
+  | { kind: "edit"; hostId: string; jobId: string }
+  | { kind: "inspect"; hostId: string; jobId: string }
+  | { kind: "reuse"; metadata: OutputMetadata };
 
 /** Carries "Reuse settings" from the gallery into the Generate composer. */
 export const useComposerStore = defineStore("composer", {

@@ -6,6 +6,7 @@
  * back-nav can never replay the handoff.
  *
  * - `edit` re-enters the original job in place, preserving its cached clips.
+ * - `inspect` loads and watches a job without granting amend authority.
  * - `reuse` starts a FRESH draft from a print's recorded per-clip provenance
  *   (`metadata.chain`) — a new sequence, no edit session, nothing cached.
  *
@@ -18,6 +19,7 @@ import type { OutputMetadata } from "../types";
 
 export type SequenceHandoff =
   | { kind: "edit"; hostId: string; jobId: string }
+  | { kind: "inspect"; hostId: string; jobId: string }
   | { kind: "reuse"; metadata: OutputMetadata };
 
 const pending = ref<SequenceHandoff | null>(null);

@@ -56,6 +56,16 @@ describe("ActivityStrip", () => {
     expect(cancel).toHaveBeenCalledWith(7);
   });
 
+  it("selects queued prints with Space", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued", prompt: "queued one" }];
+    const wrapper = mount(ActivityStrip);
+
+    await wrapper.get("[data-test='activity-queued']").trigger("keydown", { key: " " });
+
+    expect(generation.selectedClientId).toBe(7);
+  });
+
   it("shows accrued RunPod cost for a job routed to a live pod", () => {
     const generation = useGenerationStore();
     generation.jobs = [
@@ -200,7 +210,7 @@ describe("ActivityStrip — present tense", () => {
     expect(wrapper.get("[data-test='activity-digest']").text()).toBe("2 settled sequences");
   });
 
-  it("keeps a fresh failure with its error and a non-destructive dismiss", async () => {
+  it("keeps a fresh failure without repeating its error and allows dismiss", async () => {
     const chains = useChainJobsStore();
     const remove = vi.spyOn(chains, "remove").mockResolvedValue();
     chains.byHost.local = {
@@ -211,7 +221,7 @@ describe("ActivityStrip — present tense", () => {
     };
     const wrapper = mount(ActivityStrip);
     const row = wrapper.get("[data-test='activity-sequence']");
-    expect(row.text()).toContain("stage 2 blew up");
+    expect(row.text()).not.toContain("stage 2 blew up");
     expect(row.find("[data-test='seq-resume']").exists()).toBe(true);
 
     await row.get("[data-test='seq-dismiss']").trigger("click");
@@ -281,7 +291,7 @@ describe("ActivityStrip — present tense", () => {
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
   });
 
-  it("keeps a failed print visible with its error until dismissed", async () => {
+  it("keeps a failed print visible without repeating its error until dismissed", async () => {
     const generation = useGenerationStore();
     generation.jobs = [
       {
@@ -293,7 +303,10 @@ describe("ActivityStrip — present tense", () => {
     ];
     const wrapper = mount(ActivityStrip);
     const row = wrapper.get("[data-test='activity-print-attention']");
-    expect(row.text()).toContain("LTX-2 audio output is unavailable.");
+    expect(row.text()).toContain("Open Create for details");
+    expect(row.text()).not.toContain("LTX-2 audio output is unavailable.");
+    await row.trigger("keydown", { key: " " });
+    expect(generation.selectedClientId).toBe(1);
     await row.get("[data-test='print-dismiss']").trigger("click");
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
   });

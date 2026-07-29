@@ -1,4 +1,4 @@
-import { onUnmounted, reactive, ref, watch, type Ref } from "vue";
+import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import {
   cancelQueueJob,
   generateChainStream,
@@ -354,6 +354,7 @@ export function resolveChainRequest(
 
 export interface UseGenerateStream {
   jobs: Ref<Job[]>;
+  selectedJob: Ref<Job | null>;
   submit: (
     req: GenerateRequestWire | ChainRequestWire,
     decision?: ChainRoutingDecision,
@@ -363,6 +364,7 @@ export interface UseGenerateStream {
   clearDone: () => void;
   /** Remove a specific job from the list (used to dismiss persisted cards). */
   remove: (id: string) => void;
+  select: (id: string | null) => void;
 }
 
 const STORAGE_KEY = "mold.generate.jobs";
@@ -557,6 +559,10 @@ const jobs = ref<Job[]>(
       : null,
   ),
 );
+const selectedJobId = ref<string | null>(null);
+const selectedJob = computed(
+  () => jobs.value.find((job) => job.id === selectedJobId.value) ?? null,
+);
 
 // Persist whenever the list or any job's mutable state changes. 200 ms
 // debounce keeps writes out of the SSE hot path (we get a progress event
@@ -631,6 +637,7 @@ function submitJob(
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
 ): string {
+  selectedJobId.value = null;
   const id = createUuid();
   const controller = new AbortController();
   const isChain = decision.kind === "chain";
@@ -780,6 +787,12 @@ function clearDoneJobs() {
 
 function removeJob(id: string) {
   jobs.value = jobs.value.filter((j) => j.id !== id);
+  if (selectedJobId.value === id) selectedJobId.value = null;
+}
+
+function selectJob(id: string | null) {
+  selectedJobId.value =
+    id !== null && jobs.value.some((job) => job.id === id) ? id : null;
 }
 
 export function useGenerateStream(
@@ -799,9 +812,11 @@ export function useGenerateStream(
 
   return {
     jobs,
+    selectedJob,
     submit: submitJob,
     cancel: cancelJob,
     clearDone: clearDoneJobs,
     remove: removeJob,
+    select: selectJob,
   };
 }

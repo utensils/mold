@@ -57,7 +57,7 @@ describe("describeTransportError", () => {
 
   it("gives an empty-bodied HTTP failure a visible sentence", () => {
     expect(describeTransportError(new ApiError("", 500), "Studio")).toBe(
-      "Studio replied HTTP 500.",
+      "Studio hit an internal error. Try again.",
     );
   });
 
@@ -75,7 +75,7 @@ describe("describeTransportError", () => {
       "Studio didn’t accept the API key. Update it in Machines and try again.",
     );
     expect(describeTransportError(new Error("SSE request failed with HTTP 503"), "Studio")).toBe(
-      "Studio replied HTTP 503.",
+      "Studio is unavailable or still starting. Try again shortly.",
     );
   });
 
@@ -93,7 +93,7 @@ describe("describeTransportError", () => {
 
   it("passes unknown error copy through and covers empty messages", () => {
     expect(describeTransportError(new Error("host ran out of memory"), "Studio")).toBe(
-      "host ran out of memory",
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
     expect(describeTransportError(new Error(""), "Studio")).toBe(
       "Something went wrong talking to Studio.",

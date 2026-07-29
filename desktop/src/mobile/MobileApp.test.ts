@@ -1476,7 +1476,9 @@ describe("MobileApp generation queue", () => {
 
     const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
     expect(liveSummary).toContain("Variation 2, “middle thunderstorm”");
-    expect(liveSummary).toContain("host ran out of memory");
+    expect(liveSummary).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+    );
     expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
@@ -1522,7 +1524,9 @@ describe("MobileApp generation queue", () => {
 
     const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
     expect(liveSummary).toContain("Variation 2, “failed middle storm”");
-    expect(liveSummary).toContain("host ran out of memory");
+    expect(liveSummary).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
+    );
     expect(liveSummary).toContain("Cancellation failed");
     expect(liveSummary).toContain("remote cancellation was not confirmed");
     expect(wrapper.find("img.result-media").exists()).toBe(true);
@@ -2577,11 +2581,11 @@ describe("MobileApp generation queue", () => {
 
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
     expect(wrapper.find("img.result-media").exists()).toBe(true);
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
-      "host ran out of memory",
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
-      "Generation failed. host ran out of memory",
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
   });
 
@@ -2847,7 +2851,10 @@ describe("MobileApp generation queue", () => {
 
     expect(wrapper.get(".result-preview-error").text()).toContain("refused the media ticket");
     expect(wrapper.find(".result-media").exists()).toBe(false);
-    await wrapper.get(".result-preview-error button").trigger("click");
+    await wrapper
+      .findAll(".result-preview-error button")
+      .find((button) => button.text() === "Try preview again")!
+      .trigger("click");
     await flushPromises();
 
     expect(wrapper.find(".result-preview-error").exists()).toBe(false);
@@ -2928,7 +2935,11 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get(".result-preview-error").text()).toContain(
       "Couldn’t load this generated print",
     );
-    expect(wrapper.get(".result-preview-error button").text()).toBe("Try preview again");
+    expect(
+      wrapper
+        .findAll(".result-preview-error button")
+        .some((button) => button.text() === "Try preview again"),
+    ).toBe(true);
   });
 
   it("remounts generated video when forced renewal returns the same URL", async () => {
@@ -3028,11 +3039,11 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
-      "host ran out of memory",
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
-      "Generation failed. host ran out of memory",
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
   });
 
@@ -3411,9 +3422,9 @@ describe("MobileApp foreground resume", () => {
       "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
     );
     expect(summary).not.toContain("network connection was lost");
-    expect(wrapper.get("[data-test='mobile-generation-summary']").classes()).toContain(
-      "error-text",
-    );
+    expect(
+      wrapper.get("[data-test='mobile-generation-summary']").find("[role='alert']").exists(),
+    ).toBe(true);
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
       "Generation failed.",
     );
