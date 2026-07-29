@@ -271,7 +271,10 @@ describe("ClipRail", () => {
   it("keeps seams as compact connectors instead of thumbnail-height capsules", () => {
     expect(seamSource).toContain('class="ms-seam__caption"');
     expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
+      /\.ms-rail__item\s*\{[^}]*align-items:\s*flex-start/s,
+    );
+    expect(railSource).toMatch(
+      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*margin-top:\s*calc\(\(var\(--filmstrip-thumb-height\) - 34px\) \/ 2\)[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
     );
     expect(railSource).toMatch(
       /\.ms-rail-frame :deep\(\.ms-seam::before\)\s*\{[^}]*height:\s*1px/s,

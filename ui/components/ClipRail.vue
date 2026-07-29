@@ -341,7 +341,7 @@ const dragModel = computed({
 
 .ms-rail__item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   flex: 0 0 auto;
   scroll-snap-align: start;
@@ -473,6 +473,12 @@ const dragModel = computed({
   grid-template-rows: 32px 16px;
   place-items: center;
   width: var(--filmstrip-seam-width);
+  /*
+   * Keep the connector's rule centered on the picture, not the combined
+   * picture + metadata card. This also keeps every seam on one visual edit
+   * axis when the responsive rail changes scene and footer heights.
+   */
+  margin-top: calc((var(--filmstrip-thumb-height) - 34px) / 2);
   min-width: 44px;
   height: 54px;
   min-height: 44px;
