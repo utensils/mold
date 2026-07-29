@@ -48,6 +48,7 @@ const snapshot = ref<DetailSnapshot | null>(null);
 const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
+const deviceError = ref("");
 const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
@@ -65,7 +66,9 @@ let deviceRequestGeneration = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
 let deviceEventsAbort: AbortController | null = null;
-let queueTimer: ReturnType<typeof setInterval> | null = null;
+let livePollTimer: ReturnType<typeof setTimeout> | null = null;
+let deviceRefreshPromise: Promise<void> | null = null;
+let deviceRefreshQueued = false;
 
 const target = computed(() => mobileHostTarget(props.host));
 const inFlightDownloads = computed(() => [
@@ -97,8 +100,10 @@ function stopLiveServices(): void {
   resourceAbort = null;
   downloadsAbort = null;
   deviceEventsAbort = null;
-  if (queueTimer) clearInterval(queueTimer);
-  queueTimer = null;
+  if (livePollTimer) clearTimeout(livePollTimer);
+  livePollTimer = null;
+  deviceRefreshPromise = null;
+  deviceRefreshQueued = false;
 }
 
 async function refreshQueue(epoch = loadEpoch): Promise<void> {
@@ -132,27 +137,126 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   }
 }
 
-async function loadDevices(requestTarget = target.value): Promise<DeviceInfo[]> {
-  const response = await apiJsonTo<unknown>(requestTarget, "/api/devices");
-  return parseDeviceListResponse(response).devices;
+async function refreshDeviceState(epoch = loadEpoch): Promise<void> {
+  const generation = ++deviceRequestGeneration;
+  const requestHost = props.host;
+  const requestTarget = target.value;
+  const [deviceResult, capabilityResult] = await Promise.allSettled([
+    apiJsonTo<unknown>(requestTarget, "/api/devices"),
+    apiJsonTo<ServerCapabilities>(requestTarget, "/api/capabilities"),
+  ]);
+  const isCurrent = () =>
+    epoch === loadEpoch &&
+    generation === deviceRequestGeneration &&
+    props.host.id === requestHost.id &&
+    props.host.baseUrl === requestHost.baseUrl &&
+    props.host.apiKey === requestHost.apiKey &&
+    requestTarget.baseUrl === target.value.baseUrl &&
+    requestTarget.apiKey === target.value.apiKey;
+  if (!isCurrent()) return;
+
+  let capabilityPayload: ServerCapabilities | null = null;
+  let capabilityFailure: unknown = null;
+  if (
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value !== null &&
+    typeof capabilityResult.value === "object" &&
+    !Array.isArray(capabilityResult.value)
+  ) {
+    capabilityPayload = capabilityResult.value;
+    deviceCapabilities.value = capabilityPayload;
+  } else {
+    // A prior successful response is no longer mutation authority once the
+    // current route cannot verify its lifecycle contract.
+    deviceCapabilities.value = null;
+    capabilityFailure =
+      capabilityResult.status === "rejected"
+        ? capabilityResult.reason
+        : new SyntaxError("Malformed capabilities response");
+  }
+
+  let nextDevices: DeviceInfo[] | null = null;
+  let deviceFailure: unknown = null;
+  if (deviceResult.status === "fulfilled") {
+    try {
+      nextDevices = parseDeviceListResponse(deviceResult.value).devices;
+    } catch (caught) {
+      deviceFailure = caught;
+    }
+  } else {
+    deviceFailure = deviceResult.reason;
+  }
+
+  if (deviceFailure === null) {
+    devices.value = nextDevices;
+    if (capabilityFailure === null) {
+      deviceError.value = "";
+    } else {
+      const detail = describeTransportError(capabilityFailure, requestHost.name);
+      deviceError.value = `Couldn’t verify compute device controls. ${detail} Mold will try again automatically.`;
+    }
+    return;
+  }
+
+  // Only a successful capabilities response can prove that this is a host
+  // from before the additive device API. A failed capabilities request is
+  // uncertainty, so retain the last good snapshot and keep retrying visibly.
+  const legacyDeviceApi =
+    capabilityResult.status === "fulfilled" &&
+    capabilityPayload !== null &&
+    capabilityPayload.devices?.available !== true;
+  if (legacyDeviceApi) {
+    devices.value = null;
+    deviceError.value = "";
+    return;
+  }
+
+  const detail = describeTransportError(deviceFailure, requestHost.name);
+  deviceError.value = `Couldn’t refresh compute devices. ${detail} Mold will try again automatically.`;
 }
 
-async function refreshDevices(epoch = loadEpoch): Promise<void> {
-  const generation = ++deviceRequestGeneration;
-  const requestTarget = target.value;
-  try {
-    const next = await loadDevices(requestTarget);
-    if (
-      epoch === loadEpoch &&
-      generation === deviceRequestGeneration &&
-      requestTarget.baseUrl === target.value.baseUrl &&
-      requestTarget.apiKey === target.value.apiKey
-    ) {
-      devices.value = next;
-    }
-  } catch {
-    // Device inventory is additive; older hosts retain legacy telemetry.
+function requestDeviceRefresh(epoch = loadEpoch): Promise<void> {
+  if (epoch !== loadEpoch) return Promise.resolve();
+  if (deviceRefreshPromise) {
+    deviceRefreshQueued = true;
+    // The catch-up pass owns authority once an invalidation arrives. Fence the
+    // older request immediately so it cannot flash stale telemetry first.
+    deviceRequestGeneration += 1;
+    return deviceRefreshPromise;
   }
+
+  const refresh = (async () => {
+    do {
+      deviceRefreshQueued = false;
+      await refreshDeviceState(epoch);
+    } while (deviceRefreshQueued && epoch === loadEpoch);
+  })();
+  deviceRefreshPromise = refresh;
+  return refresh.finally(() => {
+    if (deviceRefreshPromise === refresh) deviceRefreshPromise = null;
+  });
+}
+
+async function refreshDevicesSafely(epoch: number): Promise<void> {
+  try {
+    await requestDeviceRefresh(epoch);
+  } catch (caught) {
+    if (epoch !== loadEpoch) return;
+    const detail = describeTransportError(caught, props.host.name);
+    deviceError.value = `Couldn’t refresh compute devices. ${detail} Mold will try again automatically.`;
+  }
+}
+
+function scheduleLivePoll(epoch: number): void {
+  if (epoch !== loadEpoch) return;
+  livePollTimer = setTimeout(async () => {
+    livePollTimer = null;
+    // Queue authority has its own generation fence and must not hold device
+    // freshness hostage if an older endpoint never settles.
+    void refreshQueue(epoch);
+    await refreshDevicesSafely(epoch);
+    scheduleLivePoll(epoch);
+  }, 5_000);
 }
 
 function startLiveServices(epoch: number): void {
@@ -189,11 +293,11 @@ function startLiveServices(epoch: number): void {
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(target.value, deviceEventsAbort.signal, () => {
     void refreshQueue(epoch);
-    void refreshDevices(epoch);
+    void refreshDevicesSafely(epoch);
   });
 
   void refreshQueue(epoch);
-  queueTimer = setInterval(() => void refreshQueue(epoch), 5_000);
+  scheduleLivePoll(epoch);
 }
 
 async function loadHost(): Promise<void> {
@@ -205,6 +309,7 @@ async function loadHost(): Promise<void> {
   snapshot.value = null;
   devices.value = null;
   deviceCapabilities.value = null;
+  deviceError.value = "";
   installed.value = [];
   queue.value = [];
   queuePlan.value = null;
@@ -215,18 +320,16 @@ async function loadHost(): Promise<void> {
   forgetPending.value = false;
 
   try {
-    const [nextStatus, models, nextDevices, nextCapabilities] = await Promise.all([
+    const [nextStatus, models] = await Promise.all([
       apiJsonTo<ServerStatus>(target.value, "/api/status"),
       apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
-      loadDevices().catch(() => null),
-      apiJsonTo<ServerCapabilities>(target.value, "/api/capabilities").catch(() => null),
     ]);
     if (epoch !== loadEpoch) return;
     status.value = nextStatus;
     installed.value = models.filter((model) => model.downloaded);
-    devices.value = nextDevices;
-    deviceCapabilities.value = nextCapabilities;
     emit("status", { id: props.host.id, status: nextStatus });
+    await refreshDevicesSafely(epoch);
+    if (epoch !== loadEpoch) return;
     startLiveServices(epoch);
   } catch (caught) {
     if (epoch !== loadEpoch) return;
@@ -243,7 +346,7 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
     await setDeviceEnabled(target.value, device.id, enabled);
-    await refreshDevices();
+    await requestDeviceRefresh();
   } catch (caught) {
     error.value = describeTransportError(caught, props.host.name);
   } finally {
@@ -472,7 +575,10 @@ onBeforeUnmount(() => {
             }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
           >
         </div>
-        <div v-if="devices !== null || queuePlan !== null" data-test="host-detail-devices">
+        <div
+          v-if="devices !== null || queuePlan !== null || deviceError"
+          data-test="host-detail-devices"
+        >
           <DevicePanel
             :devices="devices ?? []"
             :plan="queuePlan"
@@ -486,6 +592,14 @@ onBeforeUnmount(() => {
             @unpin="unpinWork"
             @toggle="toggleDeviceById"
           />
+          <p
+            v-if="deviceError"
+            class="status-line error-text"
+            role="alert"
+            data-test="host-detail-device-error"
+          >
+            {{ deviceError }}
+          </p>
         </div>
         <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
           <li v-for="entry in queue" :key="entry.id">

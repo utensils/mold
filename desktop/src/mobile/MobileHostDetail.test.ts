@@ -245,6 +245,7 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
+  vi.useRealTimers();
 });
 
 describe("MobileHostDetail remote host data", () => {
@@ -514,6 +515,272 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.text()).not.toContain("older-model");
     expect(view.text()).toContain("NEW DEVICE");
     expect(view.text()).not.toContain("OLD DEVICE");
+  });
+
+  it("polls through a failed event bootstrap, preserves the last device snapshot, and clears its warning after recovery", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 2) {
+          return Promise.reject(new ApiError("device inventory temporarily unavailable", 503));
+        }
+        return Promise.resolve({
+          devices: [raceDevice(deviceCalls === 1 ? "LAST GOOD DEVICE" : "RECOVERED DEVICE")],
+          plan_version: deviceCalls,
+        });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls === 2) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.text()).toContain("LAST GOOD DEVICE");
+    expect(sseCalls.some((call) => call.path === "/api/events")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    const alert = view.get("[data-test='host-detail-device-error']");
+    expect(alert.text()).toContain("Couldn’t refresh compute devices");
+    expect(alert.text()).toContain("device inventory temporarily unavailable");
+    expect(alert.text()).toContain("try again automatically");
+    expect(view.text()).toContain("LAST GOOD DEVICE");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(deviceCalls).toBe(3);
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.text()).toContain("RECOVERED DEVICE");
+    expect(view.text()).not.toContain("LAST GOOD DEVICE");
+  });
+
+  it("treats failed capabilities as uncertainty rather than proof of a legacy host", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return deviceCalls === 1
+          ? Promise.reject(new ApiError("device inventory unavailable", 500))
+          : Promise.resolve({
+              devices: [raceDevice("RECOVERED AFTER CAPABILITIES")],
+              plan_version: 2,
+            });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls <= 2) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-device-error']").text()).toContain(
+      "device inventory unavailable",
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.text()).toContain("RECOVERED AFTER CAPABILITIES");
+  });
+
+  it("keeps a capability-confirmed legacy host quiet when the device endpoint is absent", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        return Promise.reject(new ApiError("Not Found", 404));
+      }
+      if (path === "/api/capabilities") return Promise.resolve({});
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.find("[data-test='host-detail-devices']").exists()).toBe(false);
+  });
+
+  it("keeps device telemetry but disables lifecycle mutations while capability authority is uncertain", async () => {
+    vi.useFakeTimers();
+    let deviceCalls = 0;
+    let capabilityCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return Promise.resolve({
+          devices: [raceDevice(deviceCalls === 1 ? "INITIAL DEVICE" : "CURRENT DEVICE")],
+          plan_version: deviceCalls,
+        });
+      }
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        if (capabilityCalls === 3) {
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.text()).toContain("CURRENT DEVICE");
+    expect(view.get("[data-test='host-detail-device-error']").text()).toContain(
+      "Couldn’t verify compute device controls",
+    );
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(view.find("[data-test='host-detail-device-error']").exists()).toBe(false);
+    expect(view.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("coalesces an arbitrary burst of device invalidations behind one in-flight poll", async () => {
+    vi.useFakeTimers();
+    const slowPoll = deferred<unknown>();
+    let deviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 1) {
+          return Promise.resolve({
+            devices: [raceDevice("INITIAL DEVICE")],
+            plan_version: 1,
+          });
+        }
+        if (deviceCalls === 2) return slowPoll.promise;
+        return Promise.resolve({
+          devices: [raceDevice("COALESCED DEVICE")],
+          plan_version: 3,
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    const events = stream("/api/events");
+    await vi.advanceTimersByTimeAsync(5_000);
+    for (let index = 0; index < 20; index += 1) {
+      events.options.onEvent("message", JSON.stringify({ type: "device_state_changed" }));
+    }
+    await flushPromises();
+    expect(deviceCalls).toBe(2);
+
+    slowPoll.resolve({
+      devices: [raceDevice("STALE SLOW DEVICE")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(deviceCalls).toBe(3);
+    expect(view.text()).toContain("COALESCED DEVICE");
+    expect(view.text()).not.toContain("STALE SLOW DEVICE");
+  });
+
+  it("retargets a pending device poll and suppresses its stale host result", async () => {
+    vi.useFakeTimers();
+    const staleStudioPoll = deferred<unknown>();
+    let studioDeviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        if (requestTarget.baseUrl === studio.baseUrl) {
+          studioDeviceCalls += 1;
+          return studioDeviceCalls === 1
+            ? Promise.resolve({
+                devices: [raceDevice("STUDIO DEVICE")],
+                plan_version: 1,
+              })
+            : staleStudioPoll.promise;
+        }
+        return Promise.resolve({
+          devices: [raceDevice("RENDER DEVICE")],
+          plan_version: 1,
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(studioDeviceCalls).toBe(2);
+
+    await view.setProps({ host: renderBox });
+    await flushPromises();
+    expect(view.text()).toContain("RENDER DEVICE");
+
+    staleStudioPoll.resolve({
+      devices: [raceDevice("STALE STUDIO DEVICE")],
+      plan_version: 99,
+    });
+    await flushPromises();
+    expect(view.text()).not.toContain("STALE STUDIO DEVICE");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    const lastDeviceTarget = apiJsonTo.mock.calls
+      .filter(([, path]) => path === "/api/devices")
+      .at(-1)?.[0];
+    expect(lastDeviceTarget).toEqual(renderTarget);
+  });
+
+  it("stops device polling and suppresses an in-flight result after unmount", async () => {
+    vi.useFakeTimers();
+    const pendingPoll = deferred<unknown>();
+    let deviceCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return deviceCalls === 1
+          ? Promise.resolve({
+              devices: [raceDevice("MOUNTED DEVICE")],
+              plan_version: 1,
+            })
+          : pendingPoll.promise;
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    const events = stream("/api/events");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(deviceCalls).toBe(2);
+
+    view.unmount();
+    wrapper = null;
+    expect(events.options.signal.aborted).toBe(true);
+
+    pendingPoll.resolve({
+      devices: [raceDevice("UNMOUNTED DEVICE")],
+      plan_version: 2,
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+    expect(deviceCalls).toBe(2);
   });
 
   it("renders every status GPU before the resource stream produces a snapshot", async () => {
