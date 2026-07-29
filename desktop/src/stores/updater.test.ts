@@ -6,6 +6,7 @@ const installPendingUpdate = vi.fn();
 const appSettingsSet = vi.fn();
 const appSettingsGet = vi.fn();
 const notifyUpdateAvailable = vi.fn();
+const ONE_HOUR_MS = 60 * 60 * 1_000;
 let progressListener: ((event: unknown) => void) | null = null;
 
 vi.mock("../lib/ipc", () => ({
@@ -117,7 +118,7 @@ describe("updater store", () => {
     const updater = useUpdaterStore();
 
     await updater.init();
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1_000);
+    await vi.advanceTimersByTimeAsync(ONE_HOUR_MS);
 
     expect(checkForUpdates).toHaveBeenCalledTimes(2);
   });
@@ -137,7 +138,7 @@ describe("updater store", () => {
     const updater = useUpdaterStore();
 
     await updater.init();
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1_000);
+    await vi.advanceTimersByTimeAsync(ONE_HOUR_MS);
 
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
     expect(updater.candidate?.id).toBe("candidate-1");
