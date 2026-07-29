@@ -81,8 +81,13 @@ async function loadDevices(): Promise<void> {
   if (!isCurrent()) return;
 
   plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
-  deviceCapabilities.value =
-    capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+  const capabilityPayload =
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value !== null &&
+    typeof capabilityResult.value === "object"
+      ? capabilityResult.value
+      : null;
+  deviceCapabilities.value = capabilityPayload;
 
   let nextDevices: DeviceInfo[] | null = null;
   let deviceFailure: unknown = null;
@@ -108,7 +113,9 @@ async function loadDevices(): Promise<void> {
   // a quiet legacy state. A failed capability request is uncertainty, not
   // evidence that the host is old.
   const legacyDeviceApi =
-    capabilityResult.status === "fulfilled" && capabilityResult.value.devices?.available !== true;
+    capabilityResult.status === "fulfilled" &&
+    capabilityPayload !== null &&
+    capabilityPayload.devices?.available !== true;
   if (legacyDeviceApi) {
     devices.value = null;
     deviceError.value = "";
@@ -141,11 +148,21 @@ function requestDeviceRefresh(epoch = deviceServicesEpoch): Promise<void> {
   });
 }
 
+async function refreshDevicesSafely(epoch: number): Promise<void> {
+  try {
+    await requestDeviceRefresh(epoch);
+  } catch (error) {
+    if (epoch !== deviceServicesEpoch || !props.host) return;
+    const detail = describeTransportError(error, props.host.name);
+    deviceError.value = `Couldn’t refresh compute devices. ${detail} Mold will try again automatically.`;
+  }
+}
+
 function scheduleDevicePoll(epoch: number): void {
   if (epoch !== deviceServicesEpoch) return;
   devicePollTimer = setTimeout(async () => {
     devicePollTimer = null;
-    await requestDeviceRefresh(epoch);
+    await refreshDevicesSafely(epoch);
     scheduleDevicePoll(epoch);
   }, 5_000);
 }
@@ -207,13 +224,13 @@ watch(
     const epoch = deviceServicesEpoch;
     // Do not make initial rendering depend on SSE support. The stream's
     // onOpen callback refetches again to close the subscribe/bootstrap gap.
-    void requestDeviceRefresh(epoch);
+    void refreshDevicesSafely(epoch);
     scheduleDevicePoll(epoch);
     deviceEventsAbort = new AbortController();
     subscribeToDeviceSnapshots(
       mobileHostTarget(props.host),
       deviceEventsAbort.signal,
-      () => void requestDeviceRefresh(epoch),
+      () => void refreshDevicesSafely(epoch),
     );
   },
   { immediate: true },

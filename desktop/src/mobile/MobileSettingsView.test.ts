@@ -469,6 +469,45 @@ describe("MobileSettingsView", () => {
     wrapper.unmount();
   });
 
+  it("keeps polling after a malformed capabilities payload", async () => {
+    vi.useFakeTimers();
+    const host = mobileHost("malformed-capabilities-host");
+    let deviceCalls = 0;
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 2) {
+          throw new ApiError("device inventory unavailable", 500);
+        }
+        return {
+          devices: [
+            deviceWireForRace(deviceCalls === 1 ? "INITIAL GPU" : "RECOVERED AFTER MALFORMED"),
+          ],
+          plan_version: deviceCalls,
+        };
+      }
+      if (path === "/api/capabilities") {
+        return deviceCalls === 2 ? null : deviceCapabilities();
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+    expect(wrapper.text()).toContain("INITIAL GPU");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(wrapper.get("[role='alert']").text()).toContain("device inventory unavailable");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(deviceCalls).toBe(3);
+    expect(wrapper.find("[role='alert']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("RECOVERED AFTER MALFORMED");
+    wrapper.unmount();
+  });
+
   it("coalesces overlapping poll and SSE refreshes", async () => {
     vi.useFakeTimers();
     const host = mobileHost("slow-host");
