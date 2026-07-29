@@ -776,8 +776,7 @@ export const useHostsStore = defineStore("hosts", {
                 kind: "transient",
                 hostId: probe.host.id,
                 label: probe.host.label,
-                error:
-                  probe.preview?.reason ?? "could not compute a placement plan right now",
+                error: probe.preview?.reason ?? "could not compute a placement plan right now",
               },
             ];
           }
