@@ -131,6 +131,25 @@ describe("Lightbox (desktop two-pane)", () => {
     ).toBe("print.png");
   });
 
+  it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
+    const wrapper = mountWide({ isSequence: true, canEditSequence: true });
+    expect(
+      wrapper.get("[data-test='lightbox-primary-action']").text(),
+    ).toContain("Edit sequence");
+    expect(
+      wrapper.get("[data-test='lightbox-duplicate-sequence']").text(),
+    ).toBe("Duplicate as new");
+
+    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
+    expect(wrapper.emitted("edit-sequence")).toHaveLength(1);
+    expect(wrapper.emitted("reuse")).toBeUndefined();
+
+    await wrapper
+      .get("[data-test='lightbox-duplicate-sequence']")
+      .trigger("click");
+    expect(wrapper.emitted("reuse")).toHaveLength(1);
+  });
+
   it("exposes Upscale and Delete via the overflow menu", async () => {
     const wrapper = mountWide();
     expect(wrapper.find(".lb__menu").exists()).toBe(false);

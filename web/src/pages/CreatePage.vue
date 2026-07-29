@@ -32,6 +32,7 @@ import Icon from "@ui/components/Icon.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import type { DevelopPhase } from "@ui/lib/grain";
+import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
@@ -79,6 +80,7 @@ import {
   upscaleStream,
   type StreamTarget,
 } from "../api";
+import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import { useChainJobs } from "../composables/useChainJobs";
 import { sequenceSharedParams } from "../lib/sequenceParams";
 import {
@@ -591,12 +593,26 @@ const sequenceCanvasStage = computed(() => {
 // Ported from ChainJobCard: authenticated per-stage previews as blob URLs;
 // the latest previewed stage feeds the canvas.
 const sequencePreviews = ref<Record<number, string>>({});
+const sequenceMediaUrls = ref<Record<number, string>>({});
+const sequenceStageClipIds = ref<string[]>([]);
+const sequenceStageClipIdsByJob = new Map<string, string[]>();
+const playingSequenceStage = ref<number | null>(null);
 let sequencePreviewKey = "";
+let sequencePreviewEpoch = 0;
+const pendingSequencePreviews = new Set<string>();
+const pendingSequenceMedia = new Set<string>();
 function clearSequencePreviews() {
+  sequencePreviewEpoch += 1;
+  pendingSequencePreviews.clear();
+  pendingSequenceMedia.clear();
   for (const url of Object.values(sequencePreviews.value)) {
     URL.revokeObjectURL(url);
   }
   sequencePreviews.value = {};
+  sequenceMediaUrls.value = {};
+  sequenceStageClipIds.value = [];
+  playingSequenceStage.value = null;
+  sequencePreviewKey = "";
 }
 watch(
   () => {
@@ -607,8 +623,10 @@ watch(
           watched.hostId,
           d.id,
           d.stages
-            .filter((s) => s.has_preview)
-            .map((s) => s.idx)
+            .filter((s) => s.has_preview || s.has_media)
+            .map(
+              (s) => `${s.idx}:${s.has_preview ? 1 : 0}:${s.has_media ? 1 : 0}`,
+            )
             .join(","),
         ].join(":")
       : "";
@@ -621,28 +639,119 @@ watch(
     if (sequencePreviewKey !== nextKey) {
       clearSequencePreviews();
       sequencePreviewKey = nextKey;
+      const script = normalizeServerChainScript(d.script);
+      const boundIds = sequenceStageClipIdsByJob.get(nextKey);
+      const editing = draft.editing;
+      const editingMatches =
+        editing?.hostId === watched.hostId &&
+        editing.jobId === d.id &&
+        draft.clips.length === d.stages.length;
+      const matchesDraft =
+        script?.stages.length === draft.clips.length &&
+        script.stages.every(
+          (stage, index) => stage.prompt === draft.clips[index]?.prompt,
+        );
+      sequenceStageClipIds.value =
+        boundIds?.length === d.stages.length
+          ? [...boundIds]
+          : editingMatches
+            ? draft.clips.map((clip) => clip.id)
+            : matchesDraft
+              ? draft.clips.map((clip) => clip.id)
+              : [];
+    }
+    const stagesByIdx = new Map(d.stages.map((stage) => [stage.idx, stage]));
+    for (const [rawIdx, url] of Object.entries(sequencePreviews.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_preview) {
+        URL.revokeObjectURL(url);
+        const next = { ...sequencePreviews.value };
+        delete next[idx];
+        sequencePreviews.value = next;
+      }
+    }
+    for (const rawIdx of Object.keys(sequenceMediaUrls.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_media) {
+        const next = { ...sequenceMediaUrls.value };
+        delete next[idx];
+        sequenceMediaUrls.value = next;
+        if (playingSequenceStage.value === idx)
+          playingSequenceStage.value = null;
+      }
     }
     const target = hostTargetFor(watched.hostId);
+    const requestEpoch = sequencePreviewEpoch;
     for (const stage of d.stages) {
-      if (!stage.has_preview || sequencePreviews.value[stage.idx]) continue;
-      const headers = target?.apiKey
-        ? { "x-api-key": target.apiKey }
-        : undefined;
-      void fetch(chainJobStagePreviewUrl(d.id, stage.idx, target), {
-        ...(headers ? { headers } : {}),
-      })
-        .then(async (response) => {
-          if (!response.ok)
-            throw new Error(`Preview failed: ${response.status}`);
-          const url = URL.createObjectURL(await response.blob());
-          sequencePreviews.value = {
-            ...sequencePreviews.value,
-            [stage.idx]: url,
-          };
+      const pendingKey = `${requestEpoch}:${nextKey}:${stage.idx}`;
+      if (
+        stage.has_preview &&
+        !sequencePreviews.value[stage.idx] &&
+        !pendingSequencePreviews.has(pendingKey)
+      ) {
+        pendingSequencePreviews.add(pendingKey);
+        const headers = target?.apiKey
+          ? { "x-api-key": target.apiKey }
+          : undefined;
+        void fetch(chainJobStagePreviewUrl(d.id, stage.idx, target), {
+          ...(headers ? { headers } : {}),
         })
-        .catch(() => {});
+          .then(async (response) => {
+            if (!response.ok)
+              throw new Error(`Preview failed: ${response.status}`);
+            const url = URL.createObjectURL(await response.blob());
+            const currentStage = chainJobs.state.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequencePreviewEpoch ||
+              sequencePreviewKey !== nextKey ||
+              chainJobs.state.watching?.hostId !== watched.hostId ||
+              chainJobs.state.live.detail?.id !== d.id ||
+              !currentStage?.has_preview
+            ) {
+              URL.revokeObjectURL(url);
+              return;
+            }
+            sequencePreviews.value = {
+              ...sequencePreviews.value,
+              [stage.idx]: url,
+            };
+          })
+          .catch(() => {})
+          .finally(() => pendingSequencePreviews.delete(pendingKey));
+      }
+      if (
+        stage.has_media &&
+        !sequenceMediaUrls.value[stage.idx] &&
+        !pendingSequenceMedia.has(pendingKey)
+      ) {
+        pendingSequenceMedia.add(pendingKey);
+        void sequenceStageMediaUrl(d.id, stage.idx, target)
+          .then((url) => {
+            const currentStage = chainJobs.state.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequencePreviewEpoch ||
+              sequencePreviewKey !== nextKey ||
+              chainJobs.state.watching?.hostId !== watched.hostId ||
+              chainJobs.state.live.detail?.id !== d.id ||
+              !currentStage?.has_media
+            ) {
+              return;
+            }
+            sequenceMediaUrls.value = {
+              ...sequenceMediaUrls.value,
+              [stage.idx]: url,
+            };
+          })
+          .catch(() => {})
+          .finally(() => pendingSequenceMedia.delete(pendingKey));
+      }
     }
   },
+  { immediate: true },
 );
 const sequencePreviewSrc = computed(() => {
   const best = Object.entries(sequencePreviews.value)
@@ -650,6 +759,70 @@ const sequencePreviewSrc = computed(() => {
     .sort((a, b) => b[0] - a[0])[0];
   return best?.[1];
 });
+const sequencePlaybackSrc = computed(() => {
+  const idx = playingSequenceStage.value;
+  return idx === null ? null : (sequenceMediaUrls.value[idx] ?? null);
+});
+const sequenceFilmstripMediaByClipId = computed<
+  Record<string, ClipRailMedia | undefined>
+>(() => {
+  const detail = watchedSequenceDetail.value;
+  if (!detail) return {};
+  return Object.fromEntries(
+    [...detail.stages]
+      .sort((a, b) => a.idx - b.idx)
+      .flatMap((stage) => {
+        const clipId = sequenceStageClipIds.value[stage.idx];
+        if (!clipId) return [];
+        const progress = chainJobs.state.live.progress[stage.idx];
+        const status: ClipRailMedia["status"] =
+          stage.state === "completed"
+            ? "ready"
+            : stage.state === "failed"
+              ? "error"
+              : stage.state;
+        return [
+          [
+            clipId,
+            {
+              stageIdx: stage.idx,
+              status,
+              posterUrl: sequencePreviews.value[stage.idx] ?? null,
+              hasMedia: Boolean(
+                stage.has_media && sequenceMediaUrls.value[stage.idx],
+              ),
+              cacheReady: stage.cache_ready,
+              progressPercent:
+                progress && progress.total > 0
+                  ? (progress.step / progress.total) * 100
+                  : null,
+              error: stage.error,
+            } satisfies ClipRailMedia,
+          ],
+        ];
+      }),
+  );
+});
+
+function playSequenceStage(stageIdx: number) {
+  if (!sequenceMediaUrls.value[stageIdx]) return;
+  playingSequenceStage.value =
+    playingSequenceStage.value === stageIdx ? null : stageIdx;
+}
+
+function playSequenceClip(clipId: string) {
+  const stageIdx = sequenceStageClipIds.value.indexOf(clipId);
+  if (stageIdx >= 0) playSequenceStage(stageIdx);
+}
+
+const playingSequenceClipId = computed(() => {
+  const idx = playingSequenceStage.value;
+  return idx === null ? null : (sequenceStageClipIds.value[idx] ?? null);
+});
+
+function returnToLiveSequence() {
+  playingSequenceStage.value = null;
+}
 
 // Surface the watched sequence's terminal states without a dedicated card.
 watch(
@@ -798,6 +971,12 @@ const installedModels = computed(() =>
 const sequenceModels = computed(() =>
   modelsForOutput(installedModels.value, "sequence"),
 );
+const showSequenceEmpty = computed(
+  () =>
+    sequenceMode.value &&
+    modelsLoaded.value &&
+    sequenceModels.value.length === 0,
+);
 const composerModels = computed(() =>
   modelsForOutput(installedModels.value, draft.output),
 );
@@ -840,11 +1019,23 @@ watch(
 watch(
   [sequenceMode, sequenceModels, modelsLoaded],
   () => {
-    if (!sequenceMode.value || !modelsLoaded.value) return;
+    if (!sequenceMode.value) return;
     const current = form.state.value.model;
     if (sequenceModels.value.some((model) => model.name === current)) return;
+    if (!modelsLoaded.value) {
+      if (currentModel.value && !modelSupportsSequence(currentModel.value)) {
+        form.state.value.model = "";
+        form.state.value.modelFamily = "";
+      }
+      return;
+    }
     const first = sequenceModels.value[0];
-    if (first) form.applyModelDefaults(first);
+    if (first) {
+      form.applyModelDefaults(first);
+    } else {
+      form.state.value.model = "";
+      form.state.value.modelFamily = "";
+    }
   },
   { immediate: true },
 );
@@ -910,6 +1101,14 @@ function applySharedToForm(shared: Partial<SequenceSharedParams>) {
 
 async function onSubmitSequence() {
   composerError.value = null;
+  if (
+    !sequenceMode.value ||
+    !sequenceModels.value.some((model) => model.name === form.state.value.model)
+  ) {
+    composerError.value =
+      "Choose an installed sequence-capable video model on the selected machine.";
+    return;
+  }
   const initialRoute = routing.resolve(form.state.value.model || null);
   if (!initialRoute) {
     composerError.value = "The selected sequence host is unavailable.";
@@ -938,6 +1137,10 @@ async function onSubmitSequence() {
       enable_audio: draft.enableAudio ? true : null,
     };
     try {
+      sequenceStageClipIdsByJob.set(
+        `${editing.hostId}:${editing.jobId}`,
+        draft.clips.map((clip) => clip.id),
+      );
       await chainJobs.amend(editing.hostId, editing.jobId, amendReq);
       draft.stopEditing();
       editBaselineShared.value = null;
@@ -947,9 +1150,11 @@ async function onSubmitSequence() {
       if (error instanceof ApiHttpError && error.status === 409) {
         toast(
           "error",
-          "That sequence has moved on — submitting your edit as a new sequence.",
+          "This sequence changed on its host while you edited. Retry after reloading it, or use Duplicate as new to submit your version.",
         );
-        // Fall through to create-as-new below.
+        composerError.value =
+          "The original sequence changed. Your edits are still here; reload the sequence or choose Duplicate as new.";
+        return;
       } else {
         composerError.value =
           error instanceof Error ? error.message : String(error);
@@ -965,7 +1170,11 @@ async function onSubmitSequence() {
         "No selected machine has an authoritative route for this sequence.",
       );
     }
-    await chainJobs.create(route.hostId, req);
+    const jobId = await chainJobs.create(route.hostId, req);
+    sequenceStageClipIdsByJob.set(
+      `${route.hostId}:${jobId}`,
+      draft.clips.map((clip) => clip.id),
+    );
     if (editing) {
       draft.stopEditing();
       editBaselineShared.value = null;
@@ -1018,8 +1227,12 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
       draft.clips.splice(0, draft.clips.length, ...loaded.clips);
       draft.activeClipId = loaded.clips[0]?.id ?? null;
       draft.enableAudio = loaded.enableAudio;
-      chainJobs.watch(hostId, jobId);
     }
+    sequenceStageClipIdsByJob.set(
+      `${hostId}:${jobId}`,
+      draft.clips.map((clip) => clip.id),
+    );
+    chainJobs.watch(hostId, jobId);
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));
   }
@@ -2220,9 +2433,10 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-          v-if="sequenceMode && !supportsChain"
+          v-if="sequenceMode && (!supportsChain || showSequenceEmpty)"
           class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
           data-test="chain-unsupported"
+          :data-empty="showSequenceEmpty ? 'true' : 'false'"
         >
           <div class="flex items-start gap-3">
             <span
@@ -2235,9 +2449,16 @@ onBeforeUnmount(() => {
                 sequences need a video model
               </p>
               <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-3">
-                <span class="text-ink-2">{{ currentModelLabel }}</span>
-                renders single prints only. pick an ltx-video or ltx-2 model to
-                chain clips into a sequence.
+                <template v-if="showSequenceEmpty">
+                  No chain-capable video model is installed on the selected
+                  machine. Pull an LTX Video or distilled LTX-2 checkpoint to
+                  continue.
+                </template>
+                <template v-else>
+                  <span class="text-ink-2">{{ currentModelLabel }}</span>
+                  renders single prints only. pick an ltx-video or ltx-2 model
+                  to chain clips into a sequence.
+                </template>
               </p>
               <div class="mt-3 flex flex-wrap gap-2">
                 <button
@@ -2277,8 +2498,8 @@ onBeforeUnmount(() => {
               :adv-count="advCount"
               :mobile="true"
               :last-seed="lastSeedUsed"
-              :output="draft.output"
-              :clip-count="draft.clips.length"
+              :output="sequenceMode ? 'sequence' : 'single'"
+              :clip-count="sequenceMode ? draft.clips.length : 0"
               data-test="phone-sequence-controls"
               @update:output="setOutput"
               @open-advanced="openAdvanced"
@@ -2292,11 +2513,14 @@ onBeforeUnmount(() => {
             :model-default-frames="currentModel?.default_frames ?? null"
             :target="sequenceTarget"
             :chain-level-dirty="chainLevelDirty"
+            :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
+            :playing-clip-id="playingSequenceClipId"
             @submit="onSubmitSequence"
             @duplicate-as-new="onDuplicateAsNew"
             @discard-edit="onDiscardEdit"
             @expand-clip="onExpandClip"
             @import-shared="onImportShared"
+            @play-clip="playSequenceClip"
           />
 
           <p
@@ -2327,10 +2551,43 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div
+            v-if="sequencePlaybackSrc"
+            class="relative flex min-h-[280px] flex-col overflow-hidden rounded-card border border-edge bg-print"
+            data-test="sequence-stage-player"
+          >
+            <video
+              :key="sequencePlaybackSrc"
+              :src="sequencePlaybackSrc"
+              class="max-h-[60vh] min-h-0 w-full flex-1 object-contain"
+              autoplay
+              controls
+              loop
+              playsinline
+            />
+            <div
+              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+            >
+              <span
+                class="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-3"
+              >
+                Clip {{ (playingSequenceStage ?? 0) + 1 }}
+              </span>
+              <button
+                type="button"
+                class="rounded-control border border-ce px-2 py-1 text-xs text-ink-2 hover:text-rebate"
+                data-test="sequence-return-live"
+                @click="returnToLiveSequence"
+              >
+                Return to live render
+              </button>
+            </div>
+          </div>
+
           <!-- The canvas region stays in sequence mode: the watched job's
                stage progress and latest clip preview develop here. -->
           <ResultCanvas
-            v-if="watchedSequenceActive"
+            v-else-if="watchedSequenceActive"
             mode="generating"
             :progress="sequenceCanvasPercent"
             :stage="sequenceCanvasStage"
@@ -2430,8 +2687,8 @@ onBeforeUnmount(() => {
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
-                  :output="draft.output"
-                  :clip-count="draft.clips.length"
+                  :output="sequenceMode ? 'sequence' : 'single'"
+                  :clip-count="sequenceMode ? draft.clips.length : 0"
                   @update:output="setOutput"
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
@@ -2579,8 +2836,8 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
-          :output="draft.output"
-          :clip-count="draft.clips.length"
+          :output="sequenceMode ? 'sequence' : 'single'"
+          :clip-count="sequenceMode ? draft.clips.length : 0"
           @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"

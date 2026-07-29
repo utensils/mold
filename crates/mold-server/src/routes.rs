@@ -238,6 +238,8 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::delete_chain_job,
         crate::routes_chain_jobs::gc_chain_jobs,
         crate::routes_chain_jobs::chain_job_stage_preview,
+        crate::routes_chain_jobs::chain_job_stage_media,
+        crate::routes_chain_jobs::create_chain_job_stage_media_token,
     ),
     components(schemas(
         mold_core::GenerateRequest,
@@ -387,6 +389,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/chain-jobs/:id/stages/:idx/preview",
             get(crate::routes_chain_jobs::chain_job_stage_preview),
+        )
+        .route(
+            "/api/chain-jobs/:id/stages/:idx/media",
+            get(crate::routes_chain_jobs::chain_job_stage_media),
+        )
+        .route(
+            "/api/chain-jobs/:id/stages/:idx/media-token",
+            post(crate::routes_chain_jobs::create_chain_job_stage_media_token),
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
@@ -4244,15 +4254,15 @@ async fn import_gallery_file(
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct GalleryMediaTokenRequest {
-    path: String,
+pub(crate) struct GalleryMediaTokenRequest {
+    pub(crate) path: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct GalleryMediaTokenResponse {
-    token: Option<String>,
-    expires_at: Option<u64>,
-    auth_required: bool,
+pub(crate) struct GalleryMediaTokenResponse {
+    pub(crate) token: Option<String>,
+    pub(crate) expires_at: Option<u64>,
+    pub(crate) auth_required: bool,
 }
 
 /// Issue a short-lived credential for a browser media element.
@@ -4411,40 +4421,39 @@ async fn get_gallery_image(
     }
 
     let path = output_dir.join(&clean_name);
-    let meta = match tokio::fs::metadata(&path).await {
-        Ok(m) if m.is_file() => m,
-        _ => {
-            return Err(ApiError::not_found(format!(
-                "image not found: {clean_name}"
-            )));
-        }
+    let content_type = content_type_for_filename(&clean_name);
+    serve_media_file(&path, &headers, content_type, "image not found").await
+}
+
+pub(crate) async fn serve_media_file(
+    path: &std::path::Path,
+    headers: &HeaderMap,
+    content_type: &'static str,
+    missing_message: &'static str,
+) -> Result<axum::response::Response, ApiError> {
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_file() => meta,
+        _ => return Err(ApiError::not_found(missing_message)),
     };
     let total_len = meta.len();
-    let content_type = content_type_for_filename(&clean_name);
-
     let range_header = headers
         .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let file = tokio::fs::File::open(&path)
+        .and_then(|value| value.to_str().ok());
+    let file = tokio::fs::File::open(path)
         .await
-        .map_err(|e| ApiError::internal(format!("failed to open file: {e}")))?;
+        .map_err(|error| ApiError::internal(format!("failed to open media file: {error}")))?;
 
     if let Some(raw) = range_header {
-        if let Some((start, end)) = parse_byte_range(&raw, total_len) {
+        if let Some((start, end)) = parse_byte_range(raw, total_len) {
             return serve_range(file, start, end, total_len, content_type).await;
-        } else {
-            // A `Range` header we can't satisfy ⇒ 416 per RFC 9110 §15.6.2.
-            return Ok(axum::response::Response::builder()
-                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
-                .body(axum::body::Body::empty())
-                .unwrap());
         }
+        return Ok(axum::response::Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
+            .body(axum::body::Body::empty())
+            .unwrap());
     }
 
-    // Full response: stream the file rather than buffer it in RAM.
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
     Ok(axum::response::Response::builder()

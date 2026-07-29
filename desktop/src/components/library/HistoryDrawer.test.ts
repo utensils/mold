@@ -484,6 +484,30 @@ describe("HistoryDrawer sequences", () => {
     expect(chains.clearInactive).toHaveBeenCalledWith("okra-7680");
   });
 
+  it("warns before discarding scene playback and edit caches", async () => {
+    const wrapper = await mountDrawer({ extra: true });
+    const chains = useChainJobsStore();
+    chains.byHost.local = { jobs: [chainJob()], error: null };
+    chains.byHost["okra-7680"] = {
+      jobs: [chainJob({ id: "job-2" })],
+      error: null,
+    };
+    await wrapper.get("[data-test='tab-sequences']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='seq-cleanup-disk']").trigger("click");
+    expect(chains.gc).not.toHaveBeenCalled();
+    const dialog = document.querySelector("[data-test='confirm-dialog']") as HTMLElement;
+    expect(dialog.textContent).toContain(
+      "cached scene media used for scene playback and sequence editing",
+    );
+    expect(dialog.textContent).toContain("Final videos in the Library remain.");
+
+    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await flushPromises();
+    expect(chains.gc).toHaveBeenCalledTimes(2);
+  });
+
   it("caps the rendered list and says how much it is holding back", async () => {
     const wrapper = await mountDrawer();
     const chains = useChainJobsStore();

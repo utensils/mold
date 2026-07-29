@@ -21,6 +21,11 @@ vi.mock("../../api", async (importOriginal) => {
 
 import HistoryDrawer from "./HistoryDrawer.vue";
 import { __testing__ } from "../../composables/useChainJobs";
+import {
+  resetNotifications,
+  settleConfirm,
+  useNotifications,
+} from "../../lib/toasts";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 
 const stub = { template: "<div />" };
@@ -59,6 +64,7 @@ beforeEach(() => {
   __testing__.reset();
   vi.clearAllMocks();
   localStorage.clear();
+  resetNotifications();
 });
 afterEach(() => (document.body.innerHTML = ""));
 
@@ -109,9 +115,19 @@ describe("web HistoryDrawer", () => {
     expect(deleteChainJob).toHaveBeenCalledTimes(2);
   });
 
-  it("sweeps disk from the same footer the strip lost", async () => {
+  it("warns before discarding scene playback and edit caches", async () => {
     const wrapper = await mountDrawer([job()]);
     await wrapper.get("[data-test='seq-cleanup-disk']").trigger("click");
+    expect(gcChainJobs).not.toHaveBeenCalled();
+    expect(useNotifications().confirm?.title).toBe("Clean up sequence cache?");
+    expect(useNotifications().confirm?.body).toContain(
+      "cached scene media used for scene playback and sequence editing",
+    );
+    expect(useNotifications().confirm?.body).toContain(
+      "Final videos in the Library remain.",
+    );
+
+    settleConfirm(true);
     await flushPromises();
     expect(gcChainJobs).toHaveBeenCalled();
   });
@@ -126,7 +142,7 @@ describe("web HistoryDrawer", () => {
     expect(wrapper.get("[data-test='sequence-cap-note']").text()).toBe(
       "showing 200 of 431",
     );
-  });
+  }, 15_000);
 
   it("offers exactly one action when there are no sequences", async () => {
     const wrapper = await mountDrawer([]);

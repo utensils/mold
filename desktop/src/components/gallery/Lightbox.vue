@@ -115,11 +115,10 @@ const when = computed(() =>
   }),
 );
 
-function reuseSettings() {
-  // One button, sequence-aware: the print already knows what it is, so asking
-  // the user which kind of reuse they meant would be a shrug in button form.
+function primaryAction() {
   if (props.isSequence) {
-    emit("reuseSequence");
+    if (props.canEditSequence) emit("editSequence");
+    else emit("reuseSequence");
     return;
   }
   // Ship the full metadata — `applyPrefillToForm` restores every serialized
@@ -413,20 +412,27 @@ async function saveMedia() {
 
         <button
           type="button"
+          data-test="lightbox-primary-action"
           class="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-[10px] bg-safelight text-body-lg font-bold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
-          @click="reuseSettings"
+          @click="primaryAction"
         >
           <Icon name="reuse" :size="15" />
-          Reuse these settings
+          {{
+            isSequence
+              ? canEditSequence
+                ? "Edit sequence"
+                : "Duplicate as new"
+              : "Reuse these settings"
+          }}
         </button>
         <button
           v-if="canEditSequence"
           type="button"
-          data-test="lightbox-edit-sequence"
+          data-test="lightbox-duplicate-sequence"
           class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
-          @click="emit('editSequence')"
+          @click="emit('reuseSequence')"
         >
-          Edit sequence
+          Duplicate as new
         </button>
         <div class="mt-2.5 flex gap-2.5">
           <button

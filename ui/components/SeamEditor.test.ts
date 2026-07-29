@@ -71,7 +71,9 @@ describe("SeamEditor", () => {
 
   it("clamps fade length to the server cap via the stepper", async () => {
     const wrapper = make({ fadeFrames: 32, fadeFramesMax: 32 });
-    const increase = wrapper.find("[aria-label=Increase]");
+    const increase = wrapper.find(
+      '[aria-label="Increase Fade length in frames"]',
+    );
     await increase.trigger("click");
     expect(wrapper.emitted("update:fadeFrames")).toBeUndefined();
   });

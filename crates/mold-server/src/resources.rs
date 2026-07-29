@@ -145,6 +145,7 @@ pub(crate) fn discover_telemetry_targets(
     targets
 }
 
+#[cfg(any(test, feature = "nvml", not(target_os = "macos")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NvidiaUuidKind {
     FullGpu,
@@ -174,6 +175,7 @@ fn nvidia_uuid_text(prefix: &str, uuid: [u8; 16]) -> String {
     )
 }
 
+#[cfg(any(test, feature = "nvml", not(target_os = "macos")))]
 fn parse_nvidia_uuid(value: &str) -> Option<(NvidiaUuidKind, [u8; 16])> {
     let (kind, body) = if value
         .get(..4)
@@ -202,6 +204,7 @@ fn parse_nvidia_uuid(value: &str) -> Option<(NvidiaUuidKind, [u8; 16])> {
     Some((kind, bytes))
 }
 
+#[cfg(any(test, feature = "nvml", not(target_os = "macos")))]
 fn target_accepts_nvidia_uuid(target: &TelemetryTarget, value: &str) -> bool {
     let Some(expected) = target.raw_cuda_uuid else {
         return false;
@@ -509,6 +512,7 @@ pub fn ram_snapshot() -> RamSnapshot {
 
 pub struct SmiSource;
 
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Debug)]
 struct SmiPhysicalSample {
     uuid: String,
@@ -517,6 +521,7 @@ struct SmiPhysicalSample {
     vram_used: u64,
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn parse_visible_nvidia_smi_line(line: &str) -> Option<SmiPhysicalSample> {
     let parts: Vec<&str> = line.split(',').map(str::trim).collect();
     if parts.len() < 5 {
@@ -567,6 +572,7 @@ impl SmiSource {
     /// The subprocess can see physical GPUs hidden by
     /// `CUDA_VISIBLE_DEVICES`, so filtering by CUDA's UUID inventory is a
     /// security and correctness boundary, not merely a display preference.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn snapshot_visible(targets: &[TelemetryTarget]) -> Vec<GpuSnapshot> {
         let bin = resolve_nvidia_smi();
         let output = match std::process::Command::new(bin)
@@ -586,6 +592,7 @@ impl SmiSource {
     }
 
     /// Pure UUID join used by tests and by the subprocess fallback.
+    #[cfg(any(test, not(target_os = "macos")))]
     pub(crate) fn parse_visible_snapshot(
         text: &str,
         targets: &[TelemetryTarget],

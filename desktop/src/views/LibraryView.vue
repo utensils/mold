@@ -207,8 +207,8 @@ async function upscaleItem(entry: MergedPrint) {
 // A print stitched from a sequence carries per-clip provenance
 // (`metadata.chain`) and, when a durable job produced it, that job's id. Reuse
 // settings follows the print: one shot for a still, a fresh clip rail for a
-// sequence. Edit sequence is the second, distinct action — it CONTINUES the
-// original job with its cached clips.
+// sequence. A sequence's primary action CONTINUES the original durable job
+// with its cached clips; Duplicate as new is the explicit fresh-draft path.
 
 const isSequencePrint = (entry: MergedPrint) => planSequenceReuse(entry.item.metadata) !== null;
 
@@ -282,13 +282,14 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
   return [
-    {
-      label: "Reuse settings",
-      action: () => reuseSettings(entry),
-    },
-    ...(canEditSequence(entry)
-      ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
-      : []),
+    ...(isSequencePrint(entry)
+      ? [
+          ...(canEditSequence(entry)
+            ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
+            : []),
+          { label: "Duplicate as new", action: () => reuseSequence(entry) },
+        ]
+      : [{ label: "Reuse settings", action: () => reuseSettings(entry) }]),
     {
       label: "Copy prompt",
       action: () => {

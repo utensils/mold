@@ -518,6 +518,8 @@ export interface ChainJobStageDetail {
   frames_emitted: number | null;
   generation_time_ms: number | null;
   has_preview: boolean;
+  has_media?: boolean;
+  cache_ready?: boolean;
   error: string | null;
 }
 
@@ -570,6 +572,8 @@ export type ChainJobEvent =
       stage_idx: number;
       frames_emitted: number;
       has_preview: boolean;
+      has_media?: boolean;
+      cache_ready?: boolean;
     }
   | { type: "yielded"; pending_small_jobs: number }
   | { type: "finalizing"; total_frames: number }

@@ -13,11 +13,12 @@ vi.mock("vue-router", () => ({
 }));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
+const apiFetchTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   apiJson: (...args: unknown[]) => apiJson(...args),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),
-  apiFetchTo: vi.fn(),
+  apiFetchTo: (...args: unknown[]) => apiFetchTo(...args),
   ApiError: class ApiError extends Error {
     status = 0;
   },
@@ -38,7 +39,10 @@ import { useChainJobsStore } from "../stores/chainJobs";
 import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
+import { useAppPrefsStore } from "../stores/appPrefs";
 import { useModelStore } from "../stores/models";
+import { useToastStore } from "../stores/toasts";
+import { useUiStore } from "../stores/ui";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
 
@@ -82,6 +86,7 @@ beforeEach(() => {
     Promise.resolve(path === "/api/models" ? installedPayload : []),
   );
   apiJsonTo.mockReset();
+  apiFetchTo.mockReset();
   apiJsonTo.mockImplementation((_target: unknown, path: unknown) => {
     if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
     if (path === "/api/models") return Promise.resolve(installedPayload);
@@ -142,6 +147,118 @@ describe("GenerateView — sequence output", () => {
     // 97 comes from the swapped-in model's server-advertised default; the
     // pre-fix ordering seeded 25 (the generic floor) from the still model.
     expect(draft.clips[0]!.frames).toBe(97);
+  });
+
+  it("re-homes a restored still model onto a compatible model installed on the pinned host", async () => {
+    const stillModel = {
+      name: "flux-schnell:q8",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+    } as ModelEntry;
+    const platoVideo = {
+      ...videoModel,
+      name: "ltx-2.3-22b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+    } as ModelEntry;
+    readyLocal();
+    useHostsStore().extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useAppPrefsStore().settings = {
+      generateTargetHost: "plato-7680",
+    } as never;
+    installedPayload = [stillModel];
+    useModelStore().all = [stillModel];
+    apiJsonTo.mockImplementation((target: { baseUrl?: string }, path: unknown) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          target.baseUrl === "http://plato:7680" ? [stillModel, platoVideo] : [stillModel],
+        );
+      }
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      return Promise.resolve({});
+    });
+    const formStore = useGenerateFormStore();
+    formStore.form.model = stillModel.name;
+    formStore.form.family = stillModel.family;
+    useSequenceDraftStore().output = "sequence";
+
+    mountView();
+    await flushPromises();
+
+    expect(formStore.form.model).toBe(platoVideo.name);
+    expect(formStore.form.family).toBe("ltx2");
+  });
+
+  it("clears an incompatible pinned-host model, shows the empty state, and refuses submit", async () => {
+    const stillModel = {
+      name: "flux-schnell:q8",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+    } as ModelEntry;
+    readyLocal();
+    useHostsStore().extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useAppPrefsStore().settings = {
+      generateTargetHost: "plato-7680",
+    } as never;
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    apiJsonTo.mockImplementation((target: { baseUrl?: string }, path: unknown) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          target.baseUrl === "http://plato:7680" ? [stillModel] : [videoModel],
+        );
+      }
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      return Promise.resolve({});
+    });
+    const formStore = useGenerateFormStore();
+    formStore.form.model = stillModel.name;
+    formStore.form.family = stillModel.family;
+    useSequenceDraftStore().output = "sequence";
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(formStore.form.model).toBe("");
+    expect(wrapper.find("[data-test='sequence-empty']").exists()).toBe(true);
+    expect(wrapper.find("sequence-composer-stub").exists()).toBe(false);
+
+    apiJsonTo.mockClear();
+    useUiStore().generateTick += 1;
+    await flushPromises();
+    expect(
+      apiJsonTo.mock.calls.some(
+        ([, path, init]) =>
+          path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(
+      useToastStore().items.some((toast) => toast.message.includes("sequence-capable video model")),
+    ).toBe(true);
   });
 
   it("renders the sequence bench instead of the single composer", async () => {
@@ -310,6 +427,146 @@ describe("GenerateView — settled sequence canvas", () => {
     expect(detail).toHaveBeenCalledWith("okra-7680", "job-9");
     // One-shot: a back-nav must not replay the handoff.
     expect(useComposerStore().pendingSequence).toBeNull();
+  });
+});
+
+describe("GenerateView — cached filmstrip remount", () => {
+  function cachedDetail(id = "job-cached"): ChainJobDetail {
+    return {
+      id,
+      state: "completed",
+      model: "ltx-video",
+      stage_count: 2,
+      current_stage: 2,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      error: null,
+      stages: [
+        {
+          idx: 0,
+          state: "completed",
+          seed: "1",
+          frames_emitted: 25,
+          generation_time_ms: 10,
+          has_preview: true,
+          has_media: false,
+          cache_ready: true,
+          error: null,
+        },
+        {
+          idx: 1,
+          state: "completed",
+          seed: "2",
+          frames_emitted: 25,
+          generation_time_ms: 10,
+          has_preview: false,
+          has_media: false,
+          cache_ready: true,
+          error: null,
+        },
+      ],
+      script: {
+        schema: "mold.chain.v1",
+        chain: { model: "ltx-video", fps: 24 },
+        stages: [
+          { prompt: "server opening", frames: 25 },
+          { prompt: "server ending", frames: 25 },
+        ],
+      },
+      finalizes: [],
+      retakes: [],
+      amends: [],
+    } as ChainJobDetail;
+  }
+
+  function prepareCachedEdit(detail: ChainJobDetail) {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "edited opening";
+    draft.clips[1]!.prompt = "edited ending";
+    draft.loadFromJob(
+      {
+        jobId: detail.id,
+        hostId: "local",
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 2,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+    const chains = useChainJobsStore();
+    chains.watching = { hostId: "local", jobId: detail.id };
+    chains.live = { detail, progress: {}, activeStage: null };
+    return { chains, draft };
+  }
+
+  it("restores durable preview bindings after unmount and remount", async () => {
+    const detail = cachedDetail();
+    const { draft } = prepareCachedEdit(detail);
+    apiFetchTo.mockResolvedValue({
+      blob: async () => new Blob(["preview"], { type: "image/jpeg" }),
+    });
+    const createUrl = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValueOnce("blob:first")
+      .mockReturnValueOnce("blob:second");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    const first = mountView();
+    await flushPromises();
+    const firstMedia = first
+      .getComponent({ name: "SequenceComposer" })
+      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
+    expect(firstMedia[draft.clips[0]!.id]?.posterUrl).toBe("blob:first");
+
+    first.unmount();
+    expect(revokeUrl).toHaveBeenCalledWith("blob:first");
+
+    const second = mountView();
+    await flushPromises();
+    const secondMedia = second
+      .getComponent({ name: "SequenceComposer" })
+      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
+    expect(secondMedia[draft.clips[0]!.id]?.posterUrl).toBe("blob:second");
+    expect(apiFetchTo).toHaveBeenCalledTimes(2);
+    createUrl.mockRestore();
+    revokeUrl.mockRestore();
+  });
+
+  it("discards a late preview from the previously watched job", async () => {
+    const detail = cachedDetail("job-a");
+    const { chains } = prepareCachedEdit(detail);
+    let resolvePreview!: (response: { blob: () => Promise<Blob> }) => void;
+    apiFetchTo.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePreview = resolve;
+      }),
+    );
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:stale");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const wrapper = mountView();
+    await flushPromises();
+
+    const other = cachedDetail("job-b");
+    other.stages = other.stages.map((stage) => ({ ...stage, has_preview: false }));
+    chains.watching = { hostId: "local", jobId: "job-b" };
+    chains.live = { detail: other, progress: {}, activeStage: null };
+    await flushPromises();
+    resolvePreview({ blob: async () => new Blob(["late"], { type: "image/jpeg" }) });
+    await flushPromises();
+
+    expect(revokeUrl).toHaveBeenCalledWith("blob:stale");
+    expect(wrapper.getComponent({ name: "SequenceComposer" }).props("stageMediaByClipId")).toEqual(
+      {},
+    );
+    createUrl.mockRestore();
+    revokeUrl.mockRestore();
   });
 });
 

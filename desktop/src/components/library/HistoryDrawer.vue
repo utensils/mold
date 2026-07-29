@@ -449,6 +449,7 @@ function deleteSequenceConfirmed() {
  *  the confirm names the host and the count so the two never blur. */
 const confirmingClearSequences = ref(false);
 const clearingSequences = ref(false);
+const confirmCleanUpDisk = ref(false);
 
 const inactiveSequenceCount = computed(
   () => sequenceRows.value.filter((vm) => vm.settledAtMs !== null).length,
@@ -487,7 +488,12 @@ async function clearInactiveSequences() {
   }
 }
 
-async function cleanUpDisk() {
+function cleanUpDisk() {
+  confirmCleanUpDisk.value = true;
+}
+
+async function cleanUpDiskConfirmed() {
+  confirmCleanUpDisk.value = false;
   try {
     const hostIds = sequenceHostScope.value
       ? [sequenceHostScope.value]
@@ -804,6 +810,15 @@ async function cleanUpDisk() {
       danger
       @confirm="deleteSequenceConfirmed"
       @cancel="confirmDeleteSequence = null"
+    />
+    <ConfirmDialog
+      :open="confirmCleanUpDisk"
+      title="Clean up sequence cache?"
+      message="This discards cached scene media used for scene playback and sequence editing. Final videos in the Library remain."
+      confirm-label="Clean up"
+      danger
+      @confirm="cleanUpDiskConfirmed"
+      @cancel="confirmCleanUpDisk = false"
     />
   </DrawerPanel>
 </template>

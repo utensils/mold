@@ -1009,6 +1009,8 @@ mod tests {
                     frames_emitted: None,
                     generation_time_ms: None,
                     has_preview: false,
+                    has_media: false,
+                    cache_ready: false,
                     error: None,
                 })
                 .collect(),
@@ -1634,6 +1636,8 @@ mod tests {
                 stage_idx: 0,
                 frames_emitted: 9,
                 has_preview: true,
+                has_media: true,
+                cache_ready: true,
             },
         );
         handle
@@ -1841,6 +1845,8 @@ mod tests {
                 stage_idx: 1,
                 frames_emitted: 11,
                 has_preview: true,
+                has_media: true,
+                cache_ready: true,
             },
             ChainJobEvent::Finalizing { total_frames: 20 },
         ];
@@ -1875,6 +1881,8 @@ mod tests {
                 stage_idx: 3,
                 frames_emitted: 15,
                 has_preview: true,
+                has_media: true,
+                cache_ready: true,
             },
             "job-2",
         )

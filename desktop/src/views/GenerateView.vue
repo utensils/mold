@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { isSupportedDroppedImage, reduceNativeImageDrag } from "../lib/nativeImageDrop";
 import { useRoute, useRouter } from "vue-router";
 import {
+  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -9,6 +11,7 @@ import {
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
+import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
@@ -28,6 +31,7 @@ import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import {
   defaultClipFrames,
   friendlySequenceError,
+  modelSupportsSequence,
   modelsForOutput,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
@@ -109,6 +113,7 @@ import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../st
 import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
 import { galleryMediaPath, localMediaPath, mediaPath } from "../lib/gallery/media";
+import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
@@ -231,12 +236,79 @@ const formStore = useGenerateFormStore();
 const form = formStore.form;
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
+const workbenchRef = ref<HTMLDivElement | null>(null);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
 const templatesToggleEl = ref<HTMLButtonElement | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
+const DEFAULT_BENCH_HEIGHT = 520;
+const MIN_BENCH_HEIGHT = 280;
+const MIN_CANVAS_HEIGHT = 144;
+const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
+function readStoredBenchHeight(): number | null {
+  try {
+    const value = globalThis.localStorage?.getItem(BENCH_HEIGHT_KEY);
+    return value == null ? null : Number(value);
+  } catch {
+    return null;
+  }
+}
+const storedBenchHeight = readStoredBenchHeight();
+const benchHeight = ref(
+  Number.isFinite(storedBenchHeight)
+    ? Math.max(MIN_BENCH_HEIGHT, storedBenchHeight!)
+    : DEFAULT_BENCH_HEIGHT,
+);
+let benchResizeStartY = 0;
+let benchResizeStartHeight = 0;
+
+function clampBenchHeight(height: number): number {
+  const available = workbenchRef.value?.clientHeight ?? window.innerHeight;
+  return Math.round(
+    Math.min(
+      Math.max(MIN_BENCH_HEIGHT, available - MIN_CANVAS_HEIGHT),
+      Math.max(MIN_BENCH_HEIGHT, height),
+    ),
+  );
+}
+
+function setBenchHeight(height: number) {
+  benchHeight.value = clampBenchHeight(height);
+  try {
+    globalThis.localStorage?.setItem(BENCH_HEIGHT_KEY, String(benchHeight.value));
+  } catch {
+    // A private or restricted WebView still gets an in-memory resize.
+  }
+}
+
+function onBenchResizeMove(event: PointerEvent) {
+  setBenchHeight(benchResizeStartHeight + benchResizeStartY - event.clientY);
+}
+
+function stopBenchResize() {
+  document.removeEventListener("pointermove", onBenchResizeMove);
+  document.removeEventListener("pointerup", stopBenchResize);
+}
+
+function startBenchResize(event: PointerEvent) {
+  event.preventDefault();
+  benchResizeStartY = event.clientY;
+  benchResizeStartHeight = benchHeight.value;
+  document.addEventListener("pointermove", onBenchResizeMove);
+  document.addEventListener("pointerup", stopBenchResize);
+}
+
+function onBenchResizeKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  setBenchHeight(benchHeight.value + (event.key === "ArrowUp" ? 24 : -24));
+}
+
+function clampBenchToViewport() {
+  benchHeight.value = clampBenchHeight(benchHeight.value);
+}
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
 const expansionError = ref<string | null>(null);
@@ -270,6 +342,7 @@ const submissionGuard = new PreparationRequestGuard();
 
 let stopNativeImageDrop: (() => void) | null = null;
 let nativeImageDropUnmounted = false;
+let nativeImageDragCandidate = false;
 
 async function importDroppedImage(path: string) {
   try {
@@ -296,13 +369,17 @@ async function listenForNativeImageDrops() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
   const unlisten = await getCurrentWebview().onDragDropEvent(({ payload }) => {
-    if (payload.type === "enter" || payload.type === "over") {
-      nativeImageDragOver.value = true;
-      return;
-    }
-    nativeImageDragOver.value = false;
+    const dragState = reduceNativeImageDrag(
+      {
+        candidate: nativeImageDragCandidate,
+        visible: nativeImageDragOver.value,
+      },
+      payload,
+    );
+    nativeImageDragCandidate = dragState.candidate;
+    nativeImageDragOver.value = dragState.visible;
     if (payload.type !== "drop") return;
-    const path = payload.paths.find((candidate) => /\.(png|jpe?g)$/i.test(candidate));
+    const path = payload.paths.find(isSupportedDroppedImage);
     if (path) void importDroppedImage(path);
     else toasts.push("Drop a PNG or JPEG image.", "error");
   });
@@ -485,7 +562,43 @@ const draft = useSequenceDraftStore();
 const chains = useChainJobsStore();
 const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() => findInstalledModel(installedModels.value, form.model));
-const sequenceCapableModels = computed(() => modelsForOutput(installedModels.value, "sequence"));
+/** Sequence inventory follows the route policy. A pinned host must never
+ * inherit a compatible model from another machine's union. Edit sessions are
+ * stricter still: their immutable durable route owns the available model. */
+const sequenceTargetHostId = computed<string | null>(
+  () => draft.editing?.hostId ?? stickyTarget.value,
+);
+const sequenceTargetModels = computed(() => {
+  const target = sequenceTargetHostId.value;
+  const fixed = target && target !== "capable";
+  const fetched = fixed && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  if (fixed && !fetched) {
+    if (target === "local" && !models.loading) return models.installed;
+    return [];
+  }
+  return filterModelsForTarget(
+    installedModels.value,
+    target,
+    fetched ? new Set(hostModels.installedOn(target).map((model) => model.name)) : null,
+  );
+});
+const sequenceCapableModels = computed(() =>
+  modelsForOutput(sequenceTargetModels.value, "sequence"),
+);
+const selectedSequenceEntry = computed(() =>
+  findInstalledModel(sequenceCapableModels.value, form.model),
+);
+const sequenceInventorySettled = computed(() => {
+  const target = sequenceTargetHostId.value;
+  if (target && target !== "capable") {
+    if (target === "local" && (hostModels.byHost[target]?.fetchedAt ?? 0) === 0) {
+      return !models.loading;
+    }
+    return !hostModels.loading && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  }
+  if (hosts.all.length <= 1) return !models.loading;
+  return !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched;
+});
 const chainLimits = ref<ChainLimits | null>(null);
 const sequenceSubmitting = ref(false);
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
@@ -495,19 +608,48 @@ const editSharedBaseline = ref<string | null>(null);
  *  one handoff, not a standing property of the draft. */
 const sequenceReuseNotice = ref<string | null>(null);
 
-const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedEntry.value));
+const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedSequenceEntry.value));
 const sequenceDefaultFrames = computed(() =>
-  defaultClipFrames(selectedEntry.value, chainLimits.value, sequenceMotionTail.value),
+  defaultClipFrames(selectedSequenceEntry.value, chainLimits.value, sequenceMotionTail.value),
 );
-/** No chain-capable video model installed anywhere → guide to Discover. */
+/** No chain-capable video model on the selected route → guide to Discover. */
 const showSequenceEmpty = computed(
   () =>
-    isSequence.value && conn.ready && !models.loading && sequenceCapableModels.value.length === 0,
+    isSequence.value &&
+    conn.ready &&
+    sequenceInventorySettled.value &&
+    sequenceCapableModels.value.length === 0,
+);
+
+/** Sequence is authoritative over a stale single-image selection. Re-run
+ * after host inventory arrives and whenever the target changes. */
+watch(
+  [isSequence, sequenceCapableModels, sequenceInventorySettled, sequenceTargetHostId],
+  () => {
+    if (!isSequence.value) return;
+    const current = form.model;
+    if (sequenceCapableModels.value.some((model) => model.name === current)) return;
+    if (current && !draft.lastSingleModel && !draft.editing) {
+      draft.lastSingleModel = current;
+    }
+    const pick = sequenceCapableModels.value[0];
+    if (pick) {
+      formStore.applyModel(pick);
+    } else if (
+      sequenceInventorySettled.value ||
+      (selectedEntry.value !== null && !modelSupportsSequence(selectedEntry.value))
+    ) {
+      form.model = "";
+      form.family = "";
+      chainLimits.value = null;
+    }
+  },
+  { immediate: true },
 );
 
 function sharedSnapshot(): string {
   return JSON.stringify({
-    ...sequenceParams(form, selectedEntry.value),
+    ...sequenceParams(form, selectedSequenceEntry.value),
     enableAudio: draft.enableAudio,
     motionTail: sequenceMotionTail.value,
   });
@@ -545,7 +687,7 @@ function consumeOutputQuery() {
 
 let chainLimitsFetch = 0;
 async function loadChainLimits() {
-  const entry = selectedEntry.value;
+  const entry = selectedSequenceEntry.value;
   if (!entry) {
     chainLimits.value = null;
     return;
@@ -598,6 +740,219 @@ const watchedSequencePct = computed(() => {
   const progress = chains.live.progress[active];
   return progress && progress.total > 0 ? (progress.step / progress.total) * 100 : 0;
 });
+
+const sequenceStagePosters = ref<Record<number, string>>({});
+const sequenceStageMedia = ref<Record<number, string>>({});
+const sequenceStageClipIds = ref<string[]>([]);
+const sequenceStageClipIdsByJob = new Map<string, string[]>();
+const playingSequenceStage = ref<number | null>(null);
+let sequenceStageMediaKey = "";
+let sequenceStageMediaEpoch = 0;
+const pendingSequencePosters = new Set<string>();
+const pendingSequenceMedia = new Set<string>();
+
+function clearSequenceStageMedia() {
+  sequenceStageMediaEpoch += 1;
+  pendingSequencePosters.clear();
+  pendingSequenceMedia.clear();
+  for (const url of Object.values(sequenceStagePosters.value)) {
+    URL.revokeObjectURL(url);
+  }
+  sequenceStagePosters.value = {};
+  sequenceStageMedia.value = {};
+  sequenceStageClipIds.value = [];
+  playingSequenceStage.value = null;
+  sequenceStageMediaKey = "";
+}
+
+watch(
+  () => {
+    const detail = chains.live.detail;
+    const watched = chains.watching;
+    return detail && watched
+      ? [
+          watched.hostId,
+          detail.id,
+          detail.stages
+            .filter((stage) => stage.has_preview || stage.has_media)
+            .map((stage) => `${stage.idx}:${stage.has_preview ? 1 : 0}:${stage.has_media ? 1 : 0}`)
+            .join(","),
+        ].join(":")
+      : "";
+  },
+  () => {
+    const detail = chains.live.detail;
+    const watched = chains.watching;
+    if (!detail || !watched) return;
+    const key = `${watched.hostId}:${detail.id}`;
+    if (key !== sequenceStageMediaKey) {
+      clearSequenceStageMedia();
+      sequenceStageMediaKey = key;
+      const script = normalizeServerChainScript(detail.script);
+      const boundIds = sequenceStageClipIdsByJob.get(key);
+      const editing = draft.editing;
+      const editingMatches =
+        editing?.hostId === watched.hostId &&
+        editing.jobId === detail.id &&
+        draft.clips.length === detail.stages.length;
+      if (boundIds?.length === detail.stages.length) {
+        sequenceStageClipIds.value = [...boundIds];
+      } else if (editingMatches) {
+        // The binding cache belongs to this view instance, while the edit
+        // session is durable store state. Rebuild positionally on remount
+        // even when the user has already changed a prompt from the job script.
+        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
+      } else if (
+        script &&
+        script.stages.length === draft.clips.length &&
+        script.stages.every((stage, idx) => stage.prompt === draft.clips[idx]?.prompt)
+      ) {
+        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
+      }
+    }
+    const stagesByIdx = new Map(detail.stages.map((stage) => [stage.idx, stage]));
+    for (const [rawIdx, url] of Object.entries(sequenceStagePosters.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_preview) {
+        URL.revokeObjectURL(url);
+        const next = { ...sequenceStagePosters.value };
+        delete next[idx];
+        sequenceStagePosters.value = next;
+      }
+    }
+    for (const rawIdx of Object.keys(sequenceStageMedia.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_media) {
+        const next = { ...sequenceStageMedia.value };
+        delete next[idx];
+        sequenceStageMedia.value = next;
+        if (playingSequenceStage.value === idx) playingSequenceStage.value = null;
+      }
+    }
+    const target = chains.targetFor(watched.hostId);
+    const requestEpoch = sequenceStageMediaEpoch;
+    for (const stage of detail.stages) {
+      const pendingKey = `${requestEpoch}:${key}:${stage.idx}`;
+      if (
+        stage.has_preview &&
+        !sequenceStagePosters.value[stage.idx] &&
+        !pendingSequencePosters.has(pendingKey)
+      ) {
+        pendingSequencePosters.add(pendingKey);
+        const path = `/api/chain-jobs/${encodeURIComponent(detail.id)}/stages/${stage.idx}/preview`;
+        void apiFetchTo(target, path)
+          .then((response) => response.blob())
+          .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const currentStage = chains.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequenceStageMediaEpoch ||
+              sequenceStageMediaKey !== key ||
+              chains.watching?.hostId !== watched.hostId ||
+              chains.live.detail?.id !== detail.id ||
+              !currentStage?.has_preview
+            ) {
+              URL.revokeObjectURL(url);
+              return;
+            }
+            sequenceStagePosters.value = {
+              ...sequenceStagePosters.value,
+              [stage.idx]: url,
+            };
+          })
+          .catch(() => {})
+          .finally(() => pendingSequencePosters.delete(pendingKey));
+      }
+      if (
+        stage.has_media &&
+        !sequenceStageMedia.value[stage.idx] &&
+        !pendingSequenceMedia.has(pendingKey)
+      ) {
+        pendingSequenceMedia.add(pendingKey);
+        void sequenceStageMediaUrl(target, detail.id, stage.idx)
+          .then((url) => {
+            const currentStage = chains.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequenceStageMediaEpoch ||
+              sequenceStageMediaKey !== key ||
+              chains.watching?.hostId !== watched.hostId ||
+              chains.live.detail?.id !== detail.id ||
+              !currentStage?.has_media
+            ) {
+              return;
+            }
+            sequenceStageMedia.value = {
+              ...sequenceStageMedia.value,
+              [stage.idx]: url,
+            };
+          })
+          .catch(() => {})
+          .finally(() => pendingSequenceMedia.delete(pendingKey));
+      }
+    }
+  },
+  { immediate: true },
+);
+
+const sequencePlaybackSrc = computed(() => {
+  const idx = playingSequenceStage.value;
+  return idx === null ? null : (sequenceStageMedia.value[idx] ?? null);
+});
+const sequenceFilmstripMediaByClipId = computed<
+  Readonly<Record<string, ClipRailMedia | undefined>>
+>(() => {
+  const detail = chains.live.detail;
+  if (!detail) return {};
+  return Object.fromEntries(
+    [...detail.stages]
+      .sort((a, b) => a.idx - b.idx)
+      .flatMap((stage) => {
+        const clipId = sequenceStageClipIds.value[stage.idx];
+        if (!clipId) return [];
+        const progress = chains.live.progress[stage.idx];
+        const status: ClipRailMedia["status"] =
+          stage.state === "completed" ? "ready" : stage.state === "failed" ? "error" : stage.state;
+        return [
+          [
+            clipId,
+            {
+              stageIdx: stage.idx,
+              status,
+              posterUrl: sequenceStagePosters.value[stage.idx] ?? null,
+              hasMedia: Boolean(stage.has_media && sequenceStageMedia.value[stage.idx]),
+              cacheReady: stage.cache_ready,
+              progressPercent:
+                progress && progress.total > 0 ? (progress.step / progress.total) * 100 : null,
+              error: stage.error,
+            } satisfies ClipRailMedia,
+          ],
+        ];
+      }),
+  );
+});
+
+function playSequenceStage(stageIdx: number) {
+  if (!sequenceStageMedia.value[stageIdx]) return;
+  playingSequenceStage.value = playingSequenceStage.value === stageIdx ? null : stageIdx;
+}
+
+function playSequenceClip(clipId: string) {
+  const stageIdx = sequenceStageClipIds.value.indexOf(clipId);
+  if (stageIdx >= 0) playSequenceStage(stageIdx);
+}
+
+const playingSequenceClipId = computed(() => {
+  const stageIdx = playingSequenceStage.value;
+  return stageIdx === null ? null : (sequenceStageClipIds.value[stageIdx] ?? null);
+});
+
+function returnToLiveSequence() {
+  playingSequenceStage.value = null;
+}
 
 /**
  * The watched job once it has settled. The Create strip no longer keeps a
@@ -677,9 +1032,15 @@ function resumeSettledSequence() {
 }
 
 async function generateSequence() {
-  const entry = selectedEntry.value;
-  if (!entry || sequenceSubmitting.value) return;
-  const hostRoute = routeForModel(entry);
+  if (sequenceSubmitting.value) return;
+  const entry = selectedSequenceEntry.value;
+  if (!entry) {
+    toasts.push("Choose an installed sequence-capable video model first.", "error");
+    return;
+  }
+  const hostRoute = draft.editing
+    ? hosts.resolveRoute(draft.editing.hostId, entry.name)
+    : routeForModel(entry);
   if (!hostRoute) {
     toasts.push("The selected host isn't reachable. Pick another host.", "error");
     return;
@@ -708,6 +1069,10 @@ async function generateSequence() {
         enable_audio: draft.enableAudio,
       };
       try {
+        sequenceStageClipIdsByJob.set(
+          `${editing.hostId}:${editing.jobId}`,
+          draft.clips.map((clip) => clip.id),
+        );
         const outcome = await chains.amend(editing.hostId, editing.jobId, amend);
         toasts.push(
           `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
@@ -725,7 +1090,11 @@ async function generateSequence() {
         throw err;
       }
     } else {
-      await chains.create(hostRoute.hostId, request);
+      const jobId = await chains.create(hostRoute.hostId, request);
+      sequenceStageClipIdsByJob.set(
+        `${hostRoute.hostId}:${jobId}`,
+        draft.clips.map((clip) => clip.id),
+      );
       toasts.push("Sequence queued");
     }
     // The caveat described the handoff, not the submitted job.
@@ -797,8 +1166,12 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
       draft.clips.splice(0, draft.clips.length, ...loaded.clips);
       draft.activeClipId = loaded.clips[0]?.id ?? null;
       draft.enableAudio = loaded.enableAudio;
-      chains.watch(payload.hostId, payload.jobId);
     }
+    sequenceStageClipIdsByJob.set(
+      `${payload.hostId}:${payload.jobId}`,
+      draft.clips.map((clip) => clip.id),
+    );
+    await chains.watch(payload.hostId, payload.jobId);
     void loadChainLimits();
   } catch (err) {
     toasts.push(String(err), "error");
@@ -1858,6 +2231,8 @@ watch(
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeydown);
+  window.addEventListener("resize", clampBenchToViewport);
+  clampBenchToViewport();
   void listenForNativeImageDrops();
   // The persisted sequence draft wins on ordinary visits; a ?output=sequence
   // deep-link is consumed once and stripped.
@@ -1868,8 +2243,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   preparationGuard.invalidate();
   submissionGuard.invalidate();
+  clearSequenceStageMedia();
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
+  stopBenchResize();
+  window.removeEventListener("resize", clampBenchToViewport);
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   document.removeEventListener("keydown", onDocumentKeydown);
 });
@@ -1892,6 +2270,7 @@ onBeforeUnmount(() => {
       <CreateHeader :form="form" />
 
       <div
+        ref="workbenchRef"
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
@@ -1916,7 +2295,9 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Canvas -->
-        <div class="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-desk p-7">
+        <div
+          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-desk p-7"
+        >
           <!-- Prepared variations review (prototype: this replaces the canvas) -->
           <PreparedExpansionBatch
             v-if="preparedBatch"
@@ -1980,7 +2361,7 @@ onBeforeUnmount(() => {
                   v-if="job && job.status !== 'complete' && job.previewUrl"
                   :src="job.previewUrl"
                   alt=""
-                  class="absolute inset-0 h-full w-full object-cover"
+                  class="absolute inset-0 h-full w-full object-contain"
                   :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
                 />
                 <!-- The grain canvas paints edge-to-edge (temperature wash), so
@@ -2061,6 +2442,35 @@ onBeforeUnmount(() => {
               :message="jobErrorMessage"
               :copy-message="jobErrorCopy"
             />
+          </div>
+
+          <div
+            v-else-if="isSequence && sequencePlaybackSrc"
+            data-test="sequence-stage-player"
+            class="relative flex h-full w-full min-h-0 flex-col items-center"
+          >
+            <video
+              :key="sequencePlaybackSrc"
+              :src="sequencePlaybackSrc"
+              class="min-h-0 w-full flex-1 rounded-media border border-control-edge bg-print-surface object-contain"
+              autoplay
+              controls
+              loop
+              playsinline
+            />
+            <div
+              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+            >
+              <span class="edge-code">Clip {{ (playingSequenceStage ?? 0) + 1 }}</span>
+              <button
+                type="button"
+                data-test="sequence-return-live"
+                class="rounded-control border border-edge px-2 py-1 text-caption text-ink-2 hover:text-ink"
+                @click="returnToLiveSequence"
+              >
+                Return to live render
+              </button>
+            </div>
           </div>
 
           <!-- Watched sequence: denoise progress in the develop chrome -->
@@ -2216,72 +2626,108 @@ onBeforeUnmount(() => {
           @retry-expansion="retryExpansionAfterPull"
         />
 
-        <ActivityStrip @edit-sequence="editSequence" />
+        <div
+          data-test="create-bench-resizer"
+          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-edge bg-bath/80"
+          role="separator"
+          aria-label="Resize Activity and sequence editor"
+          aria-orientation="horizontal"
+          :aria-valuenow="benchHeight"
+          :aria-valuemin="MIN_BENCH_HEIGHT"
+          :aria-valuemax="
+            Math.max(MIN_BENCH_HEIGHT, (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
+          "
+          tabindex="0"
+          title="Drag to resize · double-click to reset"
+          @pointerdown="startBenchResize"
+          @keydown="onBenchResizeKeydown"
+          @dblclick="setBenchHeight(DEFAULT_BENCH_HEIGHT)"
+        >
+          <span
+            class="h-1 w-12 rounded-full bg-ink-3/50 transition-colors group-hover:bg-safelight group-focus-visible:bg-safelight"
+            aria-hidden="true"
+          />
+        </div>
 
-        <!-- Sequence bench replaces the single-print composer in-place -->
-        <EmptyStateBlock
-          v-if="showSequenceEmpty"
-          data-test="sequence-empty"
-          class="shrink-0 py-6"
-          icon="image"
-          headline="Sequences need a video model"
-          guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+        <div
+          data-test="create-bottom-panel"
+          class="flex min-h-0 shrink-0 flex-col overflow-y-auto bg-desk"
+          :style="{
+            height: `${benchHeight}px`,
+            containerType: 'size',
+            containerName: 'create-bench',
+          }"
         >
-          <template #action>
-            <button
-              type="button"
-              data-test="sequence-browse-models"
-              class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
-              @click="
-                router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
-              "
-            >
-              Browse video models
-            </button>
-          </template>
-        </EmptyStateBlock>
-        <SequenceComposer
-          v-else-if="isSequence"
-          data-test="generate-sequence-composer"
-          class="shrink-0"
-          :form="form"
-          :selected-model="selectedEntry"
-          :chain-limits="chainLimits"
-          :installed-models="installedModels"
-          :submitting="sequenceSubmitting"
-          :chain-level-dirty="chainLevelDirty"
-          @submit="generateSequence"
-          @duplicate="duplicateSequenceAsNew"
-        />
-        <ComposerCard
-          v-else
-          ref="composerRef"
-          data-test="generate-composer"
-          class="shrink-0"
-          :form="form"
-          :effective-batch-size="effectiveBatchSize"
-          :expansion-running="expansionRunning"
-          :expansion-host-label="expansionHostLabel"
-          :can-undo="quickExpansionOriginal !== null"
-          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-          :has-prepared="!!preparedBatch"
-          :chain-reject="chainReject"
-          :button-label="buttonLabel"
-          :estimate-request="estimateRequest"
-          :estimate-target="estimateTarget"
-          :preprocessing-status="preprocessingStatus"
-          :history="promptHistory"
-          @generate="generate"
-          @expand="expandForCurrentBatch()"
-          @restore="restoreQuickExpansion"
-        />
-        <p
-          v-if="isSequence && sequenceReuseNotice"
-          data-test="sequence-reuse-note"
-          class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
-        >
-          {{ sequenceReuseNotice }}
-        </p>
+          <ActivityStrip @edit-sequence="editSequence" />
+          <p
+            v-if="isSequence && sequenceReuseNotice"
+            data-test="sequence-reuse-note"
+            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+          >
+            {{ sequenceReuseNotice }}
+          </p>
+
+          <!-- Sequence bench replaces the single-print composer in-place -->
+          <EmptyStateBlock
+            v-if="showSequenceEmpty"
+            data-test="sequence-empty"
+            class="flex-1 py-6"
+            icon="image"
+            headline="Sequences need a video model"
+            guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+          >
+            <template #action>
+              <button
+                type="button"
+                data-test="sequence-browse-models"
+                class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
+                @click="
+                  router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
+                "
+              >
+                Browse video models
+              </button>
+            </template>
+          </EmptyStateBlock>
+          <SequenceComposer
+            v-else-if="isSequence"
+            data-test="generate-sequence-composer"
+            class="flex-1"
+            :form="form"
+            :selected-model="selectedSequenceEntry"
+            :chain-limits="chainLimits"
+            :installed-models="installedModels"
+            :submitting="sequenceSubmitting"
+            :chain-level-dirty="chainLevelDirty"
+            :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
+            :playing-clip-id="playingSequenceClipId"
+            @submit="generateSequence"
+            @duplicate="duplicateSequenceAsNew"
+            @play-clip="playSequenceClip"
+          />
+          <ComposerCard
+            v-else
+            ref="composerRef"
+            data-test="generate-composer"
+            class="flex-1"
+            :form="form"
+            :effective-batch-size="effectiveBatchSize"
+            :expansion-running="expansionRunning"
+            :expansion-host-label="expansionHostLabel"
+            :can-undo="quickExpansionOriginal !== null"
+            :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+            :has-prepared="!!preparedBatch"
+            :chain-reject="chainReject"
+            :button-label="buttonLabel"
+            :estimate-request="estimateRequest"
+            :estimate-target="estimateTarget"
+            :preprocessing-status="preprocessingStatus"
+            :history="promptHistory"
+            @generate="generate"
+            @expand="expandForCurrentBatch()"
+            @restore="restoreQuickExpansion"
+          />
+        </div>
       </div>
     </div>
 

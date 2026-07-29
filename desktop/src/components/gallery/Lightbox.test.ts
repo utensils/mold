@@ -31,9 +31,13 @@ beforeEach(() => {
   setActivePinia(createPinia());
 });
 
-function mountLightbox(selectedItem: GalleryImage = item, video = false) {
+function mountLightbox(
+  selectedItem: GalleryImage = item,
+  video = false,
+  props: Record<string, unknown> = {},
+) {
   return mount(Lightbox, {
-    props: { item: selectedItem, index: 0, count: 3, video },
+    props: { item: selectedItem, index: 0, count: 3, video, ...props },
     global: { stubs: { AuthedMedia: { template: "<div />" } } },
   });
 }
@@ -57,6 +61,38 @@ describe("Lightbox reuse", () => {
     await wrapper.get("button.bg-safelight").trigger("click");
 
     expect(useComposerStore().prefill).toEqual({ metadata });
+  });
+
+  it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
+    const wrapper = mountLightbox(item, true, {
+      isSequence: true,
+      canEditSequence: true,
+    });
+
+    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit sequence");
+    expect(wrapper.get("[data-test='lightbox-duplicate-sequence']").text()).toBe(
+      "Duplicate as new",
+    );
+
+    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
+    expect(wrapper.emitted("editSequence")).toHaveLength(1);
+    expect(wrapper.emitted("reuseSequence")).toBeUndefined();
+
+    await wrapper.get("[data-test='lightbox-duplicate-sequence']").trigger("click");
+    expect(wrapper.emitted("reuseSequence")).toHaveLength(1);
+  });
+
+  it("labels the safe fresh-draft fallback when no durable sequence is available", async () => {
+    const wrapper = mountLightbox(item, true, {
+      isSequence: true,
+      canEditSequence: false,
+    });
+
+    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain(
+      "Duplicate as new",
+    );
+    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
+    expect(wrapper.emitted("reuseSequence")).toHaveLength(1);
   });
 });
 

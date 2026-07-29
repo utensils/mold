@@ -137,7 +137,7 @@ export function sequenceReuseClampNote(modelLabel: string): string {
 
 /** The click-time 404 fallback's copy — always names the host. */
 export function sequenceGoneMessage(hostLabel: string): string {
-  return `That sequence job is gone from ${hostLabel}. Reused its settings instead.`;
+  return `That sequence job is gone from ${hostLabel}. Duplicated its saved settings as a new sequence instead.`;
 }
 
 /**

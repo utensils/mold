@@ -255,6 +255,13 @@ watch(
 function onEditSequence() {
   if (props.item) emit("edit-sequence", props.item);
 }
+function onPrimaryAction() {
+  if (props.isSequence && props.canEditSequence) {
+    onEditSequence();
+    return;
+  }
+  onReuse();
+}
 function onReuse() {
   if (props.item) emit("reuse", props.item);
 }
@@ -463,7 +470,11 @@ function onDelete() {
 
           <span class="lb__flex"></span>
 
-          <button class="lb__reuse" @click="onReuse">
+          <button
+            class="lb__reuse"
+            data-test="lightbox-primary-action"
+            @click="onPrimaryAction"
+          >
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -476,15 +487,21 @@ function onDelete() {
               <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
               <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
             </svg>
-            Reuse these settings
+            {{
+              isSequence
+                ? canEditSequence
+                  ? "Edit sequence"
+                  : "Duplicate as new"
+                : "Reuse these settings"
+            }}
           </button>
           <button
             v-if="canEditSequence"
             class="lb__quiet lb__edit-sequence"
-            data-test="lightbox-edit-sequence"
-            @click="onEditSequence"
+            data-test="lightbox-duplicate-sequence"
+            @click="onReuse"
           >
-            Edit sequence
+            Duplicate as new
           </button>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">
@@ -672,7 +689,11 @@ function onDelete() {
           <p v-if="loraLabel" class="lb__mobile-meta">
             <b>LoRA:</b> {{ loraLabel }}
           </p>
-          <button class="lb__reuse" @click="onReuse">
+          <button
+            class="lb__reuse"
+            data-test="lightbox-primary-action"
+            @click="onPrimaryAction"
+          >
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -685,15 +706,21 @@ function onDelete() {
               <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
               <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
             </svg>
-            Reuse these settings
+            {{
+              isSequence
+                ? canEditSequence
+                  ? "Edit sequence"
+                  : "Duplicate as new"
+                : "Reuse these settings"
+            }}
           </button>
           <button
             v-if="canEditSequence"
             class="lb__quiet lb__edit-sequence"
-            data-test="lightbox-edit-sequence"
-            @click="onEditSequence"
+            data-test="lightbox-duplicate-sequence"
+            @click="onReuse"
           >
-            Edit sequence
+            Duplicate as new
           </button>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">

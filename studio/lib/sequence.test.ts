@@ -5,6 +5,7 @@ import {
   defaultClipFrames,
   defaultSequenceStages,
   defaultVideoFps,
+  formatFrameDuration,
   friendlySequenceError,
   modelSupportsSequence,
   modelsForOutput,
@@ -200,6 +201,12 @@ describe("sequence authoring", () => {
     // Nothing at all → the 24-fps fallback.
     expect(defaultVideoFps(null)).toBe(DEFAULT_VIDEO_FPS);
     expect(defaultVideoFps({ default_fps: null }, null)).toBe(24);
+  });
+
+  it("formats frame durations consistently across sequence surfaces", () => {
+    expect(formatFrameDuration(97, 24)).toBe("97f · 4.0s");
+    expect(formatFrameDuration(25, 30)).toBe("25f · 0.8s");
+    expect(formatFrameDuration(97, 0)).toBe("97f · 4.0s");
   });
 
   it("turns GPU memory failures into actionable sequence recovery", () => {

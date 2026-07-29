@@ -14,6 +14,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   defaultClipFrames,
+  formatFrameDuration,
   sequenceDuration,
   sequenceFrameOptions,
   sequenceMotionTailFrames,
@@ -33,6 +34,7 @@ import type { GenerateForm } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
+import type { ClipRailMedia } from "@ui/components/types";
 
 const props = withDefaults(
   defineProps<{
@@ -44,6 +46,8 @@ const props = withDefaults(
     submitting?: boolean;
     /** Edit sessions: chain-level params differ from the loaded job's. */
     chainLevelDirty?: boolean;
+    stageMediaByClipId?: Readonly<Record<string, ClipRailMedia | undefined>> | null;
+    playingClipId?: string | null;
   }>(),
   {
     selectedModel: null,
@@ -51,6 +55,8 @@ const props = withDefaults(
     installedModels: () => [],
     submitting: false,
     chainLevelDirty: false,
+    stageMediaByClipId: null,
+    playingClipId: null,
   },
 );
 
@@ -59,6 +65,7 @@ const emit = defineEmits<{
   submit: [];
   /** Edit session: submit the current clips as a NEW job instead of amending. */
   duplicate: [];
+  "play-clip": [clipId: string];
 }>();
 
 const draft = useSequenceDraftStore();
@@ -91,7 +98,7 @@ const activeMeta = computed(() => {
   const clip = activeClip.value;
   if (!clip) return "";
   const idx = activeIndex.value;
-  const parts = [`${clip.frames}f`];
+  const parts = [formatFrameDuration(clip.frames, props.form.fps)];
   if (idx > 0) {
     parts.push(`${transitionLabel(clip.transition, motionTail.value)} from clip ${idx}`);
   }
@@ -110,6 +117,11 @@ function reorderClips(ids: string[]) {
   const byId = new Map(draft.clips.map((clip) => [clip.id, clip]));
   const next = ids.map((id) => byId.get(id)).filter((clip) => clip !== undefined);
   if (next.length === draft.clips.length) draft.clips.splice(0, draft.clips.length, ...next);
+}
+
+function resizeClip(id: string, frames: number) {
+  const clip = draft.clips.find((candidate) => candidate.id === id);
+  if (clip) clip.frames = frames;
 }
 
 // ── Seam editing (rail-anchored popover) ─────────────────────────────────────
@@ -173,7 +185,7 @@ const validation = computed(() =>
 const duration = computed(() => sequenceDuration(stages.value, props.form.fps, motionTail.value));
 const fitNote = computed(
   () =>
-    `✓ fits · ${duration.value.frames} frames · ${duration.value.seconds.toFixed(1)}s @ ${props.form.fps}fps`,
+    `✓ fits · ${formatFrameDuration(duration.value.frames, props.form.fps)} @ ${props.form.fps}fps`,
 );
 const disabledReason = computed(() => {
   if (props.chainLimits && props.chainLimits.supports_sequence === false) {
@@ -194,6 +206,9 @@ const plan = computed(() => {
     completedStages: editing.completedStages,
   });
 });
+function onPlayClip(clipId: string) {
+  emit("play-clip", clipId);
+}
 const editBanner = computed(() => {
   const editing = draft.editing;
   const current = plan.value;
@@ -325,11 +340,17 @@ async function copyToml() {
           :max-stages="maxStages"
           :open-seam-id="openSeamId"
           :plans="plan?.perClip ?? null"
+          :fps="form.fps"
+          :media-by-clip-id="stageMediaByClipId"
+          :playing-id="playingClipId"
+          :frame-options="frameOptions"
           @select="draft.activeClipId = $event"
           @add="draft.addClip(newClipFrames)"
           @remove="draft.removeClip($event)"
           @reorder="reorderClips"
+          @resize="resizeClip"
           @seam-click="onSeamClick"
+          @play="onPlayClip"
         />
       </template>
       <SeamEditor
@@ -365,7 +386,7 @@ async function copyToml() {
             aria-label="Clip frames"
           >
             <option v-for="frames in frameOptions" :key="frames" :value="frames">
-              {{ frames }}
+              {{ formatFrameDuration(frames, form.fps) }}
             </option>
           </select>
         </label>
@@ -375,7 +396,7 @@ async function copyToml() {
         data-test="clip-prompt"
         data-selectable
         rows="3"
-        class="ms-seqbench__prompt"
+        class="ms-seqbench__prompt ms-seqbench__prompt--main"
         :placeholder="
           activeIndex === 0 ? 'Describe the opening clip…' : 'Describe what happens next…'
         "
@@ -437,7 +458,7 @@ async function copyToml() {
     </div>
 
     <!-- Footer: file tools · audio · validation/fit · primary action -->
-    <div class="ms-seqbench__footer">
+    <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
       <input
         ref="tomlInput"
         type="file"
@@ -584,6 +605,8 @@ async function copyToml() {
 .ms-seqbench__clip {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 112px;
   gap: 6px;
 }
 .ms-seqbench__cliphead {
@@ -640,6 +663,10 @@ async function copyToml() {
   outline: none;
   border-color: var(--safelight);
 }
+.ms-seqbench__prompt--main {
+  flex: 1;
+  min-height: 64px;
+}
 .ms-seqbench__prompt--negative {
   font-size: 12px;
 }
@@ -669,6 +696,8 @@ async function copyToml() {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-top: auto;
+  padding-top: 2px;
 }
 .ms-seqbench__menu {
   display: flex;

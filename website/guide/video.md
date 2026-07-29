@@ -92,17 +92,23 @@ composer becomes a clip rail: clip pills carrying a prompt and frame count,
 joined by seam pills. Seams are named in words — **Smooth**, **Cut**, and
 **Fade 8f** — and a click opens the seam editor with its fade-length stepper.
 LTX-Video has no motion tail, so its seams read **Join clips**. New clips
-default to the selected model's advertised frame count.
+default to the selected model's advertised frame count. Frame choices and
+timeline metadata include their duration at the live model FPS, such as
+`97f · 4.0s`.
 
 Sequences run as durable jobs in the same activity strip as ordinary prints.
+Desktop and web show each scene as a 16:9 filmstrip tile with its poster,
+render progress, and cache state. As soon as a stage finishes, its play control
+opens the raw scene in the main Create canvas while later stages continue
+rendering; **Return to live render** switches the canvas back to progress.
 Desktop and web can edit a finished sequence in place: its clips reload onto the
 rail, each pill shows cached (✓) versus re-render (↻), and **Update sequence**
 re-renders only from the earliest changed clip — transition and fade-length
 edits re-stitch with no re-render at all. Every settled sequence job is listed
-in **Library ▸ History ▸ Sequences**, and a sequence print in the Library offers
-**Reuse settings** (start a fresh sequence from the recorded clips) and, on
-desktop and web, **Edit sequence** (re-enter the original job with its cached
-clips). Desktop and web keep TOML import/export for `mold.chain.v1` scripts
+in **Library ▸ History ▸ Sequences**, and a sequence print in the Library uses
+**Edit sequence** as its primary desktop/web action (re-enter the original job
+with its cached clips). **Duplicate as new** starts a fresh sequence from the
+recorded clips. Desktop and web keep TOML import/export for `mold.chain.v1` scripts
 under the composer's file tools.
 
 ### TUI chain composer

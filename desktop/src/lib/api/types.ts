@@ -867,6 +867,8 @@ export interface ChainJobStageDetail {
   frames_emitted?: number | null;
   generation_time_ms?: number | null;
   has_preview: boolean;
+  has_media?: boolean;
+  cache_ready?: boolean;
   error?: string | null;
 }
 
@@ -912,7 +914,14 @@ export type ChainJobEvent =
   | { type: "snapshot"; job: ChainJobDetail }
   | { type: "stage_start"; stage_idx: number }
   | { type: "denoise_step"; stage_idx: number; step: number; total: number }
-  | { type: "stage_done"; stage_idx: number; frames_emitted: number; has_preview: boolean }
+  | {
+      type: "stage_done";
+      stage_idx: number;
+      frames_emitted: number;
+      has_preview: boolean;
+      has_media?: boolean;
+      cache_ready?: boolean;
+    }
   | { type: "yielded"; pending_small_jobs: number }
   | { type: "finalizing"; total_frames: number }
   | { type: "finalized"; output: string; take: number }

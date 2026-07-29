@@ -154,6 +154,13 @@ async function clearInactive() {
 }
 
 async function cleanUpDisk() {
+  const ok = await requestConfirm({
+    title: "Clean up sequence cache?",
+    body: "This discards cached scene media used for scene playback and sequence editing on connected machines. Final videos in the Library remain.",
+    confirmLabel: "Clean up",
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const outcome = await chainJobs.gc();
     toast(

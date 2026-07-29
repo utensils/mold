@@ -311,7 +311,7 @@ describe("MobileSequenceComposer guardrails", () => {
     mountComposer({ fps: 12 });
     // Two 97-frame clips with LTX-2's 17-frame smooth tail: 97 + 80 = 177.
     const summary = wrapper!.get("[data-test='mobile-sequence-duration']").text();
-    expect(summary).toContain("177 frames");
+    expect(summary).toContain("177f · 14.8s");
     expect(summary).toContain("14.8s");
   });
 });

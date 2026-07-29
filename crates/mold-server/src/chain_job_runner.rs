@@ -775,22 +775,21 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
 
 /// One GC pass (daily tick + POST /api/chain-jobs/gc). Orphan predicate per
 /// P0 rev3: ephemeral && state != running && !is_claimed, settled gated by
-/// EPHEMERAL_GRACE_SECS; non-ephemeral completed jobs older than
-/// chain.jobs_artifact_ttl_days lose stages/ artifact dirs only (final/ +
-/// manifest + rows retained). EVERY delete goes through the guarded-delete
-/// discipline: per-job mutation lock + state-predicated row ops (inv 17 /
-/// P0 note 1). Sweep of an ephemeral removes dir + row (+ bus entry).
+/// EPHEMERAL_GRACE_SECS. Durable completed stage caches are retained by
+/// automatic passes indefinitely; only an explicit user-requested cleanup
+/// prunes those caches (final/ + manifest + rows retained). EVERY delete goes
+/// through the guarded-delete discipline.
 pub(crate) fn run_gc_pass(
     deps: &RunnerDeps,
-    ttl_days: i64,
+    _ttl_days: i64,
     now_ms: i64,
+    prune_durable_caches: bool,
 ) -> anyhow::Result<GcOutcome> {
     let db = deps
         .db
         .as_ref()
         .as_ref()
         .ok_or_else(|| anyhow!("chain job GC invoked without metadata DB"))?;
-    let ttl_ms = ttl_days.max(0).saturating_mul(86_400_000);
     let grace_ms = (EPHEMERAL_GRACE_SECS as i64).saturating_mul(1_000);
     let mut outcome = GcOutcome {
         swept_ephemeral_jobs: 0,
@@ -842,10 +841,7 @@ pub(crate) fn run_gc_pass(
             continue;
         }
 
-        if row.state == ChainJobState::Completed
-            && ttl_ms >= 0
-            && now_ms.saturating_sub(row.updated_at_ms) >= ttl_ms
-        {
+        if prune_durable_caches && row.state == ChainJobState::Completed {
             let stages_dir = row.job_dir.join(STAGES_DIR);
             if stages_dir.exists() {
                 let _guard = deps.job_locks.blocking_lock(&row.id);
@@ -980,7 +976,7 @@ async fn run_legacy_loop(
                 }
             }
             _ = daily.tick() => {
-                if let Err(err) = run_gc_for_runner(deps.clone()).await {
+                if let Err(err) = run_gc_for_runner(deps.clone(), false).await {
                     tracing::warn!("daily chain job GC failed: {err}");
                 }
             }
@@ -1073,7 +1069,7 @@ async fn run_v2_loop(
                 tokio::task::yield_now().await;
             }
             _ = daily.tick() => {
-                if let Err(error) = run_gc_for_runner(deps.clone()).await {
+                if let Err(error) = run_gc_for_runner(deps.clone(), false).await {
                     tracing::warn!("daily chain job GC failed: {error}");
                 }
             }
@@ -1237,14 +1233,17 @@ async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
     match cmd {
         RunnerCmd::Kick => true,
         RunnerCmd::Gc { reply } => {
-            let result = run_gc_for_runner(deps).await;
+            let result = run_gc_for_runner(deps, true).await;
             let _ = reply.send(result);
             true
         }
     }
 }
 
-async fn run_gc_for_runner(deps: Arc<RunnerDeps>) -> std::result::Result<GcOutcome, String> {
+async fn run_gc_for_runner(
+    deps: Arc<RunnerDeps>,
+    prune_durable_caches: bool,
+) -> std::result::Result<GcOutcome, String> {
     tokio::task::spawn_blocking(move || {
         let db = deps
             .db
@@ -1255,7 +1254,8 @@ async fn run_gc_for_runner(deps: Arc<RunnerDeps>) -> std::result::Result<GcOutco
             .get_int(settings::CHAIN_JOBS_ARTIFACT_TTL_DAYS)
             .map_err(|e| format!("{e:#}"))?
             .unwrap_or(settings::CHAIN_JOBS_ARTIFACT_TTL_DEFAULT);
-        run_gc_pass(&deps, ttl_days, now_ms_i64()).map_err(|e| format!("{e:#}"))
+        run_gc_pass(&deps, ttl_days, now_ms_i64(), prune_durable_caches)
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| format!("chain job GC task failed: {e}"))?
@@ -1639,6 +1639,10 @@ fn execute_job_inner(
                             stage_idx,
                             frames_emitted: status.frames_emitted.unwrap_or(0),
                             has_preview: paths.preview_written,
+                            has_media: layout.segment_path(stage_idx).is_file(),
+                            cache_ready: crate::routes_chain_jobs::stage_cache_ready(
+                                &layout, &status, &effective,
+                            ),
                         },
                     );
 
@@ -1877,6 +1881,17 @@ fn write_stage_artifacts(
 
     let segment_bytes = video_enc::encode_mp4(frames, effective.fps)
         .with_context(|| format!("encoding chain stage {stage_idx} segment"))?;
+    #[cfg(feature = "mp4")]
+    let segment_bytes = match outcome.audio.as_ref() {
+        Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
+            &segment_bytes,
+            &track.interleaved_samples,
+            track.sample_rate,
+            track.channels,
+        )
+        .with_context(|| format!("muxing chain stage {stage_idx} audio"))?,
+        None => segment_bytes,
+    };
     write_file(&layout.segment_path(stage_idx), &segment_bytes)?;
 
     let tail_frames = if outcome.tail.frames > 0 && !outcome.tail.tail_rgb_frames.is_empty() {
@@ -2631,15 +2646,17 @@ pub fn apply_amend(
     preserved = preserved.min(completed_leading);
     for idx in 0..preserved {
         let status = &manifest.stage_status[idx as usize];
-        if !status.raw_segment
-            && !legacy_stage_serves_new_plan(
+        let artifacts_ready =
+            crate::routes_chain_jobs::stage_cache_ready(&layout, status, &old_effective);
+        let legacy_compatible = status.raw_segment
+            || legacy_stage_serves_new_plan(
                 status,
                 &layout,
                 idx as usize,
                 &old_effective,
                 &candidate,
-            )
-        {
+            );
+        if !artifacts_ready || !legacy_compatible {
             preserved = idx;
             break;
         }
@@ -5820,6 +5837,48 @@ mod tests {
     }
 
     #[test]
+    fn amend_does_not_preserve_manifest_only_stage_with_missing_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55MISSINGCACHE",
+            &req,
+            ChainJobState::Queued,
+        );
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        let layout = JobDirLayout::new(job_dir.clone());
+        std::fs::remove_file(layout.segment_path(0)).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request(&manifest).unwrap().stages;
+        stages.push(stage("appended clip", TransitionMode::Smooth));
+        let (updated, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 0);
+        assert_eq!(updated.current_stage, 0);
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert!(manifest
+            .stage_status
+            .iter()
+            .all(|stage| stage.state == StageState::Pending));
+    }
+
+    #[test]
     fn amend_boundary_only_edit_refinalizes_without_rendering() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -6353,6 +6412,14 @@ mod tests {
                 .len(),
             9_000
         );
+        #[cfg(feature = "mp4")]
+        {
+            let playback =
+                mold_inference::ltx2::media::probe_video(&layout.segment_path(1)).unwrap();
+            assert!(playback.has_audio);
+            assert_eq!(playback.audio_sample_rate, Some(8_000));
+            assert_eq!(playback.audio_channels, Some(1));
+        }
         // frames_emitted keeps the contributed wire meaning.
         assert_eq!(manifest.stage_status[0].frames_emitted, Some(9));
         assert_eq!(manifest.stage_status[1].frames_emitted, Some(8));
@@ -7480,8 +7547,13 @@ mod tests {
             Arc::new(FakeProbe(AtomicUsize::new(0))),
         );
         let _claim = deps.claims.claim(&claimed.id);
-        let outcome =
-            run_gc_pass(&deps, 7, 1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000).unwrap();
+        let outcome = run_gc_pass(
+            &deps,
+            7,
+            1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000,
+            false,
+        )
+        .unwrap();
 
         let db = deps.db.as_ref().as_ref().unwrap();
         assert_eq!(outcome.swept_ephemeral_jobs, 1);
@@ -7540,7 +7612,14 @@ mod tests {
             }),
             Arc::new(FakeProbe(AtomicUsize::new(0))),
         );
-        let outcome = run_gc_pass(&deps, 7, now).unwrap();
+        let automatic = run_gc_pass(&deps, 7, now, false).unwrap();
+        assert_eq!(automatic.pruned_artifact_dirs, 0);
+        assert!(
+            durable.job_dir.join("stages").exists(),
+            "automatic maintenance must retain durable editable caches"
+        );
+
+        let outcome = run_gc_pass(&deps, 7, now, true).unwrap();
         let db = deps.db.as_ref().as_ref().unwrap();
 
         assert_eq!(outcome.swept_ephemeral_jobs, 0);
@@ -7593,8 +7672,13 @@ mod tests {
             }),
             Arc::new(FakeProbe(AtomicUsize::new(0))),
         );
-        let outcome =
-            run_gc_pass(&deps, 7, 1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000).unwrap();
+        let outcome = run_gc_pass(
+            &deps,
+            7,
+            1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000,
+            false,
+        )
+        .unwrap();
         let db = deps.db.as_ref().as_ref().unwrap();
 
         assert_eq!(outcome.swept_ephemeral_jobs, 1);

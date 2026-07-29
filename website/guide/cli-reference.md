@@ -102,8 +102,8 @@ mold jobs gc
 
 Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
 `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning successful ephemeral
-shim jobs and completed non-ephemeral job artifacts older than
-`chain.jobs_artifact_ttl_days`.
+shim jobs and explicitly discarding completed jobs' editable scene caches.
+Automatic maintenance leaves durable scene caches intact.
 
 ## `mold expand`
 
