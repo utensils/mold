@@ -80,6 +80,13 @@ textarea,
   background: transparent;
 }
 
+/* WKWebView may expose Picture in Picture in its native media controls even
+ * when the element opts out. Mold keeps video playback inside its own canvas
+ * and Library viewer, so hide that WebKit-only control as a fallback. */
+video::-webkit-media-controls-picture-in-picture-button {
+  display: none;
+}
+
 /* Utility type roles */
 .edge-code {
   font-family: var(--font-utility);

@@ -231,6 +231,7 @@ const form = formStore.form;
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
+const templatesToggleEl = ref<HTMLButtonElement | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
@@ -310,6 +311,13 @@ async function listenForNativeImageDrops() {
 function onDocumentPointerDown(event: PointerEvent) {
   if (!templatesOpen.value || !templatesEl.value) return;
   if (!event.composedPath().includes(templatesEl.value)) templatesOpen.value = false;
+}
+
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (!templatesOpen.value || event.defaultPrevented || event.key !== "Escape") return;
+  event.preventDefault();
+  templatesOpen.value = false;
+  void nextTick(() => templatesToggleEl.value?.focus());
 }
 
 const job = computed(() => generation.active);
@@ -1746,6 +1754,7 @@ watch(
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
+  document.addEventListener("keydown", onDocumentKeydown);
   void listenForNativeImageDrops();
   // The persisted sequence draft wins on ordinary visits; a ?output=sequence
   // deep-link is consumed once and stripped.
@@ -1759,6 +1768,7 @@ onBeforeUnmount(() => {
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
   document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
 });
 </script>
 
@@ -1785,6 +1795,7 @@ onBeforeUnmount(() => {
         <!-- Templates popover (relocated from the inspector) -->
         <div ref="templatesEl" class="absolute right-3 top-3 z-20">
           <button
+            ref="templatesToggleEl"
             type="button"
             data-test="templates-toggle"
             class="border-edge rounded-control border bg-bench/80 px-2.5 py-1 text-caption text-ink-2 backdrop-blur transition-colors hover:text-ink"
@@ -1851,6 +1862,7 @@ onBeforeUnmount(() => {
                   autoplay
                   loop
                   controls
+                  disablepictureinpicture
                 />
                 <img
                   v-else-if="job?.resultUrl"

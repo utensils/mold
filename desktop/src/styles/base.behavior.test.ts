@@ -10,4 +10,11 @@ describe("desktop document behavior", () => {
     );
     expect(css).not.toMatch(/(?:^|\n)\s*\*\s*{\s*overscroll-behavior:\s*none;/s);
   });
+
+  it("hides WebKit's Picture-in-Picture control for desktop videos", () => {
+    expect(css).toContain("video::-webkit-media-controls-picture-in-picture-button");
+    expect(css).toMatch(
+      /video::\-webkit-media-controls-picture-in-picture-button\s*\{[^}]*display:\s*none/s,
+    );
+  });
 });

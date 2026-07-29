@@ -42,4 +42,16 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain("Your print develops here");
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
+
+  it("dismisses the Templates popover on document-level Escape and restores trigger focus", () => {
+    expect(viewSource).toContain('document.addEventListener("keydown", onDocumentKeydown)');
+    expect(viewSource).toContain('document.removeEventListener("keydown", onDocumentKeydown)');
+    expect(viewSource).toContain('event.key !== "Escape"');
+    expect(viewSource).toContain("templatesToggleEl.value?.focus()");
+  });
+
+  it("disables Picture-in-Picture on the generated video preview", () => {
+    const previewVideo = viewSource.match(/<video\s+v-if="job\?\.resultUrl[^>]*>/s)?.[0] ?? "";
+    expect(previewVideo).toContain("disablepictureinpicture");
+  });
 });
