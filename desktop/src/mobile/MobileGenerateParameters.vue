@@ -26,6 +26,7 @@ import {
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { fileToBase64, isStillImageFile } from "../lib/image";
+import { CAMERA_MOTION_PRESETS, cameraMotionMode } from "@studio/lib/cameraMotion";
 
 const props = withDefaults(
   defineProps<{
@@ -116,38 +117,23 @@ const schedulerLabels: Record<string, string> = {
   unipc: "UniPC",
 };
 
-const CAMERA_MOTION_PRESETS = [
-  { id: "dolly-in", label: "Dolly in" },
-  { id: "dolly-left", label: "Dolly left" },
-  { id: "dolly-out", label: "Dolly out" },
-  { id: "dolly-right", label: "Dolly right" },
-  { id: "jib-down", label: "Jib down" },
-  { id: "jib-up", label: "Jib up" },
-  { id: "static", label: "Static" },
-] as const;
-
 const isLtx23Model = computed(() => props.form.model.includes("ltx-2.3"));
 
-function cameraModeFor(value: string | null): string {
-  if (!value) return "";
-  return CAMERA_MOTION_PRESETS.some((preset) => preset.id === value) ? value : "custom";
-}
-
-const cameraMode = ref(cameraModeFor(props.form.cameraControl));
+const cameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
   () => props.form.cameraControl,
   (value) => {
-    if (cameraMode.value === "custom" && (value === "" || cameraModeFor(value) === "custom")) {
+    if (cameraMode.value === "custom" && (value === "" || cameraMotionMode(value) === "custom")) {
       return;
     }
-    cameraMode.value = cameraModeFor(value);
+    cameraMode.value = cameraMotionMode(value);
   },
 );
 
 function setCameraMode(mode: string): void {
   cameraMode.value = mode;
   if (mode === "custom") {
-    if (cameraModeFor(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+    if (cameraMotionMode(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
   } else {
     props.form.cameraControl = mode || null;
   }

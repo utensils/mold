@@ -21,6 +21,10 @@ import type {
   SourceMediaState,
 } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
+import {
+  CAMERA_MOTION_PRESETS,
+  cameraMotionMode,
+} from "@studio/lib/cameraMotion";
 
 const props = withDefaults(
   defineProps<{
@@ -63,35 +67,20 @@ function setPipeline(raw: string) {
 
 // Camera-control LoRAs published for LTX-2 19B. LTX-2.3 uses a different
 // architecture, so its users get the custom-path escape hatch only.
-const CAMERA_MOTION_PRESETS = [
-  { id: "dolly-in", label: "Dolly in" },
-  { id: "dolly-left", label: "Dolly left" },
-  { id: "dolly-out", label: "Dolly out" },
-  { id: "dolly-right", label: "Dolly right" },
-  { id: "jib-down", label: "Jib down" },
-  { id: "jib-up", label: "Jib up" },
-  { id: "static", label: "Static" },
-] as const;
 const isLtx23Model = computed(() => props.modelValue.model.includes("ltx-2.3"));
-function cameraModeFor(value: string | null): string {
-  if (!value) return "";
-  return CAMERA_MOTION_PRESETS.some((preset) => preset.id === value)
-    ? value
-    : "custom";
-}
-const cameraMode = ref(cameraModeFor(props.modelValue.cameraControl));
+const cameraMode = ref(cameraMotionMode(props.modelValue.cameraControl));
 watch(
   () => props.modelValue.cameraControl,
   (value) => {
-    if (cameraMode.value === "custom" && cameraModeFor(value) === "custom")
+    if (cameraMode.value === "custom" && cameraMotionMode(value) === "custom")
       return;
-    cameraMode.value = cameraModeFor(value);
+    cameraMode.value = cameraMotionMode(value);
   },
 );
 function setCameraMode(raw: string) {
   cameraMode.value = raw;
   if (raw === "custom") {
-    if (cameraModeFor(props.modelValue.cameraControl) !== "custom")
+    if (cameraMotionMode(props.modelValue.cameraControl) !== "custom")
       patch({ cameraControl: "" });
     return;
   }
