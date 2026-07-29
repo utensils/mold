@@ -29,6 +29,36 @@ use std::path::{Path, PathBuf};
 
 const LIVE_BATCH_RECOVERY_VERSION: u32 = 1;
 
+/// Maximum cardinality of one live, atomic server-owned batch.
+///
+/// This is deliberately separate from both the planner's arbitrary-`u32`
+/// cardinality support and the reducer's sparse 1,024-child window. A live
+/// HTTP parent still owns one durable manifest record, result slot, final
+/// filename, and ordered completion entry per output. Capping that O(N)
+/// delivery/materialization surface at 64 keeps admission bounded while
+/// remaining well above the product's ordinary interactive batch sizes.
+pub(crate) const MAX_LIVE_SERVER_BATCH_OUTPUTS: u32 = 64;
+pub(crate) const BATCH_OUTPUT_LIMIT_EXCEEDED_CODE: &str = "BATCH_OUTPUT_LIMIT_EXCEEDED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("batch_size ({requested}) exceeds the live server batch output limit ({limit})")]
+pub(crate) struct LiveBatchAdmissionError {
+    pub requested: u32,
+    pub limit: u32,
+}
+
+pub(crate) fn validate_live_server_batch_size(
+    request: &GenerateRequest,
+) -> Result<(), LiveBatchAdmissionError> {
+    if request.batch_size > MAX_LIVE_SERVER_BATCH_OUTPUTS {
+        return Err(LiveBatchAdmissionError {
+            requested: request.batch_size,
+            limit: MAX_LIVE_SERVER_BATCH_OUTPUTS,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LiveBatchRecoveryEnvelope {
     version: u32,
@@ -899,6 +929,7 @@ pub(crate) async fn execute_server_batch(
     output_dir: PathBuf,
     delivery: ServerBatchDelivery,
 ) -> anyhow::Result<CompletedServerBatch> {
+    validate_live_server_batch_size(&request)?;
     ensure!(
         request.batch_size > 1,
         "server batch execution requires batch_size > 1"
@@ -927,10 +958,10 @@ pub(crate) async fn execute_server_batch(
     request.seed = Some(base_seed);
     let child_count =
         usize::try_from(request.batch_size).context("batch size exceeds platform usize")?;
-    let metadata_template = batch_metadata_template(&parent_id, &request, base_seed);
-    let records = batch_records(&output_dir, &request, base_seed, &metadata_template);
     let estimated_bytes = conservative_batch_output_bytes(&request)?;
     crate::batch_transaction::preflight_disk_space(&output_dir, estimated_bytes)?;
+    let metadata_template = batch_metadata_template(&parent_id, &request, base_seed);
+    let records = batch_records(&output_dir, &request, base_seed, &metadata_template);
     let normalized = serde_json::to_value(recovery_envelope(&request, &plan))?;
     let mut attempt = DurableBatchAttempt::begin(&output_dir, &parent_id, normalized, records)?;
     attempt.start()?;
@@ -1201,6 +1232,15 @@ async fn resume_recovered_batch(
                 return Ok(false);
             }
         };
+    if let Err(error) = validate_live_server_batch_size(&envelope.request) {
+        tracing::error!(
+            %parent_id,
+            error = %error,
+            "rolling back recovered live batch above the current delivery limit"
+        );
+        terminally_cancel_recovered_attempt(&mut attempt)?;
+        return Ok(false);
+    }
     if envelope.request.batch_size as usize != attempt.parent().total_children() {
         tracing::error!(
             %parent_id,
@@ -1841,6 +1881,35 @@ mod tests {
         request.frames = Some(u32::MAX);
         request.batch_size = u32::MAX;
         assert!(conservative_batch_output_bytes(&request).is_err());
+    }
+
+    #[test]
+    fn live_batch_output_admission_has_an_inclusive_boundary() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "bounded parent",
+            "model": "flux-dev:q8",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": 2,
+            "output_format": "png"
+        }))
+        .unwrap();
+
+        request.batch_size = MAX_LIVE_SERVER_BATCH_OUTPUTS;
+        assert_eq!(validate_live_server_batch_size(&request), Ok(()));
+
+        request.batch_size = MAX_LIVE_SERVER_BATCH_OUTPUTS + 1;
+        assert_eq!(
+            validate_live_server_batch_size(&request),
+            Err(LiveBatchAdmissionError {
+                requested: MAX_LIVE_SERVER_BATCH_OUTPUTS + 1,
+                limit: MAX_LIVE_SERVER_BATCH_OUTPUTS,
+            })
+        );
+
+        request.batch_size = 1;
+        assert_eq!(validate_live_server_batch_size(&request), Ok(()));
     }
 
     #[test]

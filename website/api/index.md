@@ -231,9 +231,11 @@ open http://localhost:7680/api/docs
 
 ## `/api/generate`
 
-`POST /api/generate` returns raw image bytes, not a JSON envelope. The response
-`Content-Type` matches the requested format, and the server includes an
-`x-mold-seed-used` header with the effective seed.
+`POST /api/generate` returns raw image bytes for `batch_size = 1`. A raw
+server-owned batch (`batch_size > 1`) returns one ordered
+`BatchGenerateResponse` JSON parent after its gallery transaction commits.
+The server includes an `x-mold-seed-used` header with the effective seed on
+singleton responses.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \
@@ -309,6 +311,15 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
 
 Only `prompt` is required. All other fields have defaults or model-specific
 validation.
+
+Authoritative Scheduler V2 servers with gallery output enabled advertise
+`queue.server_batch = true` and `queue.server_batch_max_outputs = 64` from
+`GET /api/capabilities`. The latter is the live atomic HTTP
+delivery/materialization limit, not a GPU planner limit. Requests above it
+fail promptly with HTTP 422 and stable code
+`BATCH_OUTPUT_LIMIT_EXCEEDED`, before model preparation, child enumeration, or
+gallery filename reservation. Clients that need more outputs should submit
+multiple parents or independent prepared siblings.
 
 Important fields:
 
@@ -587,8 +598,10 @@ curl -N http://localhost:7680/api/generate/stream \
   }'
 ```
 
-The final `complete` event matches the `GenerateResponse` JSON shape used by the
-server internally.
+For `batch_size = 1`, the final `complete` event matches the
+`GenerateResponse` JSON shape used by the server internally. A server-owned
+batch emits one ordered `batch_complete` event after durable commit and uses
+the same advertised 64-output live limit.
 
 ::: tip RunPod Note
 RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.

@@ -1454,7 +1454,15 @@ constant-size reducer delta per grant/completion/cancel/retry/commit mutation
 and writes compact checkpoints only at attempt barriers. The reducer stores a
 settled-success prefix plus at most 1,024 materialized child states; callers
 page pending indices through a bounded cursor window. That window is a
-durability/memory bound, not a batch-size or GPU-count limit. Recovery still
+durability/memory bound, not a planner cardinality or GPU-count limit. The
+planner continues to represent arbitrary positive `u32` cardinalities
+compactly. Live atomic HTTP execution is a different materialization surface:
+its transaction manifest, filenames, result slots, and ordered completion
+payload remain O(N), so current servers admit at most 64 outputs per raw
+parent. Clients discover that delivery limit through
+`queue.server_batch_max_outputs`; larger parents fail before request
+preparation or filesystem reservation with
+`BATCH_OUTPUT_LIMIT_EXCEEDED`. Recovery still
 replays v1 full-snapshot journals, including the v1 replace-before-append crash
 window where the atomic snapshot is exactly one legal transition ahead. A
 mixed journal is legal only as `v1* → v2*`; a v1 record after any v2 record,
@@ -1475,8 +1483,13 @@ receipt and requeues the still-active lease before serving.
 
 ### 12.3 Parent and child model
 
-A server batch parent lazily represents indices `0..N`; it does not
-immediately allocate N images or N full requests.
+The planner and reducer for a server batch parent lazily represent indices
+`0..N`; they do not immediately allocate N images or N full requests. The live
+atomic HTTP transaction is intentionally capped at 64 outputs because its
+durable manifest and final ordered JSON/SSE completion still materialize one
+record per child. This execution/delivery cap does not narrow arbitrary-N
+planner simulation, compact random access, or the reducer's independent 1,024
+live-child window.
 
 For child index `i`:
 
@@ -2391,7 +2404,11 @@ admission and authoritative scheduler dispatch. Blocking parents return typed
 ordered JSON; SSE parents announce one cancellable parent ID and emit exactly
 one `batch_complete` after durable commit. Cancellation and terminal failure
 close sibling authority immediately, while late successes drain without a
-receipt. Startup reconciliation reconstructs unfinished children from the
+receipt. Raw live parents are admitted up to the advertised 64-output atomic
+delivery/materialization limit; larger requests return the stable typed
+`BATCH_OUTPUT_LIMIT_EXCEEDED` error before preparation, parent registration, or
+filesystem reservation, while the planner retains compact arbitrary-N
+support. Startup reconciliation reconstructs unfinished children from the
 versioned normalized request, freshly resolves prepared inputs, and resumes
 only when the exact persisted execution-equivalence fingerprint still
 matches. Missing recovery authority, artifact/config drift, or unavailable

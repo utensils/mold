@@ -3027,6 +3027,10 @@ mod tests {
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
         assert_eq!(body["queue"]["server_batch"], true);
+        assert_eq!(
+            body["queue"]["server_batch_max_outputs"],
+            crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
+        );
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
@@ -3090,6 +3094,10 @@ mod tests {
             assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
             assert_eq!(body["devices"]["learned_eta"], false, "{label}");
             assert_eq!(body["queue"]["server_batch"], false, "{label}");
+            assert!(
+                body["queue"]["server_batch_max_outputs"].is_null(),
+                "{label}"
+            );
         }
     }
 
@@ -3120,6 +3128,63 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("authoritative scheduler V2"));
+    }
+
+    #[tokio::test]
+    async fn oversized_raw_batch_is_rejected_before_preparation_or_reservation() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.config.write().await.output_dir =
+            Some(output_dir.path().to_string_lossy().into_owned());
+        let registry = state.job_registry.clone();
+        let app = app_with_state(state);
+        let body = serde_json::json!({
+            // Invalid downstream fields deliberately prove batch admission
+            // runs before ordinary request preparation/model resolution.
+            "prompt": "",
+            "model": "must-not-be-resolved",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": u32::MAX,
+            "output_format": "png"
+        });
+
+        for route in ["/api/generate", "/api/generate/stream"] {
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.clone().oneshot(
+                    Request::post(route)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("u32::MAX batch admission must be bounded-time")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "BATCH_OUTPUT_LIMIT_EXCEEDED");
+            assert_eq!(
+                body["error"],
+                format!(
+                    "batch_size ({}) exceeds the live server batch output limit ({})",
+                    u32::MAX,
+                    crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
+                )
+            );
+        }
+
+        assert!(
+            registry.snapshot().entries.is_empty(),
+            "rejected batch must not register a parent or enumerate children"
+        );
+        assert_eq!(
+            std::fs::read_dir(output_dir.path()).unwrap().count(),
+            0,
+            "rejected batch must not reserve filenames or create transaction state"
+        );
     }
 
     /// Clients feature-detect server-side catalog sorting against this

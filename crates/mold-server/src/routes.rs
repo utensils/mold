@@ -866,6 +866,18 @@ async fn schedule_local_expansion(
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
+fn validate_live_server_batch_admission(
+    request: &mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    crate::batch_runtime::validate_live_server_batch_size(request).map_err(|error| {
+        ApiError::with_code(
+            error.to_string(),
+            crate::batch_runtime::BATCH_OUTPUT_LIMIT_EXCEEDED_CODE,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/api/generate",
@@ -885,6 +897,7 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
+    validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -1660,6 +1673,7 @@ async fn generate_stream(
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     let completion_payload = requested_sse_completion_payload(&headers)?;
+    validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -3412,6 +3426,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         expand_settings.is_local() && config.manifest_model_is_downloaded(&expand_settings.model);
     let expand = expand_capabilities(&expand_settings, expand_model_present);
 
+    let server_batch = state.scheduled_work.v2_authoritative() && !config.is_output_disabled();
     Json(mold_core::ServerCapabilities {
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
@@ -3435,7 +3450,9 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_reorder: true,
             stable_device_pins: true,
             cooperative_cancellation: false,
-            server_batch: state.scheduled_work.v2_authoritative() && !config.is_output_disabled(),
+            server_batch,
+            server_batch_max_outputs: server_batch
+                .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),
         },
         devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),

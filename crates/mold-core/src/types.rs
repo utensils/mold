@@ -4363,6 +4363,11 @@ pub struct QueueCapabilities {
     /// Server accepts one atomic batch request instead of client siblings.
     #[serde(default)]
     pub server_batch: bool,
+    /// Maximum number of ordered outputs accepted by one live atomic
+    /// `POST /api/generate` or `/api/generate/stream` parent. Absent on older
+    /// servers and whenever live server batches are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_batch_max_outputs: Option<u32>,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
