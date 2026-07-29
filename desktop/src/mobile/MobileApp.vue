@@ -20,7 +20,6 @@ import { createUuid } from "@studio/lib/id";
 import {
   defaultClipFrames,
   modelsForOutput,
-  modelSupportsSequence,
   sequenceMotionTailFrames,
   type OutputMode,
 } from "@studio/lib/sequence";
