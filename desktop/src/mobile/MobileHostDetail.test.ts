@@ -246,6 +246,7 @@ afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("MobileHostDetail remote host data", () => {
