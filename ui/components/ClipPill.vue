@@ -93,6 +93,10 @@ function onRemove(event: MouseEvent) {
     color var(--dur-quick) var(--ease);
 }
 
+.ms-clip:has(.ms-clip__remove) .ms-clip__body {
+  padding-right: 36px;
+}
+
 .ms-clip__body:hover {
   color: var(--rebate);
   border-color: var(--ink-3);
@@ -166,28 +170,36 @@ function onRemove(event: MouseEvent) {
 
 .ms-clip__remove {
   position: absolute;
-  top: -6px;
-  right: -6px;
+  top: 50%;
+  right: 7px;
   width: 18px;
   height: 18px;
-  display: none;
+  display: grid;
   place-items: center;
   padding: 0;
-  border: 1px solid var(--ce);
+  border: 0;
   border-radius: 50%;
-  background: var(--bench);
+  background: transparent;
   color: var(--ink-2);
   font-size: 10px;
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition:
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease),
+    opacity var(--dur-quick) var(--ease);
 }
 
 .ms-clip:hover .ms-clip__remove,
 .ms-clip:focus-within .ms-clip__remove {
-  display: grid;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .ms-clip__remove:hover {
+  background: color-mix(in srgb, var(--stop) 10%, transparent);
   color: var(--stop);
-  border-color: var(--stop);
 }
 </style>

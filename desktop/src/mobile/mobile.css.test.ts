@@ -314,6 +314,35 @@ describe("mobile safe areas", () => {
       expect(css).not.toContain(selector);
     }
   });
+
+  it("renders Output as two flush segments instead of nested rounded pills", () => {
+    const control = css.match(/\.mobile-output-mode \.ms-seg\s*\{([^}]*)\}/s);
+    const button = css.match(/\.mobile-output-mode \.ms-seg \.ms-seg__btn\s*\{([^}]*)\}/s);
+    const first = css.match(
+      /\.mobile-output-mode \.ms-seg \.ms-seg__btn:first-child\s*\{([^}]*)\}/s,
+    );
+    const last = css.match(/\.mobile-output-mode \.ms-seg \.ms-seg__btn:last-child\s*\{([^}]*)\}/s);
+    const seam = css.match(
+      /\.mobile-output-mode \.ms-seg \.ms-seg__btn \+ \.ms-seg__btn\s*\{([^}]*)\}/s,
+    );
+
+    expect(control?.[1]).toMatch(/gap:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/padding:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    expect(control?.[1]).toMatch(/border:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/box-shadow:\s*inset 0 0 0 1px var\(--ce\)\s*;/);
+    expect(control?.[1]).not.toMatch(/overflow:\s*hidden\s*;/);
+    expect(button?.[1]).toMatch(/border-radius:\s*0\s*;/);
+    expect(button?.[1]).toMatch(/justify-content:\s*center\s*;/);
+    expect(button?.[1]).toMatch(/padding-block:\s*0\s*;/);
+    expect(first?.[1]).toMatch(
+      /border-radius:\s*calc\(var\(--radius-control\) - 1px\) 0 0 calc\(var\(--radius-control\) - 1px\)\s*;/,
+    );
+    expect(last?.[1]).toMatch(
+      /border-radius:\s*0 calc\(var\(--radius-control\) - 1px\) calc\(var\(--radius-control\) - 1px\) 0\s*;/,
+    );
+    expect(seam?.[1]).toMatch(/border-left:\s*1px solid var\(--ce\)\s*;/);
+  });
 });
 
 describe("mobile develop bed", () => {
