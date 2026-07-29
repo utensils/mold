@@ -103,7 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network work; their preview-only registry fingerprint is domain-separated from
   landed artifact identity, memory feasibility includes declared bytes plus encoder
   headroom, and estimates are forced low-confidence until admission downloads and
-  re-plans from the real file.
+  re-plans from the real file. Pending downloads and confidence include only devices
+  selected by the candidate plan. Installed opaque `cv:`/`hf:` models now resolve from contained local
+  sidecars on a cold server, and their immutable runtime config follows prepared work
+  through coordinator planning and pre-CUDA validation so model-list refreshes cannot
+  turn a runnable model back into “no concrete local artifacts.”
 - **Learned scheduler estimates now separate setup from execution.** Typed
   phase instrumentation records cold model load, warm reload, prompt encoding,
   denoising, VAE, and upscaling, while metadata schema v15 persists an

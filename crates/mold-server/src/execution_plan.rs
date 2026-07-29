@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MIB: u64 = 1024 * 1024;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
@@ -769,7 +769,7 @@ pub struct DeviceFact {
 ///
 /// The map is keyed by stable runtime device id because mixed-capacity hosts
 /// can legitimately select different encoder variants for different GPUs.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreparedExecutionInputs {
     /// Hash of the immutable request/config authority that selected these
     /// concrete dependency variants. An empty value is reserved for synthetic
@@ -780,9 +780,13 @@ pub struct PreparedExecutionInputs {
     /// at least one sibling succeeded. These omissions are retryable; they
     /// must not silently become the device set for the lifetime of the job.
     pub retryable_device_failures: BTreeMap<String, String>,
-    /// Union of read-only preview dependencies across prepared devices.
-    /// Admission preparation always leaves this empty.
-    pub pending_downloads: Vec<mold_core::PendingModelDownload>,
+    /// Runtime-only catalog config synthesized from an installed sidecar.
+    ///
+    /// The scheduler applies this overlay when the current config lacks the
+    /// opaque model id. Carrying it with prepared work makes preview,
+    /// admission, and pre-CUDA validation independent of endpoint call order
+    /// and of `refresh_config()` erasing in-memory catalog entries.
+    pub model_config_overlay: Option<Arc<mold_core::ModelConfig>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -802,6 +806,7 @@ pub struct PreparedDeviceExecutionInputs {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingArtifactIdentity {
+    pub kind: String,
     pub repo: String,
     pub filename: String,
     pub bytes: u64,
@@ -809,6 +814,15 @@ pub struct PendingArtifactIdentity {
 }
 
 impl PendingArtifactIdentity {
+    pub fn as_download(&self) -> mold_core::PendingModelDownload {
+        mold_core::PendingModelDownload {
+            kind: self.kind.clone(),
+            name: self.filename.clone(),
+            repo: self.repo.clone(),
+            bytes: self.bytes,
+        }
+    }
+
     fn exact_fingerprint(&self) -> ContentFingerprint {
         let mut hash = Sha256::new();
         hash.update(b"mold.pending-preview.exact.v1\0");
@@ -827,6 +841,56 @@ impl PendingArtifactIdentity {
             bytes: self.bytes,
         }
     }
+}
+
+pub(crate) const ENCODER_DEPENDENCY_HEADROOM_BYTES: u64 = 2_000_000_000;
+
+impl PreparedExecutionInputs {
+    pub(crate) fn pending_downloads_for_device(
+        &self,
+        device_id: &str,
+    ) -> Vec<mold_core::PendingModelDownload> {
+        let Some(device) = self.by_device.get(device_id) else {
+            return Vec::new();
+        };
+        let mut downloads = device
+            .pending_artifacts
+            .values()
+            .map(PendingArtifactIdentity::as_download)
+            .collect::<Vec<_>>();
+        downloads.sort_by(|left, right| {
+            (
+                left.kind.as_str(),
+                left.repo.as_str(),
+                left.name.as_str(),
+                left.bytes,
+            )
+                .cmp(&(
+                    right.kind.as_str(),
+                    right.repo.as_str(),
+                    right.name.as_str(),
+                    right.bytes,
+                ))
+        });
+        downloads.dedup();
+        downloads
+    }
+}
+
+fn prepared_config_overlay(
+    config: &Config,
+    request: &GenerateRequest,
+    prepared: Option<&PreparedExecutionInputs>,
+) -> Option<Config> {
+    let model_config = prepared?.model_config_overlay.as_ref()?;
+    if config.models.contains_key(&request.model) {
+        return None;
+    }
+    let mut effective = config.clone();
+    effective
+        .models
+        .insert(request.model.clone(), model_config.as_ref().clone());
+    Some(effective)
 }
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
@@ -995,6 +1059,8 @@ fn resolve_execution_plans_with_policy(
     prepared: Option<&PreparedExecutionInputs>,
     fact_policy: EquivalenceFactPolicy,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    let overlaid_config = prepared_config_overlay(config, request, prepared);
+    let config = overlaid_config.as_ref().unwrap_or(config);
     let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
         ExecutionPlanError::MissingArtifacts {
             model: request.model.clone(),
@@ -1165,6 +1231,7 @@ pub fn validate_before_cuda(
     worker_ordinal: usize,
     config: &Config,
     request: &GenerateRequest,
+    prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<(), ExecutionPlanError> {
     if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
         return Err(ExecutionPlanError::PlanInvalidated(format!(
@@ -1172,6 +1239,8 @@ pub fn validate_before_cuda(
             plan.device_id, plan.device_ordinal
         )));
     }
+    let overlaid_config = prepared_config_overlay(config, request, prepared);
+    let config = overlaid_config.as_ref().unwrap_or(config);
     let model = request.model.as_str();
     let current_paths = ModelPaths::resolve(model, config).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
@@ -1644,7 +1713,6 @@ fn build_plan(
     // consumes host memory and does not need to fit the GPU; a device-assigned
     // encoder must fit with the same preparation headroom. Admission
     // recomputes the complete plan from landed file metadata.
-    const PENDING_DEPENDENCY_HEADROOM_BYTES: u64 = 2_000_000_000;
     let pending_dependency_peak = context
         .artifacts
         .iter()
@@ -1656,7 +1724,7 @@ fn build_plan(
             let artifact = &context.pending_artifacts[path];
             artifact
                 .bytes
-                .saturating_add(PENDING_DEPENDENCY_HEADROOM_BYTES)
+                .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
         })
         .max()
         .unwrap_or(0);
@@ -3635,11 +3703,11 @@ mod tests {
             placement.advanced.unwrap().transformer,
             DeviceRef::Device { .. }
         ));
-        validate_before_cuda(&plan, "cuda:0", 0, &config, &request).unwrap();
+        validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
 
         std::fs::write(root.path().join("transformer-q4.gguf"), vec![1_u8; 2048]).unwrap();
         assert!(matches!(
-            validate_before_cuda(&plan, "cuda:0", 0, &config, &request),
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
     }
@@ -3745,7 +3813,7 @@ mod tests {
 
         config.models.get_mut("test:q4").unwrap().is_schnell = Some(false);
         assert!(matches!(
-            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request),
+            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
     }
@@ -4044,7 +4112,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            pending_downloads: Vec::new(),
+            model_config_overlay: None,
         };
 
         let plans = resolve_execution_plans_with_prepared(
@@ -4075,7 +4143,81 @@ mod tests {
                 .all(|component| component.predicted_vram_bytes > 0),
             "every concrete GPU component must expose a non-zero weight estimate"
         );
-        validate_before_cuda(plan, "cuda:0", 0, &config, &request).unwrap();
+        validate_before_cuda(plan, "cuda:0", 0, &config, &request, None).unwrap();
+    }
+
+    #[test]
+    fn catalog_overlay_keeps_planning_and_cuda_validation_stable_on_cold_config() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("catalog.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        let encoder = root.path().join("qwen3.safetensors");
+        let tokenizer = root.path().join("tokenizer.json");
+        for path in [&transformer, &vae, &encoder, &tokenizer] {
+            std::fs::write(path, b"catalog").unwrap();
+        }
+        let model_config = ModelConfig {
+            transformer: Some(transformer.display().to_string()),
+            vae: Some(vae.display().to_string()),
+            text_encoder_files: Some(vec![encoder.display().to_string()]),
+            text_tokenizer: Some(tokenizer.display().to_string()),
+            family: Some("z-image".to_string()),
+            ..Default::default()
+        };
+        let cold_config = Config::default();
+        let mut effective_config = cold_config.clone();
+        effective_config
+            .models
+            .insert("cv:123".to_string(), model_config.clone());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"cv:123","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let paths = ModelPaths::resolve(&request.model, &effective_config).unwrap();
+        let engine_config =
+            mold_inference::FrozenEngineConfig::resolve(&request.model, &effective_config);
+        let prepared = PreparedExecutionInputs {
+            authority_fingerprint: preparation_authority_fingerprint(
+                &effective_config,
+                &request,
+                &paths,
+                &engine_config,
+            ),
+            by_device: BTreeMap::from([(
+                "cuda:0".to_string(),
+                PreparedDeviceExecutionInputs {
+                    engine_paths: paths.clone(),
+                    engine_config: engine_config.clone(),
+                    pending_artifacts: BTreeMap::new(),
+                    prepared_available_vram_bytes: 24 * GIB,
+                    capacity_sensitive: false,
+                },
+            )]),
+            retryable_device_failures: BTreeMap::new(),
+            model_config_overlay: Some(Arc::new(model_config)),
+        };
+
+        assert!(matches!(
+            resolve_execution_plans_with_prepared(
+                &cold_config,
+                &request,
+                &devices(&[24 * GIB]),
+                false,
+                None,
+            ),
+            Err(ExecutionPlanError::MissingArtifacts { .. })
+        ));
+        let plan = resolve_execution_plans_with_prepared(
+            &cold_config,
+            &request,
+            &devices(&[24 * GIB]),
+            false,
+            Some(&prepared),
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(plan.admission_paths, paths);
+        validate_before_cuda(&plan, "cuda:0", 0, &cold_config, &request, Some(&prepared)).unwrap();
     }
 
     #[test]
@@ -4106,7 +4248,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            pending_downloads: Vec::new(),
+            model_config_overlay: None,
         };
 
         let mut changed_config = config.clone();
@@ -4403,7 +4545,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            pending_downloads: Vec::new(),
+            model_config_overlay: None,
         };
         warm_execution_equivalence_cache(&config, &request, &prepared);
 

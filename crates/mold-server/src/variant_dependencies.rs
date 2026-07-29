@@ -5,7 +5,10 @@
 //! downloads missing quantized files on Tokio's blocking pool. The scheduler
 //! does not mark a generation Ready until this returns.
 
-use crate::execution_plan::{DeviceFact, PreparedDeviceExecutionInputs, PreparedExecutionInputs};
+use crate::execution_plan::{
+    DeviceFact, PreparedDeviceExecutionInputs, PreparedExecutionInputs,
+    ENCODER_DEPENDENCY_HEADROOM_BYTES,
+};
 use crate::scheduler::worker_device_id;
 use crate::state::{AppState, SseMessage};
 use mold_core::{Config, GenerateRequest, ModelPaths, SseProgressEvent};
@@ -15,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const ENCODER_HEADROOM: u64 = 2_000_000_000;
 const T5_FP16_THRESHOLD: u64 = 16_000_000_000;
 const QWEN3_4B_FP16_THRESHOLD: u64 = 10_200_000_000;
 const QWEN2_FP16_THRESHOLD: u64 = 16_000_000_000;
@@ -493,9 +495,12 @@ fn choose_largest_fitting<'a, T>(
     free: u64,
     fields: impl Fn(&'a T) -> (&'static str, u64),
 ) -> Option<&'a T> {
-    variants
-        .iter()
-        .find(|variant| fields(variant).1.saturating_add(ENCODER_HEADROOM) <= free)
+    variants.iter().find(|variant| {
+        fields(variant)
+            .1
+            .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
+            <= free
+    })
 }
 
 fn shared_quantized_fallback<'a, T>(
@@ -507,7 +512,10 @@ fn shared_quantized_fallback<'a, T>(
         .iter()
         .filter(|device| {
             variants.iter().any(|variant| {
-                fields(variant).1.saturating_add(ENCODER_HEADROOM) <= device.available_vram_bytes
+                fields(variant)
+                    .1
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
+                    <= device.available_vram_bytes
             })
         })
         .map(|device| device.available_vram_bytes)
@@ -900,8 +908,19 @@ async fn prepare_inputs_for_devices(
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     policy: DependencyMaterializationPolicy,
 ) -> Result<PreparedExecutionInputs, String> {
-    let paths = ModelPaths::resolve(&request.model, config)
+    let resolution = crate::model_manager::resolve_existing_model_paths(&request.model, config)
+        .map_err(|error| error.error)?
         .ok_or_else(|| format!("model '{}' has no concrete local artifacts", request.model))?;
+    let model_config_overlay = resolution.model_config_overlay.map(Arc::new);
+    let overlaid_config = model_config_overlay.as_ref().map(|model_config| {
+        let mut effective = config.clone();
+        effective
+            .models
+            .insert(request.model.clone(), model_config.as_ref().clone());
+        effective
+    });
+    let config = overlaid_config.as_ref().unwrap_or(config);
+    let paths = resolution.paths;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -958,7 +977,6 @@ async fn prepare_inputs_for_devices(
 
     let mut by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
-    let mut pending_downloads = BTreeMap::new();
     let models_root = config.resolved_models_dir();
     let dependency_context = DependencyContext {
         state,
@@ -1034,18 +1052,6 @@ async fn prepare_inputs_for_devices(
             failures.insert(device.id, error);
             continue;
         }
-        for dependency in &pending {
-            let download = dependency.download.clone();
-            pending_downloads.insert(
-                (
-                    download.kind.clone(),
-                    download.repo.clone(),
-                    download.name.clone(),
-                    download.bytes,
-                ),
-                download,
-            );
-        }
         by_device.insert(
             device.id,
             PreparedDeviceExecutionInputs {
@@ -1057,6 +1063,7 @@ async fn prepare_inputs_for_devices(
                         (
                             dependency.path.clone(),
                             crate::execution_plan::PendingArtifactIdentity {
+                                kind: dependency.download.kind.clone(),
                                 repo: dependency.download.repo.clone(),
                                 filename: dependency.download.name.clone(),
                                 bytes: dependency.download.bytes,
@@ -1084,7 +1091,7 @@ async fn prepare_inputs_for_devices(
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
-        pending_downloads: pending_downloads.into_values().collect(),
+        model_config_overlay,
     };
     let warm_config = config.clone();
     let warm_request = request.clone();
@@ -1171,6 +1178,11 @@ mod tests {
     use mold_core::{DevicePlacement, DeviceRef, ModelConfig};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
+
+    #[test]
+    fn encoder_dependency_headroom_contract_is_decimal_two_gigabytes() {
+        assert_eq!(ENCODER_DEPENDENCY_HEADROOM_BYTES, 2_000_000_000);
+    }
 
     struct TestDownloadAdapterGuard {
         repo: String,
@@ -1492,9 +1504,10 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
 
-        assert_eq!(prepared.pending_downloads.len(), 1);
-        assert_eq!(prepared.pending_downloads[0].kind, "text_encoder");
-        assert_eq!(prepared.pending_downloads[0].name, "Qwen_3_4b-Q8_0.gguf");
+        let pending_downloads = prepared.pending_downloads_for_device("cuda:0");
+        assert_eq!(pending_downloads.len(), 1);
+        assert_eq!(pending_downloads[0].kind, "text_encoder");
+        assert_eq!(pending_downloads[0].name, "Qwen_3_4b-Q8_0.gguf");
         let device = &prepared.by_device["cuda:0"];
         assert_eq!(device.pending_artifacts.len(), 1);
         assert!(device.pending_artifacts.keys().all(|path| !path.is_file()));
@@ -1515,9 +1528,9 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert!(
             plans[0].predicted_vram_peak_bytes
-                >= prepared.pending_downloads[0]
+                >= pending_downloads[0]
                     .bytes
-                    .saturating_add(ENCODER_HEADROOM)
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
         );
         let pending_component = plans[0]
             .execution_environment
@@ -1570,9 +1583,9 @@ mod tests {
         ));
         assert!(
             pressured[0].predicted_vram_peak_bytes
-                < prepared.pending_downloads[0]
+                < pending_downloads[0]
                     .bytes
-                    .saturating_add(ENCODER_HEADROOM),
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES),
             "CPU-placed pending encoder must not be charged against GPU peak"
         );
         assert_eq!(after, before, "preview must not register a download");

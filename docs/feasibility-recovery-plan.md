@@ -1,7 +1,8 @@
 # Plan: Fix "No selected machine has the model and required components" + missing-component auto-recovery
 
-**Status:** phases 0–1 implemented; phase 3 messaging implemented; repair/resume
-blocked on download authority · **Owner:** Codex · **Date:** 2026-07-28
+**Status:** phases 0–1 implemented, including cold opaque-catalog recovery; phase 3
+messaging implemented; repair/resume blocked on download authority · **Owner:** Codex
+· **Date:** 2026-07-29
 
 ## Implementation status
 
@@ -18,7 +19,15 @@ Implemented in this change:
 - Known registry-backed encoder dependencies produce a read-only planned preview with
   `pending_downloads`. Their preview fingerprints use a separate, domain-tagged
   repo/filename/size/format/quantization identity; no download is registered or
-  started, and admission recomputes the plan from the landed bytes.
+  started, and admission recomputes the plan from the landed bytes. Pending metadata
+  and low-confidence estimates are scoped to the devices actually selected by each
+  candidate plan, rather than unioned across the host.
+- A cold `cv:` / `hf:` request resolves an installed sidecar through the same strictly
+  local resolver used by worker fallback. The synthesized effective `ModelConfig`
+  travels with prepared execution inputs through coordinator planning and pre-CUDA
+  validation, so `/api/models` refreshes and endpoint call order cannot erase the
+  authority needed to run an opaque ID. Sidecar primary paths must be relative,
+  contained, normal path components.
 - Hard preparation failures include absent manifest components and `repair_model`
   metadata where the existing component-status authority can prove them. Stale device
   pins remain hard-infeasible.
@@ -63,11 +72,15 @@ server's precise `reason` string is discarded on every one of them:
 | 5 | Legacy fallback (`unsupported` outcome — fires **whenever post-upscale or local prompt-expand is enabled**) requires origin to be `ready` in `resolveRoute`'s Auto path, though the candidates filter deliberately exempts origin from that check | `lib/hostRouting.ts::pickAutoHost` filters `status === "ready"`; origin is `connecting` for up to the first poll and `error` on any status blip | Origin should be routable in the legacy path exactly as it is in the probe-candidate path |
 | 6 | Genuinely missing components (partial install: VAE, encoder, tokenizer file gone) | `ModelPaths::resolve` fails or `manifest_model_needs_download` → infeasible | Name the components + offer download/repair, then resume |
 
-Live verification performed:
+Live diagnosis performed before this correction:
 
-- `placement-preview` returns `outcome: "planned"` for every downloaded model
-  (`flux-dev:bf16`, `flux2-klein:q8`, `qwen-image:q8`, `sd15:fp16`, `cv:2442439`) with a
-  minimal request → the server inventory itself is currently healthy.
+- A freshly restarted server listed `cv:2937936` as downloaded and its 18.16 GB
+  checkpoint plus sidecar were present, but its first placement preview returned
+  `model 'cv:2937936' has no concrete local artifacts`.
+- Calling the mutating component/availability path first cached a synthesized catalog
+  entry in `AppState.config`, after which the same preview planned successfully.
+  Calling `/api/models` refreshed configuration from disk and could erase that warmed
+  entry. The apparent recovery was therefore endpoint-order dependent and non-durable.
 - A non-downloaded model returns authoritative `infeasible` with reason
   `model 'flux-schnell:q8' has no concrete local artifacts`.
 - A placement pin to a nonexistent device returns authoritative `infeasible` with reason
@@ -160,9 +173,23 @@ admission then downloads the deps it always could.
 - Hard failures stay hard: broken BF16/FP16 encoder expected from the model's own
   manifest, malformed Gemma shard sets, unknown variant pins, stale device pins.
 
+`crates/mold-server/src/model_manager.rs` and execution preparation:
+
+- One non-mutating resolver handles manifest/custom paths and installed catalog
+  sidecars. Catalog resolution returns both concrete `ModelPaths` and the effective
+  runtime-only `ModelConfig` overlay.
+- `PreparedExecutionInputs` carries that overlay. Coordinator planning and GPU
+  validation apply it only while the current config lacks the opaque ID; a real
+  replacement config still invalidates stale prepared work.
+- Existing-only component diagnostics use configured manifest paths, safe-contained
+  sidecar primary paths, and explicit absent companion metadata. Resolution errors are
+  surfaced rather than collapsed through `unwrap_or_default`.
+
 `crates/mold-server/src/routes.rs::placement_preview_for_request`:
 
 - Map preparation `pending` → `planned` + `pending_downloads`.
+- Project pending downloads and low confidence from the devices selected by the
+  candidate plan; never union pending artifacts from losing devices into the response.
 - Map preparation failure → `infeasible` + `reason` + `missing_components` (computed via
   a strictly local existing-only component-status path when the model resolves, so VAE
   and friends are named individually without catalog/network mutation).
@@ -276,6 +303,11 @@ if the iPhone flow changes.
   document it. **Decision:** this change accounts for declared dependency bytes plus
   encoder headroom in feasibility and forces `estimate_confidence: "low"`, but does not
   invent a transfer-time estimate without a measured link rate.
+- **Cold catalog identity:** an opaque model's sidecar-derived config used to exist
+  only as mutable process cache. **Resolved:** the read-only resolver returns a
+  request-owned overlay, preparation fingerprints it, and the overlay remains attached
+  through scheduler coordination and pre-CUDA validation. Tests interleave the same
+  config refresh performed by `/api/models` and require plan/fingerprint parity.
 - **Auto-start vs confirm for repair pulls:** this plan auto-starts per the product
   direction ("they should auto download and then the generation should resume"), with a
   visible, cancellable card. If disk-space concerns surface (multi-GB VAE/encoder

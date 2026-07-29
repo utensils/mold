@@ -622,11 +622,11 @@ describe("hosts store", () => {
 
     previewGenerationPlacement.mockResolvedValueOnce({});
     await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
-      kind: "transient",
+      kind: "unreachable",
       perHost: [
         expect.objectContaining({
           hostId: "local",
-          error: "returned an invalid placement response",
+          error: "returned an invalid authoritative placement-preview response",
         }),
       ],
     });
@@ -650,12 +650,12 @@ describe("hosts store", () => {
     });
 
     await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
-      kind: "transient",
+      kind: "unreachable",
       perHost: [
         expect.objectContaining({
-          kind: "transient",
+          kind: "unreachable",
           hostId: "local",
-          error: "returned an invalid placement response",
+          error: "returned an invalid authoritative placement-preview response",
         }),
       ],
     });

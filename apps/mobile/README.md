@@ -124,7 +124,10 @@ temporary planner failure, malformed response, transport error, or host-identity
 race instead of collapsing them into one route error. Additive
 `missing_components` metadata is informational until Create owns a finalized
 held request and the exact host's complete grouped repair pull; it must not
-promise automatic resume before then. Only a strictly valid version-1
+promise automatic resume before then. Additive `pending_downloads` and their
+low-confidence estimate describe only devices selected by the candidate plan; cold
+installed catalog IDs remain valid across server model-list refreshes. Only a
+strictly valid version-1
 non-authoritative `unsupported` result or a missing legacy endpoint
 (`404`/`405`) may retain compatible routing without an authoritative plan.
 Create generation queues and stale reasons resolve opaque catalog IDs through

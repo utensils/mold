@@ -770,16 +770,24 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          if (classification === "temporarily_unavailable" || classification === "invalid") {
+          if (classification === "temporarily_unavailable") {
             return [
               {
                 kind: "transient",
                 hostId: probe.host.id,
                 label: probe.host.label,
                 error:
-                  classification === "temporarily_unavailable"
-                    ? (probe.preview?.reason ?? "could not compute a placement plan right now")
-                    : "returned an invalid placement response",
+                  probe.preview?.reason ?? "could not compute a placement plan right now",
+              },
+            ];
+          }
+          if (classification === "invalid") {
+            return [
+              {
+                kind: "unreachable",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                error: "returned an invalid authoritative placement-preview response",
               },
             ];
           }

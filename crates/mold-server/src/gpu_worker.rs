@@ -936,6 +936,7 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &config,
                 &job.request,
+                job.prepared_execution_inputs.as_ref(),
             )
         }
         OwnerWork::ChainStage(job) => {
@@ -951,6 +952,7 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &job.config,
                 &job.stage_req,
+                None,
             )
         }
         #[cfg(feature = "expand")]
@@ -1225,6 +1227,7 @@ fn validate_scheduled_chain_stage_before_cuda(
         worker.gpu.ordinal,
         &job.config,
         &job.stage_req,
+        None,
     )
 }
 

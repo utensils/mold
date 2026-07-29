@@ -209,6 +209,25 @@ pub fn primary_looks_like_auxiliary(sidecar: &CatalogSidecar) -> bool {
         || rel.contains("-txt.")
 }
 
+/// Resolve the primary path recorded by a sidecar without consulting disk.
+///
+/// Sidecars are local metadata, not an authority to escape their own install
+/// directory. Accept only non-empty, strictly normal relative components so
+/// every consumer (inventory, placement preview, admission, and worker load)
+/// shares the same containment boundary.
+pub fn primary_path(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
+    let relative = Path::new(&sidecar.primary_filename_rel);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(sidecar_dir.join(relative))
+}
+
 /// Returns the absolute path to a sidecar's primary file, when that file is
 /// complete enough to trust. `None` indicates the sidecar is stale or the
 /// primary was only partially downloaded — the caller should treat the row as
@@ -219,8 +238,13 @@ pub fn primary_path_if_present(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> 
             return None;
         }
     }
-    let abs = sidecar_dir.join(&sidecar.primary_filename_rel);
+    let abs = primary_path(sidecar_dir, sidecar)?;
     if !abs.is_file() {
+        return None;
+    }
+    let canonical_dir = std::fs::canonicalize(sidecar_dir).ok()?;
+    let canonical_primary = std::fs::canonicalize(&abs).ok()?;
+    if !canonical_primary.starts_with(&canonical_dir) {
         return None;
     }
     if mold_core::download::has_sha256_marker(&abs) {
@@ -314,6 +338,25 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn primary_path_if_present_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("model.safetensors"), b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, install.join("linked")).unwrap();
+        let sc = sidecar_from_entry(&fixture_entry(), "linked/model.safetensors".to_string());
+
+        assert_eq!(
+            primary_path(&install, &sc),
+            Some(install.join("linked/model.safetensors"))
+        );
+        assert!(primary_path_if_present(&install, &sc).is_none());
+    }
+
     #[test]
     fn older_sidecars_leave_new_presentation_metadata_unknown() {
         let entry = fixture_entry();
@@ -389,6 +432,32 @@ mod tests {
         fs::write(tmp.path().join("x.safetensors"), b"data").unwrap();
         let abs = primary_path_if_present(tmp.path(), &sc).unwrap();
         assert_eq!(abs, tmp.path().join("x.safetensors"));
+    }
+
+    #[test]
+    fn primary_path_rejects_absolute_parent_and_non_normal_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sc = sidecar_from_entry(&fixture_entry(), "x.safetensors".into());
+        for invalid in [
+            "",
+            "/tmp/escape.safetensors",
+            "../escape.safetensors",
+            "nested/../escape.safetensors",
+            "./x.safetensors",
+        ] {
+            sc.primary_filename_rel = invalid.into();
+            assert!(
+                primary_path(tmp.path(), &sc).is_none(),
+                "accepted invalid sidecar primary path {invalid:?}"
+            );
+            assert!(primary_path_if_present(tmp.path(), &sc).is_none());
+        }
+
+        sc.primary_filename_rel = "nested/x.safetensors".into();
+        assert_eq!(
+            primary_path(tmp.path(), &sc),
+            Some(tmp.path().join("nested/x.safetensors"))
+        );
     }
 
     #[test]

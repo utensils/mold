@@ -1974,24 +1974,12 @@ pub(crate) async fn placement_preview_for_request(
                 return response;
             }
         };
-    let pending_downloads = prepared.pending_downloads.clone();
     match state
         .scheduled_work
         .preview_placement(request, copies, prepared)
         .await
     {
-        Ok(mut response) => {
-            if response.outcome == "planned" && !pending_downloads.is_empty() {
-                response.pending_downloads = pending_downloads;
-                if let Some(candidate) = response.candidate.as_mut() {
-                    candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
-                }
-                for stage in &mut response.stage_candidates {
-                    stage.candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
-                }
-            }
-            response
-        }
+        Ok(response) => response,
         Err(error) => unavailable("temporarily_unavailable", error),
     }
 }
@@ -2000,16 +1988,32 @@ async fn missing_model_components(
     state: &AppState,
     model: &str,
 ) -> Vec<mold_core::ModelComponentStatus> {
-    model_manager::model_component_status_existing_only(state, model)
-        .await
-        .map(|status| {
-            status
-                .components
-                .into_iter()
-                .filter(|component| !component.present)
-                .collect()
-        })
-        .unwrap_or_default()
+    match model_manager::model_component_status_existing_only(state, model).await {
+        Ok(status) => status
+            .components
+            .into_iter()
+            .filter(|component| !component.present)
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                model,
+                error = %error.error,
+                "strictly local component inspection failed during placement preview"
+            );
+            if mold_catalog::resolve::looks_like_catalog_id(model) {
+                vec![mold_core::ModelComponentStatus {
+                    kind: "transformer".to_string(),
+                    name: "primary checkpoint".to_string(),
+                    present: false,
+                    path: None,
+                    repair_model: Some(model.to_string()),
+                    options: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
 }
 
 async fn model_components(
