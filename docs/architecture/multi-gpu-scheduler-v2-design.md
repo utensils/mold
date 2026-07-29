@@ -2179,10 +2179,12 @@ Initial implementation may claim:
 - simulated 12 GiB, 8×B200, and MIG;
 - designed/simulated up to 64 devices.
 
-No passing RTX 3090 report is currently retained, so the current repository
-does not claim either hardware qualification. It must not claim
-hardware-qualified B200, real 12 GiB, or MIG until the deferred campaigns run
-and a passing report is retained.
+Hardware qualification is an exact-commit evidence property, not a standing
+claim inherited by later branch heads. A release or pull request may make the
+1× or 2× RTX 3090 claim only when it identifies the exact tested commit and
+retains the validating report plus its adjacent evidence directory. It must not
+claim hardware-qualified B200, real 12 GiB, or MIG until the deferred campaigns
+run and a passing exact-commit report is retained.
 
 ### 16.3 Deferred Lambda campaign
 
