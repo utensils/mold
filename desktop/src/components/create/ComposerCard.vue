@@ -160,11 +160,16 @@ defineExpose({ focus, expand, record });
 
 <style scoped>
 .ms-composer {
+  display: flex;
+  flex-direction: column;
   border-top: 1px solid var(--edge);
   padding: 16px 22px;
   background: var(--bench);
 }
 .ms-composer__bench {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   background: var(--bath);
   border: 1px solid var(--ce);
   border-radius: 12px;
@@ -175,6 +180,7 @@ defineExpose({ focus, expand, record });
   border-color: var(--safelight);
 }
 .ms-composer__input {
+  flex: 1;
   width: 100%;
   box-sizing: border-box;
   border: 0;
@@ -192,7 +198,8 @@ defineExpose({ focus, expand, record });
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-top: 12px;
+  margin-top: auto;
+  padding-top: 12px;
   min-width: 0;
   flex-wrap: wrap;
 }

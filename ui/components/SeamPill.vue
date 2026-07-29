@@ -53,8 +53,10 @@ const fadeSuffix = computed(() =>
       <span v-else-if="transition === 'cut'" class="ms-seam__line-cut" />
       <span v-else class="ms-seam__line-fade" />
     </span>
-    <span class="ms-seam__label">{{ label }}</span>
-    <span v-if="fadeSuffix" class="ms-seam__frames">{{ fadeSuffix }}</span>
+    <span class="ms-seam__caption">
+      <span class="ms-seam__label">{{ label }}</span>
+      <span v-if="fadeSuffix" class="ms-seam__frames">{{ fadeSuffix }}</span>
+    </span>
     <svg
       class="ms-seam__chevron"
       viewBox="0 0 24 24"
@@ -171,6 +173,13 @@ const fadeSuffix = computed(() =>
 
 .ms-seam__frames {
   color: var(--ink-3);
+}
+
+.ms-seam__caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
 }
 
 .ms-seam[data-on="true"] .ms-seam__frames {

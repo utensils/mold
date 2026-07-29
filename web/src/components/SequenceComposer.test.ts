@@ -84,6 +84,18 @@ describe("SequenceComposer", () => {
     expect(wrapper.text()).toContain("Describe clip 1");
   });
 
+  it("gives the filmstrip popover an explicit full-width flex wrapper", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+
+    const railWrap = wrapper.find(".sq-filmstrip-wrap");
+    expect(railWrap.find(".ms-popover").exists()).toBe(true);
+    expect(railWrap.find(".ms-popover__trigger").exists()).toBe(true);
+    expect(railWrap.find("[aria-label='Sequence filmstrip']").exists()).toBe(
+      true,
+    );
+  });
+
   it("edits the ACTIVE clip's prompt through the textarea", async () => {
     const wrapper = mountComposer();
     await flushPromises();

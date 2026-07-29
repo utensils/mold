@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { VueDraggable } from "vue-draggable-plus";
 import ClipRail from "./ClipRail.vue";
 import railSource from "./ClipRail.vue?raw";
 import pillSource from "./ClipPill.vue?raw";
+import seamSource from "./SeamPill.vue?raw";
 import type { RailClip } from "./types";
 
 function clips(count: number): RailClip[] {
@@ -68,9 +69,14 @@ describe("ClipRail", () => {
 
   it("emits the completed drag order and keeps tile controls out of the drag handle", async () => {
     const wrapper = make({ clips: clips(3) });
-    wrapper
-      .findComponent(VueDraggable)
-      .vm.$emit("update:modelValue", [clips(3)[2], clips(3)[0], clips(3)[1]]);
+    const draggable = wrapper.findComponent(VueDraggable);
+    expect(draggable.props("forceFallback")).toBe(true);
+    expect(draggable.props("fallbackTolerance")).toBe(3);
+    draggable.vm.$emit("update:modelValue", [
+      clips(3)[2],
+      clips(3)[0],
+      clips(3)[1],
+    ]);
     await wrapper.vm.$nextTick();
 
     expect(wrapper.emitted("reorder")?.[0]).toEqual([["c2", "c0", "c1"]]);
@@ -147,11 +153,100 @@ describe("ClipRail", () => {
     expect(wrapper.emitted("play")?.[0]).toEqual(["c0"]);
   });
 
-  it("keeps long rails scrollable without exposing a desktop scrollbar", () => {
+  it("makes overflow intentional with snap points, an end gutter, and a visible scrollbar", () => {
     expect(railSource).toMatch(/\.ms-rail__clips\s*\{[^}]*flex:\s*0 0 auto/s);
-    expect(railSource).toMatch(/\.ms-rail\s*\{[^}]*scrollbar-width:\s*none/s);
     expect(railSource).toMatch(
-      /\.ms-rail::-webkit-scrollbar\s*\{[^}]*display:\s*none/s,
+      /\.ms-rail\s*\{[^}]*scroll-snap-type:\s*x proximity/s,
+    );
+    expect(railSource).toMatch(
+      /\.ms-rail__item\s*\{[^}]*scroll-snap-align:\s*start/s,
+    );
+    expect(railSource).toContain('class="ms-rail__end-space"');
+    expect(railSource).toContain('aria-label="Scroll filmstrip right"');
+  });
+
+  it("reveals overflow controls and scrolls the filmstrip by a useful page", async () => {
+    const wrapper = make({ clips: clips(6) });
+    const rail = wrapper.get(".ms-rail").element as HTMLElement;
+    Object.defineProperties(rail, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1200 },
+      scrollLeft: { configurable: true, writable: true, value: 0 },
+    });
+    const scrollTo = vi.fn();
+    rail.scrollTo = scrollTo;
+    rail.dispatchEvent(new Event("scroll"));
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.attributes("data-scroll-end")).toBe("true");
+    await wrapper.get('[aria-label="Scroll filmstrip right"]').trigger("click");
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 288,
+      behavior: "smooth",
+    });
+  });
+
+  it("auto-scrolls a newly selected tile fully inside the viewport", async () => {
+    const wrapper = make({ clips: clips(6), activeId: "c0" });
+    const rail = wrapper.get(".ms-rail").element as HTMLElement;
+    Object.defineProperties(rail, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1400 },
+      scrollLeft: { configurable: true, writable: true, value: 0 },
+    });
+    rail.getBoundingClientRect = () => ({ left: 0, right: 400 }) as DOMRect;
+    const selected = wrapper.get('[data-clip-id="c5"]').element as HTMLElement;
+    selected.getBoundingClientRect = () =>
+      ({ left: 900, right: 1096 }) as DOMRect;
+    const scrollTo = vi.fn();
+    rail.scrollTo = scrollTo;
+
+    await wrapper.setProps({ activeId: "c5" });
+    await wrapper.vm.$nextTick();
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 742,
+      behavior: "smooth",
+    });
+  });
+
+  it("defines tall, default, short, and compact filmstrip density tiers", () => {
+    expect(railSource).toMatch(
+      /\.ms-rail-frame\s*\{[^}]*--filmstrip-tile-max:\s*184px[^}]*height:\s*188px/s,
+    );
+    expect(railSource).toMatch(
+      /@container create-bench \(min-height: 620px\)[\s\S]*--filmstrip-tile-max:\s*208px[\s\S]*height:\s*204px/,
+    );
+    expect(railSource).toMatch(
+      /@container create-bench \(max-height: 430px\)[\s\S]*--filmstrip-tile-max:\s*156px[\s\S]*height:\s*160px/,
+    );
+    expect(railSource).toMatch(
+      /@container create-bench \(max-height: 340px\)[\s\S]*--filmstrip-tile-max:\s*134px[\s\S]*height:\s*138px/,
+    );
+    expect(pillSource).toContain(
+      "width: min(var(--clip-width), var(--filmstrip-tile-max, 196px))",
+    );
+  });
+
+  it("changes duration on the x axis while every tile keeps the track height", () => {
+    const wrapper = make({
+      clips: [
+        { ...clips(2)[0]!, frames: 25 },
+        { ...clips(2)[1]!, frames: 97 },
+      ],
+      frameOptions: [25, 33, 41, 49, 57, 65, 73, 81, 89, 97],
+    });
+    const tiles = wrapper.findAll(".ms-clip");
+    expect(tiles[0]!.attributes("style")).not.toBe(
+      tiles[1]!.attributes("style"),
+    );
+    expect(pillSource).toMatch(
+      /\.ms-clip__body\s*\{[^}]*height:\s*var\(--filmstrip-scene-height,\s*140px\)/s,
+    );
+    expect(pillSource).toMatch(
+      /\.ms-clip__thumb\s*\{[^}]*height:\s*var\(--filmstrip-thumb-height,\s*104px\)/s,
+    );
+    expect(pillSource).toMatch(
+      /\.ms-clip__thumb :deep\(img\),[\s\S]*object-fit:\s*cover/s,
     );
   });
 
@@ -165,13 +260,27 @@ describe("ClipRail", () => {
     );
   });
 
-  it("uses a cinematic 16:9 filmstrip treatment", () => {
-    expect(pillSource).toMatch(
-      /\.ms-clip__thumb\s*\{[^}]*aspect-ratio:\s*16 \/ 9/s,
-    );
+  it("uses a cinematic fixed-track filmstrip treatment", () => {
+    expect(railSource).toContain("--filmstrip-thumb-height: 104px");
     expect(railSource).toMatch(/\.ms-rail__perfs/);
     expect(railSource).toMatch(
-      /\.ms-rail\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--print\)/s,
+      /\.ms-rail-frame\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--print\)/s,
+    );
+  });
+
+  it("keeps seams as compact connectors instead of thumbnail-height capsules", () => {
+    expect(seamSource).toContain('class="ms-seam__caption"');
+    expect(railSource).toMatch(
+      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
+    );
+    expect(railSource).toMatch(
+      /\.ms-rail-frame :deep\(\.ms-seam::before\)\s*\{[^}]*height:\s*1px/s,
+    );
+    expect(railSource).toMatch(
+      /\.ms-rail-frame :deep\(\.ms-seam__diagram\)\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border-radius:\s*50%/s,
+    );
+    expect(railSource).toContain(
+      ':deep(.ms-seam[data-transition="fade"] .ms-seam__diagram)',
     );
   });
 });

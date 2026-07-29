@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { isSupportedDroppedImage, reduceNativeImageDrag } from "../lib/nativeImageDrop";
 import { useRoute, useRouter } from "vue-router";
 import {
+  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -30,6 +31,7 @@ import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import {
   defaultClipFrames,
   friendlySequenceError,
+  modelSupportsSequence,
   modelsForOutput,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
@@ -560,7 +562,43 @@ const draft = useSequenceDraftStore();
 const chains = useChainJobsStore();
 const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() => findInstalledModel(installedModels.value, form.model));
-const sequenceCapableModels = computed(() => modelsForOutput(installedModels.value, "sequence"));
+/** Sequence inventory follows the route policy. A pinned host must never
+ * inherit a compatible model from another machine's union. Edit sessions are
+ * stricter still: their immutable durable route owns the available model. */
+const sequenceTargetHostId = computed<string | null>(
+  () => draft.editing?.hostId ?? stickyTarget.value,
+);
+const sequenceTargetModels = computed(() => {
+  const target = sequenceTargetHostId.value;
+  const fixed = target && target !== "capable";
+  const fetched = fixed && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  if (fixed && !fetched) {
+    if (target === "local" && !models.loading) return models.installed;
+    return [];
+  }
+  return filterModelsForTarget(
+    installedModels.value,
+    target,
+    fetched ? new Set(hostModels.installedOn(target).map((model) => model.name)) : null,
+  );
+});
+const sequenceCapableModels = computed(() =>
+  modelsForOutput(sequenceTargetModels.value, "sequence"),
+);
+const selectedSequenceEntry = computed(() =>
+  findInstalledModel(sequenceCapableModels.value, form.model),
+);
+const sequenceInventorySettled = computed(() => {
+  const target = sequenceTargetHostId.value;
+  if (target && target !== "capable") {
+    if (target === "local" && (hostModels.byHost[target]?.fetchedAt ?? 0) === 0) {
+      return !models.loading;
+    }
+    return !hostModels.loading && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  }
+  if (hosts.all.length <= 1) return !models.loading;
+  return !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched;
+});
 const chainLimits = ref<ChainLimits | null>(null);
 const sequenceSubmitting = ref(false);
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
@@ -570,19 +608,48 @@ const editSharedBaseline = ref<string | null>(null);
  *  one handoff, not a standing property of the draft. */
 const sequenceReuseNotice = ref<string | null>(null);
 
-const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedEntry.value));
+const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedSequenceEntry.value));
 const sequenceDefaultFrames = computed(() =>
-  defaultClipFrames(selectedEntry.value, chainLimits.value, sequenceMotionTail.value),
+  defaultClipFrames(selectedSequenceEntry.value, chainLimits.value, sequenceMotionTail.value),
 );
-/** No chain-capable video model installed anywhere → guide to Discover. */
+/** No chain-capable video model on the selected route → guide to Discover. */
 const showSequenceEmpty = computed(
   () =>
-    isSequence.value && conn.ready && !models.loading && sequenceCapableModels.value.length === 0,
+    isSequence.value &&
+    conn.ready &&
+    sequenceInventorySettled.value &&
+    sequenceCapableModels.value.length === 0,
+);
+
+/** Sequence is authoritative over a stale single-image selection. Re-run
+ * after host inventory arrives and whenever the target changes. */
+watch(
+  [isSequence, sequenceCapableModels, sequenceInventorySettled, sequenceTargetHostId],
+  () => {
+    if (!isSequence.value) return;
+    const current = form.model;
+    if (sequenceCapableModels.value.some((model) => model.name === current)) return;
+    if (current && !draft.lastSingleModel && !draft.editing) {
+      draft.lastSingleModel = current;
+    }
+    const pick = sequenceCapableModels.value[0];
+    if (pick) {
+      formStore.applyModel(pick);
+    } else if (
+      sequenceInventorySettled.value ||
+      (selectedEntry.value !== null && !modelSupportsSequence(selectedEntry.value))
+    ) {
+      form.model = "";
+      form.family = "";
+      chainLimits.value = null;
+    }
+  },
+  { immediate: true },
 );
 
 function sharedSnapshot(): string {
   return JSON.stringify({
-    ...sequenceParams(form, selectedEntry.value),
+    ...sequenceParams(form, selectedSequenceEntry.value),
     enableAudio: draft.enableAudio,
     motionTail: sequenceMotionTail.value,
   });
@@ -620,7 +687,7 @@ function consumeOutputQuery() {
 
 let chainLimitsFetch = 0;
 async function loadChainLimits() {
-  const entry = selectedEntry.value;
+  const entry = selectedSequenceEntry.value;
   if (!entry) {
     chainLimits.value = null;
     return;
@@ -680,8 +747,14 @@ const sequenceStageClipIds = ref<string[]>([]);
 const sequenceStageClipIdsByJob = new Map<string, string[]>();
 const playingSequenceStage = ref<number | null>(null);
 let sequenceStageMediaKey = "";
+let sequenceStageMediaEpoch = 0;
+const pendingSequencePosters = new Set<string>();
+const pendingSequenceMedia = new Set<string>();
 
 function clearSequenceStageMedia() {
+  sequenceStageMediaEpoch += 1;
+  pendingSequencePosters.clear();
+  pendingSequenceMedia.clear();
   for (const url of Object.values(sequenceStagePosters.value)) {
     URL.revokeObjectURL(url);
   }
@@ -689,6 +762,7 @@ function clearSequenceStageMedia() {
   sequenceStageMedia.value = {};
   sequenceStageClipIds.value = [];
   playingSequenceStage.value = null;
+  sequenceStageMediaKey = "";
 }
 
 watch(
@@ -716,8 +790,18 @@ watch(
       sequenceStageMediaKey = key;
       const script = normalizeServerChainScript(detail.script);
       const boundIds = sequenceStageClipIdsByJob.get(key);
+      const editing = draft.editing;
+      const editingMatches =
+        editing?.hostId === watched.hostId &&
+        editing.jobId === detail.id &&
+        draft.clips.length === detail.stages.length;
       if (boundIds?.length === detail.stages.length) {
         sequenceStageClipIds.value = [...boundIds];
+      } else if (editingMatches) {
+        // The binding cache belongs to this view instance, while the edit
+        // session is durable store state. Rebuild positionally on remount
+        // even when the user has already changed a prompt from the job script.
+        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
       } else if (
         script &&
         script.stages.length === draft.clips.length &&
@@ -746,31 +830,72 @@ watch(
       }
     }
     const target = chains.targetFor(watched.hostId);
+    const requestEpoch = sequenceStageMediaEpoch;
     for (const stage of detail.stages) {
-      if (stage.has_preview && !sequenceStagePosters.value[stage.idx]) {
+      const pendingKey = `${requestEpoch}:${key}:${stage.idx}`;
+      if (
+        stage.has_preview &&
+        !sequenceStagePosters.value[stage.idx] &&
+        !pendingSequencePosters.has(pendingKey)
+      ) {
+        pendingSequencePosters.add(pendingKey);
         const path = `/api/chain-jobs/${encodeURIComponent(detail.id)}/stages/${stage.idx}/preview`;
         void apiFetchTo(target, path)
           .then((response) => response.blob())
           .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const currentStage = chains.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequenceStageMediaEpoch ||
+              sequenceStageMediaKey !== key ||
+              chains.watching?.hostId !== watched.hostId ||
+              chains.live.detail?.id !== detail.id ||
+              !currentStage?.has_preview
+            ) {
+              URL.revokeObjectURL(url);
+              return;
+            }
             sequenceStagePosters.value = {
               ...sequenceStagePosters.value,
-              [stage.idx]: URL.createObjectURL(blob),
+              [stage.idx]: url,
             };
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => pendingSequencePosters.delete(pendingKey));
       }
-      if (stage.has_media && !sequenceStageMedia.value[stage.idx]) {
+      if (
+        stage.has_media &&
+        !sequenceStageMedia.value[stage.idx] &&
+        !pendingSequenceMedia.has(pendingKey)
+      ) {
+        pendingSequenceMedia.add(pendingKey);
         void sequenceStageMediaUrl(target, detail.id, stage.idx)
           .then((url) => {
+            const currentStage = chains.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequenceStageMediaEpoch ||
+              sequenceStageMediaKey !== key ||
+              chains.watching?.hostId !== watched.hostId ||
+              chains.live.detail?.id !== detail.id ||
+              !currentStage?.has_media
+            ) {
+              return;
+            }
             sequenceStageMedia.value = {
               ...sequenceStageMedia.value,
               [stage.idx]: url,
             };
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => pendingSequenceMedia.delete(pendingKey));
       }
     }
   },
+  { immediate: true },
 );
 
 const sequencePlaybackSrc = computed(() => {
@@ -907,9 +1032,15 @@ function resumeSettledSequence() {
 }
 
 async function generateSequence() {
-  const entry = selectedEntry.value;
-  if (!entry || sequenceSubmitting.value) return;
-  const hostRoute = routeForModel(entry);
+  if (sequenceSubmitting.value) return;
+  const entry = selectedSequenceEntry.value;
+  if (!entry) {
+    toasts.push("Choose an installed sequence-capable video model first.", "error");
+    return;
+  }
+  const hostRoute = draft.editing
+    ? hosts.resolveRoute(draft.editing.hostId, entry.name)
+    : routeForModel(entry);
   if (!hostRoute) {
     toasts.push("The selected host isn't reachable. Pick another host.", "error");
     return;
@@ -2520,16 +2651,27 @@ onBeforeUnmount(() => {
 
         <div
           data-test="create-bottom-panel"
-          class="min-h-0 shrink-0 overflow-y-auto bg-desk"
-          :style="{ height: `${benchHeight}px` }"
+          class="flex min-h-0 shrink-0 flex-col overflow-y-auto bg-desk"
+          :style="{
+            height: `${benchHeight}px`,
+            containerType: 'size',
+            containerName: 'create-bench',
+          }"
         >
           <ActivityStrip @edit-sequence="editSequence" />
+          <p
+            v-if="isSequence && sequenceReuseNotice"
+            data-test="sequence-reuse-note"
+            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+          >
+            {{ sequenceReuseNotice }}
+          </p>
 
           <!-- Sequence bench replaces the single-print composer in-place -->
           <EmptyStateBlock
             v-if="showSequenceEmpty"
             data-test="sequence-empty"
-            class="shrink-0 py-6"
+            class="flex-1 py-6"
             icon="image"
             headline="Sequences need a video model"
             guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
@@ -2550,9 +2692,9 @@ onBeforeUnmount(() => {
           <SequenceComposer
             v-else-if="isSequence"
             data-test="generate-sequence-composer"
-            class="shrink-0"
+            class="flex-1"
             :form="form"
-            :selected-model="selectedEntry"
+            :selected-model="selectedSequenceEntry"
             :chain-limits="chainLimits"
             :installed-models="installedModels"
             :submitting="sequenceSubmitting"
@@ -2567,7 +2709,7 @@ onBeforeUnmount(() => {
             v-else
             ref="composerRef"
             data-test="generate-composer"
-            class="shrink-0"
+            class="flex-1"
             :form="form"
             :effective-batch-size="effectiveBatchSize"
             :expansion-running="expansionRunning"
@@ -2585,13 +2727,6 @@ onBeforeUnmount(() => {
             @expand="expandForCurrentBatch()"
             @restore="restoreQuickExpansion"
           />
-          <p
-            v-if="isSequence && sequenceReuseNotice"
-            data-test="sequence-reuse-note"
-            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
-          >
-            {{ sequenceReuseNotice }}
-          </p>
         </div>
       </div>
     </div>

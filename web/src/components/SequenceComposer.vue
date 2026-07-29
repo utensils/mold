@@ -386,60 +386,68 @@ defineExpose({ importTomlText });
       </button>
     </div>
 
-    <Popover
-      :open="openSeamId !== null"
-      placement="bottom-start"
-      label="Transition"
-      @update:open="(v: boolean) => (openSeamId = v ? openSeamId : null)"
-    >
-      <template #trigger>
-        <ClipRail
-          class="w-full"
-          :clips="draft.clips"
-          :active-id="draft.activeClipId"
+    <div class="sq-filmstrip-wrap">
+      <Popover
+        :open="openSeamId !== null"
+        placement="bottom-start"
+        label="Transition"
+        @update:open="(v: boolean) => (openSeamId = v ? openSeamId : null)"
+      >
+        <template #trigger>
+          <ClipRail
+            class="w-full"
+            :clips="draft.clips"
+            :active-id="draft.activeClipId"
+            :motion-tail="motionTail"
+            :max-stages="maxStages"
+            :open-seam-id="openSeamId"
+            :plans="editingPlans"
+            :fps="shared.fps"
+            :media-by-clip-id="stageMediaByClipId"
+            :playing-id="playingClipId"
+            :frame-options="frameOptions"
+            @select="draft.activeClipId = $event"
+            @add="draft.addClip(defaultFrames)"
+            @remove="draft.removeClip($event)"
+            @reorder="applyOrder"
+            @resize="resizeClip"
+            @seam-click="onSeamClick"
+            @play="onPlayClip"
+          >
+            <template #thumb="{ clip }">
+              <img
+                v-if="clip.sourceImage?.base64"
+                :src="`data:image/png;base64,${clip.sourceImage.base64}`"
+                alt=""
+                class="h-full w-full rounded object-cover"
+              />
+            </template>
+          </ClipRail>
+        </template>
+        <SeamEditor
+          v-if="openSeamClip"
+          :transition="openSeamClip.transition"
+          :fade-frames="openSeamClip.fadeFrames"
           :motion-tail="motionTail"
-          :max-stages="maxStages"
-          :open-seam-id="openSeamId"
-          :plans="editingPlans"
           :fps="shared.fps"
-          :media-by-clip-id="stageMediaByClipId"
-          :playing-id="playingClipId"
-          :frame-options="frameOptions"
-          @select="draft.activeClipId = $event"
-          @add="draft.addClip(defaultFrames)"
-          @remove="draft.removeClip($event)"
-          @reorder="applyOrder"
-          @resize="resizeClip"
-          @seam-click="onSeamClick"
-          @play="onPlayClip"
-        >
-          <template #thumb="{ clip }">
-            <img
-              v-if="clip.sourceImage?.base64"
-              :src="`data:image/png;base64,${clip.sourceImage.base64}`"
-              alt=""
-              class="h-full w-full rounded object-cover"
-            />
-          </template>
-        </ClipRail>
-      </template>
-      <SeamEditor
-        v-if="openSeamClip"
-        :transition="openSeamClip.transition"
-        :fade-frames="openSeamClip.fadeFrames"
-        :motion-tail="motionTail"
-        :fps="shared.fps"
-        :fade-frames-max="limits?.fade_frames_max ?? 32"
-        :from-label="openSeamIndex === 1 ? 'opening' : `clip ${openSeamIndex}`"
-        :to-label="`clip ${openSeamIndex + 1}`"
-        :show-apply-all-hint="true"
-        @update:transition="draft.setTransition(openSeamClip.id, $event)"
-        @update:fade-frames="
-          draft.setTransition(openSeamClip.id, openSeamClip.transition, $event)
-        "
-        @apply-all="draft.applyTransitionToAllSeams($event)"
-      />
-    </Popover>
+          :fade-frames-max="limits?.fade_frames_max ?? 32"
+          :from-label="
+            openSeamIndex === 1 ? 'opening' : `clip ${openSeamIndex}`
+          "
+          :to-label="`clip ${openSeamIndex + 1}`"
+          :show-apply-all-hint="true"
+          @update:transition="draft.setTransition(openSeamClip.id, $event)"
+          @update:fade-frames="
+            draft.setTransition(
+              openSeamClip.id,
+              openSeamClip.transition,
+              $event,
+            )
+          "
+          @apply-all="draft.applyTransitionToAllSeams($event)"
+        />
+      </Popover>
+    </div>
 
     <div v-if="activeClip" class="flex flex-col gap-2">
       <div class="flex items-baseline justify-between gap-2">
@@ -634,6 +642,19 @@ defineExpose({ importTomlText });
   transition:
     border-color var(--dur-quick) var(--ease),
     color var(--dur-quick) var(--ease);
+}
+
+.sq-filmstrip-wrap {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.sq-filmstrip-wrap :deep(.ms-popover),
+.sq-filmstrip-wrap :deep(.ms-popover__trigger) {
+  display: flex;
+  width: 100%;
+  min-width: 0;
 }
 .sq-tool:hover {
   border-color: var(--safelight);

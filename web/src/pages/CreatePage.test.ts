@@ -240,6 +240,19 @@ function enterSequenceMode() {
   return draft;
 }
 
+function installedSequenceModel() {
+  return {
+    name: "ltx-2-19b-distilled:fp8",
+    family: "ltx2",
+    downloaded: true,
+    supports_sequence: true,
+    default_width: 1216,
+    default_height: 704,
+    default_steps: 8,
+    default_guidance: 3,
+  };
+}
+
 describe("CreatePage layout and behavior", () => {
   beforeEach(async () => {
     // The routing singleton outlives a test's component; let any poll still in
@@ -674,7 +687,98 @@ describe("CreatePage layout and behavior", () => {
     expect(controls.props("clipCount")).toBe(2);
   });
 
+  it("selects a chain-capable model from the pinned host when Sequence is restored", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    const still = {
+      name: "flux-schnell:q8",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+    };
+    const video = {
+      name: "ltx-2.3-22b-distilled:fp8",
+      family: "ltx2",
+      downloaded: true,
+      supports_sequence: true,
+      default_width: 1216,
+      default_height: 704,
+      default_steps: 8,
+      default_guidance: 3,
+      default_frames: 97,
+    };
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === studio.id ? [still, video] : [still],
+    );
+    const form = useGenerateForm();
+    form.state.value.model = still.name;
+    form.state.value.modelFamily = still.family;
+    enterSequenceMode();
+
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(form.state.value.model).toBe(video.name);
+    expect(form.state.value.modelFamily).toBe("ltx2");
+  });
+
+  it("clears an image-only pinned-host model and renders the browse state without submitting", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    const still = {
+      name: "flux-schnell:q8",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+    };
+    const videoElsewhere = {
+      name: "ltx-video",
+      family: "ltx-video",
+      downloaded: true,
+      supports_sequence: true,
+      default_width: 1024,
+      default_height: 576,
+      default_steps: 25,
+      default_guidance: 3,
+    };
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === studio.id ? [still] : [videoElsewhere],
+    );
+    const form = useGenerateForm();
+    form.state.value.model = still.name;
+    form.state.value.modelFamily = still.family;
+    enterSequenceMode();
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(form.state.value.model).toBe("");
+    expect(
+      wrapper.get("[data-test='chain-unsupported']").attributes("data-empty"),
+    ).toBe("true");
+    expect(wrapper.get("[data-test='chain-unsupported']").text()).toContain(
+      "No chain-capable video model is installed on the selected machine",
+    );
+    expect(wrapper.find("[data-test='sequence-generate']").exists()).toBe(
+      false,
+    );
+    expect(createChainJobMock).not.toHaveBeenCalled();
+  });
+
   it("submits the sequence with the LIVE inspector values (stale-inspector regression)", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
@@ -727,6 +831,7 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("keeps a successfully submitted sequence when tracked-job persistence fails", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
@@ -1801,6 +1906,127 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  it("restores cached filmstrip previews after Create unmounts and remounts", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        downloaded: true,
+        supports_sequence: true,
+        default_width: 1216,
+        default_height: 704,
+        default_steps: 8,
+        default_guidance: 3,
+      },
+    ]);
+    const draft = enterSequenceMode();
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    draft.clips[0]!.prompt = "edited opening";
+    draft.clips[1]!.prompt = "edited ending";
+    draft.loadFromJob(
+      {
+        jobId: "job-remount",
+        hostId: ORIGIN_HOST_ID,
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 2,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+    const detail = {
+      id: "job-remount",
+      state: "completed",
+      model: "ltx-2-19b-distilled:fp8",
+      stage_count: 2,
+      current_stage: 2,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      error: null,
+      stages: [
+        {
+          idx: 0,
+          state: "completed",
+          seed: "1",
+          frames_emitted: 97,
+          generation_time_ms: 1,
+          has_preview: true,
+          has_media: false,
+          cache_ready: true,
+          error: null,
+        },
+        {
+          idx: 1,
+          state: "completed",
+          seed: "2",
+          frames_emitted: 97,
+          generation_time_ms: 1,
+          has_preview: false,
+          has_media: false,
+          cache_ready: true,
+          error: null,
+        },
+      ],
+      script: {
+        schema: "mold.chain.v1",
+        chain: { model: "ltx-2-19b-distilled:fp8", fps: 24 },
+        stages: [
+          { prompt: "server opening", frames: 97 },
+          { prompt: "server ending", frames: 97 },
+        ],
+      },
+    } satisfies ChainJobDetail;
+    const chains = useChainJobs();
+    chains.watch(ORIGIN_HOST_ID, detail.id);
+    chains.state.live.detail = detail;
+    // Earlier wrappers in this file share the chain-job singleton. Let their
+    // watchers settle before measuring the two mounts owned by this test.
+    const settleFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      blob: async () => new Blob(["settled"], { type: "image/jpeg" }),
+    } as Response);
+    await flushPromises();
+    settleFetch.mockRestore();
+    const fetchPreview = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      blob: async () => new Blob(["preview"], { type: "image/jpeg" }),
+    } as Response);
+    let urlIndex = 0;
+    const createUrl = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation(() => `blob:preview-${++urlIndex}`);
+    const revokeUrl = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+
+    const first = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const firstMedia = first
+      .getComponent({ name: "SequenceComposer" })
+      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
+    const firstPoster = firstMedia[draft.clips[0]!.id]?.posterUrl;
+    expect(firstPoster).toMatch(/^blob:preview-/);
+    first.unmount();
+    expect(revokeUrl).toHaveBeenCalledWith(firstPoster);
+
+    const second = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const secondMedia = second
+      .getComponent({ name: "SequenceComposer" })
+      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
+    const secondPoster = secondMedia[draft.clips[0]!.id]?.posterUrl;
+    const previewFetchCount = fetchPreview.mock.calls.filter(([url]) =>
+      String(url).includes("/stages/0/preview"),
+    ).length;
+    fetchPreview.mockRestore();
+    createUrl.mockRestore();
+    revokeUrl.mockRestore();
+    second.unmount();
+    expect(secondPoster).toMatch(/^blob:preview-/);
+    expect(secondPoster).not.toBe(firstPoster);
+    expect(previewFetchCount).toBe(2);
+  });
+
   it("keeps the Output control reachable on phones in sequence mode", async () => {
     vi.stubGlobal(
       "matchMedia",
@@ -1810,6 +2036,7 @@ describe("CreatePage layout and behavior", () => {
         removeEventListener: vi.fn(),
       })),
     );
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });

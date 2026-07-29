@@ -3,6 +3,8 @@ import viewSource from "./GenerateView.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import modelPickerSource from "../components/create/ModelPicker.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
+import sequenceComposerSource from "../components/create/SequenceComposer.vue?raw";
+import composerCardSource from "../components/create/ComposerCard.vue?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -18,18 +20,31 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-layout")).toContain("overflow-hidden");
     expect(classesFor(viewSource, "generate-workbench")).toContain("min-h-0");
     expect(classesFor(viewSource, "generate-workbench")).toContain("overflow-hidden");
-    expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
+    expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
   });
 
   it("keeps the canvas visible and makes the bottom bench resizable", () => {
     expect(tagFor(viewSource, "generate-workbench")).toContain('ref="workbenchRef"');
     expect(tagFor(viewSource, "create-bench-resizer")).toContain('role="separator"');
     expect(tagFor(viewSource, "create-bench-resizer")).toContain('@pointerdown="startBenchResize"');
-    expect(tagFor(viewSource, "create-bottom-panel")).toContain(
-      ':style="{ height: `${benchHeight}px` }"',
-    );
+    expect(tagFor(viewSource, "create-bottom-panel")).toContain("height: `${benchHeight}px`");
+    expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerType: 'size'");
+    expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerName: 'create-bench'");
     expect(viewSource).toContain("min-h-[144px]");
     expect(viewSource).not.toContain('class="absolute inset-0 h-full w-full object-cover"');
+  });
+
+  it("fills the bottom panel and pins composer actions to its bottom edge", () => {
+    expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex");
+    expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex-col");
+    expect(classesFor(viewSource, "generate-sequence-composer")).toContain("flex-1");
+    expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__footer\s*\{[^}]*margin-top:\s*auto/s);
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__clip\s*\{[^}]*flex:\s*1/s);
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__prompt--main\s*\{[^}]*flex:\s*1/s);
+    expect(composerCardSource).toMatch(/\.ms-composer__actions\s*\{[^}]*margin-top:\s*auto/s);
+    expect(composerCardSource).toMatch(/\.ms-composer__bench\s*\{[^}]*flex:\s*1/s);
+    expect(sequenceComposerSource).toContain('data-test="sequence-composer-footer"');
   });
 
   it("keeps full model names visible in the shared model picker", () => {

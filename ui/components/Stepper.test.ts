@@ -10,8 +10,8 @@ function make(modelValue = 2, extra: Record<string, unknown> = {}) {
 
 function buttons(wrapper: ReturnType<typeof make>) {
   return {
-    dec: wrapper.find("[aria-label=Decrease]"),
-    inc: wrapper.find("[aria-label=Increase]"),
+    dec: wrapper.find('[aria-label="Decrease Batch"]'),
+    inc: wrapper.find('[aria-label="Increase Batch"]'),
   };
 }
 
@@ -23,11 +23,31 @@ describe("Stepper", () => {
     expect(spin.attributes("aria-valuemin")).toBe("1");
     expect(spin.attributes("aria-valuemax")).toBe("4");
     expect(spin.attributes("aria-label")).toBe("Batch");
+    expect(spin.attributes("aria-valuetext")).toBe("2");
     expect(spin.attributes("tabindex")).toBe("0");
   });
 
   it("renders the current value", () => {
     expect(make(3).find(".ms-stepper__value").text()).toBe("3");
+  });
+
+  it("exposes a formatted value without splitting its unit from the number", () => {
+    const wrapper = make(24, {
+      min: 1,
+      max: 60,
+      label: "Frames per second",
+      format: (value: number) => `${value} fps`,
+    });
+    expect(wrapper.find(".ms-stepper__value").text()).toBe("24 fps");
+    expect(wrapper.find("[role=spinbutton]").attributes("aria-valuetext")).toBe(
+      "24 fps",
+    );
+    expect(
+      wrapper.find('[aria-label="Decrease Frames per second"]').exists(),
+    ).toBe(true);
+    expect(
+      wrapper.find('[aria-label="Increase Frames per second"]').exists(),
+    ).toBe(true);
   });
 
   it("increments and decrements on button clicks", async () => {

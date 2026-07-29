@@ -598,7 +598,13 @@ const sequenceStageClipIds = ref<string[]>([]);
 const sequenceStageClipIdsByJob = new Map<string, string[]>();
 const playingSequenceStage = ref<number | null>(null);
 let sequencePreviewKey = "";
+let sequencePreviewEpoch = 0;
+const pendingSequencePreviews = new Set<string>();
+const pendingSequenceMedia = new Set<string>();
 function clearSequencePreviews() {
+  sequencePreviewEpoch += 1;
+  pendingSequencePreviews.clear();
+  pendingSequenceMedia.clear();
   for (const url of Object.values(sequencePreviews.value)) {
     URL.revokeObjectURL(url);
   }
@@ -606,6 +612,7 @@ function clearSequencePreviews() {
   sequenceMediaUrls.value = {};
   sequenceStageClipIds.value = [];
   playingSequenceStage.value = null;
+  sequencePreviewKey = "";
 }
 watch(
   () => {
@@ -634,6 +641,11 @@ watch(
       sequencePreviewKey = nextKey;
       const script = normalizeServerChainScript(d.script);
       const boundIds = sequenceStageClipIdsByJob.get(nextKey);
+      const editing = draft.editing;
+      const editingMatches =
+        editing?.hostId === watched.hostId &&
+        editing.jobId === d.id &&
+        draft.clips.length === d.stages.length;
       const matchesDraft =
         script?.stages.length === draft.clips.length &&
         script.stages.every(
@@ -642,9 +654,11 @@ watch(
       sequenceStageClipIds.value =
         boundIds?.length === d.stages.length
           ? [...boundIds]
-          : matchesDraft
+          : editingMatches
             ? draft.clips.map((clip) => clip.id)
-            : [];
+            : matchesDraft
+              ? draft.clips.map((clip) => clip.id)
+              : [];
     }
     const stagesByIdx = new Map(d.stages.map((stage) => [stage.idx, stage]));
     for (const [rawIdx, url] of Object.entries(sequencePreviews.value)) {
@@ -667,8 +681,15 @@ watch(
       }
     }
     const target = hostTargetFor(watched.hostId);
+    const requestEpoch = sequencePreviewEpoch;
     for (const stage of d.stages) {
-      if (stage.has_preview && !sequencePreviews.value[stage.idx]) {
+      const pendingKey = `${requestEpoch}:${nextKey}:${stage.idx}`;
+      if (
+        stage.has_preview &&
+        !sequencePreviews.value[stage.idx] &&
+        !pendingSequencePreviews.has(pendingKey)
+      ) {
+        pendingSequencePreviews.add(pendingKey);
         const headers = target?.apiKey
           ? { "x-api-key": target.apiKey }
           : undefined;
@@ -679,25 +700,58 @@ watch(
             if (!response.ok)
               throw new Error(`Preview failed: ${response.status}`);
             const url = URL.createObjectURL(await response.blob());
+            const currentStage = chainJobs.state.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequencePreviewEpoch ||
+              sequencePreviewKey !== nextKey ||
+              chainJobs.state.watching?.hostId !== watched.hostId ||
+              chainJobs.state.live.detail?.id !== d.id ||
+              !currentStage?.has_preview
+            ) {
+              URL.revokeObjectURL(url);
+              return;
+            }
             sequencePreviews.value = {
               ...sequencePreviews.value,
               [stage.idx]: url,
             };
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => pendingSequencePreviews.delete(pendingKey));
       }
-      if (stage.has_media && !sequenceMediaUrls.value[stage.idx]) {
+      if (
+        stage.has_media &&
+        !sequenceMediaUrls.value[stage.idx] &&
+        !pendingSequenceMedia.has(pendingKey)
+      ) {
+        pendingSequenceMedia.add(pendingKey);
         void sequenceStageMediaUrl(d.id, stage.idx, target)
           .then((url) => {
+            const currentStage = chainJobs.state.live.detail?.stages.find(
+              (candidate) => candidate.idx === stage.idx,
+            );
+            if (
+              requestEpoch !== sequencePreviewEpoch ||
+              sequencePreviewKey !== nextKey ||
+              chainJobs.state.watching?.hostId !== watched.hostId ||
+              chainJobs.state.live.detail?.id !== d.id ||
+              !currentStage?.has_media
+            ) {
+              return;
+            }
             sequenceMediaUrls.value = {
               ...sequenceMediaUrls.value,
               [stage.idx]: url,
             };
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => pendingSequenceMedia.delete(pendingKey));
       }
     }
   },
+  { immediate: true },
 );
 const sequencePreviewSrc = computed(() => {
   const best = Object.entries(sequencePreviews.value)
@@ -917,6 +971,12 @@ const installedModels = computed(() =>
 const sequenceModels = computed(() =>
   modelsForOutput(installedModels.value, "sequence"),
 );
+const showSequenceEmpty = computed(
+  () =>
+    sequenceMode.value &&
+    modelsLoaded.value &&
+    sequenceModels.value.length === 0,
+);
 const composerModels = computed(() =>
   modelsForOutput(installedModels.value, draft.output),
 );
@@ -959,11 +1019,23 @@ watch(
 watch(
   [sequenceMode, sequenceModels, modelsLoaded],
   () => {
-    if (!sequenceMode.value || !modelsLoaded.value) return;
+    if (!sequenceMode.value) return;
     const current = form.state.value.model;
     if (sequenceModels.value.some((model) => model.name === current)) return;
+    if (!modelsLoaded.value) {
+      if (currentModel.value && !modelSupportsSequence(currentModel.value)) {
+        form.state.value.model = "";
+        form.state.value.modelFamily = "";
+      }
+      return;
+    }
     const first = sequenceModels.value[0];
-    if (first) form.applyModelDefaults(first);
+    if (first) {
+      form.applyModelDefaults(first);
+    } else {
+      form.state.value.model = "";
+      form.state.value.modelFamily = "";
+    }
   },
   { immediate: true },
 );
@@ -1029,6 +1101,14 @@ function applySharedToForm(shared: Partial<SequenceSharedParams>) {
 
 async function onSubmitSequence() {
   composerError.value = null;
+  if (
+    !sequenceMode.value ||
+    !sequenceModels.value.some((model) => model.name === form.state.value.model)
+  ) {
+    composerError.value =
+      "Choose an installed sequence-capable video model on the selected machine.";
+    return;
+  }
   const initialRoute = routing.resolve(form.state.value.model || null);
   if (!initialRoute) {
     composerError.value = "The selected sequence host is unavailable.";
@@ -2353,9 +2433,10 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-          v-if="sequenceMode && !supportsChain"
+          v-if="sequenceMode && (!supportsChain || showSequenceEmpty)"
           class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
           data-test="chain-unsupported"
+          :data-empty="showSequenceEmpty ? 'true' : 'false'"
         >
           <div class="flex items-start gap-3">
             <span
@@ -2368,9 +2449,16 @@ onBeforeUnmount(() => {
                 sequences need a video model
               </p>
               <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-3">
-                <span class="text-ink-2">{{ currentModelLabel }}</span>
-                renders single prints only. pick an ltx-video or ltx-2 model to
-                chain clips into a sequence.
+                <template v-if="showSequenceEmpty">
+                  No chain-capable video model is installed on the selected
+                  machine. Pull an LTX Video or distilled LTX-2 checkpoint to
+                  continue.
+                </template>
+                <template v-else>
+                  <span class="text-ink-2">{{ currentModelLabel }}</span>
+                  renders single prints only. pick an ltx-video or ltx-2 model
+                  to chain clips into a sequence.
+                </template>
               </p>
               <div class="mt-3 flex flex-wrap gap-2">
                 <button

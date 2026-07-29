@@ -111,7 +111,13 @@ const pickerModels = computed<ModelEntry[]>(() => {
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
 const draft = useSequenceDraftStore();
 const isSequence = computed(() => draft.output === "sequence");
-const sequenceCapableModels = computed(() => modelsForOutput(installedModels.value, "sequence"));
+const sequenceCapableModels = computed(() =>
+  stickyTarget.value &&
+  stickyTarget.value !== "capable" &&
+  (hostModels.byHost[stickyTarget.value]?.fetchedAt ?? 0) === 0
+    ? []
+    : modelsForOutput(pickerModels.value, "sequence"),
+);
 const defaultFrames = computed(() =>
   defaultClipFrames(
     selectedModel.value,
@@ -131,6 +137,10 @@ function setOutputMode(mode: string | number) {
       draft.lastSingleModel = props.form.model || null;
       const pick = sequenceCapableModels.value[0];
       if (pick) formStore.applyModel(pick);
+      else {
+        props.form.model = "";
+        props.form.family = "";
+      }
     }
   } else if (draft.lastSingleModel) {
     const restored = findInstalledModel(installedModels.value, draft.lastSingleModel);

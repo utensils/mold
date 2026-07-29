@@ -119,7 +119,7 @@ const statusLabel = computed(() => {
     :data-playing="playing ? 'true' : undefined"
     :data-status="media?.status ?? undefined"
     :data-plan="plan ?? undefined"
-    :style="{ width: `${clipWidth}px` }"
+    :style="{ '--clip-width': `${clipWidth}px` }"
   >
     <button
       type="button"
@@ -232,7 +232,7 @@ const statusLabel = computed(() => {
   position: relative;
   display: block;
   flex: 0 0 auto;
-  width: 196px;
+  width: min(var(--clip-width), var(--filmstrip-tile-max, 196px));
 }
 
 .ms-clip__resize {
@@ -275,6 +275,7 @@ const statusLabel = computed(() => {
 .ms-clip__body {
   display: grid;
   width: 100%;
+  height: var(--filmstrip-scene-height, 140px);
   padding: 0;
   overflow: hidden;
   text-align: left;
@@ -313,7 +314,7 @@ const statusLabel = computed(() => {
   position: relative;
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: var(--filmstrip-thumb-height, 104px);
   background: linear-gradient(
     145deg,
     color-mix(in srgb, var(--halide) 14%, #101113),
@@ -406,7 +407,7 @@ const statusLabel = computed(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 36px;
+  min-height: var(--filmstrip-footer-height, 36px);
   padding: 8px 9px;
 }
 

@@ -396,7 +396,7 @@ async function copyToml() {
         data-test="clip-prompt"
         data-selectable
         rows="3"
-        class="ms-seqbench__prompt"
+        class="ms-seqbench__prompt ms-seqbench__prompt--main"
         :placeholder="
           activeIndex === 0 ? 'Describe the opening clip…' : 'Describe what happens next…'
         "
@@ -458,7 +458,7 @@ async function copyToml() {
     </div>
 
     <!-- Footer: file tools · audio · validation/fit · primary action -->
-    <div class="ms-seqbench__footer">
+    <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
       <input
         ref="tomlInput"
         type="file"
@@ -605,6 +605,8 @@ async function copyToml() {
 .ms-seqbench__clip {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 112px;
   gap: 6px;
 }
 .ms-seqbench__cliphead {
@@ -661,6 +663,10 @@ async function copyToml() {
   outline: none;
   border-color: var(--safelight);
 }
+.ms-seqbench__prompt--main {
+  flex: 1;
+  min-height: 64px;
+}
 .ms-seqbench__prompt--negative {
   font-size: 12px;
 }
@@ -690,6 +696,8 @@ async function copyToml() {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-top: auto;
+  padding-top: 2px;
 }
 .ms-seqbench__menu {
   display: flex;

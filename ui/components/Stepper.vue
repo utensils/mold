@@ -24,6 +24,15 @@ const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const atMin = computed(() => props.modelValue <= props.min);
 const atMax = computed(() => props.modelValue >= props.max);
+const valueText = computed(() =>
+  props.format ? props.format(props.modelValue) : String(props.modelValue),
+);
+const decreaseLabel = computed(() =>
+  props.label ? `Decrease ${props.label}` : "Decrease",
+);
+const increaseLabel = computed(() =>
+  props.label ? `Increase ${props.label}` : "Increase",
+);
 
 function set(next: number) {
   const clamped = Math.min(props.max, Math.max(props.min, next));
@@ -57,6 +66,7 @@ function onKeydown(event: KeyboardEvent) {
     :aria-valuenow="modelValue"
     :aria-valuemin="min"
     :aria-valuemax="max"
+    :aria-valuetext="valueText"
     :aria-label="label"
     @keydown="onKeydown"
   >
@@ -64,20 +74,18 @@ function onKeydown(event: KeyboardEvent) {
       type="button"
       class="ms-stepper__btn"
       tabindex="-1"
-      aria-label="Decrease"
+      :aria-label="decreaseLabel"
       :aria-disabled="atMin || undefined"
       @click="decrement"
     >
       −
     </button>
-    <span class="ms-stepper__value" aria-hidden="true">{{
-      format ? format(modelValue) : modelValue
-    }}</span>
+    <span class="ms-stepper__value" aria-hidden="true">{{ valueText }}</span>
     <button
       type="button"
       class="ms-stepper__btn"
       tabindex="-1"
-      aria-label="Increase"
+      :aria-label="increaseLabel"
       :aria-disabled="atMax || undefined"
       @click="increment"
     >
@@ -90,11 +98,13 @@ function onKeydown(event: KeyboardEvent) {
 .ms-stepper {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
+  min-height: 38px;
   padding: 2px;
   background: var(--bath);
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
+  box-shadow: inset 0 1px color-mix(in srgb, var(--rebate) 4%, transparent);
 }
 
 .ms-stepper:focus-visible {
@@ -103,8 +113,8 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-stepper__btn {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border: 0;
   background: transparent;
   color: var(--ink-2);
@@ -113,11 +123,18 @@ function onKeydown(event: KeyboardEvent) {
   line-height: 1;
   border-radius: var(--radius-control-sm);
   cursor: pointer;
-  transition: color var(--dur-quick) var(--ease);
+  transition:
+    color var(--dur-quick) var(--ease),
+    background var(--dur-quick) var(--ease);
 }
 
 .ms-stepper__btn:hover:not([aria-disabled="true"]) {
   color: var(--rebate);
+  background: color-mix(in srgb, var(--rebate) 7%, transparent);
+}
+
+.ms-stepper__btn:active:not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--rebate) 12%, transparent);
 }
 
 .ms-stepper__btn[aria-disabled="true"] {
@@ -131,9 +148,13 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-stepper__value {
-  width: 26px;
+  min-width: 52px;
+  padding: 0 4px;
   text-align: center;
   font-family: var(--f-mono);
   font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
 }
 </style>
