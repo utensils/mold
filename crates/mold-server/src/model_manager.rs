@@ -47,6 +47,99 @@ pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
         .is_some_and(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExistingModelResolution {
+    pub paths: ModelPaths,
+    /// Runtime-only catalog entry needed to make an opaque `cv:` / `hf:`
+    /// model resolvable. Built-in and explicitly configured models leave this
+    /// absent. Callers carry the overlay with prepared work instead of
+    /// mutating `AppState.config`.
+    pub model_config_overlay: Option<mold_core::ModelConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExistingModelAuthority {
+    pub paths: ModelPaths,
+    pub config: Config,
+}
+
+/// Resolve concrete model paths using only the supplied config and installed
+/// local sidecars.
+///
+/// This is the common authority for placement preview, admission planning,
+/// and worker fallback. It never reloads configuration, consults the live
+/// catalog, mutates intent/config caches, registers downloads, or writes a
+/// sidecar.
+pub(crate) fn resolve_existing_model_paths(
+    model_name: &str,
+    config: &Config,
+) -> Result<Option<ExistingModelResolution>, ApiError> {
+    if !looks_like_catalog_id(model_name) {
+        return Ok(
+            ModelPaths::resolve(model_name, config).map(|paths| ExistingModelResolution {
+                paths,
+                model_config_overlay: None,
+            }),
+        );
+    }
+
+    if let Some(model_config) = config.models.get(model_name).cloned() {
+        if let Some(paths) = ModelPaths::resolve(model_name, config) {
+            return Ok(Some(ExistingModelResolution {
+                paths,
+                model_config_overlay: Some(model_config),
+            }));
+        }
+    }
+
+    let Some(intent) = installed_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+    else {
+        return Ok(None);
+    };
+    let model_config = resolve_intent_to_paths(model_name, &intent, config)
+        .map_err(|error| resolve_error_to_api_error(&error))?;
+    let mut effective = config.clone();
+    effective
+        .models
+        .insert(model_name.to_string(), model_config.clone());
+    let paths = ModelPaths::resolve(model_name, &effective).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "catalog model '{model_name}' resolved to a config that ModelPaths \
+             could not turn into runtime paths — internal mismatch, please file an issue."
+        ))
+    })?;
+
+    Ok(Some(ExistingModelResolution {
+        paths,
+        model_config_overlay: Some(model_config),
+    }))
+}
+
+/// Resolve one immutable, local-only config snapshot for work that must keep
+/// an opaque catalog model stable beyond request admission.
+///
+/// The returned config owns the catalog overlay instead of mutating
+/// `AppState.config`, so inventory refreshes cannot erase or replace the
+/// authority carried by durable work.
+pub(crate) fn resolve_existing_model_authority(
+    model_name: &str,
+    config: &Config,
+) -> Result<Option<ExistingModelAuthority>, ApiError> {
+    let Some(resolved) = resolve_existing_model_paths(model_name, config)? else {
+        return Ok(None);
+    };
+    let mut effective = config.clone();
+    if let Some(model_config) = resolved.model_config_overlay {
+        effective
+            .models
+            .insert(model_name.to_string(), model_config);
+    }
+    Ok(Some(ExistingModelAuthority {
+        paths: resolved.paths,
+        config: effective,
+    }))
+}
+
 pub(crate) fn resolve_installed_catalog_paths_for_worker(
     model_name: &str,
     config: &Config,
@@ -54,25 +147,10 @@ pub(crate) fn resolve_installed_catalog_paths_for_worker(
     if !looks_like_catalog_id(model_name) {
         return Ok(None);
     }
-
-    let Some(intent) = installed_intent_from_sidecar(&config.resolved_models_dir(), model_name)
-    else {
+    let Some(authority) = resolve_existing_model_authority(model_name, config)? else {
         return Ok(None);
     };
-    let model_cfg = resolve_intent_to_paths(model_name, &intent, config)
-        .map_err(|e| resolve_error_to_api_error(&e))?;
-    let mut resolved_config = config.clone();
-    resolved_config
-        .models
-        .insert(model_name.to_string(), model_cfg);
-    let paths = ModelPaths::resolve(model_name, &resolved_config).ok_or_else(|| {
-        ApiError::not_found(format!(
-            "catalog model '{model_name}' resolved to a config that ModelPaths \
-             could not turn into runtime paths — internal mismatch, please file an issue."
-        ))
-    })?;
-
-    Ok(Some((paths, resolved_config)))
+    Ok(Some((authority.paths, authority.config)))
 }
 
 pub(crate) type DownloadProgressCallback =
@@ -764,6 +842,171 @@ pub(crate) async fn model_component_status(
     })
 }
 
+/// Strictly local component inspection for read-only placement previews.
+///
+/// Unlike [`model_component_status`], this never reloads configuration,
+/// installs a catalog model, consults live catalog state, mutates intent
+/// caches, or writes sidecars. Installed catalog IDs are resolved from
+/// safe-contained local sidecars without warming the in-memory configuration.
+pub(crate) async fn model_component_status_existing_only(
+    state: &AppState,
+    model_name: &str,
+) -> Result<ModelComponentsResponse, ApiError> {
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    let config = state.config.read().await;
+    if mold_core::manifest::find_manifest(&resolved).is_some() {
+        let components = manifest_paths_with_config_overrides(&config, &resolved)
+            .map(|paths| component_status_from_paths(&config, &resolved, &paths))
+            .unwrap_or_else(|| manifest_component_status(&config, &resolved, &resolved));
+        return Ok(ModelComponentsResponse {
+            model: resolved,
+            components,
+        });
+    }
+
+    if looks_like_catalog_id(model_name) {
+        if let Ok(Some(resolution)) = resolve_existing_model_paths(model_name, &config) {
+            let overlaid = resolution
+                .model_config_overlay
+                .as_ref()
+                .map(|model_config| {
+                    let mut effective = config.clone();
+                    effective
+                        .models
+                        .insert(model_name.to_string(), model_config.clone());
+                    effective
+                });
+            let effective = overlaid.as_ref().unwrap_or(&config);
+            return Ok(ModelComponentsResponse {
+                model: model_name.to_string(),
+                components: component_status_from_paths(effective, model_name, &resolution.paths),
+            });
+        }
+        return Ok(ModelComponentsResponse {
+            model: model_name.to_string(),
+            components: catalog_sidecar_component_status(&config, model_name),
+        });
+    }
+
+    let Some(paths) = ModelPaths::resolve(model_name, &config) else {
+        return Err(ApiError::not_found(format!(
+            "unknown model '{model_name}'. Run 'mold list' to see available models."
+        )));
+    };
+    Ok(ModelComponentsResponse {
+        model: model_name.to_string(),
+        components: component_status_from_paths(&config, model_name, &paths),
+    })
+}
+
+fn catalog_sidecar_component_status(
+    config: &Config,
+    model_name: &str,
+) -> Vec<ModelComponentStatus> {
+    let models_dir = config.resolved_models_dir();
+    let sidecar = mold_catalog::sidecar::walk_sidecars(&models_dir)
+        .into_iter()
+        .find(|(_, sidecar)| sidecar.id == model_name);
+    let Some((sidecar_dir, sidecar)) = sidecar else {
+        return vec![ModelComponentStatus {
+            kind: "transformer".to_string(),
+            name: "primary checkpoint".to_string(),
+            present: false,
+            path: None,
+            repair_model: Some(model_name.to_string()),
+            options: component_options_for_kind(config, "transformer", None),
+        }];
+    };
+
+    let primary = mold_catalog::sidecar::primary_path(&sidecar_dir, &sidecar);
+    let primary_present =
+        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_some();
+    let mut components = vec![ModelComponentStatus {
+        kind: "transformer".to_string(),
+        name: "primary checkpoint".to_string(),
+        present: primary_present,
+        path: primary
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        repair_model: Some(model_name.to_string()),
+        options: component_options_for_kind(config, "transformer", primary.as_deref()),
+    }];
+
+    let Ok(family) = mold_catalog::families::Family::from_str(&sidecar.family) else {
+        return components;
+    };
+    for companion in mold_catalog::companions::companions_for(
+        family,
+        sidecar.sub_family.as_deref(),
+        mold_catalog::entry::Bundling::SingleFile,
+        mold_catalog::entry::Kind::Checkpoint,
+    ) {
+        if let Some(paths) = manifest_paths_with_config_overrides(config, &companion) {
+            components.extend(component_status_from_paths(config, model_name, &paths));
+        } else {
+            components.extend(manifest_component_status(config, &companion, model_name));
+        }
+    }
+    components
+}
+
+fn manifest_paths_with_config_overrides(config: &Config, model_name: &str) -> Option<ModelPaths> {
+    let mut effective = config.resolved_model_config(model_name);
+    if let Some(configured) = config.lookup_model_config(model_name) {
+        macro_rules! apply_configured_path {
+            ($field:ident) => {
+                if configured.$field.is_some() {
+                    effective.$field = configured.$field;
+                }
+            };
+        }
+        apply_configured_path!(transformer);
+        apply_configured_path!(transformer_shards);
+        apply_configured_path!(vae);
+        apply_configured_path!(spatial_upscaler);
+        apply_configured_path!(temporal_upscaler);
+        apply_configured_path!(distilled_lora);
+        apply_configured_path!(t5_encoder);
+        apply_configured_path!(clip_encoder);
+        apply_configured_path!(t5_tokenizer);
+        apply_configured_path!(clip_tokenizer);
+        apply_configured_path!(clip_encoder_2);
+        apply_configured_path!(clip_tokenizer_2);
+        apply_configured_path!(text_encoder_files);
+        apply_configured_path!(text_tokenizer);
+        apply_configured_path!(decoder);
+    }
+    ModelPaths::resolve_from_model_config_exact(&effective)
+        .or_else(|| ModelPaths::resolve(model_name, config))
+}
+
+fn manifest_component_status(
+    config: &Config,
+    manifest_name: &str,
+    repair_model: &str,
+) -> Vec<ModelComponentStatus> {
+    let Some(manifest) = mold_core::manifest::find_manifest(manifest_name) else {
+        return Vec::new();
+    };
+    let models_dir = config.resolved_models_dir();
+    manifest
+        .files
+        .iter()
+        .map(|file| {
+            let kind = manifest_component_kind(file.component);
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            ModelComponentStatus {
+                kind: kind.to_string(),
+                name: manifest_component_name(file.component, &file.hf_filename).to_string(),
+                present: path.is_file(),
+                path: Some(path.to_string_lossy().to_string()),
+                repair_model: Some(repair_model.to_string()),
+                options: component_options_for_kind(config, kind, Some(&path)),
+            }
+        })
+        .collect()
+}
+
 fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'static str {
     use mold_core::manifest::ModelComponent;
     match component {
@@ -838,14 +1081,26 @@ fn component_status_from_paths(
     if let Some(path) = &paths.t5_encoder {
         push_path("text_encoder", "t5 encoder", path);
     }
+    if let Some(path) = &paths.t5_tokenizer {
+        push_path("tokenizer", "t5 tokenizer", path);
+    }
     if let Some(path) = &paths.clip_encoder {
         push_path("clip", "clip encoder", path);
+    }
+    if let Some(path) = &paths.clip_tokenizer {
+        push_path("tokenizer", "clip tokenizer", path);
     }
     if let Some(path) = &paths.clip_encoder_2 {
         push_path("clip", "clip-g encoder", path);
     }
+    if let Some(path) = &paths.clip_tokenizer_2 {
+        push_path("tokenizer", "clip-g tokenizer", path);
+    }
     for path in &paths.text_encoder_files {
         push_path("text_encoder", "text encoder", path);
+    }
+    if let Some(path) = &paths.text_tokenizer {
+        push_path("tokenizer", "text tokenizer", path);
     }
     if let Some(path) = &paths.decoder {
         push_path("decoder", "decoder", path);
@@ -1393,6 +1648,354 @@ mod tests {
     use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    #[tokio::test]
+    async fn existing_only_component_status_never_installs_unseen_catalog_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let models_dir = root.path().join("models-that-do-not-exist");
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = models_dir.display().to_string();
+        let config_before = format!("{:?}", *state.config.read().await);
+
+        for model in ["cv:999999999", "hf:owner/repo"] {
+            let status = model_component_status_existing_only(&state, model)
+                .await
+                .expect("uninstalled catalog diagnostics must remain local");
+            assert_eq!(status.components.len(), 1);
+            assert_eq!(status.components[0].name, "primary checkpoint");
+            assert!(!status.components[0].present);
+            assert_eq!(status.components[0].repair_model.as_deref(), Some(model));
+        }
+
+        assert!(state.catalog_intents.read().await.is_empty());
+        assert_eq!(format!("{:?}", *state.config.read().await), config_before);
+        assert!(
+            !models_dir.exists(),
+            "inspection must not create a sidecar or model root"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_only_component_status_reads_pre_resolved_catalog_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("model.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "cv:123".to_string(),
+            mold_core::config::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("flux".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let status = model_component_status_existing_only(&state, "cv:123")
+            .await
+            .unwrap();
+
+        assert_eq!(status.model, "cv:123");
+        assert!(status.components.iter().all(|component| component.present));
+        assert!(state.catalog_intents.read().await.is_empty());
+    }
+
+    fn catalog_sidecar(
+        models_dir: &Path,
+        install_dir_name: &str,
+        id: &str,
+        primary_rel: &str,
+        write_primary: bool,
+    ) -> PathBuf {
+        let install_dir = models_dir.join(install_dir_name);
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        if write_primary {
+            std::fs::write(&primary, b"catalog-primary").unwrap();
+        }
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: id.to_string(),
+                source: if id.starts_with("cv:") {
+                    "civitai".to_string()
+                } else {
+                    "huggingface".to_string()
+                },
+                source_id: id.to_string(),
+                name: "Catalog fixture".to_string(),
+                author: None,
+                family: "flux2".to_string(),
+                family_role: "finetune".to_string(),
+                sub_family: Some("klein-9b".to_string()),
+                kind: "checkpoint".to_string(),
+                modality: "image".to_string(),
+                nsfw: None,
+                description: None,
+                tags: Vec::new(),
+                license: None,
+                page_url: None,
+                thumbnail_url: None,
+                size_bytes: write_primary.then_some(b"catalog-primary".len() as u64),
+                supported: true,
+                trained_words: Vec::new(),
+                primary_filename_rel: primary_rel.to_string(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+        primary
+    }
+
+    fn flux2_catalog_config(models_dir: &Path) -> Config {
+        let text_encoder = models_dir.join("companions/qwen3.safetensors");
+        let tokenizer = models_dir.join("companions/tokenizer.json");
+        let vae = models_dir.join("companions/vae.safetensors");
+        std::fs::create_dir_all(text_encoder.parent().unwrap()).unwrap();
+        for path in [&text_encoder, &tokenizer, &vae] {
+            std::fs::write(path, b"companion").unwrap();
+        }
+        let mut config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "flux2-te-9b".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(text_encoder.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![text_encoder.display().to_string()]),
+                text_tokenizer: Some(tokenizer.display().to_string()),
+                family: Some("flux2".to_string()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "flux2-vae".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(vae.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("flux2".to_string()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    fn filesystem_snapshot(root: &Path) -> Vec<(PathBuf, u64)> {
+        fn visit(root: &Path, current: &Path, entries: &mut Vec<(PathBuf, u64)>) {
+            let mut children = std::fs::read_dir(current)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            children.sort_by_key(|entry| entry.path());
+            for child in children {
+                let path = child.path();
+                let metadata = child.metadata().unwrap();
+                entries.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    metadata.len(),
+                ));
+                if metadata.is_dir() {
+                    visit(root, &path, entries);
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        visit(root, root, &mut entries);
+        entries
+    }
+
+    #[tokio::test]
+    async fn existing_only_catalog_resolution_is_cold_local_and_carries_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let config = flux2_catalog_config(root.path());
+        for (dir, id) in [
+            ("cv-2937936", "cv:2937936"),
+            ("hf-owner-model", "hf:owner/model"),
+        ] {
+            let primary = catalog_sidecar(
+                root.path(),
+                dir,
+                id,
+                "flux2/catalog/model.safetensors",
+                true,
+            );
+            let filesystem_before = filesystem_snapshot(root.path());
+            let resolution = resolve_existing_model_paths(id, &config)
+                .unwrap()
+                .expect("installed sidecar must resolve without warming config");
+            assert_eq!(resolution.paths.transformer, primary);
+            assert_eq!(
+                resolution
+                    .model_config_overlay
+                    .as_ref()
+                    .and_then(|model| model.family.as_deref()),
+                Some("flux2")
+            );
+            assert!(
+                !config.models.contains_key(id),
+                "strictly local resolution must not warm the source config"
+            );
+
+            let state = AppState::for_tests();
+            *state.config.write().await = config.clone();
+            let before = format!("{:?}", *state.config.read().await);
+            let status = model_component_status_existing_only(&state, id)
+                .await
+                .unwrap();
+            assert!(status.components.iter().all(|component| component.present));
+            assert_eq!(format!("{:?}", *state.config.read().await), before);
+            assert!(state.catalog_intents.read().await.is_empty());
+            assert_eq!(filesystem_snapshot(root.path()), filesystem_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_only_catalog_diagnostics_name_missing_or_unsafe_primary() {
+        let root = tempfile::tempdir().unwrap();
+        let config = flux2_catalog_config(root.path());
+        for (dir, id, primary_rel) in [
+            (
+                "cv-missing",
+                "cv:missing",
+                "flux2/catalog/missing.safetensors",
+            ),
+            ("cv-traversal", "cv:traversal", "../escape.safetensors"),
+        ] {
+            catalog_sidecar(root.path(), dir, id, primary_rel, false);
+            let state = AppState::for_tests();
+            *state.config.write().await = config.clone();
+            let before = format!("{:?}", *state.config.read().await);
+
+            assert!(resolve_existing_model_paths(id, &config).unwrap().is_none());
+            let status = model_component_status_existing_only(&state, id)
+                .await
+                .unwrap();
+            let primary = status
+                .components
+                .iter()
+                .find(|component| component.name == "primary checkpoint")
+                .unwrap();
+            assert!(!primary.present);
+            if id == "cv:traversal" {
+                assert!(primary.path.is_none());
+            }
+            assert_eq!(primary.repair_model.as_deref(), Some(id));
+            assert_eq!(format!("{:?}", *state.config.read().await), before);
+            assert!(state.catalog_intents.read().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_only_catalog_diagnostics_fail_closed_on_malformed_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let config = flux2_catalog_config(root.path());
+        let install_dir = root.path().join("malformed");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(
+            install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            b"{not-json",
+        )
+        .unwrap();
+        let filesystem_before = filesystem_snapshot(root.path());
+        let state = AppState::for_tests();
+        *state.config.write().await = config.clone();
+        let config_before = format!("{:?}", *state.config.read().await);
+
+        assert!(resolve_existing_model_paths("cv:malformed", &config)
+            .unwrap()
+            .is_none());
+        let status = model_component_status_existing_only(&state, "cv:malformed")
+            .await
+            .unwrap();
+
+        assert_eq!(status.components.len(), 1);
+        assert!(!status.components[0].present);
+        assert!(status.components[0].path.is_none());
+        assert_eq!(
+            status.components[0].repair_model.as_deref(),
+            Some("cv:malformed")
+        );
+        assert_eq!(format!("{:?}", *state.config.read().await), config_before);
+        assert!(state.catalog_intents.read().await.is_empty());
+        assert_eq!(filesystem_snapshot(root.path()), filesystem_before);
+    }
+
+    #[tokio::test]
+    async fn existing_only_catalog_diagnostics_name_missing_companions() {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            models_dir: root.path().display().to_string(),
+            ..Default::default()
+        };
+        catalog_sidecar(
+            root.path(),
+            "cv-missing-companions",
+            "cv:missing-companions",
+            "flux2/catalog/model.safetensors",
+            true,
+        );
+        let filesystem_before = filesystem_snapshot(root.path());
+        let state = AppState::for_tests();
+        *state.config.write().await = config.clone();
+
+        assert!(resolve_existing_model_paths("cv:missing-companions", &config).is_err());
+        let status = model_component_status_existing_only(&state, "cv:missing-companions")
+            .await
+            .unwrap();
+        let missing = status
+            .components
+            .iter()
+            .filter(|component| !component.present)
+            .collect::<Vec<_>>();
+
+        assert!(
+            !missing.is_empty(),
+            "missing required catalog companions must be named"
+        );
+        assert!(missing.iter().all(|component| {
+            component.repair_model.as_deref() == Some("cv:missing-companions")
+                && component.path.is_some()
+        }));
+        assert_eq!(filesystem_snapshot(root.path()), filesystem_before);
+    }
+
+    #[tokio::test]
+    async fn existing_only_manifest_component_status_honors_configured_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("custom-unet.safetensors");
+        let vae = root.path().join("custom-vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "sd15:fp16".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("sd15".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let status = model_component_status_existing_only(&state, "sd15:fp16")
+            .await
+            .unwrap();
+        assert!(status
+            .components
+            .iter()
+            .any(|component| component.path.as_deref() == transformer.to_str()));
+        assert!(status
+            .components
+            .iter()
+            .any(|component| component.path.as_deref() == vae.to_str()));
+        assert!(status.components.iter().all(|component| component.present));
+    }
 
     struct IsolatedModelEnvironment {
         _lock: std::sync::MutexGuard<'static, ()>,

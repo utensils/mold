@@ -2535,6 +2535,7 @@ impl Coordinator {
                         pending.job.request.resolved_output_format(),
                         determinism_class,
                         false,
+                        &BTreeMap::new(),
                     );
                     let equivalence = environment.fingerprint();
                     crate::execution_plan::ResolvedExecutionPlan {
@@ -3281,6 +3282,8 @@ impl Coordinator {
                 reason: Some("copies must be between 1 and 64".to_string()),
                 candidate: None,
                 stage_candidates: Vec::new(),
+                pending_downloads: Vec::new(),
+                missing_components: Vec::new(),
             };
         }
         let has_local_expansion = request.expand == Some(true)
@@ -3307,6 +3310,8 @@ impl Coordinator {
                 ),
                 candidate: None,
                 stage_candidates: Vec::new(),
+                pending_downloads: Vec::new(),
+                missing_components: Vec::new(),
             };
         }
         self.placement_preview_dag(request, copies, prepared_inputs)
@@ -3406,6 +3411,8 @@ impl Coordinator {
             reason: Some(reason),
             candidate: None,
             stage_candidates: Vec::new(),
+            pending_downloads: Vec::new(),
+            missing_components: Vec::new(),
         };
         if !(1..=64).contains(&copies) {
             return empty("infeasible", "copies must be between 1 and 64".to_string());
@@ -3801,7 +3808,7 @@ impl Coordinator {
             setup_ms >= generation_setup_ms,
             "aggregate setup must include the primary generation"
         );
-        let confidence = selected
+        let mut confidence = selected
             .iter()
             .filter_map(|assignment| {
                 confidence_by_edge.get(&(
@@ -3817,6 +3824,34 @@ impl Coordinator {
             })
             .cloned()
             .unwrap_or_default();
+        let mut pending_by_identity = BTreeMap::new();
+        for assignment in &selected {
+            for download in
+                prepared_inputs.pending_downloads_for_device(assignment.device_id.as_str())
+            {
+                pending_by_identity.insert(
+                    (
+                        download.kind.clone(),
+                        download.repo.clone(),
+                        download.name.clone(),
+                        download.bytes,
+                    ),
+                    download,
+                );
+            }
+        }
+        let pending_downloads = pending_by_identity.into_values().collect::<Vec<_>>();
+        if !pending_downloads.is_empty() {
+            confidence = mold_core::QueueEstimateConfidence::Low;
+        }
+        for stage in &mut stage_candidates {
+            if !prepared_inputs
+                .pending_downloads_for_device(&stage.candidate.device_id)
+                .is_empty()
+            {
+                stage.candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
+            }
+        }
         mold_core::GenerationPlacementPreview {
             version: 1,
             authoritative: true,
@@ -3835,6 +3870,8 @@ impl Coordinator {
                 estimate_confidence: confidence,
             }),
             stage_candidates,
+            pending_downloads,
+            missing_components: Vec::new(),
         }
     }
 
@@ -11189,6 +11226,282 @@ mod tests {
             }],
         );
         assert_eq!(signature, vec![("cuda:1".to_string(), 0)]);
+    }
+
+    #[tokio::test]
+    async fn cold_catalog_overlay_survives_full_coordinator_preview_and_config_refresh() {
+        let root = tempfile::tempdir().unwrap();
+        let install_dir = root.path().join("cv-2937936");
+        let primary = install_dir.join("flux2/catalog/model.safetensors");
+        let text_encoder = root.path().join("companions/qwen3.safetensors");
+        let tokenizer = root.path().join("companions/tokenizer.json");
+        let vae = root.path().join("companions/vae.safetensors");
+        for path in [&primary, &text_encoder, &tokenizer, &vae] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("safetensors") {
+                let header = br#"{}"#;
+                let mut contents = (header.len() as u64).to_le_bytes().to_vec();
+                contents.extend_from_slice(header);
+                std::fs::write(path, contents).unwrap();
+            } else {
+                std::fs::write(path, b"{}").unwrap();
+            }
+        }
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:2937936".to_string(),
+                source: "civitai".to_string(),
+                source_id: "2937936".to_string(),
+                name: "Catalog preview fixture".to_string(),
+                author: None,
+                family: "flux2".to_string(),
+                family_role: "finetune".to_string(),
+                sub_family: Some("klein-9b".to_string()),
+                kind: "checkpoint".to_string(),
+                modality: "image".to_string(),
+                nsfw: None,
+                description: None,
+                tags: Vec::new(),
+                license: None,
+                page_url: None,
+                thumbnail_url: None,
+                size_bytes: Some(std::fs::metadata(&primary).unwrap().len()),
+                supported: true,
+                trained_words: Vec::new(),
+                primary_filename_rel: "flux2/catalog/model.safetensors".to_string(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+
+        let mut cold_config = mold_core::Config {
+            models_dir: root.path().display().to_string(),
+            qwen3_variant: Some("bf16".to_string()),
+            ..Default::default()
+        };
+        cold_config.models.insert(
+            "flux2-te-9b".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(text_encoder.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![text_encoder.display().to_string()]),
+                text_tokenizer: Some(tokenizer.display().to_string()),
+                family: Some("flux2".to_string()),
+                ..Default::default()
+            },
+        );
+        cold_config.models.insert(
+            "flux2-vae".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(vae.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("flux2".to_string()),
+                ..Default::default()
+            },
+        );
+        let request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"cv:2937936","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        let (worker, _worker_rx) = test_worker(0);
+        let stable_id = worker_device_id(&worker);
+        let device = crate::execution_plan::DeviceFact {
+            id: stable_id.clone(),
+            ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 24 << 30,
+        };
+        let prepared = crate::variant_dependencies::prepare_local_execution_inputs(
+            &cold_config,
+            &request,
+            vec![device],
+        )
+        .await
+        .unwrap();
+        assert!(prepared.model_config_overlay.is_some());
+        assert!(!cold_config.models.contains_key(&request.model));
+
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(cold_config.clone(), QueueHandle::new(ingress_tx), pool, 1);
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let before_config = format!("{:?}", *coordinator.state.config.read().await);
+        assert!(coordinator.state.catalog_intents.read().await.is_empty());
+
+        let first = coordinator.placement_preview(&request, 1, &prepared);
+        assert_eq!(first.outcome, "planned", "{:?}", first.reason);
+        assert_eq!(
+            first
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.device_id.as_str()),
+            Some(stable_id.as_str())
+        );
+        assert_eq!(
+            format!("{:?}", *coordinator.state.config.read().await),
+            before_config
+        );
+        assert!(coordinator.state.catalog_intents.read().await.is_empty());
+
+        // Mirror GET /api/models refreshing the runtime config from disk.
+        *coordinator.state.config.write().await = cold_config;
+        let after_refresh = coordinator.placement_preview(&request, 1, &prepared);
+        assert_eq!(
+            after_refresh.outcome, "planned",
+            "{:?}",
+            after_refresh.reason
+        );
+        assert_eq!(
+            after_refresh
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.execution_fingerprint.as_str()),
+            first
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.execution_fingerprint.as_str())
+        );
+        assert!(!coordinator
+            .state
+            .config
+            .read()
+            .await
+            .models
+            .contains_key(&request.model));
+        assert!(coordinator.state.catalog_intents.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn placement_preview_reports_only_the_selected_devices_pending_downloads() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        let encoder = root.path().join("qwen3.safetensors");
+        let tokenizer = root.path().join("tokenizer.json");
+        for path in [&transformer, &vae, &encoder, &tokenizer] {
+            std::fs::write(path, b"preview").unwrap();
+        }
+        let mut config = mold_core::Config {
+            qwen3_variant: Some("bf16".to_string()),
+            ..Default::default()
+        };
+        config.models.insert(
+            "pending-z".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                text_tokenizer: Some(tokenizer.display().to_string()),
+                family: Some("z-image".to_string()),
+                ..Default::default()
+            },
+        );
+        let request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"pending-z","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        let (worker0, _worker_rx0) = test_worker(0);
+        let (worker1, _worker_rx1) = test_worker(1);
+        let stable_id0 = worker_device_id(&worker0);
+        let stable_id1 = worker_device_id(&worker1);
+        let devices = vec![
+            crate::execution_plan::DeviceFact {
+                id: stable_id0.clone(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24 << 30,
+            },
+            crate::execution_plan::DeviceFact {
+                id: stable_id1.clone(),
+                ordinal: 1,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24 << 30,
+            },
+        ];
+        let mut prepared =
+            crate::variant_dependencies::prepare_local_execution_inputs(&config, &request, devices)
+                .await
+                .unwrap();
+        let pending_path = root.path().join("pending-qwen3.gguf");
+        let sibling = prepared.by_device.get_mut(&stable_id1).unwrap();
+        sibling.engine_paths.text_encoder_files = vec![pending_path.clone()];
+        sibling.engine_config.qwen3_variant = Some("q8".to_string());
+        sibling.engine_config.selected_qwen3_paths = vec![pending_path.clone()];
+        sibling.pending_artifacts.insert(
+            pending_path,
+            crate::execution_plan::PendingArtifactIdentity {
+                kind: "text_encoder".to_string(),
+                repo: "owner/qwen3".to_string(),
+                filename: "qwen3-q8.gguf".to_string(),
+                bytes: 1_000_000_000,
+                quantization: crate::execution_plan::QuantizationVariant::Q8,
+            },
+        );
+
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker0, worker1].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(config, QueueHandle::new(ingress_tx), pool, 1);
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+
+        let clean = coordinator.placement_preview(&request, 1, &prepared);
+        assert_eq!(
+            clean
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.device_id.as_str()),
+            Some(stable_id0.as_str())
+        );
+        assert!(
+            clean.pending_downloads.is_empty(),
+            "a clean selected device must not inherit a sibling's pending download"
+        );
+
+        let mixed = coordinator.placement_preview(&request, 2, &prepared);
+        assert_eq!(mixed.outcome, "planned");
+        assert_eq!(mixed.pending_downloads.len(), 1);
+        assert_eq!(mixed.pending_downloads[0].name, "qwen3-q8.gguf");
+        assert_eq!(
+            mixed.candidate.as_ref().unwrap().estimate_confidence,
+            mold_core::QueueEstimateConfidence::Low
+        );
+        assert_eq!(mixed.stage_candidates.len(), 2);
+        assert!(mixed.stage_candidates.iter().any(|stage| {
+            stage.candidate.device_id == stable_id1
+                && stage.candidate.estimate_confidence == mold_core::QueueEstimateConfidence::Low
+        }));
+
+        let pending =
+            coordinator.placement_preview_dag_for_device(&request, 1, &prepared, Some(&stable_id1));
+        assert_eq!(
+            pending
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.device_id.as_str()),
+            Some(stable_id1.as_str())
+        );
+        assert_eq!(pending.pending_downloads.len(), 1);
+        assert_eq!(pending.pending_downloads[0].name, "qwen3-q8.gguf");
+        assert_eq!(
+            pending.candidate.unwrap().estimate_confidence,
+            mold_core::QueueEstimateConfidence::Low
+        );
     }
 
     #[tokio::test]

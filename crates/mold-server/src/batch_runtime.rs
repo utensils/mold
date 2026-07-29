@@ -1765,6 +1765,7 @@ mod tests {
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
+                model_config_overlay: None,
             },
         };
         let last = attempt.grant(1).unwrap().0;

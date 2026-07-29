@@ -53,7 +53,7 @@ import { fetchChainLimits } from "../lib/api/chains";
 import { normalizeTargetHost, readyHostSignature } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
-import { useHostsStore } from "../stores/hosts";
+import { useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
 import {
   useGenerationStore,
@@ -153,6 +153,41 @@ const contextMenu = useContextMenuStore();
 const hostGallery = useGalleryStore();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
+
+function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
+  if (result.kind === "infeasible") {
+    const details = result.perHost
+      .map((failure) => {
+        const missing = failure.missingComponents
+          .filter((component) => !component.present)
+          .map((component) => component.name);
+        return `${failure.label}: ${failure.reason}${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`;
+      })
+      .join("; ");
+    return `No selected machine can run this print${details ? ` — ${details}.` : "."} Nothing was queued.`;
+  }
+  if (result.kind === "mixed") {
+    const details = result.perHost
+      .map((failure) => {
+        if (failure.kind === "infeasible") {
+          const missing = failure.missingComponents
+            .filter((component) => !component.present)
+            .map((component) => component.name);
+          return `${failure.label} cannot run it: ${failure.reason}${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`;
+        }
+        return failure.kind === "unreachable"
+          ? `${failure.label} did not answer: ${failure.error}`
+          : `${failure.label} could not plan it right now: ${failure.error}`;
+      })
+      .join("; ");
+    return `The selected machines failed for different reasons${details ? ` — ${details}.` : "."} Nothing was queued.`;
+  }
+  const details = result.perHost.map((failure) => `${failure.label}: ${failure.error}`).join("; ");
+  if (result.kind === "unreachable") {
+    return `Mold could not check placement${details ? ` — ${details}.` : "."} Nothing was queued.`;
+  }
+  return `Placement changed or could not be computed right now${details ? ` — ${details}.` : "."} Try again. Nothing was queued.`;
+}
 
 /** A generate that 404'd (model not on the routed host) awaiting the user's
  *  pull-and-resume decision. */
@@ -1856,15 +1891,16 @@ async function generate() {
       }
       route = feasible;
     } else {
-      route = await hosts.resolveFeasibleRoute(
+      const feasibility = await hosts.resolveFeasible(
         appPrefs.settings?.generateTargetHost ?? null,
         planningRequest,
         batch,
       );
-      if (!route) {
-        toasts.push("No selected machine has an authoritative route for this print.", "error");
+      if (feasibility.kind !== "route") {
+        toasts.push(placementFailureMessage(feasibility), "error");
         return;
       }
+      route = feasibility.route;
     }
     if (!(await preprocessSourceFit(route, draft))) return;
     if (!submissionGuard.isCurrent(submitToken)) return;
@@ -1911,11 +1947,8 @@ async function generate() {
     const finalizedPlanningRequest =
       chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
     if (route) {
-      const finalizedRoute = await hosts.resolveFeasibleRoute(
-        route.hostId,
-        finalizedPlanningRequest,
-        batch,
-      );
+      const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch);
+      const finalizedRoute = finalized.kind === "route" ? finalized.route : null;
       if (
         !finalizedRoute ||
         finalizedRoute.hostId !== route.hostId ||
@@ -1924,7 +1957,9 @@ async function generate() {
         (finalizedRoute.instanceId ?? null) !== (route.instanceId ?? null)
       ) {
         toasts.push(
-          "The finalized source request is no longer feasible on the selected machine. Nothing was queued.",
+          finalized.kind === "route"
+            ? "The selected machine changed while the finalized source request was being checked. Nothing was queued."
+            : placementFailureMessage(finalized),
           "error",
         );
         return;

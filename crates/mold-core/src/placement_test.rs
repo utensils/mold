@@ -196,6 +196,41 @@ fn generate_request_without_placement_is_none() {
 }
 
 #[test]
+fn placement_preview_empty_recovery_fields_preserve_legacy_wire_bytes() {
+    let legacy = r#"{"version":1,"authoritative":true,"state_version":7,"plan_version":9,"outcome":"infeasible","reason":"missing"}"#;
+    let preview: super::GenerationPlacementPreview = serde_json::from_str(legacy).unwrap();
+
+    assert!(preview.pending_downloads.is_empty());
+    assert!(preview.missing_components.is_empty());
+    assert_eq!(serde_json::to_string(&preview).unwrap(), legacy);
+}
+
+#[test]
+fn placement_preview_serializes_structured_recovery_fields_when_present() {
+    let json = serde_json::json!({
+        "version": 1,
+        "authoritative": true,
+        "state_version": 7,
+        "plan_version": 9,
+        "outcome": "planned",
+        "candidate": null,
+        "pending_downloads": [{
+            "kind": "text_encoder",
+            "name": "encoder.gguf",
+            "repo": "owner/repo",
+            "bytes": 123
+        }]
+    });
+    let preview: super::GenerationPlacementPreview = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(preview.pending_downloads.len(), 1);
+    assert_eq!(
+        serde_json::to_value(preview).unwrap()["pending_downloads"],
+        json["pending_downloads"]
+    );
+}
+
+#[test]
 fn model_config_serializes_placement_section() {
     use crate::config::{Config, ModelConfig};
     let mc = ModelConfig {

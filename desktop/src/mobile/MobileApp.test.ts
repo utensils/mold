@@ -1527,7 +1527,7 @@ describe("MobileApp generation queue", () => {
       "authoritative infeasible",
       {
         version: 1,
-        authoritative: true,
+        authoritative: false,
         state_version: 2,
         plan_version: 2,
         outcome: "infeasible",
@@ -1576,6 +1576,80 @@ describe("MobileApp generation queue", () => {
       ).toBeUndefined();
     },
   );
+
+  it.each([
+    [
+      "authoritative infeasibility",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "infeasible",
+        candidate: null,
+        reason: "model is missing a component",
+        missing_components: [
+          {
+            kind: "vae",
+            name: "ae.safetensors",
+            present: false,
+            repair_model: model.name,
+          },
+        ],
+      },
+      "Studio cannot run this print: model is missing a component. Missing components: ae.safetensors. Nothing was queued.",
+    ],
+    [
+      "temporary scheduler failure",
+      {
+        version: 1,
+        authoritative: false,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "temporarily_unavailable",
+        candidate: null,
+        reason: "scheduler snapshot changed",
+      },
+      "Studio could not compute a placement plan right now. Reason: scheduler snapshot changed. Try again. Nothing was queued.",
+    ],
+    [
+      "malformed infeasible metadata",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "infeasible",
+        candidate: null,
+        reason: "model is missing a component",
+        missing_components: [
+          {
+            kind: "vae",
+            name: "",
+            present: false,
+            repair_model: model.name,
+          },
+        ],
+      },
+      "Studio returned an invalid placement response.",
+    ],
+    ["malformed preview", {}, "Studio returned an invalid placement response."],
+  ])("names %s without discarding prepared work", async (_case, result, expected) => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("preserved storm pair");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    previewGenerationPlacement.mockResolvedValueOnce(result);
+
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(expected);
+    expect(openStreams).toHaveLength(0);
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(true);
+  });
 
   it("identifies a failed middle prepared sibling by variation and reviewed prompt", async () => {
     wrapper = mountMobileApp();

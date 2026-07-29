@@ -5,25 +5,64 @@
 //! downloads missing quantized files on Tokio's blocking pool. The scheduler
 //! does not mark a generation Ready until this returns.
 
-use crate::execution_plan::{DeviceFact, PreparedDeviceExecutionInputs, PreparedExecutionInputs};
+use crate::execution_plan::{
+    DeviceFact, PreparedDeviceExecutionInputs, PreparedExecutionInputs,
+    ENCODER_DEPENDENCY_HEADROOM_BYTES,
+};
 use crate::scheduler::worker_device_id;
 use crate::state::{AppState, SseMessage};
 use mold_core::{Config, GenerateRequest, ModelPaths, SseProgressEvent};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const ENCODER_HEADROOM: u64 = 2_000_000_000;
 const T5_FP16_THRESHOLD: u64 = 16_000_000_000;
 const QWEN3_4B_FP16_THRESHOLD: u64 = 10_200_000_000;
 const QWEN2_FP16_THRESHOLD: u64 = 16_000_000_000;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DownloadKey {
+    models_root: PathBuf,
     repo: String,
     filename: String,
     subdir: String,
+}
+
+#[derive(Clone, Copy)]
+struct DependencySpec<'a> {
+    models_root: &'a Path,
+    repo: &'a str,
+    filename: &'a str,
+    expected_bytes: Option<u64>,
+    quantization: Option<crate::execution_plan::QuantizationVariant>,
+    subdir: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MissingDependency {
+    download: mold_core::PendingModelDownload,
+    path: PathBuf,
+    quantization: crate::execution_plan::QuantizationVariant,
+}
+
+enum ResolvedDependency {
+    Available(PathBuf),
+    Pending(MissingDependency),
+}
+
+impl ResolvedDependency {
+    fn into_path(self, pending: &mut Vec<MissingDependency>) -> PathBuf {
+        match self {
+            Self::Available(path) => path,
+            Self::Pending(dependency) => {
+                let path = dependency.path.clone();
+                pending.push(dependency);
+                path
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -57,8 +96,81 @@ impl Drop for DownloadWatcherGuard {
 static DOWNLOADS: OnceLock<Mutex<HashMap<DownloadKey, Arc<SharedDownload>>>> = OnceLock::new();
 static NEXT_WATCHER_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+type TestDownloadAdapter =
+    Arc<dyn Fn(&Path, &str, &str, &str) -> Result<PathBuf, String> + Send + Sync>;
+#[cfg(test)]
+static TEST_DOWNLOAD_ADAPTERS: OnceLock<Mutex<HashMap<String, TestDownloadAdapter>>> =
+    OnceLock::new();
+
 fn downloads() -> &'static Mutex<HashMap<DownloadKey, Arc<SharedDownload>>> {
     DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn download_dependency_sync(
+    models_root: &Path,
+    repo: &str,
+    filename: &str,
+    subdir: &str,
+    callback: mold_core::download::DownloadProgressCallback,
+) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(adapter) = TEST_DOWNLOAD_ADAPTERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(repo)
+        .cloned()
+    {
+        return adapter(models_root, repo, filename, subdir);
+    }
+
+    mold_core::download::download_single_file_sync_with_progress_in(
+        models_root,
+        repo,
+        filename,
+        Some(subdir),
+        callback,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn normalized_download_root(root: &Path) -> Result<PathBuf, String> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve models root: {error}"))?
+            .join(root)
+    };
+    if let Ok(canonical) = absolute.canonicalize() {
+        return Ok(canonical);
+    }
+
+    let mut cursor = absolute.as_path();
+    let mut suffix = Vec::<OsString>::new();
+    while !cursor.exists() {
+        let component = cursor.file_name().ok_or_else(|| {
+            format!(
+                "cannot normalize models root with no existing ancestor: {}",
+                root.display()
+            )
+        })?;
+        suffix.push(component.to_os_string());
+        cursor = cursor.parent().ok_or_else(|| {
+            format!(
+                "cannot normalize models root with no existing ancestor: {}",
+                root.display()
+            )
+        })?;
+    }
+    let mut normalized = cursor
+        .canonicalize()
+        .map_err(|error| format!("cannot normalize models root {}: {error}", root.display()))?;
+    for component in suffix.into_iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 fn send_dependency_wait(
@@ -77,22 +189,56 @@ fn send_dependency_wait(
 async fn ensure_downloaded(
     state: Option<&AppState>,
     work_id: &str,
-    repo: &str,
-    filename: &str,
-    subdir: &str,
+    dependency: DependencySpec<'_>,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     policy: DependencyMaterializationPolicy,
-) -> Result<PathBuf, String> {
-    if let Some(path) = mold_core::download::cached_file_path(repo, filename, Some(subdir)) {
-        return Ok(path);
+) -> Result<ResolvedDependency, String> {
+    let DependencySpec {
+        models_root,
+        repo,
+        filename,
+        expected_bytes,
+        quantization,
+        subdir,
+    } = dependency;
+    let cached = if policy == DependencyMaterializationPolicy::ExistingOnly {
+        mold_core::download::cached_file_path_existing_only(
+            models_root,
+            repo,
+            filename,
+            Some(subdir),
+        )
+    } else {
+        mold_core::download::cached_file_path_in(models_root, repo, filename, Some(subdir))
+    };
+    if let Some(path) = cached {
+        return Ok(ResolvedDependency::Available(path));
     }
     if policy == DependencyMaterializationPolicy::ExistingOnly {
-        return Err(format!(
-            "required local dependency '{filename}' from '{repo}' is not installed"
-        ));
+        let bytes = expected_bytes.ok_or_else(|| {
+            format!(
+                "required local dependency '{filename}' from '{repo}' is not installed and has no known materialization record"
+            )
+        })?;
+        let quantization = quantization.ok_or_else(|| {
+            format!(
+                "required local dependency '{filename}' from '{repo}' is not installed and has no known storage record"
+            )
+        })?;
+        return Ok(ResolvedDependency::Pending(MissingDependency {
+            download: mold_core::PendingModelDownload {
+                kind: "text_encoder".to_string(),
+                name: filename.to_string(),
+                repo: repo.to_string(),
+                bytes,
+            },
+            path: mold_core::download::planned_single_file_path_in(models_root, filename, subdir),
+            quantization,
+        }));
     }
 
     let key = DownloadKey {
+        models_root: normalized_download_root(models_root)?,
         repo: repo.to_string(),
         filename: filename.to_string(),
         subdir: subdir.to_string(),
@@ -143,6 +289,7 @@ async fn ensure_downloaded(
     if creator {
         let shared = shared.clone();
         let key_for_task = key.clone();
+        let models_root = models_root.to_path_buf();
         tokio::spawn(async move {
             let repo = key_for_task.repo.clone();
             let filename = key_for_task.filename.clone();
@@ -213,13 +360,7 @@ async fn ensure_downloaded(
                 }
             });
             let result = tokio::task::spawn_blocking(move || {
-                mold_core::download::download_single_file_sync_with_progress(
-                    &repo,
-                    &filename,
-                    Some(&subdir),
-                    callback,
-                )
-                .map_err(|error| error.to_string())
+                download_dependency_sync(&models_root, &repo, &filename, &subdir, callback)
             })
             .await
             .map_err(|error| format!("encoder dependency task failed: {error}"))
@@ -244,7 +385,7 @@ async fn ensure_downloaded(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
         {
-            return result;
+            return result.map(ResolvedDependency::Available);
         }
         if let Some(state) = state {
             if state.job_registry.entry(work_id).is_none() {
@@ -354,9 +495,12 @@ fn choose_largest_fitting<'a, T>(
     free: u64,
     fields: impl Fn(&'a T) -> (&'static str, u64),
 ) -> Option<&'a T> {
-    variants
-        .iter()
-        .find(|variant| fields(variant).1.saturating_add(ENCODER_HEADROOM) <= free)
+    variants.iter().find(|variant| {
+        fields(variant)
+            .1
+            .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
+            <= free
+    })
 }
 
 fn shared_quantized_fallback<'a, T>(
@@ -368,7 +512,10 @@ fn shared_quantized_fallback<'a, T>(
         .iter()
         .filter(|device| {
             variants.iter().any(|variant| {
-                fields(variant).1.saturating_add(ENCODER_HEADROOM) <= device.available_vram_bytes
+                fields(variant)
+                    .1
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
+                    <= device.available_vram_bytes
             })
         })
         .map(|device| device.available_vram_bytes)
@@ -379,6 +526,19 @@ fn shared_quantized_fallback<'a, T>(
         // temporarily pressured, prepare the smallest concrete variant and
         // let the scheduler keep the work blocked until a device can admit it.
         .or_else(|| variants.last())
+}
+
+fn registry_quantization(tag: &str) -> Option<crate::execution_plan::QuantizationVariant> {
+    use crate::execution_plan::QuantizationVariant;
+    match tag {
+        "q2" => Some(QuantizationVariant::Q2),
+        "q3" => Some(QuantizationVariant::Q3),
+        "q4" | "iq4" => Some(QuantizationVariant::Q4),
+        "q5" => Some(QuantizationVariant::Q5),
+        "q6" => Some(QuantizationVariant::Q6),
+        "q8" => Some(QuantizationVariant::Q8),
+        _ => None,
+    }
 }
 
 fn flux2_uses_qwen3_8b(model: &str, paths: &ModelPaths) -> bool {
@@ -396,6 +556,7 @@ fn flux2_uses_qwen3_8b(model: &str, paths: &ModelPaths) -> bool {
 
 struct DependencyContext<'a> {
     state: Option<&'a AppState>,
+    models_root: &'a Path,
     work_id: &'a str,
     progress: Option<&'a tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     policy: DependencyMaterializationPolicy,
@@ -418,6 +579,7 @@ async fn materialize_t5(
     selection: VariantSelection<'_>,
     paths: &mut ModelPaths,
     frozen: &mut mold_inference::FrozenEngineConfig,
+    pending: &mut Vec<MissingDependency>,
 ) -> Result<(), String> {
     let tag = match selection.preference {
         Some("fp16") => "fp16",
@@ -442,13 +604,19 @@ async fn materialize_t5(
         ensure_downloaded(
             context.state,
             context.work_id,
-            variant.hf_repo,
-            variant.hf_filename,
-            "shared/t5-gguf",
+            DependencySpec {
+                models_root: context.models_root,
+                repo: variant.hf_repo,
+                filename: variant.hf_filename,
+                expected_bytes: Some(variant.size_bytes),
+                quantization: registry_quantization(variant.tag),
+                subdir: "shared/t5-gguf",
+            },
             context.progress,
             context.policy,
         )
         .await?
+        .into_path(pending)
     };
     paths.t5_encoder = Some(selected.clone());
     frozen.selected_t5_path = Some(selected);
@@ -462,6 +630,7 @@ async fn materialize_qwen3(
     selection: VariantSelection<'_>,
     paths: &mut ModelPaths,
     frozen: &mut mold_inference::FrozenEngineConfig,
+    pending: &mut Vec<MissingDependency>,
 ) -> Result<(), String> {
     let b8 = family.starts_with("flux2") || family == "flux.2";
     let b8 = b8 && flux2_uses_qwen3_8b(model, paths);
@@ -518,18 +687,22 @@ async fn materialize_qwen3(
         } else {
             "shared/qwen3-gguf"
         };
-        vec![
-            ensure_downloaded(
-                context.state,
-                context.work_id,
-                variant.hf_repo,
-                variant.hf_filename,
+        vec![ensure_downloaded(
+            context.state,
+            context.work_id,
+            DependencySpec {
+                models_root: context.models_root,
+                repo: variant.hf_repo,
+                filename: variant.hf_filename,
+                expected_bytes: Some(variant.size_bytes),
+                quantization: registry_quantization(variant.tag),
                 subdir,
-                context.progress,
-                context.policy,
-            )
-            .await?,
-        ]
+            },
+            context.progress,
+            context.policy,
+        )
+        .await?
+        .into_path(pending)]
     };
     paths.text_encoder_files = selected.clone();
     frozen.selected_qwen3_paths = selected;
@@ -542,6 +715,7 @@ async fn materialize_qwen2(
     family: &str,
     paths: &mut ModelPaths,
     frozen: &mut mold_inference::FrozenEngineConfig,
+    pending: &mut Vec<MissingDependency>,
 ) -> Result<(), String> {
     let have_bf16 = !paths.text_encoder_files.is_empty()
         && paths.text_encoder_files.iter().all(|path| path.is_file());
@@ -567,13 +741,19 @@ async fn materialize_qwen2(
     let selected = ensure_downloaded(
         context.state,
         context.work_id,
-        variant.hf_repo,
-        variant.hf_filename,
-        "shared/qwen2-vl-gguf",
+        DependencySpec {
+            models_root: context.models_root,
+            repo: variant.hf_repo,
+            filename: variant.hf_filename,
+            expected_bytes: Some(variant.size_bytes),
+            quantization: registry_quantization(variant.tag),
+            subdir: "shared/qwen2-vl-gguf",
+        },
         context.progress,
         context.policy,
     )
-    .await?;
+    .await?
+    .into_path(pending);
     if family != "qwen-image-edit" {
         paths.text_encoder_files = vec![selected.clone()];
     }
@@ -728,8 +908,19 @@ async fn prepare_inputs_for_devices(
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     policy: DependencyMaterializationPolicy,
 ) -> Result<PreparedExecutionInputs, String> {
-    let paths = ModelPaths::resolve(&request.model, config)
+    let resolution = crate::model_manager::resolve_existing_model_paths(&request.model, config)
+        .map_err(|error| error.error)?
         .ok_or_else(|| format!("model '{}' has no concrete local artifacts", request.model))?;
+    let model_config_overlay = resolution.model_config_overlay.map(Arc::new);
+    let overlaid_config = model_config_overlay.as_ref().map(|model_config| {
+        let mut effective = config.clone();
+        effective
+            .models
+            .insert(request.model.clone(), model_config.as_ref().clone());
+        effective
+    });
+    let config = overlaid_config.as_ref().unwrap_or(config);
+    let paths = resolution.paths;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -786,8 +977,10 @@ async fn prepare_inputs_for_devices(
 
     let mut by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
+    let models_root = config.resolved_models_dir();
     let dependency_context = DependencyContext {
         state,
+        models_root: &models_root,
         work_id,
         progress,
         policy,
@@ -795,6 +988,7 @@ async fn prepare_inputs_for_devices(
     for device in devices {
         let mut selected_paths = paths.clone();
         let mut frozen = base.clone();
+        let mut pending = Vec::new();
         let materialized = match family.as_str() {
             "flux"
             | "sd3"
@@ -812,6 +1006,7 @@ async fn prepare_inputs_for_devices(
                     },
                     &mut selected_paths,
                     &mut frozen,
+                    &mut pending,
                 )
                 .await
             }
@@ -827,6 +1022,7 @@ async fn prepare_inputs_for_devices(
                     },
                     &mut selected_paths,
                     &mut frozen,
+                    &mut pending,
                 )
                 .await
             }
@@ -841,6 +1037,7 @@ async fn prepare_inputs_for_devices(
                     &family,
                     &mut selected_paths,
                     &mut frozen,
+                    &mut pending,
                 )
                 .await
             }
@@ -860,6 +1057,21 @@ async fn prepare_inputs_for_devices(
             PreparedDeviceExecutionInputs {
                 engine_paths: selected_paths,
                 engine_config: frozen,
+                pending_artifacts: pending
+                    .iter()
+                    .map(|dependency| {
+                        (
+                            dependency.path.clone(),
+                            crate::execution_plan::PendingArtifactIdentity {
+                                kind: dependency.download.kind.clone(),
+                                repo: dependency.download.repo.clone(),
+                                filename: dependency.download.name.clone(),
+                                bytes: dependency.download.bytes,
+                                quantization: dependency.quantization,
+                            },
+                        )
+                    })
+                    .collect(),
                 prepared_available_vram_bytes: device.available_vram_bytes,
                 capacity_sensitive,
             },
@@ -879,6 +1091,7 @@ async fn prepare_inputs_for_devices(
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
+        model_config_overlay,
     };
     let warm_config = config.clone();
     let warm_request = request.clone();
@@ -963,7 +1176,41 @@ pub async fn prepare_local_execution_inputs(
 mod tests {
     use super::*;
     use mold_core::{DevicePlacement, DeviceRef, ModelConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
+
+    #[test]
+    fn encoder_dependency_headroom_contract_is_decimal_two_gigabytes() {
+        assert_eq!(ENCODER_DEPENDENCY_HEADROOM_BYTES, 2_000_000_000);
+    }
+
+    struct TestDownloadAdapterGuard {
+        repo: String,
+    }
+
+    impl Drop for TestDownloadAdapterGuard {
+        fn drop(&mut self) {
+            TEST_DOWNLOAD_ADAPTERS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.repo);
+        }
+    }
+
+    fn install_test_download_adapter(
+        repo: &str,
+        adapter: TestDownloadAdapter,
+    ) -> TestDownloadAdapterGuard {
+        TEST_DOWNLOAD_ADAPTERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(repo.to_string(), adapter);
+        TestDownloadAdapterGuard {
+            repo: repo.to_string(),
+        }
+    }
 
     #[test]
     fn preparation_capacity_includes_only_measured_reclaimable_warm_cache() {
@@ -1005,6 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_only_dependency_check_never_starts_a_download() {
+        let cache = TempDir::new().unwrap();
         let repo = format!(
             "mold-preview-missing-{}-{}",
             std::process::id(),
@@ -1017,24 +1265,333 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
-        let error = ensure_downloaded(
+        let dependency = ensure_downloaded(
             None,
             "placement-preview",
-            &repo,
-            "missing.safetensors",
-            "preview-test",
+            DependencySpec {
+                models_root: cache.path(),
+                repo: &repo,
+                filename: "missing.safetensors",
+                expected_bytes: Some(123_456),
+                quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+                subdir: "preview-test",
+            },
             None,
             DependencyMaterializationPolicy::ExistingOnly,
         )
         .await
-        .expect_err("preview must reject a missing dependency");
+        .expect("known dependency must remain previewable");
         let after = downloads()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
 
-        assert!(error.contains("is not installed"));
+        let ResolvedDependency::Pending(dependency) = dependency else {
+            panic!("fixture dependency must be reported as pending");
+        };
+        assert_eq!(dependency.download.kind, "text_encoder");
+        assert_eq!(dependency.download.repo, repo);
+        assert_eq!(dependency.download.name, "missing.safetensors");
+        assert_eq!(dependency.download.bytes, 123_456);
+        assert!(!dependency.path.is_file());
         assert_eq!(after, before, "preview must not register a download");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn existing_only_dependency_check_does_not_create_cache_roots() {
+        let _env = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parent = TempDir::new().unwrap();
+        let models_root = parent.path().join("absent-models");
+        let hf_home = parent.path().join("absent-hf-home");
+        let previous_hf_home = std::env::var_os("HF_HOME");
+        std::env::set_var("HF_HOME", &hf_home);
+        let dependency = ensure_downloaded(
+            None,
+            "placement-preview",
+            DependencySpec {
+                models_root: &models_root,
+                repo: "preview/no-create",
+                filename: "missing.gguf",
+                expected_bytes: Some(42),
+                quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+                subdir: "shared/test",
+            },
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(dependency, ResolvedDependency::Pending(_)));
+        assert!(!models_root.exists());
+        assert!(!hf_home.exists());
+        match previous_hf_home {
+            Some(value) => std::env::set_var("HF_HOME", value),
+            None => std::env::remove_var("HF_HOME"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn preview_and_admission_use_the_same_explicit_models_root() {
+        let _env = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parent = TempDir::new().unwrap();
+        let models_root = parent.path().join("config-owned-models");
+        let repo = format!("test/explicit-root-parity-{}", std::process::id());
+        let filename = "encoder.gguf";
+        let subdir = "shared/explicit-root";
+        let _adapter = install_test_download_adapter(
+            &repo,
+            Arc::new(|models_root, _repo, filename, subdir| {
+                let path =
+                    mold_core::download::planned_single_file_path_in(models_root, filename, subdir);
+                std::fs::create_dir_all(path.parent().unwrap())
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&path, b"test encoder").map_err(|error| error.to_string())?;
+                Ok(path)
+            }),
+        );
+        let spec = || DependencySpec {
+            models_root: &models_root,
+            repo: &repo,
+            filename,
+            expected_bytes: Some(12),
+            quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+            subdir,
+        };
+
+        let preview = ensure_downloaded(
+            None,
+            "placement-preview",
+            spec(),
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .unwrap();
+        let ResolvedDependency::Pending(preview) = preview else {
+            panic!("missing dependency must be pending during preview");
+        };
+        let admitted = ensure_downloaded(
+            None,
+            "admission",
+            spec(),
+            None,
+            DependencyMaterializationPolicy::Admission,
+        )
+        .await
+        .unwrap();
+        let ResolvedDependency::Available(admitted) = admitted else {
+            panic!("admission must materialize the dependency");
+        };
+
+        assert_eq!(preview.path, admitted);
+        assert!(admitted.starts_with(&models_root));
+        assert!(admitted.is_file());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn admission_deduplicates_within_but_never_across_models_roots() {
+        let _env = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parent = TempDir::new().unwrap();
+        let first_root = parent.path().join("first-models");
+        let second_root = parent.path().join("second-models");
+        let repo = format!("test/root-scoped-dedupe-{}", std::process::id());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_adapter = calls.clone();
+        let _adapter = install_test_download_adapter(
+            &repo,
+            Arc::new(move |models_root, _repo, filename, subdir| {
+                calls_for_adapter.fetch_add(1, AtomicOrdering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let path =
+                    mold_core::download::planned_single_file_path_in(models_root, filename, subdir);
+                std::fs::create_dir_all(path.parent().unwrap())
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&path, b"test encoder").map_err(|error| error.to_string())?;
+                Ok(path)
+            }),
+        );
+        let make_spec = |models_root| DependencySpec {
+            models_root,
+            repo: &repo,
+            filename: "encoder.gguf",
+            expected_bytes: Some(12),
+            quantization: Some(crate::execution_plan::QuantizationVariant::Q4),
+            subdir: "shared/dedupe",
+        };
+
+        let (first, first_joiner, second) = tokio::join!(
+            ensure_downloaded(
+                None,
+                "first",
+                make_spec(&first_root),
+                None,
+                DependencyMaterializationPolicy::Admission,
+            ),
+            ensure_downloaded(
+                None,
+                "first-joiner",
+                make_spec(&first_root),
+                None,
+                DependencyMaterializationPolicy::Admission,
+            ),
+            ensure_downloaded(
+                None,
+                "second",
+                make_spec(&second_root),
+                None,
+                DependencyMaterializationPolicy::Admission,
+            ),
+        );
+        let available_path = |result: Result<ResolvedDependency, String>| match result.unwrap() {
+            ResolvedDependency::Available(path) => path,
+            ResolvedDependency::Pending(_) => panic!("admission cannot return pending"),
+        };
+        let first = available_path(first);
+        let first_joiner = available_path(first_joiner);
+        let second = available_path(second);
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(first, first_joiner);
+        assert_ne!(first, second);
+        assert!(first.starts_with(&first_root));
+        assert!(second.starts_with(&second_root));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn existing_only_preparation_plans_known_missing_encoder_without_downloading() {
+        let _env = crate::test_support::env_lock().lock().unwrap();
+        let cache = TempDir::new().unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", cache.path().join("models"));
+        std::env::set_var("HF_HOME", cache.path().join("hf"));
+
+        let (_root, mut config, request) = zimage_case();
+        config.models.get_mut("prepared-z").unwrap().family = Some("flux2".to_string());
+        config.qwen3_variant = Some("q8".to_string());
+        let before = downloads()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let prepared = prepare_inputs_for_devices(
+            None,
+            "placement-preview",
+            &request,
+            &config,
+            vec![DeviceFact {
+                id: "cuda:0".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24_000_000_000,
+            }],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .unwrap();
+        let after = downloads()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+
+        let pending_downloads = prepared.pending_downloads_for_device("cuda:0");
+        assert_eq!(pending_downloads.len(), 1);
+        assert_eq!(pending_downloads[0].kind, "text_encoder");
+        assert_eq!(pending_downloads[0].name, "Qwen_3_4b-Q8_0.gguf");
+        let device = &prepared.by_device["cuda:0"];
+        assert_eq!(device.pending_artifacts.len(), 1);
+        assert!(device.pending_artifacts.keys().all(|path| !path.is_file()));
+        let plans = crate::execution_plan::resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &[DeviceFact {
+                id: "cuda:0".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24_000_000_000,
+            }],
+            false,
+            Some(&prepared),
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(
+            plans[0].predicted_vram_peak_bytes
+                >= pending_downloads[0]
+                    .bytes
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES)
+        );
+        let pending_component = plans[0]
+            .execution_environment
+            .components
+            .iter()
+            .find(|component| {
+                matches!(
+                    &component.content_fingerprint,
+                    crate::execution_plan::EquivalenceContentIdentity::PendingPreview { .. }
+                )
+            })
+            .expect("pending dependency must retain its preview identity");
+        assert!(matches!(
+            &pending_component.precision.storage,
+            crate::execution_plan::ComponentStorageFormat::PendingPreview {
+                container: crate::execution_plan::PendingArtifactContainer::Gguf,
+                quantization: crate::execution_plan::QuantizationVariant::Q8,
+                ..
+            }
+        ));
+        let serialized = serde_json::to_string(pending_component).unwrap();
+        assert!(!serialized.contains("\"Unknown\""), "{serialized}");
+
+        let pressured = crate::execution_plan::resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &[DeviceFact {
+                id: "cuda:0".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 6_000_000_000,
+            }],
+            false,
+            Some(&prepared),
+        )
+        .unwrap();
+        let pending_plan = pressured[0]
+            .components
+            .values()
+            .find(|component| {
+                device
+                    .pending_artifacts
+                    .contains_key(&component.artifact_path)
+            })
+            .expect("pending encoder must remain in the pressured plan");
+        assert!(matches!(
+            pending_plan.placement,
+            crate::execution_plan::ResolvedComponentPlacement::Cpu
+        ));
+        assert!(
+            pressured[0].predicted_vram_peak_bytes
+                < pending_downloads[0]
+                    .bytes
+                    .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES),
+            "CPU-placed pending encoder must not be charged against GPU peak"
+        );
+        assert_eq!(after, before, "preview must not register a download");
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        std::env::remove_var("HF_HOME");
     }
 
     #[test]
@@ -1214,6 +1771,34 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.by_device.len(), 1);
         assert!(prepared.by_device.contains_key("cuda:1"));
+    }
+
+    #[tokio::test]
+    async fn stale_device_pin_remains_hard_infeasible() {
+        let (_root, config, mut request) = zimage_case();
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::device("cuda:gone"),
+            advanced: None,
+        });
+        let error = prepare_inputs_for_devices(
+            None,
+            "placement-preview",
+            &request,
+            &config,
+            vec![DeviceFact {
+                id: "cuda:0".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24_000_000_000,
+            }],
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("unavailable device 'cuda:gone'"), "{error}");
     }
 
     #[test]

@@ -366,8 +366,17 @@ warm-reload, prompt-encode, denoise, VAE, and upscale timings feed bounded
 learned estimates; metadata schema v15 persists runtime independently so a
 candidate receives exactly its cold or warm setup charge. Multi-host Create
 uses `POST /api/generate/placement-preview` as a read-only final feasibility
-check for ordinary generation. Current chain and local prompt-expansion/
-post-generation-upscale utility previews deliberately return
+check for ordinary generation. A planned response can name known encoder
+dependencies in `pending_downloads`; those downloads and the low-confidence
+estimate include only devices selected by that candidate plan. The preview does not
+fetch them, uses a separate registry-identity fingerprint, and admission
+recomputes the plan after the files land. Cold installed Civitai and Hugging
+Face IDs resolve from contained local sidecars, with their synthesized runtime
+configuration carried through scheduling and final GPU validation even if the
+server refreshes its model list. An infeasible response can name absent
+manifest files in `missing_components` so clients can explain the repair
+instead of discarding the server's reason. Current chain and local
+prompt-expansion/post-generation-upscale utility previews deliberately return
 non-authoritative `unsupported`: those paths are not advertised as exact until
 their real device/CPU fallbacks are represented.
 

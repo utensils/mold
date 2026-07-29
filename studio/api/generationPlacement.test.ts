@@ -92,6 +92,35 @@ describe("generation placement preview", () => {
     expect(rows.map((row) => row.hostId)).toEqual(["z", "c", "a", "b"]);
   });
 
+  test("prefers a clean plan over a faster plan with multi-gigabyte pending downloads", () => {
+    const rows = [
+      {
+        hostId: "pending",
+        roundTripMs: 0,
+        preview: {
+          ...planned(10, 0),
+          pending_downloads: [
+            {
+              kind: "text_encoder",
+              name: "t5-v1_1-xxl-q8.gguf",
+              repo: "acme/text-encoders",
+              bytes: 5_100_000_000,
+            },
+          ],
+        },
+      },
+      {
+        hostId: "clean",
+        roundTripMs: 0,
+        preview: planned(10_000, 500),
+      },
+    ];
+
+    rows.sort(comparePlacementPreviews);
+
+    expect(rows.map((row) => row.hostId)).toEqual(["clean", "pending"]);
+  });
+
   test.each([
     [{}, "invalid"],
     [
@@ -127,6 +156,20 @@ describe("generation placement preview", () => {
     [
       {
         ...planned(100, 1),
+        pending_downloads: [
+          {
+            kind: "text_encoder",
+            name: "t5.gguf",
+            repo: "acme/t5",
+            bytes: -1,
+          },
+        ],
+      },
+      "invalid",
+    ],
+    [
+      {
+        ...planned(100, 1),
         candidate: {
           ...planned(100, 1).candidate,
           setup_ms: Number.NaN,
@@ -153,6 +196,87 @@ describe("generation placement preview", () => {
         authoritative: false,
         outcome: "unsupported",
         stage_candidates: [{ stage_index: 0 }],
+      },
+      "invalid",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: true,
+        outcome: "infeasible",
+        reason: "required VAE is absent",
+        candidate: null,
+      },
+      "infeasible",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: true,
+        outcome: "infeasible",
+        reason: "required VAE is absent",
+        candidate: null,
+        missing_components: [
+          {
+            kind: "vae",
+            name: "ae.safetensors",
+            present: false,
+            repair_model: "flux-dev:bf16",
+          },
+        ],
+      },
+      "infeasible",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: false,
+        outcome: "temporarily_unavailable",
+        reason: "scheduler state changed",
+        candidate: null,
+      },
+      "temporarily_unavailable",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: true,
+        outcome: "temporarily_unavailable",
+        reason: "scheduler state changed",
+        candidate: null,
+      },
+      "temporarily_unavailable",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: true,
+        outcome: "infeasible",
+        reason: "",
+        candidate: null,
+      },
+      "invalid",
+    ],
+    [
+      {
+        version: 1,
+        state_version: 1,
+        plan_version: 1,
+        authoritative: true,
+        outcome: "infeasible",
+        reason: "missing component",
+        candidate: null,
+        missing_components: [{ kind: "vae", name: "ae", present: "no" }],
       },
       "invalid",
     ],
