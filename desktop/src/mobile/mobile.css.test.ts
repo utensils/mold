@@ -328,8 +328,13 @@ describe("mobile safe areas", () => {
 
     expect(control?.[1]).toMatch(/gap:\s*0\s*;/);
     expect(control?.[1]).toMatch(/padding:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    expect(control?.[1]).toMatch(/border:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/box-shadow:\s*inset 0 0 0 1px var\(--ce\)\s*;/);
     expect(control?.[1]).not.toMatch(/overflow:\s*hidden\s*;/);
     expect(button?.[1]).toMatch(/border-radius:\s*0\s*;/);
+    expect(button?.[1]).toMatch(/justify-content:\s*center\s*;/);
+    expect(button?.[1]).toMatch(/padding-block:\s*0\s*;/);
     expect(first?.[1]).toMatch(
       /border-radius:\s*calc\(var\(--radius-control\) - 1px\) 0 0 calc\(var\(--radius-control\) - 1px\)\s*;/,
     );
