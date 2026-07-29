@@ -29,6 +29,7 @@ const BUSY_PHASES: UpdatePhase[] = [
   "staging",
   "installing",
 ];
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
 
 export function normalizeUpdateError(error: unknown): UpdateCommandError {
   if (error && typeof error === "object") {
@@ -62,6 +63,7 @@ export const useUpdaterStore = defineStore("updater", {
     dismissedCandidateId: null as string | null,
     initialized: false,
     progressUnlisten: null as (() => void) | null,
+    checkTimer: null as ReturnType<typeof setInterval> | null,
   }),
   getters: {
     isBusy: (state): boolean => BUSY_PHASES.includes(state.phase),
@@ -82,6 +84,16 @@ export const useUpdaterStore = defineStore("updater", {
       await this.subscribeToProgress().catch(() => {});
       // The manifest check is background-only and never delays app startup.
       void this.check();
+      // A long-running or freshly updated app must keep discovering later
+      // releases without requiring a manual check or another relaunch.
+      this.checkTimer = setInterval(() => void this.checkAutomatically(), UPDATE_CHECK_INTERVAL_MS);
+    },
+
+    async checkAutomatically(): Promise<void> {
+      // Keep the native pending update (and a dismissed notification) stable
+      // until the user installs it or explicitly requests another check.
+      if (this.isBusy || this.candidate || this.phase === "unsupported") return;
+      await this.check();
     },
 
     async subscribeToProgress(): Promise<void> {
