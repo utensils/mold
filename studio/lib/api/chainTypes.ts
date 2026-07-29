@@ -4,8 +4,9 @@
  * These mirror the Rust types in `mold-core` (`chain.rs`, `chain_job.rs`)
  * exactly; the per-surface `types.ts` files re-export from here rather than
  * keeping divergent copies (desktop's `ChainLimits` was missing
- * `supports_sequence` before this module existed). Seeds that are u64 on the
- * server are decimal strings on the chain-jobs wire (TOML i64 limit).
+ * `supports_sequence` before this module existed). `ChainRequest` seeds are
+ * JSON numbers; full-range u64 values in job metadata, retakes, amendments,
+ * and TOML projections use decimal strings where noted below.
  */
 
 import type { SequenceTransition } from "../sequence";
@@ -16,7 +17,7 @@ export interface ChainStageWire {
   /** Base64 PNG/JPEG for this clip's opening frame; stage 0 only today. */
   source_image?: string | null;
   negative_prompt?: string | null;
-  seed_offset?: string | null;
+  seed_offset?: number | null;
   transition?: SequenceTransition;
   fade_frames?: number | null;
 }
@@ -32,7 +33,8 @@ export interface ChainRequestWire {
   steps: number;
   guidance: number;
   strength?: number;
-  output_format?: string;
+  /** Durable chain jobs currently accept only MP4. */
+  output_format?: "mp4";
   enable_audio?: boolean | null;
   original_prompt?: string | null;
   batch_id?: string | null;

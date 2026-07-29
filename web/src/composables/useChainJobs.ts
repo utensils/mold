@@ -292,13 +292,7 @@ async function create(hostId: string, req: ChainRequestWire): Promise<string> {
   ensureLoaded();
   const target = targetFor(hostId);
   if (!target) throw new Error("That machine is no longer connected.");
-  // Studio types seed_offset as a decimal string while the Rust JSON wire
-  // (and web's mirror) is a number; buildChainRequest never sets it, so the
-  // shapes agree at runtime.
-  const { job_id } = await createChainJob(
-    req as unknown as Parameters<typeof createChainJob>[0],
-    target,
-  );
+  const { job_id } = await createChainJob(req, target);
   track(hostId, job_id);
   void fetchHost(hostId);
   watch(hostId, job_id);
