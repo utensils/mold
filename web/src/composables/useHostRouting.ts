@@ -39,6 +39,7 @@ import {
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
   type GenerationPlacementPreview,
+  type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import {
   AUTO_TARGET_ID,
@@ -93,29 +94,67 @@ export interface HostRouting {
   resolveFeasible: (
     request: GenerateRequestWire,
     copies?: number,
-  ) => Promise<HostRoute | null>;
+  ) => Promise<FeasibilityResult>;
   /** Revalidate only a previously selected host; never globally rerank. */
   revalidateFeasible: (
     route: HostRoute,
     request: GenerateRequestWire,
     copies?: number,
-  ) => Promise<HostRoute | null>;
+  ) => Promise<FeasibilityResult>;
   /** Resolve a complete durable sequence through the same scheduler preview. */
   resolveFeasibleChain: (
     request: ChainRequestWire,
     copies?: number,
-  ) => Promise<HostRoute | null>;
+  ) => Promise<FeasibilityResult>;
   revalidateFeasibleChain: (
     route: HostRoute,
     request: ChainRequestWire,
     copies?: number,
-  ) => Promise<HostRoute | null>;
+  ) => Promise<FeasibilityResult>;
   /** Re-read the registry and poll every host once. */
   refresh: () => Promise<void>;
   /** Start/stop the poll loop; ref-counted across consumers. */
   start: () => void;
   stop: () => void;
 }
+
+export interface InfeasibleHost {
+  hostId: string;
+  label: string;
+  reason: string;
+  missingComponents: PlacementMissingComponent[];
+}
+
+export interface UnreachableHost {
+  hostId: string;
+  label: string;
+  error: string;
+}
+
+export interface TransientHost {
+  hostId: string;
+  label: string;
+  reason: string;
+}
+
+export type FeasibilityResult =
+  | { kind: "route"; route: HostRoute }
+  | {
+      kind: "infeasible";
+      perHost: InfeasibleHost[];
+      unreachable?: UnreachableHost[];
+    }
+  | {
+      kind: "unreachable";
+      perHost: UnreachableHost[];
+      infeasible?: InfeasibleHost[];
+    }
+  | {
+      kind: "transient";
+      perHost: TransientHost[];
+      infeasible?: InfeasibleHost[];
+      unreachable?: UnreachableHost[];
+    };
 
 const POLL_INTERVAL_MS = 8000;
 
@@ -127,6 +166,7 @@ const modelsSettled = ref(false);
 const rawTargetId = ref<string>("");
 const pollGenerations = new Map<string, number>();
 let routingAuthorityGeneration = 0;
+let targetPolicyGeneration = 0;
 let registryAuthoritySignature = "";
 
 function readRegistry(): void {
@@ -154,6 +194,7 @@ function readTarget(): void {
   if (next !== rawTargetId.value) {
     rawTargetId.value = next;
     routingAuthorityGeneration += 1;
+    targetPolicyGeneration += 1;
   }
 }
 
@@ -365,6 +406,7 @@ function setTarget(id: string): void {
   if (rawTargetId.value !== id) {
     rawTargetId.value = id;
     routingAuthorityGeneration += 1;
+    targetPolicyGeneration += 1;
   }
   setGenerateTargetId(id);
 }
@@ -381,7 +423,8 @@ function resolve(model: string | null): HostRoute | null {
 async function resolveFeasibleWithPreview(
   model: string,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
-): Promise<HostRoute | null> {
+  authorityRetry = 0,
+): Promise<FeasibilityResult> {
   readRegistry();
   readTarget();
   const authorityGeneration = routingAuthorityGeneration;
@@ -401,6 +444,7 @@ async function resolveFeasibleWithPreview(
           candidate,
           preview: null,
           legacyUnsupported: false,
+          error: "machine disappeared from the host registry",
           roundTripMs: 0,
         };
       const started = performance.now();
@@ -414,15 +458,23 @@ async function resolveFeasibleWithPreview(
           candidate,
           preview,
           legacyUnsupported: false,
+          error: null,
           roundTripMs: Math.max(0, performance.now() - started),
         };
       } catch (error) {
+        const probeError =
+          error instanceof ApiError
+            ? `HTTP ${error.status}: ${error.message}`
+            : error instanceof Error
+              ? error.message
+              : String(error);
         return {
           candidate,
           preview: null,
           legacyUnsupported:
             error instanceof ApiError &&
             (error.status === 404 || error.status === 405),
+          error: probeError,
           roundTripMs: Math.max(0, performance.now() - started),
         };
       }
@@ -431,7 +483,15 @@ async function resolveFeasibleWithPreview(
 
   readRegistry();
   readTarget();
-  if (routingAuthorityGeneration !== authorityGeneration) return null;
+  if (routingAuthorityGeneration !== authorityGeneration) {
+    if (authorityRetry === 0) {
+      return resolveFeasibleWithPreview(model, previewFor, 1);
+    }
+    return {
+      kind: "transient",
+      perHost: [],
+    };
+  }
 
   const currentById = new Map(hosts.value.map((host) => [host.id, host]));
   const planned = probes
@@ -455,7 +515,19 @@ async function resolveFeasibleWithPreview(
     .sort(comparePlacementPreviews);
   if (planned.length > 0) {
     const chosen = currentById.get(planned[0].hostId);
-    return chosen ? resolveRoute([chosen], chosen.id, []) : null;
+    if (chosen) {
+      const target: HostRoute["target"] = { baseUrl: chosen.url };
+      if (chosen.apiKey) target.apiKey = chosen.apiKey;
+      return {
+        kind: "route",
+        route: {
+          hostId: chosen.id,
+          label: chosen.label,
+          target,
+          instanceId: chosen.instanceId ?? null,
+        },
+      };
+    }
   }
 
   const unsupportedIds = probes
@@ -470,17 +542,103 @@ async function resolveFeasibleWithPreview(
       unsupportedIds.includes(candidate.id) &&
       (candidate.id === ORIGIN_HOST_ID || candidate.status === "ready"),
   );
-  if (legacy.length === 0) return null;
-  const legacyModelIds = hostsForModel(model).filter((id) =>
-    unsupportedIds.includes(id),
-  );
-  return resolveRoute(legacy, selection, legacyModelIds);
+  if (legacy.length > 0) {
+    const originRoutable = legacy.map((host) =>
+      host.id === ORIGIN_HOST_ID ? { ...host, status: "ready" as const } : host,
+    );
+    const legacyModelIds = hostsForModel(model).filter((id) =>
+      unsupportedIds.includes(id),
+    );
+    const route = resolveRoute(originRoutable, selection, legacyModelIds);
+    if (route) return { kind: "route", route };
+  }
+
+  const transient = probes.flatMap((probe) => {
+    if (
+      !probe.preview ||
+      classifyPlacementPreview(probe.preview) !== "temporarily_unavailable"
+    ) {
+      return [];
+    }
+    return [
+      {
+        hostId: probe.candidate.id,
+        label: probe.candidate.label,
+        reason:
+          probe.preview.reason ??
+          "could not compute a placement plan right now",
+      },
+    ];
+  });
+  const infeasible = probes.flatMap((probe) => {
+    if (
+      !probe.preview ||
+      classifyPlacementPreview(probe.preview) !== "infeasible"
+    ) {
+      return [];
+    }
+    return [
+      {
+        hostId: probe.candidate.id,
+        label: probe.candidate.label,
+        reason: probe.preview.reason!,
+        missingComponents: probe.preview.missing_components ?? [],
+      },
+    ];
+  });
+  const unreachable = probes
+    .filter(
+      (probe) =>
+        !probe.legacyUnsupported &&
+        (!probe.preview ||
+          classifyPlacementPreview(probe.preview) === "invalid"),
+    )
+    .map((probe) => ({
+      hostId: probe.candidate.id,
+      label: probe.candidate.label,
+      error:
+        probe.error ??
+        "returned an invalid authoritative placement-preview response",
+    }));
+  if (transient.length > 0) {
+    return {
+      kind: "transient",
+      perHost: transient,
+      ...(infeasible.length > 0 ? { infeasible } : {}),
+      ...(unreachable.length > 0 ? { unreachable } : {}),
+    };
+  }
+  if (infeasible.length > 0) {
+    return {
+      kind: "infeasible",
+      perHost: infeasible,
+      ...(unreachable.length > 0 ? { unreachable } : {}),
+    };
+  }
+  if (unreachable.length > 0)
+    return { kind: "unreachable", perHost: unreachable };
+
+  const selectedHosts =
+    selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID
+      ? hosts.value
+      : hosts.value.filter((host) => host.id === selection);
+  return {
+    kind: "unreachable",
+    perHost: selectedHosts.map((host) => ({
+      hostId: host.id,
+      label: host.label,
+      error:
+        host.status === "connecting"
+          ? "is still connecting"
+          : "is not ready for generation",
+    })),
+  };
 }
 
 async function resolveFeasible(
   request: GenerateRequestWire,
   copies = 1,
-): Promise<HostRoute | null> {
+): Promise<FeasibilityResult> {
   return resolveFeasibleWithPreview(request.model, (target) =>
     previewGenerationPlacement(
       target,
@@ -496,7 +654,7 @@ async function resolveFeasible(
 async function resolveFeasibleChain(
   request: ChainRequestWire,
   copies = 1,
-): Promise<HostRoute | null> {
+): Promise<FeasibilityResult> {
   return resolveFeasibleWithPreview(request.model, (target) =>
     previewChainPlacement(
       target,
@@ -512,10 +670,12 @@ async function resolveFeasibleChain(
 async function revalidateFeasibleWithPreview(
   route: HostRoute,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
-): Promise<HostRoute | null> {
+  authorityRetry = 0,
+): Promise<FeasibilityResult> {
   readRegistry();
   readTarget();
   const authorityGeneration = routingAuthorityGeneration;
+  const capturedTargetPolicyGeneration = targetPolicyGeneration;
   const captured = hosts.value.find((entry) => entry.id === route.hostId);
   if (
     !captured ||
@@ -523,7 +683,7 @@ async function revalidateFeasibleWithPreview(
     (captured.apiKey ?? undefined) !== route.target.apiKey ||
     (captured.instanceId ?? null) !== (route.instanceId ?? null)
   ) {
-    return null;
+    return { kind: "transient", perHost: [] };
   }
   const capturedInstanceId = captured.instanceId ?? null;
   let preview: GenerationPlacementPreview | null = null;
@@ -540,12 +700,34 @@ async function revalidateFeasibleWithPreview(
     ) {
       legacyUnsupported = true;
     } else {
-      return null;
+      return {
+        kind: "unreachable",
+        perHost: [
+          {
+            hostId: route.hostId,
+            label: route.label,
+            error:
+              error instanceof ApiError
+                ? `HTTP ${error.status}: ${error.message}`
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+          },
+        ],
+      };
     }
   }
   readRegistry();
   readTarget();
-  if (routingAuthorityGeneration !== authorityGeneration) return null;
+  if (targetPolicyGeneration !== capturedTargetPolicyGeneration) {
+    return { kind: "transient", perHost: [] };
+  }
+  if (routingAuthorityGeneration !== authorityGeneration) {
+    if (authorityRetry === 0) {
+      return revalidateFeasibleWithPreview(route, previewFor, 1);
+    }
+    return { kind: "transient", perHost: [] };
+  }
   const current = hosts.value.find((entry) => entry.id === route.hostId);
   if (
     !current ||
@@ -553,20 +735,57 @@ async function revalidateFeasibleWithPreview(
     (current.apiKey ?? undefined) !== route.target.apiKey ||
     (current.instanceId ?? null) !== capturedInstanceId
   ) {
-    return null;
+    return { kind: "transient", perHost: [] };
   }
-  if (
-    !legacyUnsupported &&
-    classifyPlacementPreview(preview) !== "unsupported" &&
-    classifyPlacementPreview(preview) !== "planned"
-  ) {
-    return null;
+  const classification = legacyUnsupported
+    ? "unsupported"
+    : classifyPlacementPreview(preview);
+  if (classification === "temporarily_unavailable") {
+    return {
+      kind: "transient",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          reason:
+            preview?.reason ?? "could not compute a placement plan right now",
+        },
+      ],
+    };
+  }
+  if (classification === "infeasible") {
+    return {
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          reason: preview!.reason!,
+          missingComponents: preview!.missing_components ?? [],
+        },
+      ],
+    };
+  }
+  if (classification === "invalid") {
+    return {
+      kind: "unreachable",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          error: "returned an invalid authoritative placement-preview response",
+        },
+      ],
+    };
   }
   return {
-    hostId: route.hostId,
-    label: route.label,
-    target: { ...route.target },
-    instanceId: capturedInstanceId,
+    kind: "route",
+    route: {
+      hostId: route.hostId,
+      label: route.label,
+      target: { ...route.target },
+      instanceId: capturedInstanceId,
+    },
   };
 }
 
@@ -574,7 +793,7 @@ async function revalidateFeasible(
   route: HostRoute,
   request: GenerateRequestWire,
   copies = 1,
-): Promise<HostRoute | null> {
+): Promise<FeasibilityResult> {
   return revalidateFeasibleWithPreview(route, (target) =>
     previewGenerationPlacement(
       target,
@@ -591,7 +810,7 @@ async function revalidateFeasibleChain(
   route: HostRoute,
   request: ChainRequestWire,
   copies = 1,
-): Promise<HostRoute | null> {
+): Promise<FeasibilityResult> {
   return revalidateFeasibleWithPreview(route, (target) =>
     previewChainPlacement(
       target,
@@ -640,6 +859,7 @@ export const __testing__ = {
     rawTargetId.value = "";
     pollGenerations.clear();
     routingAuthorityGeneration = 0;
+    targetPolicyGeneration = 0;
     registryAuthoritySignature = "";
   },
 };

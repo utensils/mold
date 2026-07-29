@@ -7,6 +7,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
@@ -154,6 +155,55 @@ export interface HostRoute {
   /** Optional stable server identity used by remote-only clients to detect
    * when one saved endpoint now reaches a different Mold installation. */
   instanceId?: string | null;
+}
+
+export interface HostPlacementFailure {
+  kind: "infeasible";
+  hostId: string;
+  label: string;
+  route: HostRoute;
+  reason: string;
+  missingComponents: PlacementMissingComponent[];
+}
+
+export interface HostProbeFailure {
+  kind: "transient" | "unreachable";
+  hostId: string;
+  label: string;
+  error: string;
+}
+
+export type HostFeasibilityFailure = HostPlacementFailure | HostProbeFailure;
+
+export type FeasibleRouteResult =
+  | { kind: "route"; route: HostRoute }
+  | { kind: "infeasible"; perHost: HostPlacementFailure[] }
+  | { kind: "unreachable"; perHost: HostProbeFailure[] }
+  | { kind: "transient"; perHost: HostProbeFailure[] }
+  | { kind: "mixed"; perHost: HostFeasibilityFailure[] };
+
+function hostRoute(host: HostView): HostRoute | null {
+  if (!host.baseUrl) return null;
+  return {
+    hostId: host.id,
+    label: host.label,
+    kind: host.kind,
+    target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
+    instanceId: host.instanceId,
+  };
+}
+
+function probeError(error: unknown): string {
+  if (error instanceof ApiError) {
+    const detail =
+      typeof error.body === "string"
+        ? error.body.trim()
+        : error.body && typeof error.body === "object" && "error" in error.body
+          ? String((error.body as { error?: unknown }).error ?? "").trim()
+          : "";
+    return `placement preview returned HTTP ${error.status}${detail ? ` — ${detail}` : ""}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -504,146 +554,278 @@ export const useHostsStore = defineStore("hosts", {
         instanceId: chosen.instanceId,
       };
     },
+    async resolveFeasible(
+      selection: string | null,
+      request: GenerateRequest | ChainRequest | AutoChainRequest,
+      copies = 1,
+    ): Promise<FeasibleRouteResult> {
+      const intentSignature = () =>
+        JSON.stringify({
+          requestedSelection: selection,
+          activeSelection: useAppPrefsStore().settings?.generateTargetHost ?? null,
+        });
+      const identitySignature = () =>
+        JSON.stringify(
+          this.all.map((host) => [host.id, host.baseUrl, host.apiKey, host.instanceId]),
+        );
+      const availabilitySignature = () =>
+        JSON.stringify({
+          hosts: this.all.map((host) => [host.id, host.status]),
+        });
+      const capturedIntent = intentSignature();
+      const capturedIdentity = identitySignature();
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const capturedAvailability = availabilitySignature();
+        let candidates = this.all.filter((host) => {
+          // The local server is the origin authority. While it is starting,
+          // still probe it and permit the legacy path; a genuinely dead
+          // listener then reports its transport error instead of being
+          // silently discarded before dispatch.
+          if (
+            (host.status !== "ready" && !(host.kind === "local" && host.status === "connecting")) ||
+            !host.baseUrl
+          )
+            return false;
+          const telemetry = this.telemetry[host.id];
+          if (telemetry?.devices != null)
+            return telemetry.devices.some((device) => device.schedulable);
+          return (
+            telemetry?.gpuWorkers == null ||
+            telemetry.gpuWorkers.some((worker) => worker.state !== "degraded")
+          );
+        });
+        if (
+          selection !== null &&
+          selection !== "capable" &&
+          this.all.some((host) => host.id === selection)
+        )
+          candidates = candidates.filter((host) => host.id === selection);
+
+        if (candidates.length === 0) {
+          const selected =
+            selection && selection !== "capable"
+              ? this.all.filter((host) => host.id === selection)
+              : this.all;
+          return {
+            kind: "unreachable",
+            perHost: selected.map((host) => ({
+              kind: "unreachable" as const,
+              hostId: host.id,
+              label: host.label,
+              error:
+                host.status === "connecting"
+                  ? "is still connecting"
+                  : host.status === "error"
+                    ? "is not reachable"
+                    : "has no schedulable device",
+            })),
+          };
+        }
+
+        const probes = await Promise.all(
+          candidates.map(async (host) => {
+            const started = performance.now();
+            try {
+              const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+              const preview =
+                Array.isArray((request as ChainRequest).stages) || "total_frames" in request
+                  ? await previewChainPlacement(
+                      target,
+                      previewRequestForSiblingFanout(
+                        request as unknown as Record<string, unknown>,
+                        copies,
+                      ),
+                      copies,
+                    )
+                  : await previewGenerationPlacement(
+                      target,
+                      previewRequestForSiblingFanout(
+                        request as unknown as Record<string, unknown>,
+                        copies,
+                      ),
+                      copies,
+                    );
+              return {
+                host,
+                preview,
+                error: null,
+                legacyUnsupported: false,
+                roundTripMs: Math.max(0, performance.now() - started),
+              };
+            } catch (error) {
+              return {
+                host,
+                preview: null,
+                error,
+                legacyUnsupported:
+                  error instanceof ApiError && (error.status === 404 || error.status === 405),
+                roundTripMs: Math.max(0, performance.now() - started),
+              };
+            }
+          }),
+        );
+        if (intentSignature() !== capturedIntent || identitySignature() !== capturedIdentity) {
+          return {
+            kind: "transient",
+            perHost: candidates.map((host) => ({
+              kind: "transient" as const,
+              hostId: host.id,
+              label: host.label,
+              error: "routing identity changed while placement was being checked",
+            })),
+          };
+        }
+        if (availabilitySignature() !== capturedAvailability) {
+          if (attempt === 0) continue;
+          return {
+            kind: "transient",
+            perHost: candidates.map((host) => ({
+              kind: "transient" as const,
+              hostId: host.id,
+              label: host.label,
+              error: "routing state changed while placement was being checked",
+            })),
+          };
+        }
+
+        const planned = probes
+          .flatMap((probe) =>
+            probe.preview && classifyPlacementPreview(probe.preview) === "planned"
+              ? [
+                  {
+                    host: probe.host,
+                    preview: probe.preview,
+                    roundTripMs: probe.roundTripMs,
+                  },
+                ]
+              : [],
+          )
+          .map((probe) => ({
+            hostId: probe.host.id,
+            roundTripMs: probe.roundTripMs,
+            preview: probe.preview,
+          }))
+          .sort(comparePlacementPreviews);
+        if (planned.length > 0) {
+          const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
+          const route = chosen ? hostRoute(chosen) : null;
+          if (route) return { kind: "route", route };
+        }
+
+        const unsupportedIds = probes
+          .filter(
+            (probe) =>
+              probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
+          )
+          .map((probe) => probe.host.id);
+        const legacy = candidates
+          .filter((host) => unsupportedIds.includes(host.id))
+          .map((host) => ({
+            ...host,
+            gpu: strongestRoutableGpu(this.telemetry[host.id]),
+          }));
+        if (legacy.length > 0) {
+          const modelHostIds = useHostModelsStore()
+            .hostsFor(request.model)
+            .filter((id) => unsupportedIds.includes(id));
+          let chosen: (typeof legacy)[number] | null;
+          if (selection === "capable") {
+            chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
+          } else if (selection !== null && this.all.some((host) => host.id === selection)) {
+            chosen = legacy.find((host) => host.id === selection) ?? null;
+          } else {
+            const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
+            chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
+          }
+          const route = chosen ? hostRoute(chosen) : null;
+          if (route) return { kind: "route", route };
+        }
+
+        const failures = probes.flatMap<HostFeasibilityFailure>((probe) => {
+          if (probe.error && !probe.legacyUnsupported) {
+            return [
+              {
+                kind: "unreachable",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                error: probeError(probe.error),
+              },
+            ];
+          }
+          const classification = classifyPlacementPreview(probe.preview);
+          if (classification === "infeasible" && probe.preview) {
+            const route = hostRoute(probe.host);
+            if (!route) return [];
+            return [
+              {
+                kind: "infeasible",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                route,
+                reason:
+                  typeof probe.preview.reason === "string" && probe.preview.reason.trim()
+                    ? probe.preview.reason.trim()
+                    : "the server reported that this request is infeasible",
+                missingComponents: probe.preview.missing_components ?? [],
+              },
+            ];
+          }
+          if (classification === "temporarily_unavailable" || classification === "invalid") {
+            return [
+              {
+                kind: "transient",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                error:
+                  classification === "temporarily_unavailable"
+                    ? (probe.preview?.reason ?? "could not compute a placement plan right now")
+                    : "returned an invalid placement response",
+              },
+            ];
+          }
+          return [];
+        });
+        if (failures.length === 0) {
+          return {
+            kind: "transient",
+            perHost: candidates.map((host) => ({
+              kind: "transient" as const,
+              hostId: host.id,
+              label: host.label,
+              error: "no placement route could be selected",
+            })),
+          };
+        }
+        if (failures.every((failure) => failure.kind === "infeasible")) {
+          return {
+            kind: "infeasible",
+            perHost: failures as HostPlacementFailure[],
+          };
+        }
+        if (failures.every((failure) => failure.kind === "unreachable")) {
+          return {
+            kind: "unreachable",
+            perHost: failures as HostProbeFailure[],
+          };
+        }
+        if (failures.every((failure) => failure.kind === "transient")) {
+          return {
+            kind: "transient",
+            perHost: failures as HostProbeFailure[],
+          };
+        }
+        return { kind: "mixed", perHost: failures };
+      }
+      return { kind: "transient", perHost: [] };
+    },
+    /** Compatibility wrapper for callers that only need the chosen route. */
     async resolveFeasibleRoute(
       selection: string | null,
       request: GenerateRequest | ChainRequest | AutoChainRequest,
       copies = 1,
     ): Promise<HostRoute | null> {
-      const authoritySignature = () =>
-        JSON.stringify({
-          requestedSelection: selection,
-          activeSelection: useAppPrefsStore().settings?.generateTargetHost ?? null,
-          hosts: this.all.map((host) => [
-            host.id,
-            host.baseUrl,
-            host.apiKey,
-            host.instanceId,
-            host.status,
-          ]),
-        });
-      const capturedAuthority = authoritySignature();
-      let candidates = this.all.filter((host) => {
-        if (host.status !== "ready" || !host.baseUrl) return false;
-        const telemetry = this.telemetry[host.id];
-        if (telemetry?.devices != null)
-          return telemetry.devices.some((device) => device.schedulable);
-        return (
-          telemetry?.gpuWorkers == null ||
-          telemetry.gpuWorkers.some((worker) => worker.state !== "degraded")
-        );
-      });
-      if (
-        selection !== null &&
-        selection !== "capable" &&
-        this.all.some((host) => host.id === selection)
-      )
-        candidates = candidates.filter((host) => host.id === selection);
-
-      const probes = await Promise.all(
-        candidates.map(async (host) => {
-          const started = performance.now();
-          try {
-            const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
-            const preview =
-              Array.isArray((request as ChainRequest).stages) || "total_frames" in request
-                ? await previewChainPlacement(
-                    target,
-                    previewRequestForSiblingFanout(
-                      request as unknown as Record<string, unknown>,
-                      copies,
-                    ),
-                    copies,
-                  )
-                : await previewGenerationPlacement(
-                    target,
-                    previewRequestForSiblingFanout(
-                      request as unknown as Record<string, unknown>,
-                      copies,
-                    ),
-                    copies,
-                  );
-            return {
-              host,
-              preview,
-              legacyUnsupported: false,
-              roundTripMs: Math.max(0, performance.now() - started),
-            };
-          } catch (error) {
-            return {
-              host,
-              preview: null,
-              legacyUnsupported:
-                error instanceof ApiError && (error.status === 404 || error.status === 405),
-              roundTripMs: Math.max(0, performance.now() - started),
-            };
-          }
-        }),
-      );
-      if (authoritySignature() !== capturedAuthority) return null;
-
-      const planned = probes
-        .flatMap((probe) =>
-          probe.preview && classifyPlacementPreview(probe.preview) === "planned"
-            ? [
-                {
-                  host: probe.host,
-                  preview: probe.preview,
-                  roundTripMs: probe.roundTripMs,
-                },
-              ]
-            : [],
-        )
-        .map((probe) => ({
-          hostId: probe.host.id,
-          roundTripMs: probe.roundTripMs,
-          preview: probe.preview,
-        }))
-        .sort(comparePlacementPreviews);
-      if (planned.length > 0) {
-        const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
-        if (!chosen?.baseUrl) return null;
-        return {
-          hostId: chosen.id,
-          label: chosen.label,
-          kind: chosen.kind,
-          target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
-          instanceId: chosen.instanceId,
-        };
-      }
-
-      const unsupportedIds = probes
-        .filter(
-          (probe) =>
-            probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
-        )
-        .map((probe) => probe.host.id);
-      const legacy = candidates
-        .filter((host) => unsupportedIds.includes(host.id))
-        .map((host) => ({
-          ...host,
-          gpu: strongestRoutableGpu(this.telemetry[host.id]),
-        }));
-      if (legacy.length === 0) return null;
-      const modelHostIds = useHostModelsStore()
-        .hostsFor(request.model)
-        .filter((id) => unsupportedIds.includes(id));
-      let chosen: (typeof legacy)[number] | null;
-      if (selection === "capable") {
-        chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
-      } else if (selection !== null && this.all.some((host) => host.id === selection)) {
-        chosen = legacy.find((host) => host.id === selection) ?? null;
-      } else {
-        const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
-        chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
-      }
-      if (!chosen?.baseUrl) return null;
-      return {
-        hostId: chosen.id,
-        label: chosen.label,
-        kind: chosen.kind,
-        target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
-        instanceId: chosen.instanceId,
-      };
+      const result = await this.resolveFeasible(selection, request, copies);
+      return result.kind === "route" ? result.route : null;
     },
     /** Pull queue depth/capacity from every live host. */
     async refresh() {

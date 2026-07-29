@@ -18,6 +18,8 @@ export interface GenerationPlacementPreview {
   outcome: string;
   reason?: string | null;
   candidate?: GenerationPlacementCandidate | null;
+  pending_downloads?: PlacementPendingDownload[];
+  missing_components?: PlacementMissingComponent[];
   stage_candidates?: Array<
     GenerationPlacementCandidate & {
       stage_index: number;
@@ -26,11 +28,93 @@ export interface GenerationPlacementPreview {
   >;
 }
 
+export interface PlacementPendingDownload {
+  kind: string;
+  name: string;
+  repo: string;
+  bytes?: number | null;
+}
+
+export interface PlacementMissingComponent {
+  kind: string;
+  name: string;
+  present: boolean;
+  path?: string | null;
+  repair_model?: string | null;
+}
+
 export type PlacementPreviewClassification =
-  "planned" | "unsupported" | "invalid";
+  | "planned"
+  | "unsupported"
+  | "infeasible"
+  | "temporarily_unavailable"
+  | "invalid";
 
 function nonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function hasNoCandidates(preview: Record<string, unknown>): boolean {
+  return (
+    (preview.candidate === undefined || preview.candidate === null) &&
+    (preview.stage_candidates === undefined ||
+      (Array.isArray(preview.stage_candidates) &&
+        preview.stage_candidates.length === 0))
+  );
+}
+
+function validMissingComponents(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((component) => {
+    if (
+      typeof component !== "object" ||
+      component === null ||
+      Array.isArray(component)
+    ) {
+      return false;
+    }
+    const row = component as Record<string, unknown>;
+    return (
+      typeof row.kind === "string" &&
+      row.kind.length > 0 &&
+      typeof row.name === "string" &&
+      row.name.length > 0 &&
+      typeof row.present === "boolean" &&
+      (row.path === undefined ||
+        row.path === null ||
+        typeof row.path === "string") &&
+      (row.repair_model === undefined ||
+        row.repair_model === null ||
+        typeof row.repair_model === "string")
+    );
+  });
+}
+
+function validPendingDownloads(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((download) => {
+    if (
+      typeof download !== "object" ||
+      download === null ||
+      Array.isArray(download)
+    ) {
+      return false;
+    }
+    const row = download as Record<string, unknown>;
+    return (
+      typeof row.kind === "string" &&
+      row.kind.length > 0 &&
+      typeof row.name === "string" &&
+      row.name.length > 0 &&
+      typeof row.repo === "string" &&
+      row.repo.length > 0 &&
+      (row.bytes === undefined ||
+        row.bytes === null ||
+        nonNegativeSafeInteger(row.bytes))
+    );
+  });
 }
 
 /** Runtime wire validation for placement authority. A malformed response must
@@ -51,12 +135,28 @@ export function classifyPlacementPreview(
   if (
     preview.authoritative === false &&
     preview.outcome === "unsupported" &&
-    (preview.candidate === undefined || preview.candidate === null) &&
-    (preview.stage_candidates === undefined ||
-      (Array.isArray(preview.stage_candidates) &&
-        preview.stage_candidates.length === 0))
+    hasNoCandidates(preview)
   ) {
     return "unsupported";
+  }
+  if (
+    (preview.authoritative === true || preview.authoritative === false) &&
+    preview.outcome === "temporarily_unavailable" &&
+    typeof preview.reason === "string" &&
+    preview.reason.length > 0 &&
+    hasNoCandidates(preview)
+  ) {
+    return "temporarily_unavailable";
+  }
+  if (
+    preview.authoritative === true &&
+    preview.outcome === "infeasible" &&
+    typeof preview.reason === "string" &&
+    preview.reason.length > 0 &&
+    hasNoCandidates(preview) &&
+    validMissingComponents(preview.missing_components)
+  ) {
+    return "infeasible";
   }
   if (
     preview.authoritative !== true ||
@@ -81,7 +181,8 @@ export function classifyPlacementPreview(
     typeof candidate.setup_kind !== "string" ||
     candidate.setup_kind.length === 0 ||
     typeof candidate.estimate_confidence !== "string" ||
-    candidate.estimate_confidence.length === 0
+    candidate.estimate_confidence.length === 0 ||
+    !validPendingDownloads(preview.pending_downloads)
   ) {
     return "invalid";
   }
@@ -214,6 +315,9 @@ export function comparePlacementPreviews(
     preview: GenerationPlacementPreview;
   },
 ): number {
+  const leftPending = (left.preview.pending_downloads?.length ?? 0) > 0;
+  const rightPending = (right.preview.pending_downloads?.length ?? 0) > 0;
+  if (leftPending !== rightPending) return leftPending ? 1 : -1;
   const leftCandidate = left.preview.candidate!;
   const rightCandidate = right.preview.candidate!;
   return (

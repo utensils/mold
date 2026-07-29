@@ -764,6 +764,56 @@ pub(crate) async fn model_component_status(
     })
 }
 
+/// Strictly local component inspection for read-only placement previews.
+///
+/// Unlike [`model_component_status`], this never reloads configuration,
+/// installs a catalog model, consults live catalog state, mutates intent
+/// caches, or writes sidecars. Catalog IDs are inspectable only after their
+/// concrete paths already exist in the in-memory configuration.
+pub(crate) async fn model_component_status_existing_only(
+    state: &AppState,
+    model_name: &str,
+) -> Result<ModelComponentsResponse, ApiError> {
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    let config = state.config.read().await;
+    if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+        let models_dir = config.resolved_models_dir();
+        let components = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let kind = manifest_component_kind(file.component);
+                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+                ModelComponentStatus {
+                    kind: kind.to_string(),
+                    name: manifest_component_name(file.component, &file.hf_filename).to_string(),
+                    present: path.is_file(),
+                    path: Some(path.to_string_lossy().to_string()),
+                    repair_model: Some(resolved.clone()),
+                    options: component_options_for_kind(&config, kind, Some(&path)),
+                }
+            })
+            .collect();
+        return Ok(ModelComponentsResponse {
+            model: resolved,
+            components,
+        });
+    }
+
+    let Some(paths) = ModelPaths::resolve(model_name, &config) else {
+        let message = if looks_like_catalog_id(model_name) {
+            format!("catalog model '{model_name}' has no existing local runtime paths")
+        } else {
+            format!("unknown model '{model_name}'. Run 'mold list' to see available models.")
+        };
+        return Err(ApiError::not_found(message));
+    };
+    Ok(ModelComponentsResponse {
+        model: model_name.to_string(),
+        components: component_status_from_paths(&config, model_name, &paths),
+    })
+}
+
 fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'static str {
     use mold_core::manifest::ModelComponent;
     match component {
@@ -1393,6 +1443,59 @@ mod tests {
     use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    #[tokio::test]
+    async fn existing_only_component_status_never_installs_unseen_catalog_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let models_dir = root.path().join("models-that-do-not-exist");
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = models_dir.display().to_string();
+        let config_before = format!("{:?}", *state.config.read().await);
+
+        for model in ["cv:999999999", "hf:owner/repo"] {
+            let error = model_component_status_existing_only(&state, model)
+                .await
+                .expect_err("uninstalled catalog IDs must remain unresolved");
+            assert!(
+                error.error.contains("has no existing local runtime paths"),
+                "{error:?}"
+            );
+        }
+
+        assert!(state.catalog_intents.read().await.is_empty());
+        assert_eq!(format!("{:?}", *state.config.read().await), config_before);
+        assert!(
+            !models_dir.exists(),
+            "inspection must not create a sidecar or model root"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_only_component_status_reads_pre_resolved_catalog_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("model.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "cv:123".to_string(),
+            mold_core::config::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("flux".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let status = model_component_status_existing_only(&state, "cv:123")
+            .await
+            .unwrap();
+
+        assert_eq!(status.model, "cv:123");
+        assert!(status.components.iter().all(|component| component.present));
+        assert!(state.catalog_intents.read().await.is_empty());
+    }
 
     struct IsolatedModelEnvironment {
         _lock: std::sync::MutexGuard<'static, ()>,

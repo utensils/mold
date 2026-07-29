@@ -93,6 +93,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are redacted from probes. Chain and local expansion/post-generation-upscale
   utility previews explicitly report non-authoritative `unsupported` until
   their real CPU/GPU execution paths can be modeled exactly.
+- **Placement failures now retain their actual cause and known encoder dependencies
+  can cross the read-only preview boundary safely.** Web, desktop, and iPhone
+  distinguish authoritative infeasibility, temporary planner failure, malformed
+  responses, transport/HTTP errors, and host-identity races instead of reporting one
+  generic missing-components error. Authoritative infeasible responses add
+  `missing_components` when manifest repair metadata is provable. Known missing
+  quantized encoders add `pending_downloads` to a planned response without starting
+  network work; their preview-only registry fingerprint is domain-separated from
+  landed artifact identity, memory feasibility includes declared bytes plus encoder
+  headroom, and estimates are forced low-confidence until admission downloads and
+  re-plans from the real file.
 - **Learned scheduler estimates now separate setup from execution.** Typed
   phase instrumentation records cold model load, warm reload, prompt encoding,
   denoising, VAE, and upscaling, while metadata schema v15 persists an

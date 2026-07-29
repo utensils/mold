@@ -4824,6 +4824,17 @@ pub struct ChainStagePlacementCandidate {
     pub candidate: GenerationPlacementCandidate,
 }
 
+/// A dependency that an authoritative placement preview proved admission can
+/// materialize before generation starts. Placement previews never start the
+/// download themselves.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PendingModelDownload {
+    pub kind: String,
+    pub name: String,
+    pub repo: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerationPlacementPreview {
     pub version: u32,
@@ -4840,6 +4851,15 @@ pub struct GenerationPlacementPreview {
     /// server can freeze the chain runner's per-device stage plans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stage_candidates: Vec<ChainStagePlacementCandidate>,
+    /// Known dependencies that admission will materialize before executing a
+    /// planned request. Absent for older servers and when no download is
+    /// required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_downloads: Vec<PendingModelDownload>,
+    /// Concrete absent model components that can be repaired by pulling
+    /// `repair_model`. This is only populated for an infeasible response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_components: Vec<ModelComponentStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

@@ -2535,6 +2535,7 @@ impl Coordinator {
                         pending.job.request.resolved_output_format(),
                         determinism_class,
                         false,
+                        &BTreeMap::new(),
                     );
                     let equivalence = environment.fingerprint();
                     crate::execution_plan::ResolvedExecutionPlan {
@@ -3281,6 +3282,8 @@ impl Coordinator {
                 reason: Some("copies must be between 1 and 64".to_string()),
                 candidate: None,
                 stage_candidates: Vec::new(),
+                pending_downloads: Vec::new(),
+                missing_components: Vec::new(),
             };
         }
         let has_local_expansion = request.expand == Some(true)
@@ -3307,6 +3310,8 @@ impl Coordinator {
                 ),
                 candidate: None,
                 stage_candidates: Vec::new(),
+                pending_downloads: Vec::new(),
+                missing_components: Vec::new(),
             };
         }
         self.placement_preview_dag(request, copies, prepared_inputs)
@@ -3406,6 +3411,8 @@ impl Coordinator {
             reason: Some(reason),
             candidate: None,
             stage_candidates: Vec::new(),
+            pending_downloads: Vec::new(),
+            missing_components: Vec::new(),
         };
         if !(1..=64).contains(&copies) {
             return empty("infeasible", "copies must be between 1 and 64".to_string());
@@ -3835,6 +3842,8 @@ impl Coordinator {
                 estimate_confidence: confidence,
             }),
             stage_candidates,
+            pending_downloads: Vec::new(),
+            missing_components: Vec::new(),
         }
     }
 

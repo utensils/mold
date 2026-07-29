@@ -809,6 +809,7 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) load_strategy: mold_inference::LoadStrategy,
     pub(crate) block_offload: bool,
     pub(crate) under_memory_pressure: bool,
+    pub(crate) eager_peak_memory_bytes: u64,
     pub(crate) fits_available_memory: Option<bool>,
 }
 
@@ -874,6 +875,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         load_strategy,
         block_offload,
         under_memory_pressure,
+        eager_peak_memory_bytes: eager_peak,
         fits_available_memory,
     }
 }

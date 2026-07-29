@@ -366,7 +366,12 @@ warm-reload, prompt-encode, denoise, VAE, and upscale timings feed bounded
 learned estimates; metadata schema v15 persists runtime independently so a
 candidate receives exactly its cold or warm setup charge. Multi-host Create
 uses `POST /api/generate/placement-preview` as a read-only final feasibility
-check for ordinary generation. Current chain and local prompt-expansion/
+check for ordinary generation. A planned response can name known encoder
+dependencies in `pending_downloads`; the preview does not fetch them, uses a
+separate registry-identity fingerprint with low estimate confidence, and
+admission recomputes the plan after the files land. An infeasible response can
+name absent manifest files in `missing_components` so clients can explain the
+repair instead of discarding the server's reason. Current chain and local prompt-expansion/
 post-generation-upscale utility previews deliberately return
 non-authoritative `unsupported`: those paths are not advertised as exact until
 their real device/CPU fallbacks are represented.

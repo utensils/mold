@@ -26,6 +26,7 @@ import {
   takeSequenceHandoff,
 } from "../composables/useSequenceHandoff";
 import { ApiHttpError } from "../api";
+import { ApiError } from "@studio/api/client";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
@@ -267,6 +268,23 @@ describe("CreatePage layout and behavior", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    placementPreviewMock.mockReset();
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
     streamJobsRef.value = [];
     upscaleStreamMock.mockReset();
     upscaleStreamMock.mockResolvedValue(undefined);
@@ -2085,6 +2103,23 @@ describe("CreatePage host routing", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    placementPreviewMock.mockReset();
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
     listChainJobsMock.mockResolvedValue({ jobs: [] });
     routeQuery.value = {};
     routerReplaceMock.mockClear();
@@ -2162,6 +2197,101 @@ describe("CreatePage host routing", () => {
     const notifications = useNotifications();
     expect(notifications.toasts.map((t) => t.text).join(" ")).toMatch(
       /isn't reachable/i,
+    );
+  });
+
+  it("shows the server reason and only absent structured component names", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model 'flux-dev:bf16' is missing required components",
+      candidate: null,
+      missing_components: [
+        {
+          kind: "vae",
+          name: "ae.safetensors",
+          present: false,
+          repair_model: "flux-dev:bf16",
+        },
+        {
+          kind: "tokenizer",
+          name: "tokenizer.json",
+          present: false,
+          repair_model: "flux-dev:bf16",
+        },
+        {
+          kind: "transformer",
+          name: "flux-dev.safetensors",
+          present: true,
+          repair_model: "flux-dev:bf16",
+        },
+      ],
+    } as never);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toBe(
+      "This server can't run this print: model 'flux-dev:bf16' is missing required components. Missing components: ae.safetensors, tokenizer.json.",
+    );
+  });
+
+  it("names the machine and HTTP error when its feasibility probe fails", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockRejectedValue(
+      new ApiError("API key was rejected", 401),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toBe(
+      "This server didn't answer the feasibility check: HTTP 401: API key was rejected.",
+    );
+  });
+
+  it("uses retry language for temporary scheduler preview failures", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: false,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "temporarily_unavailable",
+      reason: "scheduler snapshot moved",
+      candidate: null,
+    } as never);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toBe(
+      "This server couldn't compute a placement plan right now: scheduler snapshot moved. Try again.",
     );
   });
 

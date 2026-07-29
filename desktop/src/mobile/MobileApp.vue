@@ -199,6 +199,36 @@ interface MobileExpansionPullAttempt {
   terminalJob: DownloadJob | null;
 }
 
+function sentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+function mobilePlacementFailure(
+  preview: GenerationPlacementPreview | null,
+  hostLabel: string,
+  subject: "print" | "sequence",
+): string {
+  const classification = classifyPlacementPreview(preview);
+  if (classification === "infeasible" && preview) {
+    const missing = (preview.missing_components ?? [])
+      .filter((component) => !component.present)
+      .map((component) => component.name);
+    const reason =
+      typeof preview.reason === "string" && preview.reason.trim()
+        ? sentence(preview.reason.trim())
+        : sentence(`the server reported that this ${subject} is infeasible`);
+    return `${hostLabel} cannot run this ${subject}: ${reason}${missing.length ? ` Missing components: ${missing.join(", ")}.` : ""} Nothing was queued.`;
+  }
+  if (classification === "temporarily_unavailable") {
+    const reason =
+      typeof preview?.reason === "string" && preview.reason.trim()
+        ? ` Reason: ${sentence(preview.reason.trim())}`
+        : "";
+    return `${hostLabel} could not compute a placement plan right now.${reason} Try again. Nothing was queued.`;
+  }
+  return `${hostLabel} returned an invalid placement response. Nothing was queued.`;
+}
+
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
@@ -1191,12 +1221,9 @@ async function submitMobileSequence(): Promise<void> {
         throw error;
       }
     }
-    if (
-      !legacyUnsupported &&
-      classifyPlacementPreview(preview) !== "unsupported" &&
-      classifyPlacementPreview(preview) !== "planned"
-    ) {
-      throw new Error(preview?.reason ?? "The selected host cannot run this sequence.");
+    const classification: string = classifyPlacementPreview(preview);
+    if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+      throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
     if (!sameFrozenHost(frozenRoute, selectedHost.value)) {
       throw new Error("The selected host changed while checking this sequence.");
@@ -2216,14 +2243,9 @@ async function generate(): Promise<void> {
       return;
     }
   }
-  if (
-    !legacyUnsupported &&
-    classifyPlacementPreview(placement) !== "unsupported" &&
-    classifyPlacementPreview(placement) !== "planned"
-  ) {
-    setGenerationStatus(
-      placement?.reason ?? "The selected host cannot run this finalized request.",
-    );
+  const classification: string = classifyPlacementPreview(placement);
+  if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+    setGenerationStatus(mobilePlacementFailure(placement, route.label, "print"), true);
     releasePreparedSubmission();
     return;
   }

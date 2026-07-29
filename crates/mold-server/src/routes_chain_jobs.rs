@@ -145,6 +145,8 @@ pub async fn preview_chain_job_placement(
         reason: Some(reason),
         candidate: None,
         stage_candidates: Vec::new(),
+        pending_downloads: Vec::new(),
+        missing_components: Vec::new(),
     };
     if !(1..=64).contains(&copies) {
         return Json(unavailable("copies must be between 1 and 64".to_string()));

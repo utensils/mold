@@ -141,6 +141,14 @@ pub struct ContentFingerprint(pub String);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum EquivalenceContentIdentity {
     Sha256(String),
+    /// A read-only preview dependency whose immutable registry identity is
+    /// known but whose bytes have not landed yet. This domain is never used
+    /// by admission or worker leases.
+    PendingPreview {
+        repo: String,
+        filename: String,
+        bytes: u64,
+    },
     /// The artifact could not be read. This opaque process-local token makes
     /// the plan fail closed without treating a path or inode as content.
     Unknown {
@@ -340,10 +348,23 @@ pub enum ArtifactFormatUnknown {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ComponentStorageFormat {
     Known(mold_inference::artifact_format::ArtifactStorageFormat),
+    /// Registry-declared container/quantization facts for an artifact that a
+    /// read-only preview has not materialized yet. This is deliberately a
+    /// separate domain from probed bytes and is replaced at admission.
+    PendingPreview {
+        container: PendingArtifactContainer,
+        artifact_identity: EquivalenceContentIdentity,
+        quantization: QuantizationVariant,
+    },
     Unknown {
         reason: ArtifactFormatUnknown,
         content_discriminator: EquivalenceContentIdentity,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum PendingArtifactContainer {
+    Gguf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -759,17 +780,53 @@ pub struct PreparedExecutionInputs {
     /// at least one sibling succeeded. These omissions are retryable; they
     /// must not silently become the device set for the lifetime of the job.
     pub retryable_device_failures: BTreeMap<String, String>,
+    /// Union of read-only preview dependencies across prepared devices.
+    /// Admission preparation always leaves this empty.
+    pub pending_downloads: Vec<mold_core::PendingModelDownload>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedDeviceExecutionInputs {
     pub engine_paths: ModelPaths,
     pub engine_config: mold_inference::FrozenEngineConfig,
+    /// Preview-only identities for known dependencies that admission will
+    /// materialize at these exact paths. Production admission always leaves
+    /// this empty and fingerprints the landed artifacts instead.
+    pub pending_artifacts: BTreeMap<PathBuf, PendingArtifactIdentity>,
     /// Free VRAM used to resolve an `auto` dependency choice.
     pub prepared_available_vram_bytes: u64,
     /// False for explicit variants, whose choice must not churn with
     /// telemetry.
     pub capacity_sensitive: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingArtifactIdentity {
+    pub repo: String,
+    pub filename: String,
+    pub bytes: u64,
+    pub quantization: QuantizationVariant,
+}
+
+impl PendingArtifactIdentity {
+    fn exact_fingerprint(&self) -> ContentFingerprint {
+        let mut hash = Sha256::new();
+        hash.update(b"mold.pending-preview.exact.v1\0");
+        hash.update(self.repo.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.filename.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.bytes.to_le_bytes());
+        ContentFingerprint(format!("{:x}", hash.finalize()))
+    }
+
+    fn equivalence_identity(&self) -> EquivalenceContentIdentity {
+        EquivalenceContentIdentity::PendingPreview {
+            repo: self.repo.clone(),
+            filename: self.filename.clone(),
+            bytes: self.bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
@@ -991,9 +1048,14 @@ fn resolve_execution_plans_with_policy(
                     (
                         prepared.engine_paths.clone(),
                         prepared.engine_config.clone(),
+                        prepared.pending_artifacts.clone(),
                     )
                 })?,
-                None => (paths.clone(), admission_engine_config.clone()),
+                None => (
+                    paths.clone(),
+                    admission_engine_config.clone(),
+                    BTreeMap::new(),
+                ),
             };
             let artifacts =
                 concrete_artifacts_for_family(&inputs.0, &family, &effective_loras, &inputs.1);
@@ -1012,6 +1074,7 @@ fn resolve_execution_plans_with_policy(
                 admission_engine_config: &admission_engine_config,
                 effective_loras: &effective_loras,
                 artifacts: &artifacts,
+                pending_artifacts: &inputs.2,
                 effective: &effective,
                 offload_requested,
                 equivalence_cache_only: fact_policy == EquivalenceFactPolicy::CacheOnly,
@@ -1449,6 +1512,7 @@ struct PlanContext<'a> {
     admission_engine_config: &'a mold_inference::FrozenEngineConfig,
     effective_loras: &'a [PlannedLora],
     artifacts: &'a BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &'a BTreeMap<PathBuf, PendingArtifactIdentity>,
     effective: &'a EffectivePlacement,
     offload_requested: bool,
     /// Prepared production jobs have already hashed every artifact on the
@@ -1499,8 +1563,20 @@ fn build_plan(
     // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
     // The family capability gate above remains a typed error; this path-level
     // policy exactly matches what engine construction will consume.
-    let auto_cpu_text =
-        initial_memory.under_memory_pressure && context.capabilities.supports_text_encoder_cpu;
+    let pending_encoder_bytes = context
+        .artifacts
+        .iter()
+        .filter(|(role, path)| {
+            role.is_text_encoder() && context.pending_artifacts.contains_key(*path)
+        })
+        .map(|(_, path)| context.pending_artifacts[path].bytes)
+        .sum::<u64>();
+    let pending_pushes_eager_over_budget = initial_memory
+        .eager_peak_memory_bytes
+        .saturating_add(pending_encoder_bytes)
+        > device.available_vram_bytes.saturating_mul(9) / 10;
+    let auto_cpu_text = context.capabilities.supports_text_encoder_cpu
+        && (initial_memory.under_memory_pressure || pending_pushes_eager_over_budget);
 
     let mut placements = context
         .artifacts
@@ -1563,12 +1639,39 @@ fn build_plan(
     if memory.fits_available_memory != Some(true) {
         return None;
     }
+    // Missing preview dependencies have no filesystem metadata yet. Mirror
+    // the resolved component placement: a pending encoder assigned to CPU
+    // consumes host memory and does not need to fit the GPU; a device-assigned
+    // encoder must fit with the same preparation headroom. Admission
+    // recomputes the complete plan from landed file metadata.
+    const PENDING_DEPENDENCY_HEADROOM_BYTES: u64 = 2_000_000_000;
+    let pending_dependency_peak = context
+        .artifacts
+        .iter()
+        .filter(|(role, path)| {
+            context.pending_artifacts.contains_key(*path)
+                && !placements.get(*role).copied().unwrap_or(false)
+        })
+        .map(|(_, path)| {
+            let artifact = &context.pending_artifacts[path];
+            artifact
+                .bytes
+                .saturating_add(PENDING_DEPENDENCY_HEADROOM_BYTES)
+        })
+        .max()
+        .unwrap_or(0);
+    if pending_dependency_peak > device.available_vram_bytes {
+        return None;
+    }
 
     let mut components = BTreeMap::new();
     let mut host_paths = BTreeSet::new();
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
-        let bytes = artifact_size(path);
+        let bytes = context
+            .pending_artifacts
+            .get(path)
+            .map_or_else(|| artifact_size(path), |artifact| artifact.bytes);
         let (placement, load_strategy, vram, host) = if place_cpu {
             host_paths.insert(path.clone());
             (
@@ -1602,7 +1705,11 @@ fn build_plan(
             ComponentExecutionPlan {
                 role: role.clone(),
                 artifact_path: path.clone(),
-                content_fingerprint: fingerprint_path(path),
+                content_fingerprint: context
+                    .pending_artifacts
+                    .get(path)
+                    .map(PendingArtifactIdentity::exact_fingerprint)
+                    .unwrap_or_else(|| fingerprint_path(path)),
                 dtype: (!role.is_host_only()).then_some(exact_dtype).flatten(),
                 quantization: (!role.is_host_only())
                     .then_some(exact_quantization)
@@ -1615,9 +1722,14 @@ fn build_plan(
         );
     }
 
-    let predicted_vram = memory.peak_memory_bytes;
+    let predicted_vram = memory.peak_memory_bytes.max(pending_dependency_peak);
     let predicted_host = host_paths.iter().fold(BASE_HOST_TRANSIENT, |total, path| {
-        total.saturating_add(artifact_size(path))
+        total.saturating_add(
+            context
+                .pending_artifacts
+                .get(path)
+                .map_or_else(|| artifact_size(path), |artifact| artifact.bytes),
+        )
     });
     let fingerprint = execution_fingerprint(
         context.model,
@@ -1628,9 +1740,13 @@ fn build_plan(
         context.effective_loras,
         memory.block_offload,
     );
-    let model_fingerprint = model_fingerprint(context.model, context.artifacts);
-    let equivalence_model_fingerprint =
-        equivalence_model_fingerprint(context.artifacts, context.equivalence_cache_only);
+    let model_fingerprint =
+        model_fingerprint(context.model, context.artifacts, context.pending_artifacts);
+    let equivalence_model_fingerprint = equivalence_model_fingerprint(
+        context.artifacts,
+        context.pending_artifacts,
+        context.equivalence_cache_only,
+    );
     let attention_backend = match context.engine_config.attention_backend {
         mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
         mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
@@ -1655,6 +1771,7 @@ fn build_plan(
         context.request.resolved_output_format(),
         determinism_class,
         context.equivalence_cache_only,
+        context.pending_artifacts,
     );
     let execution_equivalence_fingerprint = execution_environment.fingerprint();
     Some(Ok(ResolvedExecutionPlan {
@@ -1697,6 +1814,7 @@ pub(crate) fn execution_environment_descriptor(
     output_format: OutputFormat,
     determinism_class: DeterminismClass,
     equivalence_cache_only: bool,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
 ) -> ExecutionEnvironmentDescriptor {
     let architecture = match (device.backend, device.compute_capability) {
         (GpuBackend::Cuda, Some((major, minor))) => {
@@ -1724,8 +1842,18 @@ pub(crate) fn execution_environment_descriptor(
         .map(|(role, component)| {
             let facts =
                 artifact_facts_path_with_policy(&component.artifact_path, equivalence_cache_only);
-            let content_fingerprint = facts.content.clone();
-            let storage = component_storage_format(&facts);
+            let pending = pending_artifacts.get(&component.artifact_path);
+            let content_fingerprint = pending
+                .map(PendingArtifactIdentity::equivalence_identity)
+                .unwrap_or_else(|| facts.content.clone());
+            let storage = pending.map_or_else(
+                || component_storage_format(&facts),
+                |pending| ComponentStorageFormat::PendingPreview {
+                    container: PendingArtifactContainer::Gguf,
+                    artifact_identity: pending.equivalence_identity(),
+                    quantization: pending.quantization,
+                },
+            );
             let precision = effective_component_precision(
                 model_family,
                 role,
@@ -1983,6 +2111,7 @@ fn quantization_from_storage(storage: &ComponentStorageFormat) -> Option<Quantiz
                 None
             }
         }
+        ComponentStorageFormat::PendingPreview { quantization, .. } => Some(*quantization),
         _ => None,
     }
 }
@@ -2794,24 +2923,37 @@ fn unknown_equivalence_content(
     EquivalenceContentIdentity::Unknown { discriminator }
 }
 
-fn model_fingerprint(model: &str, artifacts: &BTreeMap<ComponentRole, PathBuf>) -> String {
+fn model_fingerprint(
+    model: &str,
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+) -> String {
     let mut hash = Sha256::new();
     hash.update(model.as_bytes());
     for (role, path) in artifacts {
         hash.update(format!("{role:?}").as_bytes());
-        hash.update(fingerprint_path(path).0.as_bytes());
+        let fingerprint = pending_artifacts
+            .get(path)
+            .map(PendingArtifactIdentity::exact_fingerprint)
+            .unwrap_or_else(|| fingerprint_path(path));
+        hash.update(fingerprint.0.as_bytes());
     }
     format!("{:x}", hash.finalize())
 }
 
 fn equivalence_model_fingerprint(
     artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
     cache_only: bool,
 ) -> String {
     let mut hash = Sha256::new();
     for (role, path) in artifacts {
         hash.update(format!("{role:?}").as_bytes());
-        equivalence_fingerprint_path_with_policy(path, cache_only).update_hash(&mut hash);
+        pending_artifacts
+            .get(path)
+            .map(PendingArtifactIdentity::equivalence_identity)
+            .unwrap_or_else(|| equivalence_fingerprint_path_with_policy(path, cache_only))
+            .update_hash(&mut hash);
     }
     format!("{:x}", hash.finalize())
 }
@@ -2837,7 +2979,7 @@ fn resolved_paths_model_fingerprint(model: &str, paths: ModelPaths) -> String {
         artifacts.insert(ComponentRole::TransformerShard(index), shard);
     }
     artifacts.insert(ComponentRole::Vae, paths.vae);
-    model_fingerprint(model, &artifacts)
+    model_fingerprint(model, &artifacts, &BTreeMap::new())
 }
 
 /// Fingerprint the complete immutable input to engine construction for a
@@ -3896,11 +4038,13 @@ mod tests {
                 PreparedDeviceExecutionInputs {
                     engine_paths: selected_paths,
                     engine_config: selected_config,
+                    pending_artifacts: BTreeMap::new(),
                     prepared_available_vram_bytes: 24 * GIB,
                     capacity_sensitive: false,
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            pending_downloads: Vec::new(),
         };
 
         let plans = resolve_execution_plans_with_prepared(
@@ -3956,11 +4100,13 @@ mod tests {
                 PreparedDeviceExecutionInputs {
                     engine_paths: paths.clone(),
                     engine_config,
+                    pending_artifacts: BTreeMap::new(),
                     prepared_available_vram_bytes: 24 * GIB,
                     capacity_sensitive: false,
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            pending_downloads: Vec::new(),
         };
 
         let mut changed_config = config.clone();
@@ -4113,6 +4259,7 @@ mod tests {
                 plan.execution_environment.output_format,
                 plan.determinism_class,
                 false,
+                &BTreeMap::new(),
             )
         };
 
@@ -4250,11 +4397,13 @@ mod tests {
                 PreparedDeviceExecutionInputs {
                     engine_paths: paths.clone(),
                     engine_config,
+                    pending_artifacts: BTreeMap::new(),
                     prepared_available_vram_bytes: 24 * GIB,
                     capacity_sensitive: false,
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            pending_downloads: Vec::new(),
         };
         warm_execution_equivalence_cache(&config, &request, &prepared);
 

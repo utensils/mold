@@ -1927,6 +1927,8 @@ pub(crate) async fn placement_preview_for_request(
         reason: Some(reason),
         candidate: None,
         stage_candidates: Vec::new(),
+        pending_downloads: Vec::new(),
+        missing_components: Vec::new(),
     };
     if !(1..=64).contains(&copies) {
         let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
@@ -1968,17 +1970,46 @@ pub(crate) async fn placement_preview_for_request(
             Err(error) => {
                 let mut response = unavailable("infeasible", error);
                 response.authoritative = true;
+                response.missing_components = missing_model_components(state, &request.model).await;
                 return response;
             }
         };
+    let pending_downloads = prepared.pending_downloads.clone();
     match state
         .scheduled_work
         .preview_placement(request, copies, prepared)
         .await
     {
-        Ok(response) => response,
+        Ok(mut response) => {
+            if response.outcome == "planned" && !pending_downloads.is_empty() {
+                response.pending_downloads = pending_downloads;
+                if let Some(candidate) = response.candidate.as_mut() {
+                    candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
+                }
+                for stage in &mut response.stage_candidates {
+                    stage.candidate.estimate_confidence = mold_core::QueueEstimateConfidence::Low;
+                }
+            }
+            response
+        }
         Err(error) => unavailable("temporarily_unavailable", error),
     }
+}
+
+async fn missing_model_components(
+    state: &AppState,
+    model: &str,
+) -> Vec<mold_core::ModelComponentStatus> {
+    model_manager::model_component_status_existing_only(state, model)
+        .await
+        .map(|status| {
+            status
+                .components
+                .into_iter()
+                .filter(|component| !component.present)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn model_components(
