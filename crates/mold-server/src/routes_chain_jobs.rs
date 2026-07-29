@@ -76,7 +76,9 @@ pub async fn create_chain_job(
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
-    crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await?;
+    crate::routes_chain::validate_chain_build_features(&req)?;
+    let authority = crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?;
+    crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
     let req = req
         .normalise()
         .map_err(|e| ApiError::validation(e.to_string()))?;
@@ -95,7 +97,9 @@ pub async fn create_chain_job(
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
             ephemeral: false,
-            frozen_model: Some(crate::routes_chain::freeze_chain_model(&state, &req.model).await?),
+            frozen_model: Some(crate::routes_chain::freeze_chain_model(
+                authority, &req.model,
+            )?),
             request: req,
         },
     )
@@ -151,8 +155,18 @@ pub async fn preview_chain_job_placement(
     if !(1..=64).contains(&copies) {
         return Json(unavailable("copies must be between 1 and 64".to_string()));
     }
+    if let Err(error) = crate::routes_chain::validate_chain_build_features(&req) {
+        return Json(unavailable(error.error));
+    }
+    let base_config = state.config.read().await.clone();
+    let validation_config =
+        match crate::model_manager::resolve_existing_model_authority(&req.model, &base_config) {
+            Ok(Some(authority)) => authority.config,
+            Ok(None) => base_config,
+            Err(error) => return Json(unavailable(error.error)),
+        };
     if let Err(error) =
-        crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await
+        crate::routes_chain::validate_and_normalize_chain_family(&validation_config, &mut req)
     {
         return Json(unavailable(error.error));
     }
@@ -461,7 +475,20 @@ pub async fn amend_chain_job(
             .map_err(|e| ApiError::internal(format!("failed to load chain request: {e:#}")))?;
         let mut candidate = crate::chain_job_runner::amend_candidate_request(&effective, &req);
         let motion_tail_before = candidate.motion_tail_frames;
-        crate::routes_chain::validate_and_normalize_chain_family(&state, &mut candidate).await?;
+        crate::routes_chain::validate_chain_build_features(&candidate)?;
+        let validation_config = if let Some(frozen) = manifest.frozen_model.as_ref() {
+            let mut config = state.config.read().await.clone();
+            config.install_frozen_model_config(&candidate.model, frozen.config.clone());
+            config
+        } else {
+            crate::routes_chain::resolve_chain_model_authority(&state, &candidate.model)
+                .await?
+                .config
+        };
+        crate::routes_chain::validate_and_normalize_chain_family(
+            &validation_config,
+            &mut candidate,
+        )?;
         if candidate.motion_tail_frames != motion_tail_before {
             req.motion_tail_frames = Some(candidate.motion_tail_frames);
         }
@@ -1059,6 +1086,79 @@ mod tests {
         out
     }
 
+    fn materialize_manifest_companion(models_dir: &std::path::Path, companion: &str) {
+        let manifest = mold_core::manifest::find_manifest(companion).unwrap();
+        for file in &manifest.files {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"test fixture").unwrap();
+            mold_core::download::write_sha256_marker(&path, "test").unwrap();
+        }
+    }
+
+    fn write_safetensors_with_keys(path: &std::path::Path, keys: &[&str]) {
+        use std::io::Write;
+
+        let mut header = serde_json::Map::new();
+        for key in keys {
+            header.insert(
+                (*key).to_string(),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": [1],
+                    "data_offsets": [0, 4],
+                }),
+            );
+        }
+        let header_json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(header_json.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header_json).unwrap();
+        file.write_all(&[0u8; 4]).unwrap();
+    }
+
+    fn materialize_ltx23_catalog_model(models_dir: &std::path::Path, model: &str) {
+        for companion in ["ltx2-te", "ltx2.3-vae", "ltx2.3-text-projection"] {
+            materialize_manifest_companion(models_dir, companion);
+        }
+        let install_dir = models_dir.join("cv-3143864");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let primary = install_dir.join("model.safetensors");
+        write_safetensors_with_keys(
+            &primary,
+            &["model.diffusion_model.transformer_blocks.0.attn1.to_q.weight"],
+        );
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: model.to_string(),
+                source: "civitai".into(),
+                source_id: "3143864".into(),
+                name: "LTX 2.3 INT4 ConvRot".into(),
+                author: None,
+                family: "ltx2".into(),
+                family_role: "finetune".into(),
+                sub_family: Some("v2.3".into()),
+                kind: "checkpoint".into(),
+                modality: "video".into(),
+                nsfw: None,
+                description: None,
+                tags: vec![],
+                license: None,
+                page_url: None,
+                thumbnail_url: None,
+                size_bytes: Some(primary.metadata().unwrap().len()),
+                supported: true,
+                trained_words: vec![],
+                primary_filename_rel: "model.safetensors".into(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+    }
+
     struct NoopExecutor;
 
     impl crate::chain_job_runner::StageExecutor for NoopExecutor {
@@ -1169,11 +1269,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_sequence_freezes_installed_ltx23_catalog_model_without_mutating_live_config() {
+        const MODEL: &str = "cv:3143864";
+
+        let home = tempfile::tempdir().unwrap();
+        let models_dir = home.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        materialize_ltx23_catalog_model(&models_dir, MODEL);
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models_dir = models_dir.display().to_string();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = MODEL.into();
+        request.stages.push(ChainStage {
+            prompt: "stage one".into(),
+            frames: 9,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Cut,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        });
+
+        let (status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state.clone()), Json(request)))
+        })
+        .unwrap();
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            !state.config.read().await.models.contains_key(MODEL),
+            "durable admission must not install a runtime catalog overlay into AppState"
+        );
+        let row = chain_jobs::get_job(db.as_ref().as_ref().unwrap(), &created.job_id)
+            .unwrap()
+            .unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        let effective = crate::chain_job_runner::effective_request(&manifest).unwrap();
+        assert_eq!(effective.model, MODEL);
+        assert_eq!(effective.stages.len(), 2);
+        let frozen = manifest.frozen_model.expect("catalog model frozen");
+        assert!(frozen.runtime_model_id.starts_with("mold-frozen-chain:"));
+        assert_eq!(frozen.config.family.as_deref(), Some("ltx2"));
+        let paths = mold_core::ModelPaths::resolve_from_model_config_exact(&frozen.config)
+            .expect("frozen paths remain exactly resolvable");
+        assert_eq!(
+            paths.transformer,
+            models_dir
+                .join("cv-3143864/model.safetensors")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_ne!(paths.vae, paths.transformer);
+        assert!(
+            paths.text_encoder_files.len() > 1,
+            "Gemma weights and LTX-2.3 text projection must both be frozen"
+        );
+        for path in frozen.config.all_file_paths() {
+            let path = std::path::Path::new(&path);
+            assert!(path.is_absolute());
+            assert!(path.is_file(), "missing frozen path {}", path.display());
+        }
+    }
+
+    #[tokio::test]
     async fn create_chain_job_fails_closed_when_model_freeze_is_unresolvable() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let state = state_with(
-            db,
+            db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
         state.config.write().await.models.insert(
@@ -1197,10 +1367,16 @@ mod tests {
             futures::executor::block_on(create_chain_job(State(state), Json(request)))
         })
         .unwrap_err();
+        assert!(error
+            .error
+            .starts_with("cannot freeze concrete chain model companions for 'unfreezable-chain':"));
         assert_eq!(
             error.into_response().status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+        assert!(chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

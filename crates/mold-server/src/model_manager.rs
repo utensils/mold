@@ -57,6 +57,12 @@ pub(crate) struct ExistingModelResolution {
     pub model_config_overlay: Option<mold_core::ModelConfig>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ExistingModelAuthority {
+    pub paths: ModelPaths,
+    pub config: Config,
+}
+
 /// Resolve concrete model paths using only the supplied config and installed
 /// local sidecars.
 ///
@@ -109,6 +115,31 @@ pub(crate) fn resolve_existing_model_paths(
     }))
 }
 
+/// Resolve one immutable, local-only config snapshot for work that must keep
+/// an opaque catalog model stable beyond request admission.
+///
+/// The returned config owns the catalog overlay instead of mutating
+/// `AppState.config`, so inventory refreshes cannot erase or replace the
+/// authority carried by durable work.
+pub(crate) fn resolve_existing_model_authority(
+    model_name: &str,
+    config: &Config,
+) -> Result<Option<ExistingModelAuthority>, ApiError> {
+    let Some(resolved) = resolve_existing_model_paths(model_name, config)? else {
+        return Ok(None);
+    };
+    let mut effective = config.clone();
+    if let Some(model_config) = resolved.model_config_overlay {
+        effective
+            .models
+            .insert(model_name.to_string(), model_config);
+    }
+    Ok(Some(ExistingModelAuthority {
+        paths: resolved.paths,
+        config: effective,
+    }))
+}
+
 pub(crate) fn resolve_installed_catalog_paths_for_worker(
     model_name: &str,
     config: &Config,
@@ -116,17 +147,10 @@ pub(crate) fn resolve_installed_catalog_paths_for_worker(
     if !looks_like_catalog_id(model_name) {
         return Ok(None);
     }
-    let Some(resolved) = resolve_existing_model_paths(model_name, config)? else {
+    let Some(authority) = resolve_existing_model_authority(model_name, config)? else {
         return Ok(None);
     };
-    let Some(model_config) = resolved.model_config_overlay else {
-        return Ok(Some((resolved.paths, config.clone())));
-    };
-    let mut resolved_config = config.clone();
-    resolved_config
-        .models
-        .insert(model_name.to_string(), model_config);
-    Ok(Some((resolved.paths, resolved_config)))
+    Ok(Some((authority.paths, authority.config)))
 }
 
 pub(crate) type DownloadProgressCallback =
