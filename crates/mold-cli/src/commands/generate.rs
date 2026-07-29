@@ -1371,6 +1371,7 @@ async fn generate_local_batch(
         let ordinal = *ordinal;
         let config = effective_config.clone();
         let execution_plan = execution_plan.clone();
+        let prepared_execution_inputs = local_plan.prepared_execution_inputs.clone();
         let (command_tx, command_rx) =
             std::sync::mpsc::sync_channel::<Option<(u32, GenerateRequest)>>(1);
         command_txs.insert(ordinal, command_tx);
@@ -1389,8 +1390,12 @@ async fn generate_local_batch(
                     mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
                     let result = (|| -> Result<GenerateResponse> {
                         if engine.is_none() {
-                            let mut created =
-                                build_local_engine_from_plan(&request, &config, &execution_plan)?;
+                            let mut created = build_local_engine_from_plan(
+                                &request,
+                                &config,
+                                &execution_plan,
+                                &prepared_execution_inputs,
+                            )?;
                             created.set_on_progress(Box::new({
                                 let tx = tx.clone();
                                 move |event| {

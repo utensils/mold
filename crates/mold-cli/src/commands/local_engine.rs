@@ -215,6 +215,7 @@ pub(crate) async fn plan_local_batch(
     Ok(LocalBatchPlan {
         candidates,
         execution_plans: by_ordinal,
+        prepared_execution_inputs: prepared,
         host_headroom_bytes: host_headroom,
     })
 }
@@ -224,6 +225,7 @@ pub(crate) fn build_local_engine_from_plan(
     request: &mold_core::GenerateRequest,
     config: &Config,
     plan: &mold_server::execution_plan::ResolvedExecutionPlan,
+    prepared: &mold_server::execution_plan::PreparedExecutionInputs,
 ) -> Result<Box<dyn mold_inference::InferenceEngine>> {
     mold_server::execution_plan::validate_before_cuda(
         plan,
@@ -231,6 +233,7 @@ pub(crate) fn build_local_engine_from_plan(
         plan.device_ordinal,
         config,
         request,
+        Some(prepared),
     )?;
     let current_free =
         mold_inference::device::free_vram_bytes(plan.device_ordinal).ok_or_else(|| {
@@ -276,6 +279,7 @@ pub(crate) struct LocalBatchPlan {
     pub candidates: Vec<LocalCandidate>,
     pub execution_plans:
         std::collections::BTreeMap<usize, mold_server::execution_plan::ResolvedExecutionPlan>,
+    pub prepared_execution_inputs: mold_server::execution_plan::PreparedExecutionInputs,
     pub host_headroom_bytes: u64,
 }
 

@@ -376,6 +376,7 @@ async fn run_chain_local(
     let req_clone = req.clone();
     let planning_request_clone = planning_request.clone();
     let effective_config_clone = effective_config.clone();
+    let prepared_execution_inputs = local_plan.prepared_execution_inputs.clone();
 
     let handle = tokio::task::spawn_blocking(move || -> Result<VideoData> {
         // Construction, load, render, and drop are all owned by this one
@@ -386,6 +387,7 @@ async fn run_chain_local(
             &planning_request_clone,
             &effective_config_clone,
             &execution_plan,
+            &prepared_execution_inputs,
         )?;
         engine.load()?;
         let renderer = engine.as_chain_renderer().ok_or_else(|| {

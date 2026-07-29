@@ -5020,6 +5020,40 @@ mod tests {
         assert!(preview.reason.unwrap().contains("between 1 and 64"));
     }
 
+    #[tokio::test]
+    async fn generation_placement_preview_names_missing_manifest_components() {
+        let models = tempfile::tempdir().unwrap();
+        let mut state = AppState::for_tests();
+        state.config.write().await.models_dir = models.path().display().to_string();
+        let (owner_tx, _owner_rx) = tokio::sync::mpsc::channel(1);
+        let (preview_tx, _preview_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            owner_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            true,
+            false,
+        )
+        .with_placement_preview(preview_tx);
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"sd15:fp16","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 1).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.candidate.is_none());
+        let vae = preview
+            .missing_components
+            .iter()
+            .find(|component| component.kind == "vae")
+            .expect("missing manifest VAE must be named");
+        assert!(!vae.present);
+        assert_eq!(vae.name, "vae");
+        assert_eq!(vae.repair_model.as_deref(), Some("sd15:fp16"));
+    }
+
     // ── /api/docs ────────────────────────────────────────────────────────────
 
     #[tokio::test]

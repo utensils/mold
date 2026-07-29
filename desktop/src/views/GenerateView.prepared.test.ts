@@ -8,7 +8,7 @@ import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue"
 import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { newJob, useGenerationStore } from "../stores/generation";
-import { useHostsStore } from "../stores/hosts";
+import { useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useDownloadsStore } from "../stores/downloads";
@@ -206,8 +206,8 @@ describe("GenerateView prepared expansion batches", () => {
     const prepared = wrapper.findComponent(PreparedExpansionBatch);
     const preparedRoute = prepared.props("batch").route;
     const preview = vi
-      .spyOn(useHostsStore(), "resolveFeasibleRoute")
-      .mockResolvedValue(preparedRoute);
+      .spyOn(useHostsStore(), "resolveFeasible")
+      .mockResolvedValue({ kind: "route", route: preparedRoute });
     const firstId = prepared.props("batch").prompts[0]!.id;
     prepared.vm.$emit("edit", { id: firstId, text: "edited storm light" });
     await flushPromises();
@@ -274,7 +274,57 @@ describe("GenerateView prepared expansion batches", () => {
         ];
       }
       vi.spyOn(hosts, "resolveRoute").mockReturnValue(route);
-      const finalizedPreview = vi.spyOn(hosts, "resolveFeasibleRoute").mockResolvedValue(null);
+      const placementFailure: FeasibleRouteResult =
+        route.kind === "local"
+          ? {
+              kind: "infeasible",
+              perHost: [
+                {
+                  kind: "infeasible",
+                  hostId: route.hostId,
+                  label: route.label,
+                  route,
+                  reason: "required VAE is not installed",
+                  missingComponents: [
+                    {
+                      kind: "vae",
+                      name: "ae.safetensors",
+                      present: false,
+                      repair_model: "flux-dev:q4",
+                    },
+                  ],
+                },
+              ],
+            }
+          : {
+              kind: "mixed",
+              perHost: [
+                {
+                  kind: "infeasible",
+                  hostId: route.hostId,
+                  label: route.label,
+                  route,
+                  reason: "required VAE is not installed",
+                  missingComponents: [
+                    {
+                      kind: "vae",
+                      name: "ae.safetensors",
+                      present: false,
+                      repair_model: "flux-dev:q4",
+                    },
+                  ],
+                },
+                {
+                  kind: "unreachable",
+                  hostId: "local",
+                  label: "This device",
+                  error: "placement preview returned HTTP 401",
+                },
+              ],
+            };
+      const finalizedPreview = vi
+        .spyOn(hosts, "resolveFeasible")
+        .mockResolvedValue(placementFailure);
       const submit = vi.spyOn(useGenerationStore(), "submitBatch");
       const wrapper = mountView();
       await flushPromises();
@@ -296,7 +346,14 @@ describe("GenerateView prepared expansion batches", () => {
       expect(
         preserved.props("batch").prompts.map((prompt: { text: string }) => prompt.text),
       ).toEqual(before);
-      expect(useToastStore().items.at(-1)?.message).toContain("Nothing was queued");
+      const message = useToastStore().items.at(-1)?.message ?? "";
+      expect(message).toContain("required VAE is not installed (missing: ae.safetensors)");
+      expect(message).toContain("Nothing was queued");
+      if (route.kind === "remote") {
+        expect(message).toContain("failed for different reasons");
+        expect(message).toContain("This device did not answer");
+        expect(message).not.toContain("No selected machine can run this print");
+      }
     },
   );
 
