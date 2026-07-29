@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelQueueJob,
   parseQueueListing,
   predictedCompletionUnixMs,
   reduceQueuePlanEvent,
@@ -144,5 +145,26 @@ describe("queue plan contract", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       hard_pinned_device_id: null,
     });
+  });
+
+  it("cancels a queued job on the explicit authenticated target", async () => {
+    let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    await cancelQueueJob(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "job/1",
+    );
+
+    const [url, init] = captured!;
+    expect(url).toBe("https://gpu.example/api/queue/job%2F1");
+    expect(init?.method).toBe("DELETE");
+    expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
   });
 });

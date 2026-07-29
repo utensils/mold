@@ -3721,6 +3721,11 @@ button:disabled {
   margin-top: 8px;
 }
 
+.mobile-host-queue-cancel {
+  flex: none;
+  min-width: 72px;
+}
+
 .status-badge {
   flex: none;
   color: var(--halide);
