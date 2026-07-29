@@ -1927,6 +1927,8 @@ pub(crate) async fn placement_preview_for_request(
         reason: Some(reason),
         candidate: None,
         stage_candidates: Vec::new(),
+        pending_downloads: Vec::new(),
+        missing_components: Vec::new(),
     };
     if !(1..=64).contains(&copies) {
         let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
@@ -1968,6 +1970,7 @@ pub(crate) async fn placement_preview_for_request(
             Err(error) => {
                 let mut response = unavailable("infeasible", error);
                 response.authoritative = true;
+                response.missing_components = missing_model_components(state, &request.model).await;
                 return response;
             }
         };
@@ -1978,6 +1981,38 @@ pub(crate) async fn placement_preview_for_request(
     {
         Ok(response) => response,
         Err(error) => unavailable("temporarily_unavailable", error),
+    }
+}
+
+async fn missing_model_components(
+    state: &AppState,
+    model: &str,
+) -> Vec<mold_core::ModelComponentStatus> {
+    match model_manager::model_component_status_existing_only(state, model).await {
+        Ok(status) => status
+            .components
+            .into_iter()
+            .filter(|component| !component.present)
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                model,
+                error = %error.error,
+                "strictly local component inspection failed during placement preview"
+            );
+            if mold_catalog::resolve::looks_like_catalog_id(model) {
+                vec![mold_core::ModelComponentStatus {
+                    kind: "transformer".to_string(),
+                    name: "primary checkpoint".to_string(),
+                    present: false,
+                    path: None,
+                    repair_model: Some(model.to_string()),
+                    options: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 

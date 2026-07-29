@@ -2846,24 +2846,19 @@ impl ProductionStageExecutor {
     fn fresh_config(&self) -> mold_core::Config {
         self.config.blocking_read().clone()
     }
-}
 
-impl StageExecutor for ProductionStageExecutor {
-    fn freeze_model(&self, model: &str) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
-        let config = self.fresh_config();
-        crate::execution_plan::freeze_chain_model(&config, model).map_err(anyhow::Error::new)
-    }
-
-    fn render_stage(
+    #[allow(clippy::too_many_arguments)]
+    fn render_stage_with_authority(
         &self,
+        cache_key: &str,
         model: &str,
+        config: &mold_core::Config,
         stage_req: &GenerateRequest,
         carry: Option<&ChainTail>,
         motion_tail_frames: u32,
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
         cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome> {
-        let config = self.fresh_config();
         let Some(in_flight) = claim_worker_for_stage(
             &self.gpu_pool,
             model,
@@ -2876,7 +2871,7 @@ impl StageExecutor for ProductionStageExecutor {
         let worker = in_flight.worker().clone();
         let _in_flight = in_flight;
         let _active = WorkerActiveGenerationGuard::new(worker.clone(), model, &stage_req.prompt)?;
-        let hint = model_manager::family_for_model_sync(model, &config).map(|family| {
+        let hint = model_manager::family_for_model_sync(model, config).map(|family| {
             model_manager::ActivationHint {
                 width: stage_req.width,
                 height: stage_req.height,
@@ -2887,10 +2882,11 @@ impl StageExecutor for ProductionStageExecutor {
         });
         let carry_owned = carry.cloned();
         let stage_req = stage_req.clone();
-        let prep = gpu_worker::run_stage_blocking(
+        gpu_worker::run_stage_blocking_with_identity(
             &worker,
+            cache_key,
             model,
-            &config,
+            config,
             hint,
             move |engine| -> anyhow::Result<StageRenderOutcome> {
                 let renderer = engine.as_chain_renderer().ok_or_else(|| {
@@ -2919,8 +2915,47 @@ impl StageExecutor for ProductionStageExecutor {
                     Ok(StageRenderOutcome::Done(outcome))
                 }
             },
-        )?;
-        prep
+        )?
+    }
+}
+
+impl StageExecutor for ProductionStageExecutor {
+    fn freeze_model(&self, model: &str) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+        let config = self.fresh_config();
+        match model_manager::resolve_existing_model_authority(model, &config)
+            .map_err(|error| anyhow!(error.error))?
+        {
+            Some(authority) => crate::execution_plan::freeze_chain_model_with_paths(
+                &authority.config,
+                model,
+                authority.paths,
+            )
+            .map_err(anyhow::Error::new),
+            None => crate::execution_plan::freeze_chain_model(&config, model)
+                .map_err(anyhow::Error::new),
+        }
+    }
+
+    fn render_stage(
+        &self,
+        model: &str,
+        stage_req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_frames: u32,
+        progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<StageRenderOutcome> {
+        let config = self.fresh_config();
+        self.render_stage_with_authority(
+            model,
+            model,
+            &config,
+            stage_req,
+            carry,
+            motion_tail_frames,
+            progress,
+            cancelled,
+        )
     }
 
     fn render_stage_with_context(
@@ -2940,9 +2975,27 @@ impl StageExecutor for ProductionStageExecutor {
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> anyhow::Result<StageExecution> {
         if !self.dispatch_mode.owns_v2_workers() {
+            let mut config = self.fresh_config();
+            let cache_key = if let Some(frozen) = frozen_model {
+                let current =
+                    crate::execution_plan::frozen_model_fingerprint(model, &frozen.config)?;
+                if current != frozen.model_fingerprint {
+                    anyhow::bail!("frozen chain model inputs changed before CUDA");
+                }
+                config.install_frozen_model_config(model, frozen.config.clone());
+                if frozen.runtime_model_id.is_empty() {
+                    model
+                } else {
+                    frozen.runtime_model_id.as_str()
+                }
+            } else {
+                model
+            };
             return self
-                .render_stage(
+                .render_stage_with_authority(
+                    cache_key,
                     model,
+                    &config,
                     stage_req,
                     carry,
                     motion_tail_frames,
@@ -7853,6 +7906,55 @@ mod tests {
         let worker_method = &worker_source[worker_start..worker_end];
         assert!(worker_method.contains("run_stage_blocking_planned("));
         assert!(!worker_method.contains("run_stage_blocking(\n"));
+    }
+
+    #[test]
+    fn production_legacy_stage_path_keeps_persisted_frozen_model_authority() {
+        let source = include_str!("chain_job_runner.rs");
+        let implementation = source
+            .find("impl StageExecutor for ProductionStageExecutor")
+            .expect("production executor implementation");
+        let freeze_start = source[implementation..]
+            .find("fn freeze_model(")
+            .map(|offset| implementation + offset)
+            .expect("production freeze method");
+        let render_start = source[freeze_start..]
+            .find("\n    fn render_stage(")
+            .map(|offset| freeze_start + offset)
+            .expect("production render method");
+        let freeze_method = &source[freeze_start..render_start];
+        assert!(freeze_method.contains("resolve_existing_model_authority("));
+        assert!(freeze_method.contains("freeze_chain_model_with_paths("));
+
+        let contextual_start = source[render_start..]
+            .find("fn render_stage_with_context(")
+            .map(|offset| render_start + offset)
+            .expect("production contextual render method");
+        let v2_start = source[contextual_start..]
+            .find("\n        if cancelled()")
+            .map(|offset| contextual_start + offset)
+            .expect("V2 branch begins after legacy branch");
+        let legacy_branch = &source[contextual_start..v2_start];
+        let fingerprint = legacy_branch
+            .find("frozen_model_fingerprint(")
+            .expect("legacy replacement fence");
+        let install = legacy_branch
+            .find("install_frozen_model_config(")
+            .expect("legacy frozen config install");
+        let render = legacy_branch
+            .find("render_stage_with_authority(")
+            .expect("legacy frozen render");
+        assert!(fingerprint < install && install < render);
+        assert!(legacy_branch.contains("frozen.runtime_model_id"));
+
+        let helper_start = source
+            .find("fn render_stage_with_authority(")
+            .expect("authority-aware render helper");
+        let helper_end = source[helper_start..]
+            .find("\n}\n\nimpl StageExecutor for ProductionStageExecutor")
+            .map(|offset| helper_start + offset)
+            .expect("authority helper boundary");
+        assert!(source[helper_start..helper_end].contains("run_stage_blocking_with_identity("));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

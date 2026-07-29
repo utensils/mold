@@ -132,7 +132,7 @@ describe("GenerateView source-fit submit path", () => {
 
   it("resolves the host before preprocessing and routes the upscale to it", async () => {
     const hosts = setupMultiHost();
-    const resolveFeasibleRoute = vi.spyOn(hosts, "resolveFeasibleRoute");
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");
     const generation = useGenerationStore();
     const submitBatch = vi
       .spyOn(generation, "submitBatch")
@@ -153,9 +153,9 @@ describe("GenerateView source-fit submit path", () => {
     await flushPromises();
 
     // Host resolution happened BEFORE preprocessing (same-host invariant).
-    expect(resolveFeasibleRoute).toHaveBeenCalled();
+    expect(resolveFeasible).toHaveBeenCalled();
     expect(applySourceFitPreprocess).toHaveBeenCalled();
-    expect(Math.min(...resolveFeasibleRoute.mock.invocationCallOrder)).toBeLessThan(
+    expect(Math.min(...resolveFeasible.mock.invocationCallOrder)).toBeLessThan(
       Math.min(...applySourceFitPreprocess.mock.invocationCallOrder),
     );
 

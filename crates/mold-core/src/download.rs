@@ -1307,7 +1307,13 @@ pub fn download_single_file_sync(
     bar.set_style(bar_style);
     bar.set_message(truncate_filename(hf_filename, msg_width));
     let progress = SyncDownloadProgress::new(bar, msg_width);
-    download_single_file_sync_with_adapter(hf_repo, hf_filename, target_subdir, progress)
+    download_single_file_sync_with_adapter(
+        &models_dir(),
+        hf_repo,
+        hf_filename,
+        target_subdir,
+        progress,
+    )
 }
 
 /// Callback-reporting counterpart to [`download_single_file_sync`].
@@ -1321,6 +1327,7 @@ pub fn download_single_file_sync_with_progress(
     callback: DownloadProgressCallback,
 ) -> Result<PathBuf, DownloadError> {
     download_single_file_sync_with_adapter(
+        &models_dir(),
         hf_repo,
         hf_filename,
         target_subdir,
@@ -1328,7 +1335,48 @@ pub fn download_single_file_sync_with_progress(
     )
 }
 
+/// Explicit-root counterpart used when a caller owns an immutable config
+/// snapshot. Both the managed Hugging Face cache and clean target stay under
+/// `models_root`.
+pub fn download_single_file_sync_with_progress_in(
+    models_root: &Path,
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+    callback: DownloadProgressCallback,
+) -> Result<PathBuf, DownloadError> {
+    download_single_file_sync_with_adapter(
+        models_root,
+        hf_repo,
+        hf_filename,
+        target_subdir,
+        SyncCallbackProgress::new(callback),
+    )
+}
+
+/// Deterministic clean path that [`download_single_file_sync`] will populate
+/// for a dependency with a target subdirectory.
+///
+/// This performs no I/O and does not imply that the file is present. It is
+/// used by read-only placement previews to build the same engine input shape
+/// that admission will materialize later.
+pub fn planned_single_file_path(hf_filename: &str, target_subdir: &str) -> PathBuf {
+    planned_single_file_path_in(&models_dir(), hf_filename, target_subdir)
+}
+
+/// No-I/O counterpart used by read-only previews with their exact config
+/// snapshot. The root is never created.
+pub fn planned_single_file_path_in(
+    models_root: &Path,
+    hf_filename: &str,
+    target_subdir: &str,
+) -> PathBuf {
+    let leaf = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
+    models_root.join(target_subdir).join(leaf)
+}
+
 fn download_single_file_sync_with_adapter<P>(
+    models_root: &Path,
     hf_repo: &str,
     hf_filename: &str,
     target_subdir: Option<&str>,
@@ -1340,7 +1388,7 @@ where
     use hf_hub::api::sync::ApiBuilder;
 
     let mut builder = ApiBuilder::from_env()
-        .with_cache_dir(hf_cache_dir())
+        .with_cache_dir(models_root.join(".hf-cache"))
         .with_progress(false);
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
@@ -1378,8 +1426,7 @@ where
 
     // Place at clean path if target_subdir specified
     if let Some(subdir) = target_subdir {
-        let leaf = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
-        let clean_path = models_dir().join(subdir).join(leaf);
+        let clean_path = planned_single_file_path_in(models_root, hf_filename, subdir);
         hardlink_or_copy(&hf_path, &clean_path)?;
         Ok(clean_path)
     } else {
@@ -1414,24 +1461,35 @@ pub fn cached_file_path(
     hf_filename: &str,
     target_subdir: Option<&str>,
 ) -> Option<PathBuf> {
+    cached_file_path_in(&models_dir(), hf_repo, hf_filename, target_subdir)
+}
+
+/// Explicit-root cache lookup for admission. This preserves the historical
+/// fallback search while keeping the managed cache and clean target bound to
+/// the caller's config snapshot.
+pub fn cached_file_path_in(
+    models_root: &Path,
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+) -> Option<PathBuf> {
     // 1. Check clean path (if target_subdir specified)
     if let Some(subdir) = target_subdir {
-        let leaf = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
-        let clean_path = models_dir().join(subdir).join(leaf);
+        let clean_path = planned_single_file_path_in(models_root, hf_filename, subdir);
         if clean_path.exists() {
             return Some(clean_path);
         }
     }
 
     // 2. Check new hf-cache location (~/.mold/models/.hf-cache/)
-    let new_cache = Cache::new(hf_cache_dir());
+    let new_cache = Cache::new(models_root.join(".hf-cache"));
     let new_repo = new_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
     if let Some(path) = new_repo.get(hf_filename) {
         return Some(path);
     }
 
     // 3. Check old mold models dir (backward compat — HF cached here before .hf-cache/)
-    let old_cache = Cache::new(models_dir());
+    let old_cache = Cache::new(models_root.to_path_buf());
     let old_repo = old_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
     if let Some(path) = old_repo.get(hf_filename) {
         return Some(path);
@@ -1441,6 +1499,44 @@ pub fn cached_file_path(
     let default_cache = Cache::from_env();
     let default_repo = default_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
     default_repo.get(hf_filename)
+}
+
+/// Strictly read-only cache inspection for placement previews.
+///
+/// Every cache constructor is gated on an already-existing root, and the
+/// clean destination is derived from the caller's immutable config snapshot.
+/// This function never creates the models root, `.hf-cache`, or the default
+/// Hugging Face cache.
+pub fn cached_file_path_existing_only(
+    models_root: &Path,
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(subdir) = target_subdir {
+        let clean_path = planned_single_file_path_in(models_root, hf_filename, subdir);
+        if clean_path.exists() {
+            return Some(clean_path);
+        }
+    }
+
+    let lookup = |root: &Path| {
+        root.is_dir().then(|| {
+            Cache::new(root.to_path_buf())
+                .repo(Repo::new(hf_repo.to_string(), RepoType::Model))
+                .get(hf_filename)
+        })?
+    };
+    lookup(&models_root.join(".hf-cache"))
+        .or_else(|| lookup(models_root))
+        .or_else(|| {
+            let cache = Cache::from_env();
+            cache.path().is_dir().then(|| {
+                cache
+                    .repo(Repo::new(hf_repo.to_string(), RepoType::Model))
+                    .get(hf_filename)
+            })?
+        })
 }
 
 // ── Pull and configure (shared between CLI and server) ───────────────────────

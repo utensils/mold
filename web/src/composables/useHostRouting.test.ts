@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __testing__, useHostRouting } from "./useHostRouting";
+import {
+  __testing__,
+  useHostRouting,
+  type FeasibilityResult,
+} from "./useHostRouting";
 import {
   addHost,
   ORIGIN_HOST_ID,
@@ -142,6 +146,13 @@ function device(
   };
 }
 
+function routeOf(result: FeasibilityResult) {
+  expect(result.kind).toBe("route");
+  if (result.kind !== "route")
+    throw new Error(`expected route, got ${result.kind}`);
+  return result.route;
+}
+
 describe("useHostRouting", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -274,7 +285,7 @@ describe("useHostRouting", () => {
       seed: null,
       batch_size: 1,
     });
-    expect(route?.hostId).toBe(studio.id);
+    expect(routeOf(route).hostId).toBe(studio.id);
   });
 
   it("uses scheduler completion time rather than current free memory", async () => {
@@ -301,8 +312,49 @@ describe("useHostRouting", () => {
       seed: null,
       batch_size: 1,
     });
-    expect(route?.hostId).toBe(ORIGIN_HOST_ID);
+    expect(routeOf(route).hostId).toBe(ORIGIN_HOST_ID);
     expect(placementCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes to a clean host instead of a faster host with pending downloads", async () => {
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status());
+      models.set(id, [model("flux-dev:q4")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    placementCall.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve(
+        target.baseUrl.includes("studio")
+          ? placement(10_000)
+          : placement(10, {
+              pending_downloads: [
+                {
+                  kind: "text_encoder",
+                  name: "t5-v1_1-xxl-q8.gguf",
+                  repo: "acme/text-encoders",
+                  bytes: 5_100_000_000,
+                },
+              ],
+            }),
+      ),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const result = await routing.resolveFeasible({
+      prompt: "print",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    });
+
+    expect(routeOf(result).hostId).toBe(studio.id);
   });
 
   it("previews Batch N as N one-image siblings without mutating the reviewed request", async () => {
@@ -353,7 +405,16 @@ describe("useHostRouting", () => {
           seed: null,
           batch_size: 1,
         }),
-      ).resolves.toBeNull();
+      ).resolves.toEqual({
+        kind: "unreachable",
+        perHost: [
+          {
+            hostId: ORIGIN_HOST_ID,
+            label: "this server",
+            error: `HTTP ${statusCode}: placement failed`,
+          },
+        ],
+      });
     },
   );
 
@@ -390,9 +451,12 @@ describe("useHostRouting", () => {
       });
 
       expect(route).toMatchObject({
-        hostId: studio.id,
-        instanceId: "instance-a",
-        target: { baseUrl: studio.url },
+        kind: "route",
+        route: {
+          hostId: studio.id,
+          instanceId: "instance-a",
+          target: { baseUrl: studio.url },
+        },
       });
     },
   );
@@ -420,8 +484,8 @@ describe("useHostRouting", () => {
     );
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = await routing.resolveFeasible(request);
-    expect(frozen?.hostId).toBe(ORIGIN_HOST_ID);
+    const frozen = routeOf(await routing.resolveFeasible(request));
+    expect(frozen.hostId).toBe(ORIGIN_HOST_ID);
 
     placementCall.mockClear();
     placementCall.mockImplementation((target: { baseUrl: string }) =>
@@ -429,11 +493,50 @@ describe("useHostRouting", () => {
     );
     const revalidated = await routing.revalidateFeasible(frozen!, request);
 
-    expect(revalidated?.hostId).toBe(ORIGIN_HOST_ID);
+    expect(routeOf(revalidated).hostId).toBe(ORIGIN_HOST_ID);
     expect(placementCall).toHaveBeenCalledTimes(1);
     expect(placementCall.mock.calls[0]?.[0]).toMatchObject({
       baseUrl: window.location.origin,
     });
+  });
+
+  it("does not retry an old frozen host when Run on changes during revalidation", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    setGenerateTargetId(studio.id);
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status());
+      models.set(id, [model("flux-dev:q4")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    const request = {
+      prompt: "print",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    };
+    const routing = useHostRouting();
+    await routing.refresh();
+    const frozen = routeOf(await routing.resolveFeasible(request));
+    placementCall.mockClear();
+
+    let release!: (value: GenerationPlacementPreview) => void;
+    placementCall.mockImplementationOnce(
+      () =>
+        new Promise<GenerationPlacementPreview>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = routing.revalidateFeasible(frozen, request);
+    await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
+    routing.setTarget(ORIGIN_HOST_ID);
+    release(placement(100));
+
+    await expect(pending).resolves.toEqual({ kind: "transient", perHost: [] });
+    expect(placementCall).toHaveBeenCalledOnce();
   });
 
   it.each(["explicit unsupported", "HTTP 404", "HTTP 405"])(
@@ -472,7 +575,7 @@ describe("useHostRouting", () => {
           candidate: null,
         }),
       );
-      const frozen = await routing.resolveFeasibleChain(request);
+      const frozen = routeOf(await routing.resolveFeasibleChain(request));
       expect(frozen).toMatchObject({
         hostId: studio.id,
         instanceId: "instance-a",
@@ -493,11 +596,14 @@ describe("useHostRouting", () => {
       }
 
       await expect(
-        routing.revalidateFeasibleChain(frozen!, request, 3),
+        routing.revalidateFeasibleChain(frozen, request, 3),
       ).resolves.toMatchObject({
-        hostId: studio.id,
-        instanceId: "instance-a",
-        target: { baseUrl: studio.url, apiKey: "same-key" },
+        kind: "route",
+        route: {
+          hostId: studio.id,
+          instanceId: "instance-a",
+          target: { baseUrl: studio.url, apiKey: "same-key" },
+        },
       });
     },
   );
@@ -525,7 +631,7 @@ describe("useHostRouting", () => {
     };
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = await routing.resolveFeasible(request);
+    const frozen = routeOf(await routing.resolveFeasible(request));
     expect(frozen).toMatchObject({
       hostId: studio.id,
       instanceId: "instance-a",
@@ -538,12 +644,12 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.revalidateFeasible(frozen!, request, 4);
+    const pending = routing.revalidateFeasible(frozen, request, 4);
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledTimes(2));
     updateHost(studio.id, { instanceId: "instance-b" });
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({ kind: "transient", perHost: [] });
   });
 
   it("rejects an already-replaced frozen host before issuing a placement probe", async () => {
@@ -569,7 +675,7 @@ describe("useHostRouting", () => {
     };
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = await routing.resolveFeasible(request);
+    const frozen = routeOf(await routing.resolveFeasible(request));
     expect(frozen).toMatchObject({
       hostId: studio.id,
       instanceId: "instance-a",
@@ -578,9 +684,10 @@ describe("useHostRouting", () => {
     updateHost(studio.id, { instanceId: "instance-b" });
     placementCall.mockClear();
 
-    await expect(
-      routing.revalidateFeasible(frozen!, request),
-    ).resolves.toBeNull();
+    await expect(routing.revalidateFeasible(frozen, request)).resolves.toEqual({
+      kind: "transient",
+      perHost: [],
+    });
     expect(placementCall).not.toHaveBeenCalled();
   });
 
@@ -603,7 +710,7 @@ describe("useHostRouting", () => {
     };
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = await routing.resolveFeasible(request);
+    const frozen = routeOf(await routing.resolveFeasible(request));
     expect(frozen).toMatchObject({
       hostId: ORIGIN_HOST_ID,
       instanceId: "origin-instance-a",
@@ -616,16 +723,16 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.revalidateFeasible(frozen!, request, 4);
+    const pending = routing.revalidateFeasible(frozen, request, 4);
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledTimes(2));
     statuses.set(ORIGIN_HOST_ID, status({ instance_id: "origin-instance-b" }));
     await routing.refresh();
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({ kind: "transient", perHost: [] });
   });
 
-  it("rejects a feasibility result when the target changes while probes are pending", async () => {
+  it("retries once when the target changes while probes are pending", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     setGenerateTargetId(studio.id);
     for (const id of [ORIGIN_HOST_ID, studio.id]) {
@@ -657,10 +764,12 @@ describe("useHostRouting", () => {
     routing.setTarget(ORIGIN_HOST_ID);
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    const result = await pending;
+    expect(routeOf(result).hostId).toBe(ORIGIN_HOST_ID);
+    expect(placementCall).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects a feasibility result when host credentials change during probes", async () => {
+  it("retries once with current credentials when they change during probes", async () => {
     const studio = addHost({
       url: "http://studio:7680",
       name: "Studio",
@@ -696,10 +805,14 @@ describe("useHostRouting", () => {
     updateHost(studio.id, { apiKey: "rotated-key" });
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    expect(routeOf(await pending).target).toEqual({
+      baseUrl: studio.url,
+      apiKey: "rotated-key",
+    });
+    expect(placementCall).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects a feasibility result when the host URL changes during probes", async () => {
+  it("retries once with the current URL when it changes during probes", async () => {
     const studio = addHost({
       url: "http://studio:7680",
       name: "Studio",
@@ -732,10 +845,13 @@ describe("useHostRouting", () => {
     updateHost(studio.id, { url: "http://replacement:7680" });
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    expect(routeOf(await pending).target.baseUrl).toBe(
+      "http://replacement:7680",
+    );
+    expect(placementCall).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects a feasibility result when host instance identity changes during probes", async () => {
+  it("retries once with the current instance identity when it changes during probes", async () => {
     const studio = addHost({
       url: "http://studio:7680",
       name: "Studio",
@@ -769,7 +885,8 @@ describe("useHostRouting", () => {
     updateHost(studio.id, { instanceId: "instance-b" });
     release(placement(100));
 
-    await expect(pending).resolves.toBeNull();
+    expect(routeOf(await pending).instanceId).toBe("instance-b");
+    expect(placementCall).toHaveBeenCalledTimes(2);
   });
 
   it("never reroutes an explicitly selected host after authoritative infeasibility", async () => {
@@ -801,10 +918,240 @@ describe("useHostRouting", () => {
       batch_size: 1,
     });
 
-    expect(route).toBeNull();
+    expect(route).toEqual({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: studio.id,
+          label: "Studio",
+          reason: "insufficient_vram",
+          missingComponents: [],
+        },
+      ],
+    });
     expect(placementCall).toHaveBeenCalledTimes(1);
     expect(placementCall.mock.calls[0]?.[0]).toMatchObject({
       baseUrl: studio.url,
+    });
+  });
+
+  it("retains each host's authoritative infeasibility reason and components", async () => {
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status());
+      models.set(id, [model("flux-dev:q4")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    placementCall.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve(
+        placement(0, {
+          outcome: "infeasible",
+          candidate: null,
+          reason: target.baseUrl.includes("studio")
+            ? "stale device pin cuda:gone"
+            : "required VAE is absent",
+          missing_components: target.baseUrl.includes("studio")
+            ? []
+            : [
+                {
+                  kind: "vae",
+                  name: "ae.safetensors",
+                  present: false,
+                  repair_model: "flux-dev:q4",
+                },
+              ],
+        }),
+      ),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "print",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          label: "this server",
+          reason: "required VAE is absent",
+          missingComponents: [
+            {
+              kind: "vae",
+              name: "ae.safetensors",
+              present: false,
+              repair_model: "flux-dev:q4",
+            },
+          ],
+        },
+        {
+          hostId: studio.id,
+          label: "Studio",
+          reason: "stale device pin cuda:gone",
+          missingComponents: [],
+        },
+      ],
+    });
+  });
+
+  it("does not discard probe errors when another selected host is infeasible", async () => {
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status());
+      models.set(id, [model("flux-dev:q4")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    placementCall.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("studio")
+        ? Promise.reject(new ApiError("scheduler unavailable", 503))
+        : Promise.resolve(
+            placement(0, {
+              outcome: "infeasible",
+              candidate: null,
+              reason: "required VAE is absent",
+            }),
+          ),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "print",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          label: "this server",
+          reason: "required VAE is absent",
+          missingComponents: [],
+        },
+      ],
+      unreachable: [
+        {
+          hostId: studio.id,
+          label: "Studio",
+          error: "HTTP 503: scheduler unavailable",
+        },
+      ],
+    });
+  });
+
+  it("routes the origin through legacy fallback while its first poll is connecting", async () => {
+    placementCall.mockResolvedValue(
+      placement(0, {
+        authoritative: false,
+        outcome: "unsupported",
+        candidate: null,
+      }),
+    );
+    const routing = useHostRouting();
+
+    const result = await routing.resolveFeasible({
+      prompt: "print",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    });
+
+    expect(routeOf(result).hostId).toBe(ORIGIN_HOST_ID);
+  });
+
+  it("returns scheduler temporary unavailability with the host reason", async () => {
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    placementCall.mockResolvedValue(
+      placement(0, {
+        authoritative: false,
+        outcome: "temporarily_unavailable",
+        candidate: null,
+        reason: "scheduler snapshot moved",
+      }),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "print",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "transient",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          label: "this server",
+          reason: "scheduler snapshot moved",
+        },
+      ],
+    });
+  });
+
+  it("returns an authoritative paused-queue preview as transient", async () => {
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    placementCall.mockResolvedValue(
+      placement(0, {
+        authoritative: true,
+        outcome: "temporarily_unavailable",
+        candidate: null,
+        reason: "generation queue is paused",
+      }),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "print",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "transient",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          label: "this server",
+          reason: "generation queue is paused",
+        },
+      ],
     });
   });
 

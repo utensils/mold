@@ -112,7 +112,10 @@ import {
   resolveSourceFitTransform,
 } from "@studio/lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
-import { useHostRouting } from "../composables/useHostRouting";
+import {
+  useHostRouting,
+  type FeasibilityResult,
+} from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import { sameHostRoute, type HostRoute } from "../lib/hostRouting";
@@ -1164,12 +1167,10 @@ async function onSubmitSequence() {
   }
 
   try {
-    const route = await routing.resolveFeasibleChain(req);
-    if (!route) {
-      throw new Error(
-        "No selected machine has an authoritative route for this sequence.",
-      );
-    }
+    const feasibility = await routing.resolveFeasibleChain(req);
+    if (feasibility.kind !== "route")
+      throw new Error(feasibilityMessage(feasibility, "this sequence"));
+    const route = feasibility.route;
     const jobId = await chainJobs.create(route.hostId, req);
     sequenceStageClipIdsByJob.set(
       `${route.hostId}:${jobId}`,
@@ -1752,16 +1753,100 @@ function resolveSubmitRoute(): HostRoute | null | false {
 async function resolveFeasibleSubmitRoute(
   request: GenerateRequestWire,
   copies = 1,
-): Promise<HostRoute | null | false> {
-  const route = await routing.resolveFeasible(request, copies);
-  if (!route) {
-    toast(
-      "error",
-      "No selected machine has the model and required components for this print.",
-    );
+): Promise<HostRoute | false> {
+  const result = await routing.resolveFeasible(request, copies);
+  if (result.kind !== "route") {
+    toast("error", feasibilityMessage(result, "this print"));
     return false;
   }
-  return route;
+  return result.route;
+}
+
+function terminalPunctuation(value: string): string {
+  return /[.!?]$/.test(value) ? value : `${value}.`;
+}
+
+function sentenceCaseHostLabel(label: string): string {
+  return label === "this server" ? "This server" : label;
+}
+
+function feasibilityMessage(
+  result: Exclude<FeasibilityResult, { kind: "route" }>,
+  subject: string,
+): string {
+  const unreachableMessages = (
+    hosts: ReadonlyArray<{ label: string; error: string }>,
+  ) =>
+    hosts
+      .map(
+        (host) =>
+          `${sentenceCaseHostLabel(host.label)} didn't answer the feasibility check: ${terminalPunctuation(host.error)}`,
+      )
+      .join(" ");
+  const infeasibleMessages = (
+    hosts: ReadonlyArray<{
+      label: string;
+      reason: string;
+      missingComponents: ReadonlyArray<{
+        name: string;
+        present: boolean;
+      }>;
+    }>,
+  ) =>
+    hosts
+      .map((host) => {
+        const missingNames = [
+          ...new Set(
+            host.missingComponents
+              .filter((component) => !component.present)
+              .map((component) => component.name),
+          ),
+        ];
+        const missing =
+          missingNames.length > 0
+            ? ` Missing components: ${missingNames.join(", ")}.`
+            : "";
+        return `${sentenceCaseHostLabel(host.label)} can't run ${subject}: ${terminalPunctuation(host.reason)}${missing}`;
+      })
+      .join(" ");
+  if (result.kind === "transient") {
+    if (result.perHost.length === 0) {
+      return `Routing changed while Mold checked ${subject}. Please try again.`;
+    }
+    const primary = result.perHost
+      .map(
+        (host) =>
+          `${sentenceCaseHostLabel(host.label)} couldn't compute a placement plan right now: ${terminalPunctuation(host.reason)} Try again.`,
+      )
+      .join(" ");
+    return [
+      primary,
+      result.infeasible ? infeasibleMessages(result.infeasible) : "",
+      result.unreachable ? unreachableMessages(result.unreachable) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (result.kind === "unreachable") {
+    if (result.perHost.length === 0) {
+      return `No selected machine could be reached to check ${subject}.`;
+    }
+    return [
+      unreachableMessages(result.perHost),
+      result.infeasible ? infeasibleMessages(result.infeasible) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (result.perHost.length === 0) {
+    return `No selected machine can run ${subject}.`;
+  }
+  return [
+    infeasibleMessages(result.perHost),
+    result.unreachable ? unreachableMessages(result.unreachable) : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function requestCopyCount(request: GenerateRequestWire): number {
@@ -1824,7 +1909,7 @@ async function onSubmit(allowStaleQuick = false) {
   const currentRequest = form.toRequest(currentModel.value);
   const copies = requestCopyCount(currentRequest);
   if (quick && !allowStaleQuick) {
-    const feasible = route
+    const result = route
       ? decision.kind === "chain"
         ? await routing.revalidateFeasibleChain(
             route,
@@ -1833,7 +1918,12 @@ async function onSubmit(allowStaleQuick = false) {
           )
         : await routing.revalidateFeasible(route, currentRequest, copies)
       : await resolveFeasibleSubmitRoute(currentRequest, copies);
-    if (feasible === false) return;
+    if (result === false) return;
+    if ("kind" in result && result.kind !== "route") {
+      toast("error", feasibilityMessage(result, "this prepared print"));
+      return;
+    }
+    const feasible = "kind" in result ? result.route : result;
     if (!sameRoute(route, feasible)) {
       toast(
         "error",
@@ -1843,21 +1933,18 @@ async function onSubmit(allowStaleQuick = false) {
     }
     route = feasible;
   } else {
-    const feasible =
+    const result =
       decision.kind === "chain"
         ? await routing.resolveFeasibleChain(
             resolveChainRequest(currentRequest, decision),
             copies,
           )
         : await routing.resolveFeasible(currentRequest, copies);
-    if (!feasible) {
-      toast(
-        "error",
-        "No selected machine has the model and required components for this print.",
-      );
+    if (result.kind !== "route") {
+      toast("error", feasibilityMessage(result, "this print"));
       return;
     }
-    route = feasible;
+    route = result.route;
   }
   const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
@@ -1869,7 +1956,7 @@ async function onSubmit(allowStaleQuick = false) {
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
   }
-  const finalizedRoute = route
+  const finalizedResult = route
     ? decision.kind === "chain"
       ? await routing.revalidateFeasibleChain(
           route,
@@ -1883,13 +1970,11 @@ async function onSubmit(allowStaleQuick = false) {
           finalizedCopies,
         )
       : await routing.resolveFeasible(req, finalizedCopies);
-  if (!finalizedRoute) {
-    toast(
-      "error",
-      "No selected machine has an authoritative route for this finalized print.",
-    );
+  if (finalizedResult.kind !== "route") {
+    toast("error", feasibilityMessage(finalizedResult, "this finalized print"));
     return;
   }
+  const finalizedRoute = finalizedResult.route;
   if (!sameRoute(route, finalizedRoute)) {
     toast(
       "error",
@@ -1936,20 +2021,18 @@ async function onExpand() {
     const model = form.state.value.model;
     const selectedHostPolicy = routing.targetId.value;
     const baseRequest = form.toRequest(currentModel.value);
-    const route =
+    const result =
       decision.kind === "chain"
         ? await routing.resolveFeasibleChain(
             resolveChainRequest(baseRequest, decision),
             count,
           )
         : await routing.resolveFeasible(baseRequest, count);
-    if (!route) {
-      toast(
-        "error",
-        "No selected machine can run every prepared variation with the required components.",
-      );
+    if (result.kind !== "route") {
+      toast("error", feasibilityMessage(result, "every prepared variation"));
       return;
     }
+    const route = result.route;
     const submitRoute = normalizeSubmitRoute(route);
     const style = styleHint(form.state.value.stylePreset ?? "");
     composerError.value = null;
@@ -2102,9 +2185,14 @@ async function queueVariations() {
           prepared.baseRequest,
           list.length,
         );
-  if (!revalidated || !sameRoute(prepared.route, revalidated)) {
+  if (
+    revalidated.kind !== "route" ||
+    !sameRoute(prepared.route, revalidated.route)
+  ) {
     composerError.value =
-      "The prepared machine can no longer run this complete batch. Nothing was queued; your reviewed variations are preserved.";
+      revalidated.kind === "route"
+        ? "The prepared machine can no longer run this complete batch. Nothing was queued; your reviewed variations are preserved."
+        : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
     return;
   }
   for (const [index, prompt] of list.entries()) {
@@ -2123,7 +2211,7 @@ async function queueVariations() {
         batch_count: list.length,
       },
       prepared.decision,
-      normalizeSubmitRoute(revalidated),
+      normalizeSubmitRoute(revalidated.route),
     );
   }
   variations.value = [];

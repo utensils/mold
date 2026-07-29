@@ -121,7 +121,15 @@ After source preprocessing, Create performs one read-only placement preview for
 the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
 route. A URL, Keychain key, or instance change, an authoritative infeasible
 result, a malformed response, or any non-legacy HTTP failure preserves the
-reviewed work and queues nothing. Only a strictly valid version-1
+reviewed work and queues nothing. The UI names the server's infeasible reason,
+temporary planner failure, malformed response, transport error, or host-identity
+race instead of collapsing them into one route error. Additive
+`missing_components` metadata is informational until Create owns a finalized
+held request and the exact host's complete grouped repair pull; it must not
+promise automatic resume before then. Additive `pending_downloads` and their
+low-confidence estimate describe only devices selected by the candidate plan; cold
+installed catalog IDs remain valid across server model-list refreshes. Only a
+strictly valid version-1
 non-authoritative `unsupported` result or a missing legacy endpoint
 (`404`/`405`) may retain compatible routing without an authoritative plan.
 Create generation queues and stale reasons resolve opaque catalog IDs through

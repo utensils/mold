@@ -936,6 +936,7 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &config,
                 &job.request,
+                job.prepared_execution_inputs.as_ref(),
             )
         }
         OwnerWork::ChainStage(job) => {
@@ -951,6 +952,7 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &job.config,
                 &job.stage_req,
+                None,
             )
         }
         #[cfg(feature = "expand")]
@@ -1225,6 +1227,7 @@ fn validate_scheduled_chain_stage_before_cuda(
         worker.gpu.ordinal,
         &job.config,
         &job.stage_req,
+        None,
     )
 }
 
@@ -3821,6 +3824,29 @@ pub fn run_stage_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
     // Same take/restore critical section as `run_chain_blocking`; the durable
     // runner calls this once per stage, so the lock scope is one render call.
     run_chain_blocking(worker, model_name, config, hint, with_engine)
+}
+
+/// Run a blocking chain stage with a cache identity separate from its semantic
+/// model name. Durable frozen models use their immutable runtime ID so a
+/// legacy/observe worker cannot reuse an engine loaded from mutable live
+/// config under the original catalog ID.
+pub fn run_stage_blocking_with_identity<T, E: std::fmt::Display + std::fmt::Debug>(
+    worker: &GpuWorker,
+    cache_key: &str,
+    model_name: &str,
+    config: &mold_core::Config,
+    hint: Option<crate::model_manager::ActivationHint>,
+    with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
+) -> ChainPrep<T, E> {
+    run_chain_blocking_with_identity(
+        worker,
+        cache_key,
+        model_name,
+        config,
+        hint,
+        None,
+        with_engine,
+    )
 }
 
 struct PlannedStageLoad<'a> {
