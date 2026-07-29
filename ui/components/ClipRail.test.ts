@@ -274,16 +274,19 @@ describe("ClipRail", () => {
       /\.ms-rail__item\s*\{[^}]*align-items:\s*flex-start/s,
     );
     expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*margin-top:\s*calc\(\(var\(--filmstrip-thumb-height\) - 34px\) \/ 2\)[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
+      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*margin-top:\s*calc\(\s*var\(--filmstrip-thumb-height\) \/ 2 - var\(--filmstrip-seam-rule-y\)\s*\)[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
     );
     expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam::before\)\s*\{[^}]*height:\s*1px/s,
+      /\.ms-rail-frame :deep\(\.ms-seam::before\)\s*\{[^}]*top:\s*var\(--filmstrip-seam-rule-y\)[^}]*height:\s*1px/s,
     );
     expect(railSource).toMatch(
       /\.ms-rail-frame :deep\(\.ms-seam__diagram\)\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border-radius:\s*50%/s,
     );
     expect(railSource).toContain(
       ':deep(.ms-seam[data-transition="fade"] .ms-seam__diagram)',
+    );
+    expect(railSource).toMatch(
+      /@container create-bench \(max-height: 340px\)[\s\S]*?\.ms-rail-frame\s*\{[^}]*--filmstrip-thumb-height:\s*76px[^}]*--filmstrip-seam-rule-y:\s*15px/s,
     );
   });
 });

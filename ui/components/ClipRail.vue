@@ -293,6 +293,7 @@ const dragModel = computed({
   --filmstrip-footer-height: 36px;
   --filmstrip-scene-height: 140px;
   --filmstrip-seam-width: 46px;
+  --filmstrip-seam-rule-y: 17px;
   position: relative;
   height: 188px;
   min-width: 0;
@@ -478,7 +479,9 @@ const dragModel = computed({
    * picture + metadata card. This also keeps every seam on one visual edit
    * axis when the responsive rail changes scene and footer heights.
    */
-  margin-top: calc((var(--filmstrip-thumb-height) - 34px) / 2);
+  margin-top: calc(
+    var(--filmstrip-thumb-height) / 2 - var(--filmstrip-seam-rule-y)
+  );
   min-width: 44px;
   height: 54px;
   min-height: 44px;
@@ -496,7 +499,7 @@ const dragModel = computed({
   content: "";
   position: absolute;
   z-index: 0;
-  top: 17px;
+  top: var(--filmstrip-seam-rule-y);
   right: -10px;
   left: -10px;
   height: 1px;
@@ -643,6 +646,7 @@ const dragModel = computed({
     --filmstrip-footer-height: 32px;
     --filmstrip-scene-height: 108px;
     --filmstrip-seam-width: 44px;
+    --filmstrip-seam-rule-y: 15px;
     height: 138px;
   }
 
@@ -661,10 +665,6 @@ const dragModel = computed({
   .ms-rail-frame :deep(.ms-seam__diagram) {
     width: 26px;
     height: 26px;
-  }
-
-  .ms-rail-frame :deep(.ms-seam::before) {
-    top: 15px;
   }
 
   .ms-rail-frame :deep(.ms-seam__caption) {
