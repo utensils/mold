@@ -83,7 +83,10 @@ export function defaultSequenceStages(
   ];
 }
 
-export function friendlySequenceError(error: string): string {
+export function friendlySequenceError(
+  error: string,
+  hostName?: string | null,
+): string {
   const normalized = error.toLowerCase();
   if (
     normalized.includes("cuda_error_out_of_memory") ||
@@ -91,7 +94,7 @@ export function friendlySequenceError(error: string): string {
   ) {
     return "This sequence needs more GPU memory. Shorten the clip duration or reduce the size, then try again.";
   }
-  return error;
+  return describeTransportError(error, hostName);
 }
 
 export function sequenceDuration(
@@ -195,3 +198,4 @@ export function defaultClipFrames(
   while (frames <= motionTailFrames) frames += 8;
   return Math.max(frames, 9);
 }
+import { describeTransportError } from "./errors";

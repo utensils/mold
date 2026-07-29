@@ -53,6 +53,17 @@ describe("SequenceJobRow", () => {
     const wrapper = mount(SequenceJobRow, { props: { vm: vm() } });
     await wrapper.get("[data-test='seq-cancel']").trigger("click");
     expect(wrapper.emitted("action")?.[0]?.[0]).toBe("cancel");
+    expect(wrapper.emitted("select")).toBeUndefined();
+  });
+
+  it("selects the row by pointer or keyboard without stealing action clicks", async () => {
+    const wrapper = mount(SequenceJobRow, { props: { vm: vm() } });
+    const row = wrapper.get("[data-test='sequence-job-row']");
+    expect(row.attributes("role")).toBe("button");
+    await row.trigger("click");
+    await row.trigger("keydown", { key: "Enter" });
+    await row.trigger("keydown", { key: " " });
+    expect(wrapper.emitted("select")).toHaveLength(3);
   });
 
   it("labels watch as Open once the job has settled", () => {

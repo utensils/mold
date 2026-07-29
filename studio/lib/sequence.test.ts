@@ -213,5 +213,10 @@ describe("sequence authoring", () => {
     expect(friendlySequenceError("model unavailable")).toBe(
       "model unavailable",
     );
+    expect(
+      friendlySequenceError("SSE request failed with HTTP 404", "plato"),
+    ).toBe(
+      "plato couldn’t find that model or job. It may have been removed or the host may have restarted.",
+    );
   });
 });

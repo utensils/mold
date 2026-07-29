@@ -17,6 +17,7 @@ import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
+import ErrorNotice from "@ui/components/ErrorNotice.vue";
 
 const runpod = useRunPodStore();
 const prefs = useAppPrefsStore();
@@ -178,9 +179,7 @@ async function confirmLaunch() {
   try {
     await runpod.create({ ...form });
     toasts.push("GPU instance requested");
-  } catch (error) {
-    toasts.push(errorMessage(error), "error");
-  }
+  } catch {}
 }
 
 // Resuming a stopped pod resumes billing — confirm it too, showing the pod's
@@ -201,9 +200,7 @@ async function createNetworkVolume() {
     form.networkVolumeId = volume.id;
     showVolumeCreate.value = false;
     toasts.push(`Created ${volume.name}`);
-  } catch (error) {
-    toasts.push(errorMessage(error), "error");
-  }
+  } catch {}
 }
 
 function startVolumeEdit(volume: RunPodNetworkVolume) {
@@ -221,9 +218,7 @@ async function updateNetworkVolume(volume: RunPodNetworkVolume) {
     });
     editingVolumeId.value = null;
     toasts.push(`Updated ${volumeEdit.name}`);
-  } catch (error) {
-    toasts.push(errorMessage(error), "error");
-  }
+  } catch {}
 }
 
 async function deleteNetworkVolume(volume: RunPodNetworkVolume) {
@@ -236,9 +231,7 @@ async function deleteNetworkVolume(volume: RunPodNetworkVolume) {
     await runpod.deleteNetworkVolume(volume.id);
     if (form.networkVolumeId === volume.id) form.networkVolumeId = null;
     toasts.push(`Deleted ${volume.name}`);
-  } catch (error) {
-    toasts.push(errorMessage(error), "error");
-  }
+  } catch {}
 }
 
 async function act(action: "start" | "stop" | "delete", pod: RunPodPod) {
@@ -252,9 +245,7 @@ async function act(action: "start" | "stop" | "delete", pod: RunPodPod) {
     toasts.push(
       `${action === "delete" ? "Deleted" : action === "start" ? "Started" : "Stopped"} ${pod.name ?? pod.id}`,
     );
-  } catch (error) {
-    toasts.push(errorMessage(error), "error");
-  }
+  } catch {}
 }
 
 async function useInMold(pod: RunPodPod) {
@@ -553,19 +544,8 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="min-h-0 overflow-y-auto p-4">
-        <section
-          v-if="runpod.operationError"
-          role="alert"
-          class="border-stop/40 mb-4 rounded-chrome border bg-stop/10 p-3"
-        >
-          <div class="flex items-start gap-3">
-            <div class="min-w-0 flex-1">
-              <p class="text-body font-semibold text-stop">RunPod couldn’t complete the request</p>
-              <pre
-                data-selectable
-                class="data-mono mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-caption text-ink-2"
-                >{{ runpod.operationError }}</pre>
-            </div>
+        <ErrorNotice v-if="runpod.operationError" class="mb-4" :message="runpod.operationError">
+          <template #actions>
             <button
               type="button"
               class="text-caption text-ink-2 hover:text-ink"
@@ -573,8 +553,8 @@ onBeforeUnmount(() => {
             >
               Dismiss
             </button>
-          </div>
-        </section>
+          </template>
+        </ErrorNotice>
         <section class="border-edge mb-5 rounded-chrome border bg-bath">
           <div class="flex items-center justify-between px-3 py-2.5">
             <div>

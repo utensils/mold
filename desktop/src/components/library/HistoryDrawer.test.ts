@@ -31,11 +31,14 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 import HistoryDrawer from "./HistoryDrawer.vue";
+import DrawerPanel from "@ui/components/DrawerPanel.vue";
+import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore } from "../../stores/hosts";
 import { useComposerStore } from "../../stores/composer";
 import { useChainJobsStore } from "../../stores/chainJobs";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { GalleryImage } from "../../lib/api/types";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 
@@ -140,6 +143,26 @@ beforeEach(() => {
 });
 
 describe("HistoryDrawer runs", () => {
+  it("starts wider and persists left-edge resizing or a double-click reset", async () => {
+    const wrapper = await mountDrawer();
+    const prefs = useAppPrefsStore();
+    const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined);
+    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(620);
+
+    const handle = wrapper.getComponent(PanelResizeHandle);
+    expect(handle.props("label")).toBe("Resize history");
+    handle.vm.$emit("resize", -80);
+    await flushPromises();
+    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(700);
+    handle.vm.$emit("commit");
+    await flushPromises();
+    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: 700 });
+
+    handle.vm.$emit("reset");
+    await flushPromises();
+    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: null });
+  });
+
   it("shows past runs with thumbnails and full metadata", async () => {
     const wrapper = await mountDrawer();
     const rows = wrapper.findAll("[data-test='run-row']");
@@ -156,11 +179,13 @@ describe("HistoryDrawer runs", () => {
     await wrapper.get("[data-test='run-row']").trigger("click");
     await flushPromises();
     const composer = useComposerStore();
-    expect(composer.prefill).toMatchObject({
-      prompt: "a lighthouse at dusk",
-      seed: 42,
-      width: 1024,
-      height: 768,
+    expect(composer.prefill).toEqual({
+      metadata: expect.objectContaining({
+        prompt: "a lighthouse at dusk",
+        seed: 42,
+        width: 1024,
+        height: 768,
+      }),
     });
     expect(router.currentRoute.value.path).toBe("/create");
   });
@@ -346,6 +371,23 @@ describe("HistoryDrawer sequences", () => {
     expect(rows[0]!.text()).toContain("okra");
     expect(rows[1]!.text()).toContain("completed");
     expect(rows[1]!.text()).toContain("5 clips");
+  });
+
+  it("loads a selected sequence into Create without granting edit authority", async () => {
+    const wrapper = await mountDrawer();
+    const chains = useChainJobsStore();
+    chains.byHost.local = { jobs: [chainJob()], error: null };
+    await wrapper.get("[data-test='tab-sequences']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-job-row']").trigger("click");
+    await flushPromises();
+    expect(useComposerStore().pendingSequence).toEqual({
+      kind: "inspect",
+      hostId: "local",
+      jobId: "job-1",
+    });
+    expect(router.currentRoute.value.path).toBe("/create");
   });
 
   it("opens on the tab named in the URL and writes the tab back on switch", async () => {

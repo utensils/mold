@@ -29,6 +29,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     navRailWidth: (s) => normalizePanelWidth("navRail", s.settings?.navRailWidth),
     generateParamsWidth: (s) =>
       normalizePanelWidth("generateParams", s.settings?.generateParamsWidth),
+    historyDrawerWidth: (s) => normalizePanelWidth("historyDrawer", s.settings?.historyDrawerWidth),
     sidebarCollapsed: (s) => s.settings?.sidebarCollapsed ?? false,
   },
   actions: {

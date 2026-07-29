@@ -99,6 +99,31 @@ describe("generation queueing", () => {
     expect(store.jobs[1]!.queuePosition).toBe(1);
   });
 
+  it("keeps an explicitly selected older job on the canvas", () => {
+    const store = useGenerationStore();
+    const older = store.startJob({ ...req, prompt: "older prompt" });
+    const newer = store.startJob({ ...req, prompt: "newer prompt" });
+    expect(store.active?.clientId).toBe(newer.clientId);
+
+    store.select(older.clientId);
+    expect(store.active?.clientId).toBe(older.clientId);
+    expect(store.active?.request?.prompt).toBe("older prompt");
+
+    store.select(null);
+    expect(store.active?.clientId).toBe(newer.clientId);
+  });
+
+  it("returns the canvas to automatic active work when a new batch is submitted", async () => {
+    const store = useGenerationStore();
+    const inspected = store.startJob({ ...req, prompt: "inspected" });
+    store.select(inspected.clientId);
+    const { jobs } = store.submitBatch({ ...req, prompt: "new work" }, 1);
+    await flushPromises();
+
+    expect(store.selectedClientId).toBeNull();
+    expect(store.active?.clientId).toBe(jobs[0]!.clientId);
+  });
+
   it("creates every batch sibling but holds at most two streams open", async () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch({ ...req, seed: 100 }, 3);

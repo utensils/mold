@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 
 const checkForUpdates = vi.fn();
@@ -6,6 +6,7 @@ const installPendingUpdate = vi.fn();
 const appSettingsSet = vi.fn();
 const appSettingsGet = vi.fn();
 const notifyUpdateAvailable = vi.fn();
+const ONE_HOUR_MS = 60 * 60 * 1_000;
 let progressListener: ((event: unknown) => void) | null = null;
 
 vi.mock("../lib/ipc", () => ({
@@ -83,6 +84,10 @@ beforeEach(() => {
   notifyUpdateAvailable.mockReset();
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("updater store", () => {
   it("performs a non-installing automatic check and exposes an update notification", async () => {
     checkForUpdates.mockResolvedValue(
@@ -106,6 +111,37 @@ describe("updater store", () => {
     expect(updater.phase).toBe("available");
     expect(updater.shouldNotify).toBe(true);
     expect(notifyUpdateAvailable).toHaveBeenCalledWith("0.17.0");
+  });
+
+  it("keeps checking after the startup check reports the app is up to date", async () => {
+    vi.useFakeTimers();
+    const updater = useUpdaterStore();
+
+    await updater.init();
+    await vi.advanceTimersByTimeAsync(ONE_HOUR_MS);
+
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replace an update that is already waiting for the user", async () => {
+    vi.useFakeTimers();
+    checkForUpdates.mockResolvedValue(
+      checkResult({
+        candidate: {
+          id: "candidate-1",
+          version: "0.17.0",
+          publishedAt: null,
+          notes: null,
+        },
+      }),
+    );
+    const updater = useUpdaterStore();
+
+    await updater.init();
+    await vi.advanceTimersByTimeAsync(ONE_HOUR_MS);
+
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(updater.candidate?.id).toBe("candidate-1");
   });
 
   it("dismisses only the currently announced update", async () => {

@@ -226,6 +226,11 @@ const active = computed(
       :key="vm.key"
       class="activity__sequence"
       :data-test="`activity-sequence-${vm.kind === 'sequence' ? vm.jobId : ''}`"
+      role="button"
+      tabindex="0"
+      @click="emit('sequence-action', 'watch', vm)"
+      @keydown.enter.prevent="emit('sequence-action', 'watch', vm)"
+      @keydown.space.prevent="emit('sequence-action', 'watch', vm)"
     >
       <span class="activity__seq-icon" aria-hidden="true">
         <Icon name="video" :size="14" />
@@ -253,12 +258,6 @@ const active = computed(
           :height="3"
           :label="`${vm.model} sequence progress`"
         />
-        <span
-          v-if="vm.kind === 'sequence' && vm.error"
-          class="activity__seq-error"
-          role="alert"
-          >{{ vm.error }}</span
-        >
       </span>
       <span v-if="sequencePercent(vm) !== null" class="activity__pct"
         >{{ sequencePercent(vm) }}%</span
@@ -270,7 +269,7 @@ const active = computed(
           type="button"
           class="activity__seq-action"
           :data-action="action"
-          @click="emit('sequence-action', action, vm)"
+          @click.stop="emit('sequence-action', action, vm)"
         >
           {{ ACTION_LABELS[action] }}
         </button>
@@ -281,7 +280,7 @@ const active = computed(
           :data-test="`activity-seq-dismiss-${vm.kind === 'sequence' ? vm.jobId : ''}`"
           title="Hide this from Activity. The sequence stays in Library ▸ History."
           :aria-label="`Dismiss ${vm.model}`"
-          @click="dismissSequence(vm)"
+          @click.stop="dismissSequence(vm)"
         >
           <Icon name="close" :size="13" />
         </button>
@@ -294,6 +293,11 @@ const active = computed(
         :key="job.id"
         class="activity__pill"
         :data-test="`activity-queued-${job.id}`"
+        role="button"
+        tabindex="0"
+        @click="emit('open', job)"
+        @keydown.enter.prevent="emit('open', job)"
+        @keydown.space.prevent="emit('open', job)"
       >
         <span class="activity__pill-text">
           <span
@@ -309,7 +313,7 @@ const active = computed(
           class="activity__cancel"
           :aria-label="`Cancel ${promptFor(job)}`"
           :data-test="`activity-cancel-${job.id}`"
-          @click="emit('cancel', job.id)"
+          @click.stop="emit('cancel', job.id)"
         >
           <Icon name="close" :size="12" />
         </button>
@@ -322,18 +326,21 @@ const active = computed(
       class="activity__error"
       role="alert"
       :data-test="`activity-error-${job.id}`"
+      tabindex="0"
+      @click="emit('open', job)"
+      @keydown.enter.prevent="emit('open', job)"
+      @keydown.space.prevent="emit('open', job)"
     >
-      <Icon name="negative" :size="15" />
       <span class="activity__error-body">
         <span class="activity__error-prompt">{{ promptFor(job) }}</span>
-        <span>{{ job.error }}</span>
+        <span>Failed — open Create for details</span>
       </span>
       <button
         type="button"
         class="activity__dismiss"
         :aria-label="`Dismiss error for ${promptFor(job)}`"
         :data-test="`activity-dismiss-${job.id}`"
-        @click="emit('dismiss', job.id)"
+        @click.stop="emit('dismiss', job.id)"
       >
         <Icon name="close" :size="13" />
       </button>

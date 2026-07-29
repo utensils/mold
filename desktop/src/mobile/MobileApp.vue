@@ -32,10 +32,13 @@ import {
 } from "@studio/api/generationPlacement";
 import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
+import { chainScriptToClips } from "@studio/lib/sequenceForm";
+import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
 import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
@@ -57,6 +60,7 @@ import {
 } from "../lib/chainRouting";
 import {
   applyModelDefaults,
+  applyRequestToForm,
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
@@ -586,6 +590,43 @@ const activityRows = computed<ActivityRow[]>(() =>
     return print ? [{ key: vm.key, sequence: null, print }] : [];
   }),
 );
+
+async function selectMobilePrint(job: Job): Promise<void> {
+  generation.select(job.clientId);
+  if (job.hostId && hosts.value.some((host) => host.id === job.hostId)) {
+    await selectHost(job.hostId);
+  }
+  const request = job.request;
+  if (request) applyRequestToForm(form, request, generationModels.value);
+  draft.stopEditing();
+  draft.output = "single";
+  latestResultClientId.value = job.status === "complete" ? job.clientId : null;
+  tab.value = "generate";
+}
+
+function selectCurrentMobileSequence(): void {
+  const route = sequenceRoute.value;
+  const detail = sequenceJob.value;
+  if (!route || !detail) return;
+  const script = normalizeServerChainScript(detail.script);
+  if (script) {
+    const loaded = chainScriptToClips(script);
+    const shared = loaded.shared;
+    if (shared.model) form.model = shared.model;
+    if (shared.width != null) form.width = shared.width;
+    if (shared.height != null) form.height = shared.height;
+    if (shared.fps != null) form.fps = shared.fps;
+    if (shared.steps != null) form.steps = shared.steps;
+    if (shared.guidance != null) form.guidance = shared.guidance;
+    form.seed = shared.seed ?? "";
+    draft.stopEditing();
+    draft.output = "sequence";
+    draft.clips.splice(0, draft.clips.length, ...loaded.clips);
+    draft.activeClipId = loaded.clips[0]?.id ?? null;
+    draft.enableAudio = loaded.enableAudio;
+  }
+  tab.value = "generate";
+}
 /** A settled sequence keeps its row (for Resume / Dismiss) but is NOT active,
  *  so the header counts real work rather than rows on screen. */
 const activeRowCount = computed(
@@ -2829,7 +2870,6 @@ function handleForegroundResume(): void {
 
 watch(resultPreviewError, (error) => {
   if (!error) return;
-  setGenerationStatus(error, true);
   generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${error}`;
 });
 
@@ -2992,22 +3032,23 @@ onBeforeUnmount(() => {
               </option>
             </select>
           </label>
-          <div
+          <ErrorNotice
             v-if="modelLoadError"
             class="mobile-model-state is-error"
-            role="alert"
             data-test="mobile-model-error"
+            :message="modelLoadError"
           >
-            <p>{{ modelLoadError }}</p>
-            <button
-              class="secondary-button"
-              type="button"
-              data-test="mobile-model-retry"
-              @click="refreshModels"
-            >
-              Retry
-            </button>
-          </div>
+            <template #actions>
+              <button
+                class="secondary-button"
+                type="button"
+                data-test="mobile-model-retry"
+                @click="refreshModels"
+              >
+                Retry
+              </button>
+            </template>
+          </ErrorNotice>
           <div
             v-else-if="!loadingModels && generationModels.length === 0"
             class="mobile-model-state"
@@ -3370,19 +3411,23 @@ onBeforeUnmount(() => {
                 }"
               />
             </div>
-            <div
-              class="status-line"
-              :class="{ 'error-text': generationStatusIsError }"
-              data-test="mobile-generation-summary"
-            >
+            <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
+              <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
+            </div>
+            <div v-else class="status-line" data-test="mobile-generation-summary">
               {{ generationStatus }}
             </div>
-            <div v-if="resultPreviewError" class="result-preview-error" role="alert">
-              <p class="status-line error-text">{{ resultPreviewError }}</p>
-              <button class="secondary-button" type="button" @click="retryGeneratedPreview">
-                Try preview again
-              </button>
-            </div>
+            <ErrorNotice
+              v-if="resultPreviewError"
+              class="result-preview-error"
+              :message="resultPreviewError"
+            >
+              <template #actions>
+                <button class="secondary-button" type="button" @click="retryGeneratedPreview">
+                  Try preview again
+                </button>
+              </template>
+            </ErrorNotice>
             <video
               v-if="resultUrl && resultIsVideo"
               :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
@@ -3433,6 +3478,12 @@ onBeforeUnmount(() => {
                 :key="row.key"
                 class="mobile-generation-job"
                 :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+                role="button"
+                tabindex="0"
+                @click="row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()"
+                @keydown.enter.prevent="
+                  row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                "
               >
                 <template v-if="row.print">
                   <div class="mobile-generation-job-copy">
@@ -3446,7 +3497,7 @@ onBeforeUnmount(() => {
                       type="button"
                       :aria-label="`Cancel ${row.print.prompt}`"
                       data-test="mobile-generation-cancel"
-                      @click="cancelGeneration(row.print)"
+                      @click.stop="cancelGeneration(row.print)"
                     >
                       Cancel
                     </button>
@@ -3478,7 +3529,7 @@ onBeforeUnmount(() => {
                       class="mobile-generation-cancel"
                       type="button"
                       data-test="mobile-sequence-cancel"
-                      @click="cancelMobileSequence"
+                      @click.stop="cancelMobileSequence"
                     >
                       Cancel
                     </button>
@@ -3487,7 +3538,7 @@ onBeforeUnmount(() => {
                       class="mobile-generation-cancel mobile-sequence-resume"
                       type="button"
                       data-test="mobile-sequence-resume"
-                      @click="resumeMobileSequence"
+                      @click.stop="resumeMobileSequence"
                     >
                       Resume
                     </button>
@@ -3496,7 +3547,7 @@ onBeforeUnmount(() => {
                       class="mobile-generation-cancel mobile-sequence-dismiss"
                       type="button"
                       data-test="mobile-sequence-dismiss"
-                      @click="dismissMobileSequence"
+                      @click.stop="dismissMobileSequence"
                     >
                       Dismiss
                     </button>
@@ -3506,7 +3557,7 @@ onBeforeUnmount(() => {
             </ol>
           </section>
           <p
-            v-if="sequenceError && sequenceRoute"
+            v-if="sequenceError && sequenceRoute && !isSequence"
             class="status-line error-text"
             role="alert"
             data-test="mobile-sequence-route-error"

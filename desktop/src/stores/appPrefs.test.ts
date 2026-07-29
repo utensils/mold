@@ -25,6 +25,7 @@ vi.mock("../lib/ipc", () => ({
       saveRemoteOutputs: true,
       navRailWidth: null,
       generateParamsWidth: null,
+      historyDrawerWidth: null,
       sidebarCollapsed: false,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
@@ -223,6 +224,7 @@ describe("appPrefs panel widths", () => {
     const prefs = useAppPrefsStore();
     expect(prefs.navRailWidth).toBe(210);
     expect(prefs.generateParamsWidth).toBe(340);
+    expect(prefs.historyDrawerWidth).toBe(620);
   });
 
   it("defaults to the PANEL_LIMITS defaults when the persisted values are null", async () => {
@@ -231,26 +233,37 @@ describe("appPrefs panel widths", () => {
     await prefs.init();
     expect(prefs.navRailWidth).toBe(210);
     expect(prefs.generateParamsWidth).toBe(340);
+    expect(prefs.historyDrawerWidth).toBe(620);
   });
 
   it("reflects persisted widths", async () => {
     vi.mocked(ipc.appSettingsGet).mockResolvedValue(
-      panelSettings({ navRailWidth: 260, generateParamsWidth: 400 }) as never,
+      panelSettings({
+        navRailWidth: 260,
+        generateParamsWidth: 400,
+        historyDrawerWidth: 700,
+      }) as never,
     );
     const prefs = useAppPrefsStore();
     await prefs.init();
     expect(prefs.navRailWidth).toBe(260);
     expect(prefs.generateParamsWidth).toBe(400);
+    expect(prefs.historyDrawerWidth).toBe(700);
   });
 
   it("clamps absurd persisted widths into the panel limits", async () => {
     vi.mocked(ipc.appSettingsGet).mockResolvedValue(
-      panelSettings({ navRailWidth: 9000, generateParamsWidth: 4 }) as never,
+      panelSettings({
+        navRailWidth: 9000,
+        generateParamsWidth: 4,
+        historyDrawerWidth: 9000,
+      }) as never,
     );
     const prefs = useAppPrefsStore();
     await prefs.init();
     expect(prefs.navRailWidth).toBe(320);
     expect(prefs.generateParamsWidth).toBe(280);
+    expect(prefs.historyDrawerWidth).toBe(960);
   });
 
   it("defaults the sidebar to expanded and persists a collapse toggle", async () => {

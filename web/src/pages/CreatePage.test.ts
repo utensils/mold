@@ -1405,6 +1405,58 @@ describe("CreatePage layout and behavior", () => {
     ).toEqual(["chain-9"]);
   });
 
+  it("clears stale advanced fields when a selected job omits optional keys", async () => {
+    const job = {
+      id: "print-9",
+      request: {
+        prompt: "a clean request",
+        model: "flux-dev:q4",
+        width: 768,
+        height: 512,
+        steps: 20,
+        guidance: 3,
+      },
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      serverId: null,
+    } as Job;
+    streamJobsRef.value = [job];
+    const form = useGenerateForm();
+    form.state.value.negativePrompt = "stale negative";
+    form.state.value.controlModel = "stale-control";
+    form.state.value.frames = 97;
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "stale.png", base64: "stale" },
+    ];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit("open", job);
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("a clean request");
+    expect(form.state.value.negativePrompt).toBe("");
+    expect(form.state.value.controlModel).toBe("");
+    expect(form.state.value.frames).toBeNull();
+    expect(form.state.value.imageAttachments).toEqual([]);
+  });
+
   it("deletes settled durable jobs through the strip's Delete action", async () => {
     listChainJobsMock.mockResolvedValue({
       jobs: [

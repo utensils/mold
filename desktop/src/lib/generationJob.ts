@@ -16,6 +16,8 @@ export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "comp
 export interface Job {
   /** Client-side identity — stable across the job's life; keys cancel/menus. */
   clientId: number;
+  /** Exact submitted sibling request, used when a queue/history row is selected. */
+  request?: GenerateRequest;
   /** Groups sibling jobs submitted together as one batch. */
   batchId: number;
   /** Server-assigned id from the Queued event (empty until it arrives). */
@@ -78,6 +80,7 @@ export interface Job {
 export function newJob(req: GenerateRequest): Job {
   return {
     clientId: 0,
+    request: req,
     batchId: 0,
     id: "",
     prompt: req.prompt,

@@ -115,7 +115,9 @@ export function sequenceToVM(
     stageCount: summary.stage_count,
     currentStage: summary.current_stage,
     progress,
-    error: summary.error ? friendlySequenceError(summary.error) : null,
+    error: summary.error
+      ? friendlySequenceError(summary.error, host.hostLabel)
+      : null,
     actions: sequenceActions(summary.state),
     createdAtMs: summary.created_at_unix_ms,
     settledAtMs: settled ? summary.updated_at_unix_ms : null,
