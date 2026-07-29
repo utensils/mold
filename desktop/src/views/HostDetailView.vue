@@ -254,13 +254,13 @@ const installedModels = computed(() => hostModels.installedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
-const mutatingDeviceId = ref<string | null>(null);
+const mutatingDeviceIds = ref(new Set<string>());
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
 
 async function toggleDeviceById(deviceId: string, enabled: boolean) {
   const target = hostTarget();
   if (!target) return;
-  mutatingDeviceId.value = deviceId;
+  mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
   try {
     await setDeviceEnabled(target, deviceId, enabled);
     await hosts.refresh();
@@ -272,9 +272,9 @@ async function toggleDeviceById(deviceId: string, enabled: boolean) {
       }`,
     );
   } finally {
-    if (mutatingDeviceId.value === deviceId) {
-      mutatingDeviceId.value = null;
-    }
+    const next = new Set(mutatingDeviceIds.value);
+    next.delete(deviceId);
+    mutatingDeviceIds.value = next;
   }
 }
 
@@ -680,7 +680,7 @@ async function forget() {
                 "
                 :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
                 show-controls
-                :busy-device-ids="mutatingDeviceId ? [mutatingDeviceId] : []"
+                :busy-device-ids="[...mutatingDeviceIds]"
                 @unpin="unpinWork"
                 @toggle="toggleDeviceById"
               />

@@ -343,10 +343,12 @@ describe("HostDetailView GPU lifecycle controls", () => {
 
     await wrapper.get("[data-test='device-toggle-0']").trigger("click");
     await wrapper.get("[data-test='device-toggle-1']").trigger("click");
+    expect(wrapper.get("[data-test='device-toggle-0']").attributes("disabled")).toBeDefined();
     expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
 
     first.resolve();
     await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(wrapper.get("[data-test='device-toggle-0']").attributes("disabled")).toBeUndefined();
     expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
 
     second.resolve();

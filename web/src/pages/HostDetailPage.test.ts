@@ -684,11 +684,17 @@ describe("HostDetailPage — queue", () => {
     await w.get('[data-test="device-toggle-0"]').trigger("click");
     await w.get('[data-test="device-toggle-1"]').trigger("click");
     expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
       w.get('[data-test="device-toggle-1"]').attributes("disabled"),
     ).toBeDefined();
 
     first.resolve(makeDevice(0, { desired_enabled: false }));
     await flushPromises();
+    expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeUndefined();
     expect(
       w.get('[data-test="device-toggle-1"]').attributes("disabled"),
     ).toBeDefined();

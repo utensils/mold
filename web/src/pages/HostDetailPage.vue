@@ -62,7 +62,7 @@ const hostName = ref(host.value?.name ?? "");
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
-const mutatingDeviceId = ref<string | null>(null);
+const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
 const downloads = ref<DownloadJobWire[]>([]);
 const targetId = ref(getGenerateTargetId());
@@ -154,7 +154,7 @@ async function onToggleDevice(deviceId: string, enabled: boolean) {
   const entry = host.value;
   if (!entry) return;
   const epoch = sessionEpoch;
-  mutatingDeviceId.value = deviceId;
+  mutatingDeviceIds.value = new Set(mutatingDeviceIds.value).add(deviceId);
   try {
     const accepted = await setDeviceEnabled(
       { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
@@ -182,9 +182,9 @@ async function onToggleDevice(deviceId: string, enabled: boolean) {
       `Couldn't ${enabled ? "enable" : "disable"} device: ${errMsg(e)}`,
     );
   } finally {
-    if (mutatingDeviceId.value === deviceId) {
-      mutatingDeviceId.value = null;
-    }
+    const next = new Set(mutatingDeviceIds.value);
+    next.delete(deviceId);
+    mutatingDeviceIds.value = next;
   }
 }
 
@@ -615,7 +615,7 @@ onBeforeUnmount(() => {
             "
             :restart-enable="caps?.devices?.restart_enable === true"
             show-controls
-            :busy-device-ids="mutatingDeviceId ? [mutatingDeviceId] : []"
+            :busy-device-ids="[...mutatingDeviceIds]"
             @unpin="onUnpinWork"
             @toggle="onToggleDevice"
           />
