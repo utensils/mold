@@ -277,6 +277,12 @@ pub struct AppState {
     /// Must never be held across an .await point.
     pub active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
+    /// Hard output kill switch used by isolated server test fixtures.
+    ///
+    /// This is intentionally separate from `Config`: environment overrides
+    /// remain authoritative in production, while mock-generation fixtures
+    /// must never inherit any process-level `MOLD_OUTPUT_DIR`.
+    pub output_disabled_override: bool,
     pub start_time: Instant,
     /// Guards concurrent model loads and hot-swaps.
     pub model_load_lock: Arc<Mutex<()>>,
@@ -516,6 +522,24 @@ pub fn resolve_max_cached_models() -> usize {
 }
 
 impl AppState {
+    /// Test states must never inherit the production gallery fallback.
+    ///
+    /// `Config::default()` intentionally resolves output to
+    /// `~/.mold/output`, which means a successful mock generation can write
+    /// into a developer's real Library unless output is explicitly disabled.
+    /// Persistence tests opt back in with their own temporary output dir.
+    #[cfg(test)]
+    pub(crate) fn test_config() -> Config {
+        Config {
+            output_dir: Some(String::new()),
+            ..Config::default()
+        }
+    }
+
+    pub(crate) fn is_output_disabled(&self, config: &Config) -> bool {
+        self.output_disabled_override || config.is_output_disabled()
+    }
+
     /// Create state with a pre-loaded engine (server starts with a configured model).
     pub fn new(
         engine: Box<dyn InferenceEngine>,
@@ -537,6 +561,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
+            output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -604,6 +629,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
+            output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -680,7 +706,8 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            output_disabled_override: true,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -724,7 +751,8 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            output_disabled_override: true,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -769,6 +797,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),

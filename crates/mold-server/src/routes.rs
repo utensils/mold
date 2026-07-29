@@ -644,7 +644,7 @@ async fn prepare_generation(
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;
-        let output_dir = if config.is_output_disabled() {
+        let output_dir = if state.is_output_disabled(&config) {
             None
         } else {
             Some(config.effective_output_dir())
@@ -3471,7 +3471,8 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         expand_settings.is_local() && config.manifest_model_is_downloaded(&expand_settings.model);
     let expand = expand_capabilities(&expand_settings, expand_model_present);
 
-    let server_batch = state.scheduled_work.v2_authoritative() && !config.is_output_disabled();
+    let server_batch =
+        state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
@@ -3973,7 +3974,7 @@ async fn import_gallery_file(
 ) -> Result<(StatusCode, Json<GalleryImportResponse>), ApiError> {
     validate_gallery_filename(&filename)?;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Err(ApiError::not_found("image output is disabled"));
     }
     let output_dir = config.effective_output_dir();
@@ -4377,7 +4378,7 @@ async fn list_gallery(
     // needlessly serializing ordinary listings and media reads.
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Ok(Json(Vec::new()));
     }
     let output_dir = config.effective_output_dir();
@@ -4439,7 +4440,7 @@ async fn get_gallery_image(
 ) -> Result<axum::response::Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Err(ApiError::not_found("image output is disabled"));
     }
     let output_dir = config.effective_output_dir();
@@ -4611,7 +4612,7 @@ async fn delete_gallery_image(
 ) -> Result<impl IntoResponse, ApiError> {
     let _gallery_writer = state.gallery_publication_gate.write().await;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Err(ApiError::not_found("image output is disabled"));
     }
     let output_dir = config.effective_output_dir();
@@ -4734,7 +4735,7 @@ async fn get_gallery_thumbnail(
 ) -> Result<impl IntoResponse, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Err(ApiError::not_found("image output is disabled"));
     }
     let output_dir = config.effective_output_dir();
@@ -4851,7 +4852,7 @@ async fn get_gallery_preview(
 ) -> Result<axum::response::Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
-    if config.is_output_disabled() {
+    if state.is_output_disabled(&config) {
         return Err(ApiError::not_found("image output is disabled"));
     }
     let output_dir = config.effective_output_dir();

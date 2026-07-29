@@ -283,6 +283,43 @@ mod tests {
         create_router(state)
     }
 
+    #[tokio::test]
+    async fn generation_fixture_disables_real_gallery_output_by_default() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let config = state.config.read().await;
+
+        assert!(
+            state.is_output_disabled(&config),
+            "mock generation tests must opt into an isolated output directory"
+        );
+    }
+
+    #[test]
+    fn generation_fixture_ignores_process_output_override() {
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("MOLD_OUTPUT_DIR");
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/tmp/mold-test-must-not-write") };
+
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let config = state.config.try_read().unwrap();
+        let environment_would_enable_output = !config.is_output_disabled();
+        let fixture_disables_output = state.is_output_disabled(&config);
+        drop(config);
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("MOLD_OUTPUT_DIR", value) },
+            None => unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") },
+        }
+
+        assert!(environment_would_enable_output);
+        assert!(
+            fixture_disables_output,
+            "mock generation tests must ignore process-level output overrides"
+        );
+    }
+
     /// Create an app from pre-built state. Caller must ensure queue worker is
     /// running if generate endpoints will be tested.
     fn app_with_state(state: AppState) -> axum::Router {
@@ -5149,7 +5186,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_metadata_only_returns_saved_filename_without_base64_media() {
         let output_dir = tempfile::tempdir().unwrap();
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.output_disabled_override = false;
         state.config.write().await.output_dir =
             Some(output_dir.path().to_string_lossy().into_owned());
         let worker_state = state.clone();
@@ -5481,7 +5519,8 @@ mod tests {
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -5551,7 +5590,8 @@ mod tests {
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -5824,7 +5864,8 @@ mod tests {
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
