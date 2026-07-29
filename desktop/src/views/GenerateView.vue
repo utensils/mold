@@ -102,6 +102,7 @@ import {
   sha256HexOfBase64,
 } from "../lib/sourceRestore";
 import { isMissingModelError } from "../lib/generateErrors";
+import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
@@ -321,6 +322,14 @@ function onDocumentKeydown(event: KeyboardEvent) {
 }
 
 const job = computed(() => generation.active);
+const jobErrorMessage = computed(() =>
+  job.value?.error
+    ? describeTransportError(job.value.error, job.value.hostLabel)
+    : "Something went wrong while developing this print.",
+);
+const jobErrorCopy = computed(() =>
+  job.value?.error ? copyableError(job.value.error, jobErrorMessage.value) : jobErrorMessage.value,
+);
 const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
 const formValidationError = computed(
@@ -632,9 +641,18 @@ const settledSequenceCaption = computed(() => {
 
 const settledSequenceError = computed(() =>
   settledSequence.value?.state === "failed"
-    ? friendlySequenceError(settledSequence.value.error ?? "Sequence failed.")
+    ? friendlySequenceError(
+        settledSequence.value.error ?? "Sequence failed.",
+        hosts.all.find((h) => h.id === chains.watching?.hostId)?.label,
+      )
     : null,
 );
+const settledSequenceErrorCopy = computed(() => {
+  const raw = settledSequence.value?.error;
+  return raw && settledSequenceError.value
+    ? copyableError(raw, settledSequenceError.value)
+    : (settledSequenceError.value ?? "");
+});
 
 function showSettledSequenceInLibrary() {
   const print = settledSequencePrint.value;
@@ -728,6 +746,15 @@ async function duplicateSequenceAsNew() {
 /** ActivityStrip Edit: load a durable job's effective script into an edit
  * session — applying its shared params to the form is the explicit action. */
 async function editSequence(payload: { hostId: string; jobId: string }) {
+  await loadSequence(payload, true);
+}
+
+/** Select/watch a durable job without turning a row click into an amend. */
+async function inspectSequence(payload: { hostId: string; jobId: string }) {
+  await loadSequence(payload, false);
+}
+
+async function loadSequence(payload: { hostId: string; jobId: string }, editing: boolean) {
   // An edit session is lossless — any reuse caveat on screen is now stale.
   sequenceReuseNotice.value = null;
   try {
@@ -750,17 +777,27 @@ async function editSequence(payload: { hostId: string; jobId: string }) {
     if (shared.steps != null) form.steps = shared.steps;
     if (shared.guidance != null) form.guidance = shared.guidance;
     form.seed = shared.seed ?? "";
-    draft.loadFromJob(
-      {
-        jobId: payload.jobId,
-        hostId: payload.hostId,
-        baseline: loaded.clips.map((clip) => ({ ...clip })),
-        completedStages: countLeadingCompletedStages(detail.stages),
-      },
-      loaded.clips,
-      loaded.enableAudio,
-    );
-    editSharedBaseline.value = sharedSnapshot();
+    if (editing) {
+      draft.loadFromJob(
+        {
+          jobId: payload.jobId,
+          hostId: payload.hostId,
+          baseline: loaded.clips.map((clip) => ({ ...clip })),
+          completedStages: countLeadingCompletedStages(detail.stages),
+        },
+        loaded.clips,
+        loaded.enableAudio,
+      );
+      editSharedBaseline.value = sharedSnapshot();
+    } else {
+      draft.stopEditing();
+      editSharedBaseline.value = null;
+      draft.output = "sequence";
+      draft.clips.splice(0, draft.clips.length, ...loaded.clips);
+      draft.activeClipId = loaded.clips[0]?.id ?? null;
+      draft.enableAudio = loaded.enableAudio;
+      chains.watch(payload.hostId, payload.jobId);
+    }
     void loadChainLimits();
   } catch (err) {
     toasts.push(String(err), "error");
@@ -1527,8 +1564,6 @@ async function generate() {
           chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
           requestOptions,
         };
-      } else {
-        toasts.push(failed.error, "error");
       }
     }
   } finally {
@@ -1705,7 +1740,11 @@ function applySequenceHandoff() {
     applySequenceReuse(handoff.metadata);
     return;
   }
-  void editSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
+  if (handoff.kind === "inspect") {
+    void inspectSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
+  } else {
+    void editSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
+  }
 }
 watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
 // Leaving Sequence retires the caveat with the rail it described.
@@ -1955,7 +1994,8 @@ onBeforeUnmount(() => {
             <GenerateErrorNotice
               v-if="job?.status === 'error'"
               class="mt-3 w-full"
-              :message="job.error ?? 'Generation failed for an unknown reason.'"
+              :message="jobErrorMessage"
+              :copy-message="jobErrorCopy"
             />
           </div>
 
@@ -2008,6 +2048,7 @@ onBeforeUnmount(() => {
               data-test="sequence-failed"
               class="w-full"
               :message="settledSequenceError"
+              :copy-message="settledSequenceErrorCopy"
             />
             <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
               <span class="edge-code text-ink-3">saved to Library</span>

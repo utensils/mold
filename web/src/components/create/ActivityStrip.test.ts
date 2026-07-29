@@ -219,7 +219,7 @@ describe("ActivityStrip", () => {
     ).toContain("plato");
   });
 
-  it("keeps failed jobs visible with the server error until dismissed", async () => {
+  it("keeps failed jobs visible without repeating the canvas error", async () => {
     const failed = makeJob({
       state: "error",
       settledAt: NOW - 30_000,
@@ -228,8 +228,11 @@ describe("ActivityStrip", () => {
     const wrapper = mount(ActivityStrip, { props: { jobs: [failed] } });
 
     expect(wrapper.get("[data-test='activity-error-job-1']").text()).toContain(
-      "LTX-2 audio output is unavailable",
+      "Failed — open Create for details",
     );
+    expect(
+      wrapper.get("[data-test='activity-error-job-1']").text(),
+    ).not.toContain("LTX-2 audio output is unavailable");
     await wrapper.get("[data-test='activity-dismiss-job-1']").trigger("click");
     expect(wrapper.emitted("dismiss")?.[0]).toEqual(["job-1"]);
   });
@@ -256,7 +259,7 @@ describe("ActivityStrip — present tense", () => {
     );
   });
 
-  it("keeps a fresh failure with its error and a non-destructive dismiss", async () => {
+  it("keeps a fresh failure with actions but not duplicate detail", async () => {
     const wrapper = mount(ActivityStrip, {
       props: {
         jobs: [],
@@ -270,7 +273,7 @@ describe("ActivityStrip — present tense", () => {
       },
     });
     const row = wrapper.get("[data-test='activity-sequence-chain-1']");
-    expect(row.text()).toContain("stage 2 blew up");
+    expect(row.text()).not.toContain("stage 2 blew up");
     expect(row.find("[data-action='resume']").exists()).toBe(true);
 
     await row

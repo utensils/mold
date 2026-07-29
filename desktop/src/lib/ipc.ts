@@ -100,6 +100,8 @@ export interface AppSettings {
   navRailWidth: number | null;
   /** Persisted Generate-inspector width in px; null uses the panel default. */
   generateParamsWidth: number | null;
+  /** Persisted Library History drawer width in px; null uses the panel default. */
+  historyDrawerWidth?: number | null;
   /** Sidebar collapsed to the 62px icon rail; restored on launch. */
   sidebarCollapsed: boolean;
 }
@@ -163,6 +165,7 @@ const browserFallbackSettings = (): AppSettings => ({
   saveRemoteOutputs: true,
   navRailWidth: null,
   generateParamsWidth: null,
+  historyDrawerWidth: null,
   sidebarCollapsed: false,
 });
 

@@ -29,6 +29,8 @@ const props = withDefaults(
     timeLabel?: string | null;
     /** Non-destructive ✕ that removes the row from a strip for this session. */
     dismissible?: boolean;
+    /** Activity summaries suppress detail when the canvas owns the full notice. */
+    showError?: boolean;
   }>(),
   {
     dense: false,
@@ -36,12 +38,14 @@ const props = withDefaults(
     modelLabel: null,
     timeLabel: null,
     dismissible: false,
+    showError: true,
   },
 );
 
 const emit = defineEmits<{
   action: [action: ActivityAction, vm: SequenceVM];
   dismiss: [vm: SequenceVM];
+  select: [vm: SequenceVM];
 }>();
 
 // State color follows the development-temperature rule (spec §2.1).
@@ -67,51 +71,68 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
 </script>
 
 <template>
-  <div class="ms-seqrow" data-test="sequence-job-row" :data-state="vm.state">
-    <span class="ms-seqrow__state" :class="STATE_CLASS[vm.state]">{{
-      vm.state
-    }}</span>
-    <span class="ms-seqrow__model" :title="model">{{ model }}</span>
-    <span class="ms-seqrow__meta">
-      {{ vm.stageCount }} clips · {{ clip }}/{{ vm.stageCount }} ·
-      {{ vm.hostLabel }}
-      <template v-if="timeLabel"> · {{ timeLabel }}</template>
-    </span>
-    <span
-      v-if="showProgress"
-      class="ms-seqrow__progress"
-      data-test="seq-progress"
-    >
-      <ProgressBar :value="percent" :height="4" label="Sequence progress" />
-    </span>
-    <span class="ms-seqrow__spacer" />
-    <span v-if="vm.error" class="ms-seqrow__error" :title="vm.error">{{
-      vm.error
-    }}</span>
-    <button
-      v-for="action in buttons"
-      :key="action"
-      type="button"
-      class="ms-seqrow__btn"
-      :class="{
-        'ms-seqrow__btn--danger': action === 'cancel' || action === 'delete',
-      }"
-      :data-test="`seq-${action}`"
-      @click="emit('action', action, vm)"
-    >
-      {{ sequenceActionLabel(action, vm.state) }}
-    </button>
-    <button
-      v-if="dismissible"
-      type="button"
-      class="ms-seqrow__dismiss"
-      data-test="seq-dismiss"
-      title="Hide this from Activity. The sequence stays in Library ▸ History."
-      :aria-label="`Dismiss ${model}`"
-      @click="emit('dismiss', vm)"
-    >
-      ✕
-    </button>
+  <div
+    class="ms-seqrow"
+    :class="{ 'ms-seqrow--dense': dense }"
+    data-test="sequence-job-row"
+    :data-state="vm.state"
+    role="group"
+    tabindex="0"
+    @click="emit('select', vm)"
+    @keydown.enter.prevent="emit('select', vm)"
+    @keydown.space.prevent="emit('select', vm)"
+  >
+    <div class="ms-seqrow__identity">
+      <span class="ms-seqrow__state" :class="STATE_CLASS[vm.state]">{{
+        vm.state
+      }}</span>
+      <span class="ms-seqrow__model" :title="model">{{ model }}</span>
+      <span class="ms-seqrow__meta">
+        {{ vm.stageCount }} clips · {{ clip }}/{{ vm.stageCount }} ·
+        {{ vm.hostLabel }}
+        <template v-if="timeLabel"> · {{ timeLabel }}</template>
+      </span>
+      <span
+        v-if="showProgress"
+        class="ms-seqrow__progress"
+        data-test="seq-progress"
+      >
+        <ProgressBar :value="percent" :height="4" label="Sequence progress" />
+      </span>
+      <span
+        v-if="showError && vm.error"
+        class="ms-seqrow__error"
+        :title="vm.error"
+        >{{ vm.error }}</span
+      >
+    </div>
+    <div class="ms-seqrow__actions" data-test="sequence-job-actions">
+      <button
+        v-for="action in buttons"
+        :key="action"
+        type="button"
+        class="ms-seqrow__btn"
+        :class="{
+          'ms-seqrow__btn--danger': action === 'cancel' || action === 'delete',
+        }"
+        :data-test="`seq-${action}`"
+        @click.stop="emit('action', action, vm)"
+      >
+        {{ sequenceActionLabel(action, vm.state) }}
+      </button>
+      <slot name="actions" />
+      <button
+        v-if="dismissible"
+        type="button"
+        class="ms-seqrow__dismiss"
+        data-test="seq-dismiss"
+        title="Hide this from Activity. The sequence stays in Library ▸ History."
+        :aria-label="`Dismiss ${model}`"
+        @click.stop="emit('dismiss', vm)"
+      >
+        ✕
+      </button>
+    </div>
   </div>
 </template>
 
@@ -121,6 +142,22 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.ms-seqrow__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ms-seqrow__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .ms-seqrow__state {
@@ -166,10 +203,6 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
   min-width: 60px;
 }
 
-.ms-seqrow__spacer {
-  flex: 1;
-}
-
 .ms-seqrow__error {
   font-size: 10.5px;
   color: var(--stop);
@@ -177,6 +210,40 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 320px;
+}
+
+.ms-seqrow--dense {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ms-seqrow--dense .ms-seqrow__identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 10px;
+}
+
+.ms-seqrow--dense .ms-seqrow__model {
+  max-width: none;
+}
+
+.ms-seqrow--dense .ms-seqrow__meta {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ms-seqrow--dense .ms-seqrow__progress,
+.ms-seqrow--dense .ms-seqrow__error {
+  grid-column: 1 / -1;
+  max-width: none;
+}
+
+.ms-seqrow--dense .ms-seqrow__actions {
+  width: 100%;
 }
 
 .ms-seqrow__btn {

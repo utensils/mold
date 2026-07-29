@@ -719,6 +719,69 @@ describe("applyPrefillToForm", () => {
     expect(form.loras).toHaveLength(2);
     expect(form.width).toBe(512);
   });
+
+  it("restores an exact queued request without retaining stale advanced inputs", () => {
+    const form = newGenerateForm();
+    form.controlModel = "stale-control";
+    applyPrefillToForm(
+      form,
+      {
+        request: {
+          prompt: "a moving train",
+          negative_prompt: "blurry",
+          original_prompt: "a train",
+          model: "ltx2:q8",
+          width: 1280,
+          height: 720,
+          steps: 18,
+          guidance: 2.5,
+          seed: 77,
+          scheduler: "euler-ancestral",
+          output_format: "mp4",
+          source_image: "SOURCE",
+          source_image_name: "frame.png",
+          loras: [{ path: "/models/motion.safetensors", scale: 0.7 }],
+          frames: 97,
+          fps: 25,
+          enable_audio: true,
+          source_video: "VIDEO",
+          audio_file: "AUDIO",
+          keyframes: [{ frame: 48, image: "KEYFRAME" }],
+          pipeline: "retake",
+          retake_range: { start_seconds: 1, end_seconds: 2 },
+          spatial_upscale: "x2",
+          temporal_upscale: "x2",
+        },
+      },
+      [ltx2Model()],
+    );
+
+    expect(form).toMatchObject({
+      prompt: "a moving train",
+      originalPrompt: "a train",
+      negativePrompt: "blurry",
+      model: "ltx2:q8",
+      family: "ltx2",
+      seed: "77",
+      scheduler: "euler-ancestral",
+      outputFormat: "mp4",
+      sourceImage: "SOURCE",
+      sourceImageName: "frame.png",
+      controlModel: "",
+      frames: 97,
+      fps: 25,
+      enableAudio: true,
+      pipeline: "retake",
+      spatialUpscale: "x2",
+      temporalUpscale: "x2",
+    });
+    expect(form.loras).toEqual([
+      expect.objectContaining({ path: "/models/motion.safetensors", scale: 0.7 }),
+    ]);
+    expect(form.sourceVideo?.base64).toBe("VIDEO");
+    expect(form.audioFile?.base64).toBe("AUDIO");
+    expect(form.keyframes[0]?.image.base64).toBe("KEYFRAME");
+  });
 });
 
 describe("LTX-2 img2img (image-to-video)", () => {

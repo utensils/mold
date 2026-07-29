@@ -143,13 +143,11 @@ function onOpenSequence(payload: {
   edit: boolean;
 }) {
   closeHistory();
-  if (payload.edit) {
-    setSequenceHandoff({
-      kind: "edit",
-      hostId: payload.hostId,
-      jobId: payload.jobId,
-    });
-  }
+  setSequenceHandoff({
+    kind: payload.edit ? "edit" : "inspect",
+    hostId: payload.hostId,
+    jobId: payload.jobId,
+  });
   void router.push({ path: "/create", query: { output: "sequence" } });
 }
 

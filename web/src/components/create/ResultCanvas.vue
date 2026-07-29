@@ -12,6 +12,7 @@
  */
 import { computed } from "vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import type { DevelopPhase } from "@ui/lib/grain";
@@ -39,6 +40,8 @@ const props = withDefaults(
     resultCaption?: string;
     /** error — server or transport failure copy. */
     error?: string;
+    /** error — optional raw diagnostic appended to clipboard copy. */
+    errorCopy?: string;
     /** variations — the editable prompt list. */
     variations?: string[];
   }>(),
@@ -141,11 +144,15 @@ function editVariation(index: number, value: string) {
       data-test="canvas-error"
     >
       <div class="canvas__error-mark" aria-hidden="true">!</div>
-      <div>
+      <div class="min-w-0 flex-1">
         <div class="canvas__error-title">Generation failed</div>
-        <div class="canvas__error-copy">
-          {{ error || "Unknown generation error" }}
-        </div>
+        <ErrorNotice
+          class="mt-2 text-left"
+          :message="
+            error || 'Something went wrong while developing this print.'
+          "
+          :copy-message="errorCopy"
+        />
       </div>
     </div>
 

@@ -21,6 +21,8 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useRunPodStore } from "../../stores/runpod";
 import { useToastStore } from "../../stores/toasts";
+import { useComposerStore } from "../../stores/composer";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 /**
  * Create activity strip (Mold Studio) — present tense only.
@@ -41,6 +43,25 @@ const hostModels = useHostModelsStore();
 const chains = useChainJobsStore();
 const runpod = useRunPodStore();
 const toasts = useToastStore();
+const composer = useComposerStore();
+const draft = useSequenceDraftStore();
+
+function selectPrint(job: Job) {
+  generation.select(job.clientId);
+  draft.stopEditing();
+  draft.output = "single";
+  const request = job.request;
+  if (request) composer.set({ request });
+}
+
+function selectPrintVm(vm: ActivityJobVM) {
+  const job = generation.jobs.find((candidate) => `print:${candidate.clientId}` === vm.key);
+  if (job) selectPrint(job);
+}
+
+function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
+  composer.setSequence({ kind: "inspect", hostId: vm.hostId, jobId: vm.jobId });
+}
 
 // ── Prints (unchanged look and behavior) ─────────────────────────────────────
 const running = computed<Job | null>(
@@ -210,7 +231,12 @@ function deleteConfirmed() {
       <span class="ms-activity__kicker">Activity</span>
       <template v-if="running">
         <span class="ms-activity__thumb ms-shimmer" aria-hidden="true" />
-        <div class="ms-activity__running">
+        <button
+          type="button"
+          class="ms-activity__running text-left"
+          data-test="activity-running-select"
+          @click="selectPrint(running)"
+        >
           <div class="ms-activity__line">
             <span class="ms-activity__prompt">{{ running.prompt }}</span>
             <PodCostMeter
@@ -223,7 +249,7 @@ function deleteConfirmed() {
             <span class="ms-activity__pct data-mono">{{ runningPct }}%</span>
           </div>
           <ProgressBar :value="runningPct" :height="4" label="Print progress" />
-        </div>
+        </button>
       </template>
       <div v-else class="ms-activity__idle-spacer" />
       <div
@@ -231,13 +257,17 @@ function deleteConfirmed() {
         :key="job.clientId"
         class="ms-activity__pill"
         data-test="activity-queued"
+        role="button"
+        tabindex="0"
+        @click="selectPrint(job)"
+        @keydown.enter.prevent="selectPrint(job)"
       >
         <span class="ms-activity__pill-text">Queued · {{ job.prompt }}</span>
         <button
           type="button"
           class="ms-activity__cancel"
           :aria-label="`Cancel queued print: ${job.prompt}`"
-          @click="cancel(job)"
+          @click.stop="cancel(job)"
         >
           ✕
         </button>
@@ -262,7 +292,9 @@ function deleteConfirmed() {
       data-test="activity-sequence"
       :vm="vm"
       :model-label="modelLabel(vm.model)"
+      :show-error="false"
       @action="runAction"
+      @select="selectSequence"
     />
 
     <!-- Settled but still wanting a decision: capped, expiring, dismissible. -->
@@ -272,8 +304,10 @@ function deleteConfirmed() {
       data-test="activity-sequence"
       :vm="vm"
       :model-label="modelLabel(vm.model)"
+      :show-error="false"
       dismissible
       @action="runAction"
+      @select="selectSequence"
       @dismiss="dismiss"
     />
 
@@ -283,18 +317,21 @@ function deleteConfirmed() {
       class="ms-activity__seq"
       data-test="activity-print-attention"
       role="alert"
+      tabindex="0"
+      @click="selectPrintVm(vm)"
+      @keydown.enter.prevent="selectPrintVm(vm)"
     >
       <span class="ms-activity__state data-mono text-stop">failed</span>
       <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>
       <div class="ms-activity__seq-spacer" />
-      <span v-if="vm.error" class="ms-activity__seq-error" :title="vm.error">{{ vm.error }}</span>
+      <span class="ms-activity__seq-error">Open Create for details</span>
       <button
         type="button"
         class="ms-activity__cancel"
         data-test="print-dismiss"
         title="Hide this failure. Nothing is deleted."
         :aria-label="`Dismiss failed print: ${vm.prompt}`"
-        @click="dismiss(vm)"
+        @click.stop="dismiss(vm)"
       >
         ✕
       </button>

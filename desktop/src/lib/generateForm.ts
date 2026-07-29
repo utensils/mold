@@ -528,7 +528,68 @@ export interface MetadataPrefill {
   metadata: OutputMetadata;
 }
 
-export type GeneratePrefill = ScalarPrefill | MetadataPrefill;
+/** Exact queued request, including advanced and media inputs. */
+export interface RequestPrefill {
+  request: GenerateRequest;
+}
+
+export type GeneratePrefill = ScalarPrefill | MetadataPrefill | RequestPrefill;
+
+export function applyRequestToForm(
+  form: GenerateForm,
+  request: GenerateRequest,
+  models: ModelEntry[],
+): void {
+  Object.assign(form, newGenerateForm());
+  const model = findInstalledModel(models, request.model);
+  if (model) applyModelDefaults(form, model);
+  form.prompt = request.prompt;
+  form.originalPrompt = request.original_prompt ?? null;
+  form.negativePrompt = request.negative_prompt ?? "";
+  form.model = request.model;
+  form.width = request.width;
+  form.height = request.height;
+  form.steps = request.steps;
+  form.guidance = request.guidance ?? form.guidance;
+  form.seed = request.seed == null ? "" : String(request.seed);
+  form.scheduler = request.scheduler ?? "default";
+  form.cfgPlus = request.cfg_plus ?? false;
+  form.batchSize = request.batch_size ?? 1;
+  form.outputFormat = request.output_format ?? form.outputFormat;
+  form.upscaleModel = request.upscale_model ?? "";
+  form.strength = request.strength ?? form.strength;
+  form.sourceImage = request.source_image ?? null;
+  form.sourceImageName = request.source_image_name ?? null;
+  form.imageAttachments = [...(request.edit_images ?? [])];
+  form.maskImage = request.mask_image ?? null;
+  form.controlImage = request.control_image ?? null;
+  form.controlModel = request.control_model ?? "";
+  form.controlScale = request.control_scale ?? 1;
+  const loras = request.loras ?? (request.lora ? [request.lora] : []);
+  form.loras = loras.slice(0, MAX_LORA_STACK).map((lora) => ({
+    path: lora.path,
+    name: loraNameFromPath(lora.path),
+    scale: lora.scale,
+    trainedWords: [],
+  }));
+  form.frames = request.frames ?? form.frames;
+  form.fps = request.fps ?? form.fps;
+  form.enableAudio = request.enable_audio ?? false;
+  form.audioFile = request.audio_file
+    ? { filename: "Audio input", base64: request.audio_file }
+    : null;
+  form.sourceVideo = request.source_video
+    ? { filename: "Video input", base64: request.source_video }
+    : null;
+  form.keyframes = (request.keyframes ?? []).map((keyframe) => ({
+    frame: keyframe.frame,
+    image: { filename: `Keyframe ${keyframe.frame}`, base64: keyframe.image },
+  }));
+  form.pipeline = request.pipeline ?? null;
+  form.retakeRange = request.retake_range ?? null;
+  form.spatialUpscale = request.spatial_upscale ?? null;
+  form.temporalUpscale = request.temporal_upscale ?? null;
+}
 
 /**
  * Route a composer prefill into the form: gallery reuse ships full metadata
@@ -542,6 +603,10 @@ export function applyPrefillToForm(
 ): void {
   if ("metadata" in prefill) {
     applyMetadataToForm(form, prefill.metadata, models);
+    return;
+  }
+  if ("request" in prefill) {
+    applyRequestToForm(form, prefill.request, models);
     return;
   }
   form.prompt = prefill.prompt;

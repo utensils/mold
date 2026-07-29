@@ -29,10 +29,12 @@ import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import Icon from "@ui/components/Icon.vue";
+import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { copyableError, describeTransportError } from "@studio/lib/errors";
 import {
   defaultClipFrames,
   friendlySequenceError,
@@ -539,9 +541,20 @@ const settledSequenceCaption = computed(() => {
 
 const settledSequenceError = computed(() =>
   settledSequence.value?.state === "failed"
-    ? friendlySequenceError(settledSequence.value.error ?? "Sequence failed.")
+    ? friendlySequenceError(
+        settledSequence.value.error ?? "Sequence failed.",
+        chainJobs.state.watching?.hostId
+          ? hostLabelFor(chainJobs.state.watching.hostId)
+          : null,
+      )
     : null,
 );
+const settledSequenceErrorCopy = computed(() => {
+  const raw = settledSequence.value?.error;
+  return raw && settledSequenceError.value
+    ? copyableError(raw, settledSequenceError.value)
+    : (settledSequenceError.value ?? "");
+});
 
 function onEditSettledSequence() {
   const d = settledSequence.value;
@@ -651,13 +664,6 @@ watch(
       // Verb→noun (§11): the sequence is a thing now, and it has a home.
       toast("info", "Sequence ready — saved to Library");
       void refreshGallery();
-    } else if (state === "failed") {
-      toast(
-        "error",
-        friendlySequenceError(
-          watchedSequenceDetail.value?.error ?? "Sequence failed.",
-        ),
-      );
     }
   },
 );
@@ -971,6 +977,14 @@ async function onSubmitSequence() {
 
 /** Load a durable job's effective script into an edit session. */
 async function editSequence(hostId: string, jobId: string) {
+  await loadSequence(hostId, jobId, true);
+}
+
+async function inspectSequence(hostId: string, jobId: string) {
+  await loadSequence(hostId, jobId, false);
+}
+
+async function loadSequence(hostId: string, jobId: string, editing: boolean) {
   // An edit session is lossless — any reuse caveat on screen is now stale.
   sequenceReuseNotice.value = null;
   try {
@@ -979,19 +993,29 @@ async function editSequence(hostId: string, jobId: string) {
     if (!script) throw new Error("This sequence job has no editable script.");
     const loaded = chainScriptToClips(script);
     applySharedToForm(loaded.shared);
-    draft.loadFromJob(
-      {
-        jobId,
-        hostId,
-        baseline: loaded.clips.map((clip) => ({ ...clip })),
-        completedStages: countLeadingCompletedStages(detail.stages),
-      },
-      loaded.clips,
-      loaded.enableAudio,
-    );
-    editBaselineShared.value = JSON.stringify(
-      sequenceSharedParams(form.state.value, currentFamily.value),
-    );
+    if (editing) {
+      draft.loadFromJob(
+        {
+          jobId,
+          hostId,
+          baseline: loaded.clips.map((clip) => ({ ...clip })),
+          completedStages: countLeadingCompletedStages(detail.stages),
+        },
+        loaded.clips,
+        loaded.enableAudio,
+      );
+      editBaselineShared.value = JSON.stringify(
+        sequenceSharedParams(form.state.value, currentFamily.value),
+      );
+    } else {
+      draft.stopEditing();
+      editBaselineShared.value = null;
+      setOutput("sequence");
+      draft.clips.splice(0, draft.clips.length, ...loaded.clips);
+      draft.activeClipId = loaded.clips[0]?.id ?? null;
+      draft.enableAudio = loaded.enableAudio;
+      chainJobs.watch(hostId, jobId);
+    }
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));
   }
@@ -1022,7 +1046,7 @@ function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
     toast("error", error instanceof Error ? error.message : String(error));
   switch (action) {
     case "watch":
-      chainJobs.watch(vm.hostId, vm.jobId);
+      void inspectSequence(vm.hostId, vm.jobId);
       break;
     case "cancel":
       void chainJobs.cancel(vm.hostId, vm.jobId).catch(fail);
@@ -1078,7 +1102,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
 }
 
 /** A sequence handed over from the Library: History ▸ Sequences hands over
- *  `edit`; a sequence print hands over `reuse`. One-shot — the slot is
+ *  `inspect`/`edit`; a sequence print hands over `reuse`. One-shot — the slot is
  *  emptied on arrival so a back-nav cannot replay it. */
 function applySequenceHandoff() {
   const handoff = takeSequenceHandoff();
@@ -1087,7 +1111,11 @@ function applySequenceHandoff() {
     applySequenceReuse(handoff.metadata);
     return;
   }
-  void editSequence(handoff.hostId, handoff.jobId);
+  if (handoff.kind === "inspect") {
+    void inspectSequence(handoff.hostId, handoff.jobId);
+  } else {
+    void editSequence(handoff.hostId, handoff.jobId);
+  }
 }
 watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
 
@@ -1204,8 +1232,15 @@ function percentFor(job: Job): number | null {
 // the server is actually denoising), else the earliest-submitted running job.
 // A naive newest-first pick would bind the canvas to a queued batch sibling
 // that never previews while an earlier sibling is mid-denoise.
-const runningJob = computed(() => activeCanvasJob(stream.jobs.value));
+const runningJob = computed(() => {
+  const selected = stream.selectedJob?.value ?? null;
+  return selected?.state === "running"
+    ? selected
+    : activeCanvasJob(stream.jobs.value);
+});
 const latestDone = computed(() => {
+  const selected = stream.selectedJob?.value ?? null;
+  if (selected) return selected.state === "done" ? selected : null;
   let best: Job | null = null;
   for (const j of stream.jobs.value) {
     if (
@@ -1220,8 +1255,24 @@ const latestDone = computed(() => {
 });
 
 const latestError = computed(() =>
-  stream.jobs.value.find((j) => j.state === "error"),
+  stream.selectedJob?.value
+    ? stream.selectedJob.value.state === "error"
+      ? stream.selectedJob.value
+      : undefined
+    : stream.jobs.value.find((j) => j.state === "error"),
 );
+const latestErrorMessage = computed(() => {
+  const job = latestError.value;
+  return job?.error
+    ? describeTransportError(job.error, job.hostLabel)
+    : "Something went wrong while developing this print.";
+});
+const latestErrorCopy = computed(() => {
+  const job = latestError.value;
+  return job?.error
+    ? copyableError(job.error, latestErrorMessage.value)
+    : latestErrorMessage.value;
+});
 
 const canvasMode = computed<
   "empty" | "generating" | "result" | "error" | "variations"
@@ -1775,12 +1826,86 @@ function recreateFromGallery(item: GalleryImage) {
 }
 
 function openJob(job: Job) {
-  const r = job.result;
-  if (!r) return;
-  const match = galleryEntries.value.find(
-    (e) => e.metadata.seed === r.seed_used && e.metadata.model === r.model,
-  );
-  if (match) openItem(match);
+  stream.select?.(job.id);
+  setOutput("single");
+  const request = job.request;
+  const image = (base64: string, filename: string) => ({
+    kind: "upload" as const,
+    filename,
+    base64,
+  });
+  if ("prompt" in request && typeof request.prompt === "string") {
+    form.state.value.prompt = request.prompt;
+  }
+  form.state.value.stylePreset = null;
+  form.state.value.expand = {
+    enabled: false,
+    variations: 1,
+    familyOverride: null,
+  };
+  form.state.value.sourceFitPolicy = { mode: "pad-repaint" };
+  form.state.value.cameraControl = null;
+  form.state.value.model = request.model;
+  form.state.value.modelFamily =
+    models.value.find((model) => model.name === request.model)?.family ?? "";
+  form.state.value.width = request.width;
+  form.state.value.height = request.height;
+  form.state.value.steps = request.steps;
+  form.state.value.guidance = request.guidance ?? form.state.value.guidance;
+  form.state.value.seed = request.seed == null ? null : Number(request.seed);
+  form.state.value.seedMode = request.seed == null ? "random" : "static";
+  if ("negative_prompt" in request) {
+    form.state.value.negativePrompt = request.negative_prompt ?? "";
+    form.state.value.scheduler = request.scheduler ?? null;
+    form.state.value.cfgPlus = request.cfg_plus ?? false;
+    form.state.value.batchSize = request.batch_size ?? 1;
+    form.state.value.outputFormat =
+      request.output_format ?? form.state.value.outputFormat;
+    form.state.value.strength = request.strength ?? 0.75;
+    form.state.value.upscaleModel = request.upscale_model ?? "";
+    form.state.value.gifPreview = request.gif_preview ?? false;
+    form.state.value.placement = request.placement ?? null;
+    const source = request.source_image
+      ? image(request.source_image, request.source_image_name || "Source image")
+      : null;
+    form.state.value.imageAttachments = request.edit_images?.length
+      ? request.edit_images.map((base64, index) =>
+          image(base64, index === 0 ? "Target image" : `Reference ${index}`),
+        )
+      : source
+        ? [source]
+        : [];
+    form.state.value.maskImage = request.mask_image
+      ? image(request.mask_image, "Mask")
+      : null;
+    form.state.value.controlImage = request.control_image
+      ? image(request.control_image, "Control image")
+      : null;
+    form.state.value.controlModel = request.control_model ?? "";
+    form.state.value.controlScale = request.control_scale ?? 1;
+    form.state.value.loras = (
+      request.loras ?? (request.lora ? [request.lora] : [])
+    ).map((lora) => ({ ...lora, trainedWords: [] }));
+    form.state.value.frames = request.frames ?? null;
+    form.state.value.fps = request.fps ?? null;
+    form.state.value.enableAudio = request.enable_audio ?? null;
+    form.state.value.audioFile = request.audio_file
+      ? image(request.audio_file, "Audio input")
+      : null;
+    form.state.value.audioFilePath = request.audio_file_path ?? "";
+    form.state.value.sourceVideo = request.source_video
+      ? image(request.source_video, "Video input")
+      : null;
+    form.state.value.sourceVideoPath = request.source_video_path ?? "";
+    form.state.value.keyframes = (request.keyframes ?? []).map((keyframe) => ({
+      frame: keyframe.frame,
+      image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
+    }));
+    form.state.value.pipeline = request.pipeline ?? null;
+    form.state.value.retakeRange = request.retake_range ?? null;
+    form.state.value.spatialUpscale = request.spatial_upscale ?? null;
+    form.state.value.temporalUpscale = request.temporal_upscale ?? null;
+  }
 }
 
 function closeDrawer() {
@@ -2077,14 +2202,12 @@ onBeforeUnmount(() => {
               loop
               playsinline
             />
-            <p
+            <ErrorNotice
               v-if="settledSequenceError"
-              class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
               data-test="sequence-result-error"
-              role="alert"
-            >
-              {{ settledSequenceError }}
-            </p>
+              :message="settledSequenceError"
+              :copy-message="settledSequenceErrorCopy"
+            />
             <p class="data-mono text-caption text-ink-3">
               {{ settledSequenceCaption }}
             </p>
@@ -2256,7 +2379,8 @@ onBeforeUnmount(() => {
             :print-height="runningJob?.request.height"
             :result-src="resultSrc"
             :result-caption="resultCaption"
-            :error="latestError?.error ?? undefined"
+            :error="latestErrorMessage"
+            :error-copy="latestErrorCopy"
             :variations="variations"
             @update:variations="variations = $event"
             @use-variation="useVariation"

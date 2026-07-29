@@ -11,12 +11,7 @@ import type { ChainJobState, ChainJobSummary } from "./api/chainTypes";
 import { friendlySequenceError } from "./sequence";
 
 export type ActivityAction =
-  | "cancel"
-  | "watch"
-  | "retake"
-  | "edit"
-  | "resume"
-  | "delete";
+  "cancel" | "watch" | "retake" | "edit" | "resume" | "delete";
 
 export type PrintPhase = "queued" | "running" | "done" | "failed" | "cancelled";
 
@@ -94,8 +89,12 @@ const ACTION_LABEL: Record<ActivityAction, string> = {
 
 /** §11 voice: `watch` is present tense, so a settled job is *opened* instead.
  *  Same action id on the wire — only the label moves. */
-export function sequenceActionLabel(action: ActivityAction, state: ChainJobState): string {
-  if (action === "watch") return state === "queued" || state === "running" ? "Watch" : "Open";
+export function sequenceActionLabel(
+  action: ActivityAction,
+  state: ChainJobState,
+): string {
+  if (action === "watch")
+    return state === "queued" || state === "running" ? "Watch" : "Open";
   return ACTION_LABEL[action];
 }
 
@@ -116,7 +115,9 @@ export function sequenceToVM(
     stageCount: summary.stage_count,
     currentStage: summary.current_stage,
     progress,
-    error: summary.error ? friendlySequenceError(summary.error) : null,
+    error: summary.error
+      ? friendlySequenceError(summary.error, host.hostLabel)
+      : null,
     actions: sequenceActions(summary.state),
     createdAtMs: summary.created_at_unix_ms,
     settledAtMs: settled ? summary.updated_at_unix_ms : null,
@@ -193,7 +194,9 @@ export function partitionActivity(
   const settledVisibleMs = options.settledVisibleMs ?? SETTLED_VISIBLE_MS;
   const maxAttentionRows = options.maxAttentionRows ?? MAX_ATTENTION_ROWS;
   const dismissed =
-    options.dismissed instanceof Set ? options.dismissed : new Set(options.dismissed ?? []);
+    options.dismissed instanceof Set
+      ? options.dismissed
+      : new Set(options.dismissed ?? []);
 
   const active: ActivityJobVM[] = [];
   const eligible: ActivityJobVM[] = [];
@@ -206,7 +209,8 @@ export function partitionActivity(
     }
     // A missing stamp means "just settled" rather than "ancient": hiding a
     // failure we can't date would lose its only pointer.
-    const fresh = vm.settledAtMs === null || nowMs - vm.settledAtMs < settledVisibleMs;
+    const fresh =
+      vm.settledAtMs === null || nowMs - vm.settledAtMs < settledVisibleMs;
     if (needsAttention(vm) && fresh) {
       // A dismissal is a decision, not a deferral — the row leaves the strip
       // without reappearing as a count. The durable job is untouched and
@@ -217,7 +221,10 @@ export function partitionActivity(
     if (vm.kind === "sequence") settledSequences += 1;
   }
 
-  eligible.sort((a, b) => (b.settledAtMs ?? b.createdAtMs) - (a.settledAtMs ?? a.createdAtMs));
+  eligible.sort(
+    (a, b) =>
+      (b.settledAtMs ?? b.createdAtMs) - (a.settledAtMs ?? a.createdAtMs),
+  );
   const attention = eligible.slice(0, Math.max(0, maxAttentionRows));
   return {
     active,
@@ -233,7 +240,8 @@ export function activityDigestLabel(partition: {
   hiddenAttention: number;
 }): string | null {
   const parts: string[] = [];
-  if (partition.hiddenAttention > 0) parts.push(`${partition.hiddenAttention} failed`);
+  if (partition.hiddenAttention > 0)
+    parts.push(`${partition.hiddenAttention} failed`);
   if (partition.settledSequences > 0) {
     const n = partition.settledSequences;
     parts.push(`${n} settled sequence${n === 1 ? "" : "s"}`);

@@ -80,7 +80,6 @@ const fail = (error: unknown) =>
 async function onAction(action: ActivityAction, vm: SequenceVM) {
   switch (action) {
     case "watch":
-      chainJobs.watch(vm.hostId, vm.jobId);
       emit("open-sequence", {
         hostId: vm.hostId,
         jobId: vm.jobId,
@@ -109,6 +108,14 @@ async function onAction(action: ActivityAction, vm: SequenceVM) {
     default:
       return;
   }
+}
+
+function selectSequence(vm: SequenceVM) {
+  emit("open-sequence", {
+    hostId: vm.hostId,
+    jobId: vm.jobId,
+    edit: false,
+  });
 }
 
 // `Clear inactive` is a server DELETE, unlike the strip's client-side dismiss —
@@ -209,6 +216,7 @@ async function cleanUpDisk() {
               :vm="vm"
               :time-label="timeLabel(vm)"
               @action="onAction"
+              @select="selectSequence"
             />
           </div>
           <p v-if="capNote" data-test="sequence-cap-note" class="hd-note">

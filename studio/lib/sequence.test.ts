@@ -161,9 +161,7 @@ describe("sequence authoring", () => {
   it("defaults clip frames from the model, then limits, then the floor", () => {
     const limits = { frames_per_clip_cap: 97, frames_per_clip_recommended: 97 };
     // Server-advertised model default wins.
-    expect(
-      defaultClipFrames({ default_frames: 97 }, limits, 17),
-    ).toBe(97);
+    expect(defaultClipFrames({ default_frames: 97 }, limits, 17)).toBe(97);
     // LTX-Video ships 25.
     expect(
       defaultClipFrames(
@@ -174,7 +172,11 @@ describe("sequence authoring", () => {
     ).toBe(25);
     // No model default → chain-limits recommendation.
     expect(
-      defaultClipFrames(null, { frames_per_clip_cap: 97, frames_per_clip_recommended: 33 }, 17),
+      defaultClipFrames(
+        null,
+        { frames_per_clip_cap: 97, frames_per_clip_recommended: 33 },
+        17,
+      ),
     ).toBe(33);
     // Nothing from the server → the conservative 25-frame floor.
     expect(defaultClipFrames(null, null, 17)).toBe(25);
@@ -210,6 +212,11 @@ describe("sequence authoring", () => {
     );
     expect(friendlySequenceError("model unavailable")).toBe(
       "model unavailable",
+    );
+    expect(
+      friendlySequenceError("SSE request failed with HTTP 404", "plato"),
+    ).toBe(
+      "plato couldn’t find that model or job. It may have been removed or the host may have restarted.",
     );
   });
 });

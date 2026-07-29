@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import ResultCanvas from "./ResultCanvas.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
+import ErrorNotice from "@ui/components/ErrorNotice.vue";
 
 describe("ResultCanvas", () => {
   it("renders the brand empty state", () => {
@@ -118,6 +119,22 @@ describe("ResultCanvas", () => {
     expect(wrapper.get(".canvas__bed").attributes("style") ?? "").not.toContain(
       "aspect-ratio",
     );
+  });
+
+  it("renders a copyable error notice", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: {
+        mode: "error",
+        error: "plato couldn’t find that model or job.",
+        errorCopy:
+          "plato couldn’t find that model or job.\n\nTechnical details: HTTP 404",
+      },
+    });
+    expect(wrapper.findComponent(ErrorNotice).props()).toMatchObject({
+      message: "plato couldn’t find that model or job.",
+      copyMessage:
+        "plato couldn’t find that model or job.\n\nTechnical details: HTTP 404",
+    });
   });
 
   it("renders a result image and caption", () => {

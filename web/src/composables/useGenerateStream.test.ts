@@ -339,6 +339,18 @@ describe("workStarted tracking", () => {
     expect(job.progress.queuePosition).toBeNull();
   });
 
+  it("returns to automatic canvas selection when new work is submitted", () => {
+    const stream = useGenerateStream();
+    const inspected = stream.submit(singleGen({ prompt: "inspected" }), {
+      kind: "single",
+    });
+    stream.select(inspected);
+    expect(stream.selectedJob.value?.id).toBe(inspected);
+
+    stream.submit(singleGen({ prompt: "new work" }), { kind: "single" });
+    expect(stream.selectedJob.value).toBeNull();
+  });
+
   it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });

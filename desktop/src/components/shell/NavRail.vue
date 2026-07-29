@@ -26,6 +26,7 @@ import { useToastStore } from "../../stores/toasts";
 import { badgeCount } from "../../lib/notifications";
 import { shortcutLabel } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 const route = useRoute();
 const router = useRouter();
@@ -38,6 +39,7 @@ const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const gallery = useGalleryStore();
 const toasts = useToastStore();
+const draft = useSequenceDraftStore();
 
 // Workspace badges (§08 G11): Library counts prints developed since the last
 // visit; Machines shows a stop dot when any connected host is offline.
@@ -188,6 +190,20 @@ function jobMenu(job: Job): MenuEntry[] {
     },
   ];
 }
+
+function selectPrint(job: Job) {
+  generation.select(job.clientId);
+  draft.stopEditing();
+  draft.output = "single";
+  const request = job.request;
+  if (request) composer.set({ request });
+  void router.push("/create");
+}
+
+function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
+  composer.setSequence({ kind: "inspect", hostId: vm.hostId, jobId: vm.jobId });
+  void router.push("/create");
+}
 </script>
 
 <template>
@@ -250,7 +266,7 @@ function jobMenu(job: Job): MenuEntry[] {
           href="#"
           data-test="developing-sequence"
           class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-          @click.prevent="router.push('/create')"
+          @click.prevent="selectSequence(vm)"
         >
           <span
             class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
@@ -276,7 +292,7 @@ function jobMenu(job: Job): MenuEntry[] {
           :key="job.clientId"
           href="#"
           class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-          @click.prevent="router.push('/create')"
+          @click.prevent="selectPrint(job)"
           @contextmenu.prevent="contextMenu.open($event, jobMenu(job))"
         >
           <span
