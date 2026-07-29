@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CAMERA_MOTION_PRESETS, cameraMotionMode } from "./cameraMotion";
+import {
+  CAMERA_MOTION_PRESETS,
+  cameraMotionMode,
+  isCameraMotionPreset,
+} from "./cameraMotion";
 
 describe("camera motion presets", () => {
   it("keeps the shared LTX-2 preset order and labels", () => {
@@ -15,6 +19,8 @@ describe("camera motion presets", () => {
   });
 
   it("classifies empty, preset, and custom values", () => {
+    expect(isCameraMotionPreset("jib-up")).toBe(true);
+    expect(isCameraMotionPreset("/models/camera.safetensors")).toBe(false);
     expect(cameraMotionMode(null)).toBe("");
     expect(cameraMotionMode("")).toBe("");
     expect(cameraMotionMode("jib-up")).toBe("jib-up");

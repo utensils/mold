@@ -8,9 +8,11 @@ export const CAMERA_MOTION_PRESETS = [
   { id: "static", label: "Static" },
 ] as const;
 
+export function isCameraMotionPreset(value: string): boolean {
+  return CAMERA_MOTION_PRESETS.some((preset) => preset.id === value);
+}
+
 export function cameraMotionMode(value: string | null): string {
   if (!value) return "";
-  return CAMERA_MOTION_PRESETS.some((preset) => preset.id === value)
-    ? value
-    : "custom";
+  return isCameraMotionPreset(value) ? value : "custom";
 }

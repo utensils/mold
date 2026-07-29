@@ -1,5 +1,6 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
+import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
 
 export const MAX_GENERATION_PIXELS = 1_800_000;
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -53,16 +54,6 @@ export function mobileMediaBudgetValidationError(form: GenerateForm): string | n
     : MOBILE_MEDIA_BUDGET_ERROR;
 }
 
-const CAMERA_MOTION_PRESETS = new Set([
-  "dolly-in",
-  "dolly-left",
-  "dolly-out",
-  "dolly-right",
-  "jib-down",
-  "jib-up",
-  "static",
-]);
-
 export function stepsValidationError(value: number): string | null {
   return Number.isInteger(value) && value >= 1 && value <= 100
     ? null
@@ -100,7 +91,7 @@ export function cameraControlValidationError(form: GenerateForm): string | null 
   const value = form.cameraControl.trim();
   if (!value) return "Choose a camera motion or enter a custom .safetensors path.";
   if (value.endsWith(".safetensors")) return null;
-  if (!form.model.includes("ltx-2.3") && CAMERA_MOTION_PRESETS.has(value)) return null;
+  if (!form.model.includes("ltx-2.3") && isCameraMotionPreset(value)) return null;
   return "Custom camera motion must be a .safetensors path on the selected host.";
 }
 
