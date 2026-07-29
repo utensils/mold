@@ -30,6 +30,7 @@ import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { GalleryImage, ModelInfoExtended, OutputMetadata } from "../types";
 import type { Job } from "../composables/useGenerateStream";
+import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 const routerReplaceMock = vi.hoisted(() =>
@@ -660,6 +661,17 @@ describe("CreatePage layout and behavior", () => {
 
     expect(form.state.value.imageAttachments[0]?.filename).toBe("new.png");
     expect(form.state.value.maskImage).toBeNull();
+  });
+
+  it("keeps the visible Output control synchronized with sequence mode", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    enterSequenceMode();
+    await flushPromises();
+
+    const controls = wrapper.getComponent({ name: "ControlsAside" });
+    expect(controls.props("output")).toBe("sequence");
+    expect(controls.props("clipCount")).toBe(2);
   });
 
   it("submits the sequence with the LIVE inspector values (stale-inspector regression)", async () => {
@@ -1548,8 +1560,6 @@ describe("CreatePage layout and behavior", () => {
         { idx: 0, state: "completed" },
         { idx: 1, state: "completed" },
       ],
-      finalizes: [],
-      retakes: [],
       script: {
         schema: "mold.chain.v1",
         chain: {
@@ -1564,7 +1574,7 @@ describe("CreatePage layout and behavior", () => {
           motion_tail_frames: 17,
           output_format: "mp4",
         },
-        stage: [
+        stages: [
           { prompt: "one", frames: 97 },
           { prompt: "two", frames: 97, transition: "cut" },
         ],
@@ -1626,7 +1636,7 @@ describe("CreatePage layout and behavior", () => {
     expect(draft.editing).toBeNull();
   });
 
-  it("falls back to create-as-new when an amend conflicts (409)", async () => {
+  it("preserves the edit session when an amend conflicts (409)", async () => {
     hostModelsMock.mockResolvedValue([
       {
         name: "ltx-2-19b-distilled:fp8",
@@ -1668,8 +1678,127 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
 
     expect(amendChainJobMock).toHaveBeenCalledTimes(1);
-    expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    expect(draft.editing).toBeNull();
+    expect(createChainJobMock).not.toHaveBeenCalled();
+    expect(draft.editing).toMatchObject({
+      jobId: "job-9",
+      hostId: ORIGIN_HOST_ID,
+    });
+    expect(wrapper.get("[data-test='sequence-submit-error']").text()).toContain(
+      "Your edits are still here",
+    );
+  });
+
+  it("keeps one stage playing while later stages finish and stops invalidated media", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        downloaded: true,
+        supports_sequence: true,
+        default_width: 1216,
+        default_height: 704,
+        default_steps: 8,
+        default_guidance: 3,
+      },
+    ]);
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "arrival";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const chains = useChainJobs();
+    chains.watch(ORIGIN_HOST_ID, "job-playback");
+    const playbackDetail = {
+      id: "job-playback",
+      state: "running",
+      model: "ltx-2-19b-distilled:fp8",
+      stage_count: 2,
+      current_stage: 1,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      error: null,
+      stages: [
+        {
+          idx: 0,
+          state: "completed",
+          seed: "1",
+          frames_emitted: 97,
+          generation_time_ms: 1,
+          has_preview: false,
+          has_media: true,
+          cache_ready: true,
+          error: null,
+        },
+        {
+          idx: 1,
+          state: "running",
+          seed: "2",
+          frames_emitted: null,
+          generation_time_ms: null,
+          has_preview: false,
+          has_media: false,
+          cache_ready: false,
+          error: null,
+        },
+      ],
+      script: {
+        schema: "mold.chain.v1",
+        chain: { model: "ltx-2-19b-distilled:fp8", fps: 24 },
+        stages: [
+          { prompt: "opening", frames: 97 },
+          { prompt: "arrival", frames: 97 },
+        ],
+      },
+    } satisfies ChainJobDetail;
+    chains.state.live.detail = playbackDetail;
+    await flushPromises();
+
+    await wrapper.get("[data-test='stub-play-first']").trigger("click");
+    await flushPromises();
+    const firstSrc = wrapper
+      .get("[data-test='sequence-stage-player'] video")
+      .attributes("src");
+    expect(firstSrc).toContain("/api/chain-jobs/job-playback/stages/0/media");
+
+    chains.state.live.detail = {
+      ...playbackDetail,
+      stages: [
+        playbackDetail.stages[0]!,
+        {
+          ...playbackDetail.stages[1]!,
+          state: "completed",
+          has_media: true,
+          cache_ready: true,
+        },
+      ],
+    };
+    await flushPromises();
+    expect(
+      wrapper
+        .get("[data-test='sequence-stage-player'] video")
+        .attributes("src"),
+    ).toBe(firstSrc);
+
+    const completedDetail = chains.state.live.detail!;
+    chains.state.live.detail = {
+      ...completedDetail,
+      stages: [
+        {
+          ...completedDetail.stages[0]!,
+          state: "pending",
+          has_media: false,
+          cache_ready: false,
+        },
+        completedDetail.stages[1]!,
+      ],
+    };
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-stage-player']").exists()).toBe(
+      false,
+    );
   });
 
   it("keeps the Output control reachable on phones in sequence mode", async () => {
@@ -2046,6 +2175,7 @@ function pageStubs() {
     },
     ControlsAside: {
       name: "ControlsAside",
+      props: ["output", "clipCount"],
       template: "<aside data-test='controls-stub' />",
     },
     AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
@@ -2072,6 +2202,8 @@ function pageStubs() {
         "modelDefaultFrames",
         "target",
         "chainLevelDirty",
+        "stageMediaByClipId",
+        "playingClipId",
       ],
       emits: [
         "submit",
@@ -2079,10 +2211,12 @@ function pageStubs() {
         "discard-edit",
         "expand-clip",
         "import-shared",
+        "play-clip",
       ],
       template:
         "<div data-test='sequence-composer-stub'>" +
         "<button data-test='sequence-generate' @click=\"$emit('submit')\">go</button>" +
+        "<button v-if='Object.keys(stageMediaByClipId || {}).length' data-test='stub-play-first' @click=\"$emit('play-clip', Object.keys(stageMediaByClipId)[0])\">play</button>" +
         "<button data-test='clip-expand' @click=\"$emit('expand-clip', 'clip-x', 'a stage prompt')\">expand</button>" +
         "</div>",
     },

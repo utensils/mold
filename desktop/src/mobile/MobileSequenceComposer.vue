@@ -15,6 +15,7 @@ import { computed, ref } from "vue";
 import SeamPill from "@ui/components/SeamPill.vue";
 import {
   defaultClipFrames,
+  formatFrameDuration,
   friendlySequenceError,
   sequenceDuration,
   sequenceFrameOptions,
@@ -171,7 +172,7 @@ function submit(): void {
           <details class="mobile-native-disclosure">
             <summary>
               <span>Clip tools</span>
-              <small>{{ clip.frames }} frames</small>
+              <small>{{ formatFrameDuration(clip.frames, fps) }}</small>
             </summary>
             <label class="field">
               <span>Duration</span>
@@ -186,7 +187,7 @@ function submit(): void {
                   :key="frames"
                   :value="frames"
                 >
-                  {{ frames }} frames · {{ (frames / fps).toFixed(1) }}s
+                  {{ formatFrameDuration(frames, fps) }}
                 </option>
               </select>
             </label>
@@ -206,7 +207,7 @@ function submit(): void {
     </button>
 
     <p class="mobile-sequence-duration" data-test="mobile-sequence-duration">
-      {{ duration.frames }} frames · {{ duration.seconds.toFixed(1) }}s @ {{ fps }}fps
+      {{ formatFrameDuration(duration.frames, fps) }} @ {{ fps }}fps
     </p>
 
     <!-- Shared generation params are OWNED by the host form (one source of

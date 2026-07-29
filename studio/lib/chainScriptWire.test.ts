@@ -131,4 +131,14 @@ describe("countLeadingCompletedStages", () => {
     expect(countLeadingCompletedStages([stage(0, "pending")])).toBe(0);
     expect(countLeadingCompletedStages([])).toBe(0);
   });
+
+  it("stops at a completed stage whose reusable artifacts were cleaned up", () => {
+    expect(
+      countLeadingCompletedStages([
+        { ...stage(0, "completed"), cache_ready: true },
+        { ...stage(1, "completed"), cache_ready: false },
+        { ...stage(2, "completed"), cache_ready: true },
+      ]),
+    ).toBe(1);
+  });
 });

@@ -1,7 +1,7 @@
 /**
- * Web mirror of the Library's two sequence doors: **Reuse settings** (a NEW
- * draft from the print's recorded clips) and **Edit sequence** (re-entering
- * the durable job with its cached clips), including the click-time 404 →
+ * Web mirror of the Library's two sequence doors: primary **Edit sequence**
+ * (re-entering the durable job with its cached clips) and explicit
+ * **Duplicate as new** (a NEW draft from the print's recorded clips), including the click-time 404 →
  * reuse fallback and the deliberate refusal to downgrade on an unreachable
  * host.
  */
@@ -158,7 +158,11 @@ const LightboxStub = defineComponent({
     "edit-sequence",
   ],
   template: `<div v-if="item" data-test="lightbox">
-    <button data-test="lb-reuse" @click="$emit('reuse', item)">reuse</button>
+    <button
+      data-test="lb-primary"
+      @click="canEditSequence ? $emit('edit-sequence', item) : $emit('reuse', item)"
+    >primary</button>
+    <button data-test="lb-reuse" @click="$emit('reuse', item)">duplicate</button>
     <button
       v-if="canEditSequence"
       data-test="lb-edit-sequence"
@@ -208,7 +212,7 @@ beforeEach(() => {
 });
 
 describe("LibraryPage — sequence prints", () => {
-  it("hands a sequence print's clips to Create as a NEW draft", async () => {
+  it("duplicates a sequence print's clips into a NEW draft", async () => {
     const wrapper = await mounted();
     await wrapper.get("[data-test='grid-open']").trigger("click");
     await wrapper.get("[data-test='lb-reuse']").trigger("click");
@@ -256,7 +260,7 @@ describe("LibraryPage — sequence prints", () => {
     getChainJobMock.mockResolvedValue({ id: "job-9", state: "completed" });
     const wrapper = await mounted();
     await wrapper.get("[data-test='grid-open']").trigger("click");
-    await wrapper.get("[data-test='lb-edit-sequence']").trigger("click");
+    await wrapper.get("[data-test='lb-primary']").trigger("click");
     await flushPromises();
 
     expect(getChainJobMock).toHaveBeenCalledWith("job-9", {
@@ -279,7 +283,7 @@ describe("LibraryPage — sequence prints", () => {
     );
     const wrapper = await mounted();
     await wrapper.get("[data-test='grid-open']").trigger("click");
-    await wrapper.get("[data-test='lb-edit-sequence']").trigger("click");
+    await wrapper.get("[data-test='lb-primary']").trigger("click");
     await flushPromises();
 
     expect(pendingSequenceHandoff().value?.kind).toBe("reuse");
@@ -294,7 +298,7 @@ describe("LibraryPage — sequence prints", () => {
     getChainJobMock.mockRejectedValue(new Error("network down"));
     const wrapper = await mounted();
     await wrapper.get("[data-test='grid-open']").trigger("click");
-    await wrapper.get("[data-test='lb-edit-sequence']").trigger("click");
+    await wrapper.get("[data-test='lb-primary']").trigger("click");
     await flushPromises();
 
     expect(pendingSequenceHandoff().value).toBeNull();

@@ -228,7 +228,7 @@ and clears terminal, error, null-id, removed-host, and unmount state for retry.
 
 **TOML schema** (`ChainScript`): top `schema = "mold.chain.v1"`; `[chain]` = model, width, height, fps, seed?, steps, guidance, strength, motion_tail_frames, output_format, enable_audio?; `[[stages]]` array. Per-stage (`ChainStage`): `prompt`, `frames`, `transition` (`smooth` default/motion-tail morph, `cut` fresh latent, `fade` cut+RGB crossfade), `fade_frames?`, `source_image` (or `source_image_path` relative to script / `source_image_b64`), `negative_prompt?`, `seed_offset?`, `model?` (per-stage override), `loras[]`, `references[]` (named refs).
 
-**Durable jobs** (`mold jobs`, `POST /api/chain/jobs`, SSE events): survive restart, store artifacts (TTL `chain.jobs_artifact_ttl_days`).
+**Durable jobs** (`mold jobs`, `POST /api/chain/jobs`, SSE events): survive restart and retain editable scene artifacts until job deletion or an explicit cleanup.
 
 - `jobs list [--json]`, `jobs show <id>`, `jobs resume <id>`, `jobs cancel <id>`, `jobs delete <id> [--yes]`, `jobs gc`.
 - `jobs retake <id> --stage N --mode cascade|splice --seed-offset --prompt`: regenerate one stage (cascade re-renders downstream, splice replaces in place).

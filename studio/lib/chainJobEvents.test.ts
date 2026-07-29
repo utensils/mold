@@ -56,10 +56,18 @@ describe("applyChainJobEvent", () => {
       { type: "snapshot", job: detail() },
       { type: "stage_start", stage_idx: 0 },
       { type: "denoise_step", stage_idx: 0, step: 8, total: 8 },
-      { type: "stage_done", stage_idx: 0, has_preview: true },
+      {
+        type: "stage_done",
+        stage_idx: 0,
+        has_preview: true,
+        has_media: true,
+        cache_ready: true,
+      },
     ]);
     expect(s.detail?.stages[0]!.state).toBe("completed");
     expect(s.detail?.stages[0]!.has_preview).toBe(true);
+    expect(s.detail?.stages[0]!.has_media).toBe(true);
+    expect(s.detail?.stages[0]!.cache_ready).toBe(true);
     expect(s.activeStage).toBeNull();
   });
 

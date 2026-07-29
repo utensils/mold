@@ -101,14 +101,16 @@ export function normalizeServerChainScript(raw: unknown): ChainScript | null {
   return script;
 }
 
-/** Leading completed stages of a job — the edit session's cache ceiling. */
+/** Leading completed, disk-backed stages — the edit session's cache ceiling.
+ * Older servers do not advertise `cache_ready`; completed remains the
+ * backward-compatible best signal there. */
 export function countLeadingCompletedStages(
   stages: readonly ChainJobStageDetail[],
 ): number {
   const ordered = [...stages].sort((a, b) => a.idx - b.idx);
   let count = 0;
   for (const stage of ordered) {
-    if (stage.state !== "completed") break;
+    if (stage.state !== "completed" || stage.cache_ready === false) break;
     count += 1;
   }
   return count;

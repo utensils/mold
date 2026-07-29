@@ -32,12 +32,22 @@ function withStageState(
   detail: ChainJobDetail | null,
   idx: number,
   state: ChainStageState,
-  hasPreview?: boolean,
+  availability?: {
+    hasPreview: boolean | undefined;
+    hasMedia: boolean | undefined;
+    cacheReady: boolean | undefined;
+  },
 ): ChainJobDetail | null {
   if (!detail) return detail;
   const stages = detail.stages.map((s): ChainJobStageDetail =>
     s.idx === idx
-      ? { ...s, state, has_preview: hasPreview ?? s.has_preview }
+      ? {
+          ...s,
+          state,
+          has_preview: availability?.hasPreview ?? s.has_preview,
+          has_media: availability?.hasMedia ?? s.has_media,
+          cache_ready: availability?.cacheReady ?? s.cache_ready,
+        }
       : s,
   );
   return { ...detail, stages };
@@ -73,12 +83,11 @@ export function applyChainJobEvent(
         ...state,
         activeStage:
           state.activeStage === ev.stage_idx ? null : state.activeStage,
-        detail: withStageState(
-          state.detail,
-          ev.stage_idx,
-          "completed",
-          ev.has_preview,
-        ),
+        detail: withStageState(state.detail, ev.stage_idx, "completed", {
+          hasPreview: ev.has_preview,
+          hasMedia: ev.has_media,
+          cacheReady: ev.cache_ready,
+        }),
       };
     case "state_changed":
       return {

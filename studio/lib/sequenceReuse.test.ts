@@ -328,7 +328,7 @@ describe("sequenceEditAvailability", () => {
 describe("copy", () => {
   it("names the host in the gone-job fallback", () => {
     expect(sequenceGoneMessage("plato")).toBe(
-      "That sequence job is gone from plato. Reused its settings instead.",
+      "That sequence job is gone from plato. Duplicated its saved settings as a new sequence instead.",
     );
   });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { VueDraggable } from "vue-draggable-plus";
 import ClipRail from "./ClipRail.vue";
 import railSource from "./ClipRail.vue?raw";
 import pillSource from "./ClipPill.vue?raw";
@@ -65,13 +66,85 @@ describe("ClipRail", () => {
     expect(three.find(".ms-clip__remove").exists()).toBe(true);
   });
 
-  it("surfaces the edit-session render plan on the pills", () => {
+  it("emits the completed drag order and keeps tile controls out of the drag handle", async () => {
+    const wrapper = make({ clips: clips(3) });
+    wrapper
+      .findComponent(VueDraggable)
+      .vm.$emit("update:modelValue", [clips(3)[2], clips(3)[0], clips(3)[1]]);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.emitted("reorder")?.[0]).toEqual([["c2", "c0", "c1"]]);
+    expect(railSource).toContain(".ms-clip__resize,.ms-clip__resize *");
+  });
+
+  it("resizes a clip onto valid frame counts without starting a reorder", async () => {
+    const timelineClips = clips(2);
+    timelineClips[0]!.frames = 25;
+    const wrapper = make({
+      clips: timelineClips,
+      frameOptions: [9, 17, 25, 33, 41],
+    });
+
+    await wrapper.findAll(".ms-clip__resize")[0]!.trigger("pointerdown", {
+      clientX: 0,
+    });
+    document.dispatchEvent(new MouseEvent("pointermove", { clientX: 112 }));
+    document.dispatchEvent(new MouseEvent("pointerup"));
+
+    expect(wrapper.emitted("resize")?.at(-1)).toEqual(["c0", 41]);
+    expect(wrapper.emitted("reorder")).toBeUndefined();
+  });
+
+  it("surfaces the edit-session render plan on filmstrip tiles", () => {
     const wrapper = make({
       clips: clips(3),
       plans: ["cached", "rerender", "new"],
     });
-    expect(wrapper.find(".ms-clip__plan--cached").exists()).toBe(true);
-    expect(wrapper.find(".ms-clip__plan--rerender").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Cached");
+    expect(wrapper.text()).toContain("Re-render");
+  });
+
+  it("renders durable stage posters and progress separately from draft clips", () => {
+    const wrapper = make({
+      mediaByClipId: {
+        c0: {
+          status: "ready",
+          posterUrl: "https://mold.test/stage-0.jpg",
+          hasMedia: true,
+          cacheReady: true,
+        },
+        c1: {
+          status: "running",
+          progressPercent: 42.4,
+        },
+      },
+    });
+    expect(
+      wrapper.get('img[src="https://mold.test/stage-0.jpg"]').attributes("src"),
+    ).toBe("https://mold.test/stage-0.jpg");
+    expect(wrapper.get(".ms-clip__status").text()).toContain("Cached");
+    expect(wrapper.get(".ms-clip__rendering").text()).toContain("42%");
+    expect(
+      wrapper.get(".ms-clip__progress > span").attributes("style"),
+    ).toContain("42.4%");
+  });
+
+  it("emits play for playable scenes and exposes duration in accessible labels", async () => {
+    const wrapper = make({
+      fps: 24,
+      playingId: "c0",
+      mediaByClipId: {
+        c0: { status: "ready", hasMedia: true, cacheReady: true },
+      },
+    });
+    const play = wrapper.get(".ms-clip__play");
+    expect(play.attributes("aria-label")).toBe(
+      "Pause Opening clip, 97f · 4.0s",
+    );
+    expect(play.attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get(".ms-clip__frames").text()).toBe("97f · 4.0s");
+    await play.trigger("click");
+    expect(wrapper.emitted("play")?.[0]).toEqual(["c0"]);
   });
 
   it("keeps long rails scrollable without exposing a desktop scrollbar", () => {
@@ -82,15 +155,23 @@ describe("ClipRail", () => {
     );
   });
 
-  it("reserves an in-pill slot for remove so it cannot cover the frame count", () => {
+  it("keeps playback and removal as separate, keyboard-focusable controls", () => {
+    expect(pillSource).toMatch(/class="ms-clip__play"[\s\S]*:aria-label=/);
     expect(pillSource).toMatch(
-      /\.ms-clip:has\(\.ms-clip__remove\) \.ms-clip__body\s*\{[^}]*padding-right:\s*36px/s,
-    );
-    expect(pillSource).toMatch(
-      /\.ms-clip__remove\s*\{[^}]*top:\s*50%[^}]*right:\s*7px[^}]*opacity:\s*0/s,
+      /\.ms-clip__remove\s*\{[^}]*position:\s*absolute[^}]*opacity:\s*0/s,
     );
     expect(pillSource).toMatch(
       /\.ms-clip:hover \.ms-clip__remove,[\s\S]*\.ms-clip:focus-within \.ms-clip__remove\s*\{[^}]*opacity:\s*1/s,
+    );
+  });
+
+  it("uses a cinematic 16:9 filmstrip treatment", () => {
+    expect(pillSource).toMatch(
+      /\.ms-clip__thumb\s*\{[^}]*aspect-ratio:\s*16 \/ 9/s,
+    );
+    expect(railSource).toMatch(/\.ms-rail__perfs/);
+    expect(railSource).toMatch(
+      /\.ms-rail\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--print\)/s,
     );
   });
 });

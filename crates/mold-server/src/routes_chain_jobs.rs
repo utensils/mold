@@ -3,8 +3,8 @@ use std::path::Path as FsPath;
 use std::pin::Pin;
 
 use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode},
+    extract::{Extension, Path, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{sse, IntoResponse, Response, Sse},
     Json,
 };
@@ -665,7 +665,113 @@ pub async fn chain_job_stage_preview(
     Ok(([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response())
 }
 
-/// DB rows + manifest join; has_preview from disk; script = EFFECTIVE.
+/// Stream a completed stage's standalone MP4 with byte-range support.
+#[utoipa::path(
+    get,
+    path = "/api/chain-jobs/{id}/stages/{idx}/media",
+    tag = "chain-jobs",
+    params(("id" = String, Path), ("idx" = u32, Path)),
+    responses(
+        (status = 200, description = "Stage MP4", content_type = "video/mp4"),
+        (status = 206, description = "Stage MP4 byte range", content_type = "video/mp4"),
+        (status = 404, description = "Job, stage, or stage media missing"),
+        (status = 416, description = "Unsatisfiable byte range")
+    )
+)]
+pub async fn chain_job_stage_media(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, idx)): Path<(String, u32)>,
+) -> Result<Response, ApiError> {
+    chain_jobs_handle(&state)?;
+    let db = metadata_db(&state)?;
+    let row = chain_jobs::get_job(db, &id)
+        .map_err(|error| ApiError::internal(format!("failed to load chain job: {error:#}")))?
+        .ok_or_else(|| not_found(&id))?;
+    let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+        .map_err(|error| ApiError::internal(format!("failed to read chain manifest: {error:#}")))?;
+    let status = manifest
+        .stage_status
+        .get(idx as usize)
+        .filter(|status| status.idx == idx)
+        .ok_or_else(|| not_found(&id))?;
+    let path = stage_segment_path(&row.job_dir, status).ok_or_else(|| {
+        ApiError::with_code(
+            "stage media not found",
+            CHAIN_JOB_NOT_FOUND,
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    crate::routes::serve_media_file(&path, &headers, "video/mp4", "stage media not found").await
+}
+
+/// Issue the same short-lived exact-path ticket shape used by gallery media.
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/{id}/stages/{idx}/media-token",
+    tag = "chain-jobs",
+    params(("id" = String, Path), ("idx" = u32, Path)),
+    responses(
+        (status = 200, description = "Short-lived stage media ticket", body = crate::routes::GalleryMediaTokenResponse),
+        (status = 401, description = "API key authentication is required"),
+        (status = 404, description = "Job, stage, or stage media missing")
+    )
+)]
+pub(crate) async fn create_chain_job_stage_media_token(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Path((id, idx)): Path<(String, u32)>,
+) -> Result<impl IntoResponse, ApiError> {
+    chain_jobs_handle(&state)?;
+    let db = metadata_db(&state)?;
+    let row = chain_jobs::get_job(db, &id)
+        .map_err(|error| ApiError::internal(format!("failed to load chain job: {error:#}")))?
+        .ok_or_else(|| not_found(&id))?;
+    let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+        .map_err(|error| ApiError::internal(format!("failed to read chain manifest: {error:#}")))?;
+    let status = manifest
+        .stage_status
+        .get(idx as usize)
+        .filter(|status| status.idx == idx)
+        .ok_or_else(|| not_found(&id))?;
+    if stage_segment_path(&row.job_dir, status).is_none() {
+        return Err(ApiError::with_code(
+            "stage media not found",
+            CHAIN_JOB_NOT_FOUND,
+            StatusCode::NOT_FOUND,
+        ));
+    }
+
+    let path = format!("/api/chain-jobs/{id}/stages/{idx}/media");
+    let key_set = auth_state.and_then(|Extension(state)| state);
+    let (token, expires_at, auth_required) = match key_set {
+        Some(key_set) => {
+            let _authenticated = authenticated.ok_or_else(|| {
+                ApiError::with_code(
+                    "API key authentication is required to issue a media token",
+                    "UNAUTHORIZED",
+                    StatusCode::UNAUTHORIZED,
+                )
+            })?;
+            let (token, expires_at) = key_set.issue_gallery_media_token(&path);
+            (Some(token), Some(expires_at), true)
+        }
+        None => (None, None, false),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((
+        headers,
+        Json(crate::routes::GalleryMediaTokenResponse {
+            token,
+            expires_at,
+            auth_required,
+        }),
+    ))
+}
+
+/// DB rows + manifest join; media/cache flags come from disk; script = EFFECTIVE.
 pub(crate) fn job_detail_for(
     db: &MetadataDb,
     _jobs_root: &FsPath,
@@ -680,14 +786,19 @@ pub(crate) fn job_detail_for(
     let stages = manifest
         .stage_status
         .iter()
-        .map(|stage| ChainJobStageDetail {
-            idx: stage.idx,
-            state: stage.state,
-            seed: stage.seed,
-            frames_emitted: stage.frames_emitted,
-            generation_time_ms: stage.generation_time_ms,
-            has_preview: layout.preview_path(stage.idx).is_file(),
-            error: stage.error.clone(),
+        .map(|stage| {
+            let has_media = stage_segment_path(layout.root(), stage).is_some();
+            ChainJobStageDetail {
+                idx: stage.idx,
+                state: stage.state,
+                seed: stage.seed,
+                frames_emitted: stage.frames_emitted,
+                generation_time_ms: stage.generation_time_ms,
+                has_preview: layout.preview_path(stage.idx).is_file(),
+                has_media,
+                cache_ready: stage_cache_ready(&layout, stage, &effective),
+                error: stage.error.clone(),
+            }
         })
         .collect();
     Ok(Some(ChainJobDetail {
@@ -698,6 +809,54 @@ pub(crate) fn job_detail_for(
         amends: manifest.amends.clone(),
         script: ChainScript::from(&effective),
     }))
+}
+
+fn stage_segment_path(
+    job_dir: &FsPath,
+    stage: &mold_core::chain_job::StageStatus,
+) -> Option<std::path::PathBuf> {
+    if stage.state != StageState::Completed {
+        return None;
+    }
+    let rel = stage.segment.as_ref()?;
+    let path = job_dir.join(rel);
+    path.is_file().then_some(path)
+}
+
+pub(crate) fn stage_cache_ready(
+    layout: &JobDirLayout,
+    stage: &mold_core::chain_job::StageStatus,
+    effective: &ChainRequest,
+) -> bool {
+    if stage_segment_path(layout.root(), stage).is_none() {
+        return false;
+    }
+    if effective.enable_audio == Some(true)
+        && stage
+            .audio
+            .as_ref()
+            .is_none_or(|rel| !layout.root().join(rel).is_file())
+    {
+        return false;
+    }
+    if stage.raw_segment && effective.motion_tail_frames > 0 {
+        if stage.tail_frames.unwrap_or(0) < effective.motion_tail_frames {
+            return false;
+        }
+        let tail_dir = layout.tail_dir(stage.idx);
+        let expected = effective.motion_tail_frames as usize;
+        let present = std::fs::read_dir(tail_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .count();
+        if present < expected {
+            return false;
+        }
+    }
+    true
 }
 
 fn chain_jobs_handle(
@@ -1061,6 +1220,67 @@ mod tests {
 
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn stage_media_streams_ranges_and_detail_reflects_disk_cache() {
+        use axum::body::to_bytes;
+
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                Json(req(OutputFormat::Mp4)),
+            ))
+        })
+        .unwrap();
+        let db_ref = db.as_ref().as_ref().unwrap();
+        let row = chain_jobs::get_job(db_ref, &created.job_id)
+            .unwrap()
+            .unwrap();
+        let layout = JobDirLayout::new(row.job_dir.clone());
+        std::fs::create_dir_all(layout.tail_dir(0)).unwrap();
+        std::fs::write(layout.segment_path(0), b"0123456789").unwrap();
+        std::fs::write(layout.tail_dir(0).join("000000.png"), b"tail").unwrap();
+        let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        manifest.stage_status[0].state = StageState::Completed;
+        manifest.stage_status[0].segment = Some(layout.segment_rel(0));
+        manifest.stage_status[0].tail_frames = Some(1);
+        manifest.stage_status[0].raw_segment = true;
+        manifest.write_atomic(&row.job_dir).unwrap();
+
+        let detail = job_detail_for(db_ref, home.path(), &created.job_id)
+            .unwrap()
+            .unwrap();
+        assert!(detail.stages[0].has_media);
+        assert!(detail.stages[0].cache_ready);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+        let response = chain_job_stage_media(State(state), headers, Path((created.job_id, 0)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            HeaderValue::from_static("bytes 2-5/10")
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "2345"
+        );
+
+        std::fs::remove_file(layout.tail_dir(0).join("000000.png")).unwrap();
+        let detail = job_detail_for(db_ref, home.path(), &row.id)
+            .unwrap()
+            .unwrap();
+        assert!(detail.stages[0].has_media);
+        assert!(!detail.stages[0].cache_ready);
     }
 
     fn amend_body(stages: Vec<ChainStage>) -> AmendRequest {

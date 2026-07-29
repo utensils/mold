@@ -200,9 +200,9 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
 
     // Browser media elements cannot attach an X-Api-Key header to their own
     // streaming and Range requests. Accept a short-lived signed ticket only
-    // for GET/HEAD reads of the full-size gallery media route; all other paths and
-    // methods continue through normal API-key authentication below.
-    if is_gallery_image_read(&request) {
+    // for GET/HEAD reads of an explicitly supported media route; all other
+    // paths and methods continue through normal API-key authentication below.
+    if is_ticketed_media_read(&request) {
         if let Some((token, expires_at)) = gallery_media_ticket_query(&request) {
             let now = unix_timestamp();
             if key_set.validates_gallery_media_token(token, path, expires_at, now) {
@@ -237,12 +237,12 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
     }
 }
 
-fn is_gallery_image_read(request: &Request) -> bool {
+fn is_ticketed_media_read(request: &Request) -> bool {
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return false;
     }
 
-    is_gallery_image_path(request.uri().path())
+    is_ticketable_media_path(request.uri().path())
 }
 
 pub(crate) fn is_gallery_image_path(path: &str) -> bool {
@@ -252,6 +252,33 @@ pub(crate) fn is_gallery_image_path(path: &str) -> bool {
 
     path.strip_prefix("/api/gallery/image/")
         .is_some_and(|filename| !filename.is_empty() && !filename.contains('/'))
+}
+
+pub(crate) fn is_chain_stage_media_path(path: &str) -> bool {
+    if path.contains('?') || path.contains('#') {
+        return false;
+    }
+    let Some(rest) = path.strip_prefix("/api/chain-jobs/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    matches!(
+        (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next()
+        ),
+        (Some(id), Some("stages"), Some(idx), Some("media"), None)
+            if !id.is_empty()
+                && !id.contains(['\\', '.'])
+                && idx.parse::<u32>().is_ok()
+    )
+}
+
+pub(crate) fn is_ticketable_media_path(path: &str) -> bool {
+    is_gallery_image_path(path) || is_chain_stage_media_path(path)
 }
 
 fn gallery_media_ticket_query(request: &Request) -> Option<(&str, u64)> {
@@ -358,6 +385,25 @@ mod tests {
     }
 
     #[test]
+    fn chain_stage_media_path_is_exact_and_traversal_safe() {
+        assert!(is_chain_stage_media_path(
+            "/api/chain-jobs/01JBR55-TEST/stages/0/media"
+        ));
+        assert!(is_chain_stage_media_path(
+            "/api/chain-jobs/01JBR55-TEST/stages/4294967295/media"
+        ));
+        for invalid in [
+            "/api/chain-jobs/01JBR55-TEST/stages/0/preview",
+            "/api/chain-jobs/01JBR55-TEST/stages/not-a-number/media",
+            "/api/chain-jobs/../stages/0/media",
+            "/api/chain-jobs/01JBR55-TEST/stages/0/media/extra",
+            "/api/chain-jobs/01JBR55-TEST/stages/0/media?media_token=x",
+        ] {
+            assert!(!is_chain_stage_media_path(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
     fn parse_file_keys() {
         let _lock = env_lock().lock().unwrap();
         let dir = std::env::temp_dir().join("mold_test_keys");
@@ -415,6 +461,24 @@ mod tests {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
         assert!(ks.validates_gallery_media_token(&token, MEDIA_PATH, 1_900, 1_000));
         assert!(!ks.validates_gallery_media_token(&token, MEDIA_PATH, 1_900, 1_900));
+    }
+
+    #[test]
+    fn stage_media_token_is_bound_to_one_exact_stage_path() {
+        const MEDIA_PATH: &str = "/api/chain-jobs/01JBR55-TEST/stages/2/media";
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from(["correct-key".to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let token = ks.sign_gallery_media_token_for_tests(MEDIA_PATH, 1_900);
+
+        assert!(ks.validates_gallery_media_token(&token, MEDIA_PATH, 1_900, 1_000));
+        assert!(!ks.validates_gallery_media_token(
+            &token,
+            "/api/chain-jobs/01JBR55-TEST/stages/3/media",
+            1_900,
+            1_000,
+        ));
     }
 
     #[test]

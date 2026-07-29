@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { isSupportedDroppedImage, reduceNativeImageDrag } from "../lib/nativeImageDrop";
 import { useRoute, useRouter } from "vue-router";
 import {
   findInstalledModel,
@@ -9,6 +10,7 @@ import {
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
+import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
@@ -109,6 +111,7 @@ import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../st
 import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
 import { galleryMediaPath, localMediaPath, mediaPath } from "../lib/gallery/media";
+import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
@@ -231,12 +234,79 @@ const formStore = useGenerateFormStore();
 const form = formStore.form;
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
+const workbenchRef = ref<HTMLDivElement | null>(null);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
 const templatesToggleEl = ref<HTMLButtonElement | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
+const DEFAULT_BENCH_HEIGHT = 520;
+const MIN_BENCH_HEIGHT = 280;
+const MIN_CANVAS_HEIGHT = 144;
+const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
+function readStoredBenchHeight(): number | null {
+  try {
+    const value = globalThis.localStorage?.getItem(BENCH_HEIGHT_KEY);
+    return value == null ? null : Number(value);
+  } catch {
+    return null;
+  }
+}
+const storedBenchHeight = readStoredBenchHeight();
+const benchHeight = ref(
+  Number.isFinite(storedBenchHeight)
+    ? Math.max(MIN_BENCH_HEIGHT, storedBenchHeight!)
+    : DEFAULT_BENCH_HEIGHT,
+);
+let benchResizeStartY = 0;
+let benchResizeStartHeight = 0;
+
+function clampBenchHeight(height: number): number {
+  const available = workbenchRef.value?.clientHeight ?? window.innerHeight;
+  return Math.round(
+    Math.min(
+      Math.max(MIN_BENCH_HEIGHT, available - MIN_CANVAS_HEIGHT),
+      Math.max(MIN_BENCH_HEIGHT, height),
+    ),
+  );
+}
+
+function setBenchHeight(height: number) {
+  benchHeight.value = clampBenchHeight(height);
+  try {
+    globalThis.localStorage?.setItem(BENCH_HEIGHT_KEY, String(benchHeight.value));
+  } catch {
+    // A private or restricted WebView still gets an in-memory resize.
+  }
+}
+
+function onBenchResizeMove(event: PointerEvent) {
+  setBenchHeight(benchResizeStartHeight + benchResizeStartY - event.clientY);
+}
+
+function stopBenchResize() {
+  document.removeEventListener("pointermove", onBenchResizeMove);
+  document.removeEventListener("pointerup", stopBenchResize);
+}
+
+function startBenchResize(event: PointerEvent) {
+  event.preventDefault();
+  benchResizeStartY = event.clientY;
+  benchResizeStartHeight = benchHeight.value;
+  document.addEventListener("pointermove", onBenchResizeMove);
+  document.addEventListener("pointerup", stopBenchResize);
+}
+
+function onBenchResizeKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  setBenchHeight(benchHeight.value + (event.key === "ArrowUp" ? 24 : -24));
+}
+
+function clampBenchToViewport() {
+  benchHeight.value = clampBenchHeight(benchHeight.value);
+}
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
 const expansionError = ref<string | null>(null);
@@ -270,6 +340,7 @@ const submissionGuard = new PreparationRequestGuard();
 
 let stopNativeImageDrop: (() => void) | null = null;
 let nativeImageDropUnmounted = false;
+let nativeImageDragCandidate = false;
 
 async function importDroppedImage(path: string) {
   try {
@@ -296,13 +367,17 @@ async function listenForNativeImageDrops() {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
   const { getCurrentWebview } = await import("@tauri-apps/api/webview");
   const unlisten = await getCurrentWebview().onDragDropEvent(({ payload }) => {
-    if (payload.type === "enter" || payload.type === "over") {
-      nativeImageDragOver.value = true;
-      return;
-    }
-    nativeImageDragOver.value = false;
+    const dragState = reduceNativeImageDrag(
+      {
+        candidate: nativeImageDragCandidate,
+        visible: nativeImageDragOver.value,
+      },
+      payload,
+    );
+    nativeImageDragCandidate = dragState.candidate;
+    nativeImageDragOver.value = dragState.visible;
     if (payload.type !== "drop") return;
-    const path = payload.paths.find((candidate) => /\.(png|jpe?g)$/i.test(candidate));
+    const path = payload.paths.find(isSupportedDroppedImage);
     if (path) void importDroppedImage(path);
     else toasts.push("Drop a PNG or JPEG image.", "error");
   });
@@ -599,6 +674,161 @@ const watchedSequencePct = computed(() => {
   return progress && progress.total > 0 ? (progress.step / progress.total) * 100 : 0;
 });
 
+const sequenceStagePosters = ref<Record<number, string>>({});
+const sequenceStageMedia = ref<Record<number, string>>({});
+const sequenceStageClipIds = ref<string[]>([]);
+const sequenceStageClipIdsByJob = new Map<string, string[]>();
+const playingSequenceStage = ref<number | null>(null);
+let sequenceStageMediaKey = "";
+
+function clearSequenceStageMedia() {
+  for (const url of Object.values(sequenceStagePosters.value)) {
+    URL.revokeObjectURL(url);
+  }
+  sequenceStagePosters.value = {};
+  sequenceStageMedia.value = {};
+  sequenceStageClipIds.value = [];
+  playingSequenceStage.value = null;
+}
+
+watch(
+  () => {
+    const detail = chains.live.detail;
+    const watched = chains.watching;
+    return detail && watched
+      ? [
+          watched.hostId,
+          detail.id,
+          detail.stages
+            .filter((stage) => stage.has_preview || stage.has_media)
+            .map((stage) => `${stage.idx}:${stage.has_preview ? 1 : 0}:${stage.has_media ? 1 : 0}`)
+            .join(","),
+        ].join(":")
+      : "";
+  },
+  () => {
+    const detail = chains.live.detail;
+    const watched = chains.watching;
+    if (!detail || !watched) return;
+    const key = `${watched.hostId}:${detail.id}`;
+    if (key !== sequenceStageMediaKey) {
+      clearSequenceStageMedia();
+      sequenceStageMediaKey = key;
+      const script = normalizeServerChainScript(detail.script);
+      const boundIds = sequenceStageClipIdsByJob.get(key);
+      if (boundIds?.length === detail.stages.length) {
+        sequenceStageClipIds.value = [...boundIds];
+      } else if (
+        script &&
+        script.stages.length === draft.clips.length &&
+        script.stages.every((stage, idx) => stage.prompt === draft.clips[idx]?.prompt)
+      ) {
+        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
+      }
+    }
+    const stagesByIdx = new Map(detail.stages.map((stage) => [stage.idx, stage]));
+    for (const [rawIdx, url] of Object.entries(sequenceStagePosters.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_preview) {
+        URL.revokeObjectURL(url);
+        const next = { ...sequenceStagePosters.value };
+        delete next[idx];
+        sequenceStagePosters.value = next;
+      }
+    }
+    for (const rawIdx of Object.keys(sequenceStageMedia.value)) {
+      const idx = Number(rawIdx);
+      if (!stagesByIdx.get(idx)?.has_media) {
+        const next = { ...sequenceStageMedia.value };
+        delete next[idx];
+        sequenceStageMedia.value = next;
+        if (playingSequenceStage.value === idx) playingSequenceStage.value = null;
+      }
+    }
+    const target = chains.targetFor(watched.hostId);
+    for (const stage of detail.stages) {
+      if (stage.has_preview && !sequenceStagePosters.value[stage.idx]) {
+        const path = `/api/chain-jobs/${encodeURIComponent(detail.id)}/stages/${stage.idx}/preview`;
+        void apiFetchTo(target, path)
+          .then((response) => response.blob())
+          .then((blob) => {
+            sequenceStagePosters.value = {
+              ...sequenceStagePosters.value,
+              [stage.idx]: URL.createObjectURL(blob),
+            };
+          })
+          .catch(() => {});
+      }
+      if (stage.has_media && !sequenceStageMedia.value[stage.idx]) {
+        void sequenceStageMediaUrl(target, detail.id, stage.idx)
+          .then((url) => {
+            sequenceStageMedia.value = {
+              ...sequenceStageMedia.value,
+              [stage.idx]: url,
+            };
+          })
+          .catch(() => {});
+      }
+    }
+  },
+);
+
+const sequencePlaybackSrc = computed(() => {
+  const idx = playingSequenceStage.value;
+  return idx === null ? null : (sequenceStageMedia.value[idx] ?? null);
+});
+const sequenceFilmstripMediaByClipId = computed<
+  Readonly<Record<string, ClipRailMedia | undefined>>
+>(() => {
+  const detail = chains.live.detail;
+  if (!detail) return {};
+  return Object.fromEntries(
+    [...detail.stages]
+      .sort((a, b) => a.idx - b.idx)
+      .flatMap((stage) => {
+        const clipId = sequenceStageClipIds.value[stage.idx];
+        if (!clipId) return [];
+        const progress = chains.live.progress[stage.idx];
+        const status: ClipRailMedia["status"] =
+          stage.state === "completed" ? "ready" : stage.state === "failed" ? "error" : stage.state;
+        return [
+          [
+            clipId,
+            {
+              stageIdx: stage.idx,
+              status,
+              posterUrl: sequenceStagePosters.value[stage.idx] ?? null,
+              hasMedia: Boolean(stage.has_media && sequenceStageMedia.value[stage.idx]),
+              cacheReady: stage.cache_ready,
+              progressPercent:
+                progress && progress.total > 0 ? (progress.step / progress.total) * 100 : null,
+              error: stage.error,
+            } satisfies ClipRailMedia,
+          ],
+        ];
+      }),
+  );
+});
+
+function playSequenceStage(stageIdx: number) {
+  if (!sequenceStageMedia.value[stageIdx]) return;
+  playingSequenceStage.value = playingSequenceStage.value === stageIdx ? null : stageIdx;
+}
+
+function playSequenceClip(clipId: string) {
+  const stageIdx = sequenceStageClipIds.value.indexOf(clipId);
+  if (stageIdx >= 0) playSequenceStage(stageIdx);
+}
+
+const playingSequenceClipId = computed(() => {
+  const stageIdx = playingSequenceStage.value;
+  return stageIdx === null ? null : (sequenceStageClipIds.value[stageIdx] ?? null);
+});
+
+function returnToLiveSequence() {
+  playingSequenceStage.value = null;
+}
+
 /**
  * The watched job once it has settled. The Create strip no longer keeps a
  * settled row, so the canvas is what holds the result: the finished video with
@@ -708,6 +938,10 @@ async function generateSequence() {
         enable_audio: draft.enableAudio,
       };
       try {
+        sequenceStageClipIdsByJob.set(
+          `${editing.hostId}:${editing.jobId}`,
+          draft.clips.map((clip) => clip.id),
+        );
         const outcome = await chains.amend(editing.hostId, editing.jobId, amend);
         toasts.push(
           `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
@@ -725,7 +959,11 @@ async function generateSequence() {
         throw err;
       }
     } else {
-      await chains.create(hostRoute.hostId, request);
+      const jobId = await chains.create(hostRoute.hostId, request);
+      sequenceStageClipIdsByJob.set(
+        `${hostRoute.hostId}:${jobId}`,
+        draft.clips.map((clip) => clip.id),
+      );
       toasts.push("Sequence queued");
     }
     // The caveat described the handoff, not the submitted job.
@@ -797,8 +1035,12 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
       draft.clips.splice(0, draft.clips.length, ...loaded.clips);
       draft.activeClipId = loaded.clips[0]?.id ?? null;
       draft.enableAudio = loaded.enableAudio;
-      chains.watch(payload.hostId, payload.jobId);
     }
+    sequenceStageClipIdsByJob.set(
+      `${payload.hostId}:${payload.jobId}`,
+      draft.clips.map((clip) => clip.id),
+    );
+    await chains.watch(payload.hostId, payload.jobId);
     void loadChainLimits();
   } catch (err) {
     toasts.push(String(err), "error");
@@ -1858,6 +2100,8 @@ watch(
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeydown);
+  window.addEventListener("resize", clampBenchToViewport);
+  clampBenchToViewport();
   void listenForNativeImageDrops();
   // The persisted sequence draft wins on ordinary visits; a ?output=sequence
   // deep-link is consumed once and stripped.
@@ -1868,8 +2112,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   preparationGuard.invalidate();
   submissionGuard.invalidate();
+  clearSequenceStageMedia();
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
+  stopBenchResize();
+  window.removeEventListener("resize", clampBenchToViewport);
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   document.removeEventListener("keydown", onDocumentKeydown);
 });
@@ -1892,6 +2139,7 @@ onBeforeUnmount(() => {
       <CreateHeader :form="form" />
 
       <div
+        ref="workbenchRef"
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
@@ -1916,7 +2164,9 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Canvas -->
-        <div class="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-desk p-7">
+        <div
+          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-desk p-7"
+        >
           <!-- Prepared variations review (prototype: this replaces the canvas) -->
           <PreparedExpansionBatch
             v-if="preparedBatch"
@@ -1980,7 +2230,7 @@ onBeforeUnmount(() => {
                   v-if="job && job.status !== 'complete' && job.previewUrl"
                   :src="job.previewUrl"
                   alt=""
-                  class="absolute inset-0 h-full w-full object-cover"
+                  class="absolute inset-0 h-full w-full object-contain"
                   :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
                 />
                 <!-- The grain canvas paints edge-to-edge (temperature wash), so
@@ -2061,6 +2311,35 @@ onBeforeUnmount(() => {
               :message="jobErrorMessage"
               :copy-message="jobErrorCopy"
             />
+          </div>
+
+          <div
+            v-else-if="isSequence && sequencePlaybackSrc"
+            data-test="sequence-stage-player"
+            class="relative flex h-full w-full min-h-0 flex-col items-center"
+          >
+            <video
+              :key="sequencePlaybackSrc"
+              :src="sequencePlaybackSrc"
+              class="min-h-0 w-full flex-1 rounded-media border border-control-edge bg-print-surface object-contain"
+              autoplay
+              controls
+              loop
+              playsinline
+            />
+            <div
+              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+            >
+              <span class="edge-code">Clip {{ (playingSequenceStage ?? 0) + 1 }}</span>
+              <button
+                type="button"
+                data-test="sequence-return-live"
+                class="rounded-control border border-edge px-2 py-1 text-caption text-ink-2 hover:text-ink"
+                @click="returnToLiveSequence"
+              >
+                Return to live render
+              </button>
+            </div>
           </div>
 
           <!-- Watched sequence: denoise progress in the develop chrome -->
@@ -2216,72 +2495,104 @@ onBeforeUnmount(() => {
           @retry-expansion="retryExpansionAfterPull"
         />
 
-        <ActivityStrip @edit-sequence="editSequence" />
+        <div
+          data-test="create-bench-resizer"
+          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-edge bg-bath/80"
+          role="separator"
+          aria-label="Resize Activity and sequence editor"
+          aria-orientation="horizontal"
+          :aria-valuenow="benchHeight"
+          :aria-valuemin="MIN_BENCH_HEIGHT"
+          :aria-valuemax="
+            Math.max(MIN_BENCH_HEIGHT, (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
+          "
+          tabindex="0"
+          title="Drag to resize · double-click to reset"
+          @pointerdown="startBenchResize"
+          @keydown="onBenchResizeKeydown"
+          @dblclick="setBenchHeight(DEFAULT_BENCH_HEIGHT)"
+        >
+          <span
+            class="h-1 w-12 rounded-full bg-ink-3/50 transition-colors group-hover:bg-safelight group-focus-visible:bg-safelight"
+            aria-hidden="true"
+          />
+        </div>
 
-        <!-- Sequence bench replaces the single-print composer in-place -->
-        <EmptyStateBlock
-          v-if="showSequenceEmpty"
-          data-test="sequence-empty"
-          class="shrink-0 py-6"
-          icon="image"
-          headline="Sequences need a video model"
-          guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+        <div
+          data-test="create-bottom-panel"
+          class="min-h-0 shrink-0 overflow-y-auto bg-desk"
+          :style="{ height: `${benchHeight}px` }"
         >
-          <template #action>
-            <button
-              type="button"
-              data-test="sequence-browse-models"
-              class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
-              @click="
-                router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
-              "
-            >
-              Browse video models
-            </button>
-          </template>
-        </EmptyStateBlock>
-        <SequenceComposer
-          v-else-if="isSequence"
-          data-test="generate-sequence-composer"
-          class="shrink-0"
-          :form="form"
-          :selected-model="selectedEntry"
-          :chain-limits="chainLimits"
-          :installed-models="installedModels"
-          :submitting="sequenceSubmitting"
-          :chain-level-dirty="chainLevelDirty"
-          @submit="generateSequence"
-          @duplicate="duplicateSequenceAsNew"
-        />
-        <ComposerCard
-          v-else
-          ref="composerRef"
-          data-test="generate-composer"
-          class="shrink-0"
-          :form="form"
-          :effective-batch-size="effectiveBatchSize"
-          :expansion-running="expansionRunning"
-          :expansion-host-label="expansionHostLabel"
-          :can-undo="quickExpansionOriginal !== null"
-          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-          :has-prepared="!!preparedBatch"
-          :chain-reject="chainReject"
-          :button-label="buttonLabel"
-          :estimate-request="estimateRequest"
-          :estimate-target="estimateTarget"
-          :preprocessing-status="preprocessingStatus"
-          :history="promptHistory"
-          @generate="generate"
-          @expand="expandForCurrentBatch()"
-          @restore="restoreQuickExpansion"
-        />
-        <p
-          v-if="isSequence && sequenceReuseNotice"
-          data-test="sequence-reuse-note"
-          class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
-        >
-          {{ sequenceReuseNotice }}
-        </p>
+          <ActivityStrip @edit-sequence="editSequence" />
+
+          <!-- Sequence bench replaces the single-print composer in-place -->
+          <EmptyStateBlock
+            v-if="showSequenceEmpty"
+            data-test="sequence-empty"
+            class="shrink-0 py-6"
+            icon="image"
+            headline="Sequences need a video model"
+            guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+          >
+            <template #action>
+              <button
+                type="button"
+                data-test="sequence-browse-models"
+                class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
+                @click="
+                  router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
+                "
+              >
+                Browse video models
+              </button>
+            </template>
+          </EmptyStateBlock>
+          <SequenceComposer
+            v-else-if="isSequence"
+            data-test="generate-sequence-composer"
+            class="shrink-0"
+            :form="form"
+            :selected-model="selectedEntry"
+            :chain-limits="chainLimits"
+            :installed-models="installedModels"
+            :submitting="sequenceSubmitting"
+            :chain-level-dirty="chainLevelDirty"
+            :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
+            :playing-clip-id="playingSequenceClipId"
+            @submit="generateSequence"
+            @duplicate="duplicateSequenceAsNew"
+            @play-clip="playSequenceClip"
+          />
+          <ComposerCard
+            v-else
+            ref="composerRef"
+            data-test="generate-composer"
+            class="shrink-0"
+            :form="form"
+            :effective-batch-size="effectiveBatchSize"
+            :expansion-running="expansionRunning"
+            :expansion-host-label="expansionHostLabel"
+            :can-undo="quickExpansionOriginal !== null"
+            :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+            :has-prepared="!!preparedBatch"
+            :chain-reject="chainReject"
+            :button-label="buttonLabel"
+            :estimate-request="estimateRequest"
+            :estimate-target="estimateTarget"
+            :preprocessing-status="preprocessingStatus"
+            :history="promptHistory"
+            @generate="generate"
+            @expand="expandForCurrentBatch()"
+            @restore="restoreQuickExpansion"
+          />
+          <p
+            v-if="isSequence && sequenceReuseNotice"
+            data-test="sequence-reuse-note"
+            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+          >
+            {{ sequenceReuseNotice }}
+          </p>
+        </div>
       </div>
     </div>
 

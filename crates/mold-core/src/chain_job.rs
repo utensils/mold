@@ -632,6 +632,13 @@ pub struct ChainJobStageDetail {
     pub frames_emitted: Option<u32>,
     pub generation_time_ms: Option<u64>,
     pub has_preview: bool,
+    /// A standalone stage MP4 exists and can be streamed immediately.
+    #[serde(default)]
+    pub has_media: bool,
+    /// Every disk artifact needed to reuse this stage during amend/finalize
+    /// is present. This is authoritative filesystem state, not manifest intent.
+    #[serde(default)]
+    pub cache_ready: bool,
     pub error: Option<String>,
 }
 
@@ -731,6 +738,10 @@ pub enum ChainJobEvent {
         stage_idx: u32,
         frames_emitted: u32,
         has_preview: bool,
+        #[serde(default)]
+        has_media: bool,
+        #[serde(default)]
+        cache_ready: bool,
     },
     Yielded {
         pending_small_jobs: usize,
@@ -1086,6 +1097,8 @@ tail_frames = 17
                     frames_emitted: stage.frames_emitted,
                     generation_time_ms: stage.generation_time_ms,
                     has_preview: false,
+                    has_media: false,
+                    cache_ready: false,
                     error: stage.error.clone(),
                 })
                 .collect(),
@@ -1353,6 +1366,8 @@ request_json = "{}"
                 frames_emitted: None,
                 generation_time_ms: None,
                 has_preview: false,
+                has_media: false,
+                cache_ready: false,
                 error: None,
             }],
             finalizes: vec![],
@@ -1388,8 +1403,10 @@ request_json = "{}"
                     stage_idx: 2,
                     frames_emitted: 97,
                     has_preview: true,
+                    has_media: true,
+                    cache_ready: true,
                 },
-                serde_json::json!({"type":"stage_done","stage_idx":2,"frames_emitted":97,"has_preview":true}),
+                serde_json::json!({"type":"stage_done","stage_idx":2,"frames_emitted":97,"has_preview":true,"has_media":true,"cache_ready":true}),
             ),
             (
                 ChainJobEvent::Yielded {

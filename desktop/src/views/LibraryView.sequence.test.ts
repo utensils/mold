@@ -1,7 +1,7 @@
 /**
- * A sequence print's two doors out of the Library: **Reuse settings** (a NEW
- * draft from the recorded clips) and **Edit sequence** (re-entering the
- * durable job with its cached clips). The rules that matter are the ones a
+ * A sequence print's two doors out of the Library: primary **Edit sequence**
+ * (re-entering the durable job with its cached clips) and explicit
+ * **Duplicate as new** (a NEW draft from the recorded clips). The rules that matter are the ones a
  * regression would silently break — which action shows, and what happens when
  * the click-time existence check comes back 404 vs unreachable.
  */
@@ -214,10 +214,10 @@ describe("Library — sequence print actions", () => {
     expect(entryNamed(await menuFor(wrapper, "S 7"), "Edit sequence")).toBeUndefined();
   });
 
-  it("reuses a sequence print's clips as a NEW draft on the Create sequence route", async () => {
+  it("duplicates a sequence print's clips as a NEW draft on the Create sequence route", async () => {
     const { wrapper, router } = await mountView();
     const menu = await menuFor(wrapper, "S 7");
-    menu.activate(entryNamed(menu, "Reuse settings")!);
+    menu.activate(entryNamed(menu, "Duplicate as new")!);
     await flushPromises();
 
     const handoff = useComposerStore().pendingSequence;
@@ -277,7 +277,9 @@ describe("Library — sequence print actions", () => {
     expect(useComposerStore().pendingSequence?.kind).toBe("reuse");
     expect(
       useToastStore().items.some(
-        (t) => t.message === "That sequence job is gone from plato. Reused its settings instead.",
+        (t) =>
+          t.message ===
+          "That sequence job is gone from plato. Duplicated its saved settings as a new sequence instead.",
       ),
     ).toBe(true);
     expect(router.currentRoute.value.fullPath).toBe("/create?output=sequence");
@@ -307,7 +309,7 @@ describe("Library — sequence print actions", () => {
     // an unresolved origin must never guess a sibling host's job.
     const { wrapper } = await mountView({ localOrigin: true });
     const menu = await menuFor(wrapper, "S 7");
-    expect(entryNamed(menu, "Reuse settings")).toBeDefined();
+    expect(entryNamed(menu, "Duplicate as new")).toBeDefined();
     expect(entryNamed(menu, "Edit sequence")).toBeUndefined();
   });
 });

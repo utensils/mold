@@ -520,9 +520,9 @@ function stepLightbox(delta: number) {
 // ── Sequence prints ─────────────────────────────────────────────────────────
 // A print stitched from a sequence carries per-clip provenance
 // (`metadata.chain`) and, when a durable job produced it, that job's id.
-// Reuse settings follows the print — One shot for a still, a fresh clip rail
-// for a sequence — and Edit sequence is the second, distinct action that
-// CONTINUES the original job with its cached clips.
+// Reuse settings follows a still. A sequence's primary action CONTINUES the
+// original durable job with its cached clips; Duplicate as new is the explicit
+// fresh-draft path.
 
 const isSequencePrint = (item: GalleryImage | null) =>
   item !== null && planSequenceReuse(item.metadata) !== null;
@@ -1039,9 +1039,6 @@ onBeforeUnmount(() => {
       >
         Open
       </button>
-      <button type="button" role="menuitem" @click="contextReuse">
-        Reuse settings
-      </button>
       <button
         v-if="canEditSequence(contextMenu.item)"
         type="button"
@@ -1050,6 +1047,13 @@ onBeforeUnmount(() => {
         @click="contextEditSequence"
       >
         Edit sequence
+      </button>
+      <button type="button" role="menuitem" @click="contextReuse">
+        {{
+          isSequencePrint(contextMenu.item)
+            ? "Duplicate as new"
+            : "Reuse settings"
+        }}
       </button>
       <button type="button" role="menuitem" @click="contextSource">
         Use as source

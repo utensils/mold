@@ -20,6 +20,7 @@ import {
 } from "@studio/lib/sequenceForm";
 import {
   defaultClipFrames,
+  formatFrameDuration,
   sequenceDuration,
   sequenceFrameOptions,
   sequenceMotionTailFrames,
@@ -32,6 +33,7 @@ import { fetchChainLimits, type ChainLimits, type StreamTarget } from "../api";
 import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import type { SourceImageState } from "../types";
+import type { ClipRailMedia } from "@ui/components/types";
 
 const props = withDefaults(
   defineProps<{
@@ -45,8 +47,18 @@ const props = withDefaults(
     target?: StreamTarget;
     /** Edit sessions: shape/detail/seed changed since the job was loaded. */
     chainLevelDirty?: boolean;
+    /** Immutable durable-stage media, index-aligned with the submitted job. */
+    stageMediaByClipId?: Readonly<
+      Record<string, ClipRailMedia | undefined>
+    > | null;
+    playingClipId?: string | null;
   }>(),
-  { modelDefaultFrames: null, chainLevelDirty: false },
+  {
+    modelDefaultFrames: null,
+    chainLevelDirty: false,
+    stageMediaByClipId: null,
+    playingClipId: null,
+  },
 );
 
 const emit = defineEmits<{
@@ -55,6 +67,7 @@ const emit = defineEmits<{
   "discard-edit": [];
   "expand-clip": [clipId: string, prompt: string];
   "import-shared": [shared: Partial<SequenceSharedParams>];
+  "play-clip": [clipId: string];
 }>();
 
 const draft = useSequenceDraftStore();
@@ -113,12 +126,17 @@ const clipCaption = computed(() => {
     idx === 0
       ? "Opening clip"
       : `${transitionLabel(clip.transition, motionTail.value)} from clip ${idx}`;
-  return `${clip.frames}f · ${from}`;
+  return `${formatFrameDuration(clip.frames, props.shared.fps)} · ${from}`;
 });
 
 // ── Rail wiring ───────────────────────────────────────────────────────
 function applyOrder(ids: string[]) {
   ids.forEach((id, index) => draft.moveClip(id, index));
+}
+
+function resizeClip(id: string, frames: number) {
+  const clip = draft.clips.find((candidate) => candidate.id === id);
+  if (clip) clip.frames = frames;
 }
 
 const openSeamClip = computed(
@@ -140,6 +158,9 @@ const editingPlans = computed(() => {
     completedStages: session.completedStages,
   }).perClip;
 });
+function onPlayClip(clipId: string) {
+  emit("play-clip", clipId);
+}
 
 // ── Validation / duration ─────────────────────────────────────────────
 const stages = computed<SequenceStage[]>(() =>
@@ -163,7 +184,7 @@ const duration = computed(() =>
 );
 const fitNote = computed(() => {
   const n = draft.clips.length;
-  return `${n} ${n === 1 ? "clip" : "clips"} · ${duration.value.frames} frames · ${duration.value.seconds.toFixed(1)}s @ ${props.shared.fps}fps`;
+  return `${n} ${n === 1 ? "clip" : "clips"} · ${formatFrameDuration(duration.value.frames, props.shared.fps)} @ ${props.shared.fps}fps`;
 });
 
 const frameOptions = computed(() =>
@@ -380,11 +401,17 @@ defineExpose({ importTomlText });
           :max-stages="maxStages"
           :open-seam-id="openSeamId"
           :plans="editingPlans"
+          :fps="shared.fps"
+          :media-by-clip-id="stageMediaByClipId"
+          :playing-id="playingClipId"
+          :frame-options="frameOptions"
           @select="draft.activeClipId = $event"
           @add="draft.addClip(defaultFrames)"
           @remove="draft.removeClip($event)"
           @reorder="applyOrder"
+          @resize="resizeClip"
           @seam-click="onSeamClick"
+          @play="onPlayClip"
         >
           <template #thumb="{ clip }">
             <img
@@ -456,8 +483,7 @@ defineExpose({ importTomlText });
               :key="frames"
               :value="frames"
             >
-              {{ frames }}f ·
-              {{ (frames / Math.max(shared.fps, 1)).toFixed(1) }}s
+              {{ formatFrameDuration(frames, shared.fps) }}
             </option>
           </select>
         </label>

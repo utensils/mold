@@ -21,6 +21,17 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
   });
 
+  it("keeps the canvas visible and makes the bottom bench resizable", () => {
+    expect(tagFor(viewSource, "generate-workbench")).toContain('ref="workbenchRef"');
+    expect(tagFor(viewSource, "create-bench-resizer")).toContain('role="separator"');
+    expect(tagFor(viewSource, "create-bench-resizer")).toContain('@pointerdown="startBenchResize"');
+    expect(tagFor(viewSource, "create-bottom-panel")).toContain(
+      ':style="{ height: `${benchHeight}px` }"',
+    );
+    expect(viewSource).toContain("min-h-[144px]");
+    expect(viewSource).not.toContain('class="absolute inset-0 h-full w-full object-cover"');
+  });
+
   it("keeps full model names visible in the shared model picker", () => {
     expect(classesFor(modelPickerSource, "selected-model-name")).not.toContain("truncate");
     expect(classesFor(modelPickerSource, "selected-model-name")).toContain("break-all");

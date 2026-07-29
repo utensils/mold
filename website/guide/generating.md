@@ -134,10 +134,10 @@ each pill shows whether that clip is cached (✓) or will re-render (↻) as you
 edit; **Update sequence** re-renders only from the earliest changed clip.
 Changing a transition type or a fade length re-renders nothing at all — those
 are applied when the video is stitched. From a sequence print in the Library,
-**Reuse settings** starts a fresh sequence from the recorded clips (telling you
-how many it restored and naming anything a print does not record), while
-**Edit sequence** re-enters the original job on the machine that produced it so
-its rendered clips stay cached.
+**Edit sequence** is the primary action and re-enters the original job on the
+machine that produced it so rendered clips stay cached. **Duplicate as new**
+starts a fresh sequence from the recorded clips, telling you how many it
+restored and naming anything a print does not record.
 
 On every surface, a **↺ Reset** in the Create settings header restores the
 generation settings to the selected model's defaults — shape, resolution,

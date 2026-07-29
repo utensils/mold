@@ -174,7 +174,7 @@ describe("SequenceComposer", () => {
       "2 clips",
     );
     expect(wrapper.get("[data-test='sequence-fit-note']").text()).toContain(
-      "177 frames",
+      "177f · 7.4s",
     );
   });
 

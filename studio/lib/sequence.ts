@@ -2,6 +2,7 @@ import {
   DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES,
   type SequenceTransition,
 } from "@ui/lib/seam";
+import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 
 // The seam vocabulary is presentational and lives beside the SeamPill /
 // SeamEditor primitives in ui/; re-exported here so studio consumers keep
@@ -12,6 +13,7 @@ export {
   transitionLabel,
   type SequenceTransition,
 } from "@ui/lib/seam";
+export { formatFrameDuration } from "@ui/lib/duration";
 
 export interface SequenceModel {
   name: string;
@@ -152,7 +154,7 @@ export function modelsForOutput<M extends SequenceModel>(
 
 /** Frame rate used when nothing else is known — older servers and image
  * models omit the additive `/api/models.default_fps`. */
-export const DEFAULT_VIDEO_FPS = 24;
+export const DEFAULT_VIDEO_FPS = FALLBACK_VIDEO_FPS;
 
 /**
  * Frame rate for a selected video model: the model's own server-advertised

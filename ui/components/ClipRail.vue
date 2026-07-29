@@ -10,7 +10,7 @@ import { computed } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import ClipPill from "./ClipPill.vue";
 import SeamPill from "./SeamPill.vue";
-import type { RailClip } from "./types";
+import type { ClipRailMedia, RailClip } from "./types";
 
 // Re-exported for convenience; the canonical home is ./types (see its
 // header comment — SFC named exports break clean-sandbox builds).
@@ -27,9 +27,26 @@ const props = withDefaults(
     openSeamId?: string | null;
     /** Per-clip render plan for edit sessions (index-aligned). */
     plans?: readonly ("cached" | "rerender" | "new")[] | null;
+    /** Live model FPS, used for honest frame + seconds labels. */
+    fps?: number;
+    /** Durable stage state keyed by draft clip id. */
+    mediaByClipId?: Readonly<Record<string, ClipRailMedia | undefined>> | null;
+    /** Clip currently playing in the surface's main canvas. */
+    playingId?: string | null;
+    /** Valid frame counts for drag-to-trim scene sizing. */
+    frameOptions?: readonly number[] | null;
     disabled?: boolean;
   }>(),
-  { maxStages: 16, openSeamId: null, plans: null, disabled: false },
+  {
+    maxStages: 16,
+    openSeamId: null,
+    plans: null,
+    fps: 24,
+    mediaByClipId: null,
+    playingId: null,
+    frameOptions: null,
+    disabled: false,
+  },
 );
 
 const emit = defineEmits<{
@@ -38,6 +55,8 @@ const emit = defineEmits<{
   remove: [id: string];
   reorder: [ids: string[]];
   "seam-click": [id: string];
+  play: [id: string];
+  resize: [id: string, frames: number];
 }>();
 
 const canAdd = computed(
@@ -62,12 +81,16 @@ const dragModel = computed({
 </script>
 
 <template>
-  <div class="ms-rail" role="list" aria-label="Sequence clips">
+  <div class="ms-rail" aria-label="Sequence filmstrip">
+    <div class="ms-rail__perfs ms-rail__perfs--top" aria-hidden="true" />
     <VueDraggable
       v-model="dragModel"
       class="ms-rail__clips"
+      role="list"
+      aria-label="Sequence clips"
       :disabled="disabled"
       handle=".ms-clip__body"
+      filter=".ms-clip__play,.ms-clip__remove,.ms-clip__resize,.ms-clip__resize *,.ms-seam,.ms-seam *"
     >
       <template v-for="(clip, index) in clips" :key="clip.id">
         <div class="ms-rail__item" role="listitem">
@@ -83,11 +106,17 @@ const dragModel = computed({
           <ClipPill
             :label="clipLabel(index)"
             :frames="clip.frames"
+            :fps="fps"
             :active="clip.id === activeId"
+            :playing="clip.id === playingId"
             :removable="removable"
             :plan="plans?.[index] ?? null"
+            :media="mediaByClipId?.[clip.id] ?? null"
+            :frame-options="frameOptions"
             @select="emit('select', clip.id)"
+            @play="emit('play', clip.id)"
             @remove="emit('remove', clip.id)"
+            @resize="emit('resize', clip.id, $event)"
           >
             <template #thumb
               ><slot name="thumb" :clip="clip" :index="index"
@@ -96,7 +125,6 @@ const dragModel = computed({
         </div>
       </template>
     </VueDraggable>
-    <span class="ms-rail__divider" aria-hidden="true" />
     <button
       v-if="canAdd"
       type="button"
@@ -116,21 +144,30 @@ const dragModel = computed({
       >
         <path d="M12 5v14M5 12h14" />
       </svg>
-      clip
+      <span>Add clip</span>
     </button>
-    <span class="ms-rail__spacer" />
-    <span v-if="!disabled && clips.length > 1" class="ms-rail__hint"
-      >drag to reorder</span
-    >
+    <div class="ms-rail__perfs ms-rail__perfs--bottom" aria-hidden="true" />
   </div>
 </template>
 
 <style scoped>
 .ms-rail {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: stretch;
+  gap: 10px;
+  min-height: 182px;
+  padding: 23px 13px;
   overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid color-mix(in srgb, var(--rebate) 16%, transparent);
+  border-radius: 11px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 20%),
+    color-mix(in srgb, var(--print) 94%, black);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.06),
+    0 8px 24px color-mix(in srgb, var(--print) 18%, transparent);
   scrollbar-width: none;
 }
 
@@ -140,36 +177,56 @@ const dragModel = computed({
 
 .ms-rail__clips {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: stretch;
+  gap: 10px;
   flex: 0 0 auto;
 }
 
 .ms-rail__item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex: 0 0 auto;
 }
 
-.ms-rail__divider {
-  width: 1px;
-  height: 20px;
-  background: var(--edge);
-  flex: 0 0 1px;
-  margin: 0 2px;
+.ms-rail__perfs {
+  position: absolute;
+  z-index: 8;
+  right: 8px;
+  left: 8px;
+  height: 8px;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.15) 0 9px,
+    transparent 9px 19px
+  );
+  mask: linear-gradient(#000 0 0);
+  border-radius: 2px;
+}
+
+.ms-rail__perfs--top {
+  top: 7px;
+}
+
+.ms-rail__perfs--bottom {
+  bottom: 7px;
 }
 
 .ms-rail__add {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  flex: 0 0 auto;
-  background: transparent;
-  border: 1px dashed var(--ce);
-  border-radius: var(--radius-pill);
-  color: var(--ink-3);
+  justify-content: center;
+  gap: 9px;
+  width: 78px;
+  min-height: 138px;
+  padding: 10px;
+  flex: 0 0 78px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 9px;
+  color: rgba(255, 255, 255, 0.62);
   font-family: var(--f-body);
   font-size: 12px;
   cursor: pointer;
@@ -177,8 +234,9 @@ const dragModel = computed({
 }
 
 .ms-rail__add:hover {
-  color: var(--rebate);
-  border-color: var(--ink-3);
+  color: white;
+  border-color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 8%, transparent);
 }
 
 .ms-rail__add:focus-visible {
@@ -186,14 +244,47 @@ const dragModel = computed({
   outline-offset: 2px;
 }
 
-.ms-rail__spacer {
-  flex: 1;
+.ms-rail :deep(.ms-seam) {
+  width: 54px;
+  height: auto;
+  min-height: 76px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 4px;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.72);
+  white-space: normal;
 }
 
-.ms-rail__hint {
-  font-family: var(--f-mono);
-  font-size: 9.5px;
-  color: var(--ink-3);
-  flex: 0 0 auto;
+.ms-rail :deep(.ms-seam__label) {
+  max-width: 48px;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ms-rail :deep(.ms-seam__chevron) {
+  display: none;
+}
+
+.ms-rail :deep(.ms-seam[data-on="true"]),
+.ms-rail :deep(.ms-seam[data-transition="fade"]) {
+  border-color: var(--safelight);
+  color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 10%, transparent);
+}
+
+@media (max-width: 639px) {
+  .ms-rail {
+    min-height: 167px;
+    padding-inline: 10px;
+  }
+
+  .ms-clip {
+    width: 168px;
+  }
 }
 </style>

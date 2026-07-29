@@ -33,3 +33,20 @@ export interface RailClip {
   transition: import("../lib/seam").SequenceTransition;
   fadeFrames: number;
 }
+
+/** Durable render state projected onto a draft clip by its owning surface.
+ *
+ * This deliberately stays separate from `RailClip`: the draft remains the
+ * editable authoring model while media comes from an immutable chain-job
+ * stage. `progressPercent` is 0–100.
+ */
+export interface ClipRailMedia {
+  /** Immutable durable-job stage index represented by this tile. */
+  stageIdx?: number;
+  status: "pending" | "running" | "ready" | "error";
+  posterUrl?: string | null | undefined;
+  hasMedia?: boolean | undefined;
+  cacheReady?: boolean | undefined;
+  progressPercent?: number | null | undefined;
+  error?: string | null | undefined;
+}
