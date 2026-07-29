@@ -33,6 +33,7 @@ import {
   fpsValidationError,
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
+import { CAMERA_MOTION_PRESETS, cameraMotionMode } from "@studio/lib/cameraMotion";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -115,34 +116,21 @@ const cameraError = computed(() => cameraControlValidationError(props.form));
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
 const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
 
-const CAMERA_MOTION_PRESETS = [
-  { id: "dolly-in", label: "Dolly in" },
-  { id: "dolly-left", label: "Dolly left" },
-  { id: "dolly-out", label: "Dolly out" },
-  { id: "dolly-right", label: "Dolly right" },
-  { id: "jib-down", label: "Jib down" },
-  { id: "jib-up", label: "Jib up" },
-  { id: "static", label: "Static" },
-] as const;
 const isLtx23Model = computed(() => props.form.model.includes("ltx-2.3"));
-function cameraModeFor(value: string | null): string {
-  if (!value) return "";
-  return CAMERA_MOTION_PRESETS.some((p) => p.id === value) ? value : "custom";
-}
-const uiCameraMode = ref(cameraModeFor(props.form.cameraControl));
+const uiCameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
   () => props.form.cameraControl,
   (value) => {
-    if (uiCameraMode.value === "custom" && (value === "" || cameraModeFor(value) === "custom")) {
+    if (uiCameraMode.value === "custom" && (value === "" || cameraMotionMode(value) === "custom")) {
       return;
     }
-    uiCameraMode.value = cameraModeFor(value);
+    uiCameraMode.value = cameraMotionMode(value);
   },
 );
 function setCameraMode(mode: string) {
   uiCameraMode.value = mode;
   if (mode === "custom") {
-    if (cameraModeFor(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+    if (cameraMotionMode(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
   } else {
     props.form.cameraControl = mode === "" ? null : mode;
   }
