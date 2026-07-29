@@ -180,13 +180,20 @@ button {
 
 .mobile-output-mode .ms-seg {
   gap: 0;
-  overflow: hidden;
   padding: 0;
 }
 
 .mobile-output-mode .ms-seg .ms-seg__btn {
   min-height: 44px;
   border-radius: 0;
+}
+
+.mobile-output-mode .ms-seg .ms-seg__btn:first-child {
+  border-radius: calc(var(--radius-control) - 1px) 0 0 calc(var(--radius-control) - 1px);
+}
+
+.mobile-output-mode .ms-seg .ms-seg__btn:last-child {
+  border-radius: 0 calc(var(--radius-control) - 1px) calc(var(--radius-control) - 1px) 0;
 }
 
 .mobile-output-mode .ms-seg .ms-seg__btn + .ms-seg__btn {
