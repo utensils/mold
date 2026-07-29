@@ -131,12 +131,18 @@ const dragModel = computed({
   align-items: center;
   gap: 8px;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ms-rail::-webkit-scrollbar {
+  display: none;
 }
 
 .ms-rail__clips {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .ms-rail__item {
