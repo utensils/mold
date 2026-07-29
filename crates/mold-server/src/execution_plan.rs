@@ -3128,6 +3128,19 @@ pub fn freeze_chain_model(
         ModelPaths::resolve(model, config).ok_or_else(|| ExecutionPlanError::MissingArtifacts {
             model: model.to_string(),
         })?;
+    freeze_chain_model_with_paths(config, model, paths)
+}
+
+/// Freeze a model from the exact path resolution used at request admission.
+///
+/// Callers resolving opaque installed-catalog IDs must not repeat resolution
+/// from the base config: the effective overlay and these paths are one
+/// immutable authority snapshot.
+pub fn freeze_chain_model_with_paths(
+    config: &Config,
+    model: &str,
+    paths: ModelPaths,
+) -> Result<mold_core::chain_job::FrozenChainModel, ExecutionPlanError> {
     let canonical = |path: &std::path::Path| {
         std::fs::canonicalize(path)
             .map_err(|_| ExecutionPlanError::MissingArtifacts {

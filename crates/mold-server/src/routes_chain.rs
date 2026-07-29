@@ -24,20 +24,38 @@ use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 
 use crate::chain_job_runner::{ChainJobRunnerHandle, EphemeralClaimGuard};
+use crate::model_manager::ExistingModelAuthority;
 use crate::queue::save_video_to_dir;
 use crate::routes::{requested_sse_completion_payload, ApiError};
 use crate::state::{AppState, SseCompletionPayload};
 
-pub(crate) async fn freeze_chain_model(
+fn chain_freeze_error(model: &str, error: impl std::fmt::Display) -> ApiError {
+    ApiError::validation(format!(
+        "cannot freeze concrete chain model companions for '{model}': {error}"
+    ))
+}
+
+pub(crate) async fn resolve_chain_model_authority(
     state: &AppState,
     model: &str,
+) -> Result<ExistingModelAuthority, ApiError> {
+    let config = state.config.read().await.clone();
+    crate::model_manager::resolve_existing_model_authority(model, &config)
+        .map_err(|error| chain_freeze_error(model, error.error))?
+        .ok_or_else(|| {
+            chain_freeze_error(
+                model,
+                format!("model '{model}' has no concrete local artifact paths"),
+            )
+        })
+}
+
+pub(crate) fn freeze_chain_model(
+    authority: ExistingModelAuthority,
+    model: &str,
 ) -> Result<mold_core::chain_job::FrozenChainModel, ApiError> {
-    let config = state.config.read().await;
-    crate::execution_plan::freeze_chain_model(&config, model).map_err(|error| {
-        ApiError::validation(format!(
-            "cannot freeze concrete chain model companions for '{model}': {error}"
-        ))
-    })
+    crate::execution_plan::freeze_chain_model_with_paths(&authority.config, model, authority.paths)
+        .map_err(|error| chain_freeze_error(model, error))
 }
 
 /// Internal wire event used by the chain SSE stream before per-event
@@ -88,11 +106,13 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
     })?;
 
     let mut req = req;
-    validate_and_normalize_chain_family(state, &mut req).await?;
+    validate_chain_build_features(&req)?;
+    let authority = resolve_chain_model_authority(state, &req.model).await?;
+    validate_and_normalize_chain_family(&authority.config, &mut req)?;
     let mut req = req
         .normalise()
         .map_err(|e| ApiError::validation(e.to_string()))?;
-    validate_and_normalize_chain_family(state, &mut req).await?;
+    validate_and_normalize_chain_family(&authority.config, &mut req)?;
 
     let original_format = req.output_format;
     req.output_format = OutputFormat::Mp4;
@@ -105,7 +125,7 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
             ephemeral: true,
-            frozen_model: Some(freeze_chain_model(state, &req.model).await?),
+            frozen_model: Some(freeze_chain_model(authority, &req.model)?),
             request: req,
         },
     ) {
@@ -539,18 +559,22 @@ fn build_sse_chain_complete_event(
 /// chain generation. Mutates `req.motion_tail_frames` for families that lack
 /// latent context handoff (currently `ltx-video`) so the stitch layer doesn't
 /// trim independent fresh frames at Smooth boundaries.
-pub(crate) async fn validate_and_normalize_chain_family(
-    state: &AppState,
-    req: &mut ChainRequest,
-) -> Result<(), ApiError> {
+pub(crate) fn validate_chain_build_features(_req: &ChainRequest) -> Result<(), ApiError> {
     #[cfg(not(feature = "mp4"))]
-    if req.enable_audio == Some(true) {
+    if _req.enable_audio == Some(true) {
         return Err(ApiError::validation(
             "chain audio requires a mold build with the mp4 feature; rebuild with `--features mp4` or remove `enable_audio: true`",
         ));
     }
+    Ok(())
+}
 
-    let config = state.config.read().await;
+pub(crate) fn validate_and_normalize_chain_family(
+    config: &mold_core::Config,
+    req: &mut ChainRequest,
+) -> Result<(), ApiError> {
+    validate_chain_build_features(req)?;
+
     let resolved_model = config.resolved_model_config(&req.model);
     let canonical_model = mold_core::manifest::resolve_model_name(&req.model);
     let manifest = mold_core::manifest::find_manifest(&canonical_model);
@@ -1269,8 +1293,8 @@ mod tests {
         let mut request = req(OutputFormat::Mp4);
         request.model = "ltx-2.3-22b-dev:fp8".into();
 
-        let error = validate_and_normalize_chain_family(&state, &mut request)
-            .await
+        let config = state.config.read().await;
+        let error = validate_and_normalize_chain_family(&config, &mut request)
             .expect_err("two-stage LTX-2 must be rejected at the API boundary");
 
         assert!(error.error.contains("two-stage"));
