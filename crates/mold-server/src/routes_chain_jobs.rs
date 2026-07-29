@@ -1075,6 +1075,25 @@ mod tests {
         }
     }
 
+    async fn freezable_amend_request(state: &AppState, home: &std::path::Path) -> ChainRequest {
+        let transformer = home.join("amend-transformer.safetensors");
+        let vae = home.join("amend-vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        state.config.write().await.models.insert(
+            "route-chain-amend-test".into(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "route-chain-amend-test".into();
+        request
+    }
+
     #[tokio::test]
     async fn amend_chain_job_returns_202_with_preserved_stages_and_requeues() {
         let home = tempfile::tempdir().unwrap();
@@ -1083,17 +1102,18 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
 
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
 
         let mut events_rx = state.events.subscribe();
-        let mut stages = req(OutputFormat::Mp4).stages;
+        let mut stages = request.stages;
         stages.push(ChainStage {
             prompt: "appended clip".into(),
             frames: 9,
@@ -1138,10 +1158,11 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
@@ -1152,7 +1173,7 @@ mod tests {
             futures::executor::block_on(amend_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
-                Json(amend_body(req(OutputFormat::Mp4).stages)),
+                Json(amend_body(request.stages)),
             ))
         })
         .unwrap_err();
@@ -1207,15 +1228,16 @@ mod tests {
             db,
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let request = freezable_amend_request(&state, home.path()).await;
         let (_status, Json(created)) = with_mold_home(home.path(), || {
             futures::executor::block_on(create_chain_job(
                 State(state.clone()),
-                Json(req(OutputFormat::Mp4)),
+                Json(request.clone()),
             ))
         })
         .unwrap();
 
-        let mut stages = req(OutputFormat::Mp4).stages;
+        let mut stages = request.stages;
         stages[0].frames = 10; // not 8k+1
         let err = with_mold_home(home.path(), || {
             futures::executor::block_on(amend_chain_job(
