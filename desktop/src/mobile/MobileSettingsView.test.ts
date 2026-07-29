@@ -1,5 +1,6 @@
-import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../lib/api/client";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
 const { apiJsonTo, listQueueMock, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(
@@ -34,6 +35,10 @@ beforeEach(() => {
   listQueueMock.mockReset().mockResolvedValue({ entries: [], plan: null });
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   subscribeMock.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("MobileSettingsView", () => {
@@ -372,21 +377,258 @@ describe("MobileSettingsView", () => {
     await vi.waitFor(() => expect(subscribeMock).toHaveBeenCalledOnce());
     const refresh = subscribeMock.mock.calls[0]?.[2] as () => void;
     refresh();
+    older.resolve({ devices: [enabled], plan_version: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
     newer.resolve({ devices: [disabled], plan_version: 2 });
     await vi.waitFor(() =>
       expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable"),
     );
-    older.resolve({ devices: [enabled], plan_version: 1 });
-    await Promise.resolve();
-    await Promise.resolve();
 
     expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable");
   });
+
+  it("polls devices every five seconds when the SSE stream is absent or stops delivering", async () => {
+    vi.useFakeTimers();
+    const host = mobileHost("poll-host");
+    let deviceCalls = 0;
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return {
+          devices: [deviceWireForRace(deviceCalls === 1 ? "INITIAL GPU" : "POLLED GPU")],
+          plan_version: deviceCalls,
+        };
+      }
+      if (path === "/api/capabilities") return deviceCapabilities();
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+    expect(wrapper.text()).toContain("INITIAL GPU");
+
+    // The mocked stream never calls onOpen or emits an invalidation. Polling
+    // must still recover from an absent or subsequently dropped stream.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(deviceCalls).toBe(2);
+    expect(wrapper.text()).toContain("POLLED GPU");
+    wrapper.unmount();
+  });
+
+  it("surfaces a rejected device fetch and clears the error after a poll recovers", async () => {
+    vi.useFakeTimers();
+    const host = mobileHost("recovering-host");
+    let deviceCalls = 0;
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 1) {
+          throw new ApiError("device inventory crashed", 500);
+        }
+        return {
+          devices: [deviceWireForRace("RECOVERED GPU")],
+          plan_version: 2,
+        };
+      }
+      if (path === "/api/capabilities") return deviceCapabilities();
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+
+    const alert = wrapper.get("[role='alert']");
+    expect(alert.text()).toContain("Couldn’t refresh compute devices");
+    expect(alert.text()).toContain("device inventory crashed");
+    expect(alert.text()).toContain("try again automatically");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(wrapper.find("[role='alert']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("RECOVERED GPU");
+    wrapper.unmount();
+  });
+
+  it("keeps the deliberate older-server state quiet when capabilities omit the device API", async () => {
+    const host = mobileHost("legacy-host");
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") throw new ApiError("Not Found", 404);
+      if (path === "/api/capabilities") return {};
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+
+    expect(wrapper.find("[role='alert']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("coalesces overlapping poll and SSE refreshes", async () => {
+    vi.useFakeTimers();
+    const host = mobileHost("slow-host");
+    const slowPoll = deferred<unknown>();
+    let deviceCalls = 0;
+    apiJsonTo.mockImplementation((_target, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        if (deviceCalls === 1) {
+          return Promise.resolve({
+            devices: [deviceWireForRace("INITIAL GPU")],
+            plan_version: 1,
+          });
+        }
+        if (deviceCalls === 2) return slowPoll.promise;
+        return Promise.resolve({
+          devices: [deviceWireForRace("COALESCED GPU")],
+          plan_version: 3,
+        });
+      }
+      if (path === "/api/capabilities") return Promise.resolve(deviceCapabilities());
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+    const refresh = subscribeMock.mock.calls[0]?.[2] as () => void;
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    refresh();
+    refresh();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(deviceCalls).toBe(2);
+
+    slowPoll.resolve({
+      devices: [deviceWireForRace("SLOW GPU")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(deviceCalls).toBe(3);
+    await flushPromises();
+    expect(wrapper.text()).toContain("COALESCED GPU");
+    expect(wrapper.text()).not.toContain("SLOW GPU");
+    wrapper.unmount();
+  });
+
+  it("retargets polling on host identity changes and ignores stale-host results", async () => {
+    vi.useFakeTimers();
+    const first = mobileHost("first-host");
+    const second = {
+      ...mobileHost("second-host"),
+      baseUrl: "http://second-host.tailnet.ts.net:7680",
+      apiKey: "second-secret",
+    };
+    const stale = deferred<unknown>();
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/devices") {
+        if (target.baseUrl === first.baseUrl) return stale.promise;
+        return Promise.resolve({
+          devices: [deviceWireForRace("SECOND GPU")],
+          plan_version: 1,
+        });
+      }
+      if (path === "/api/capabilities") return Promise.resolve(deviceCapabilities());
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(first);
+    await flushPromises();
+    const firstSignal = subscribeMock.mock.calls[0]?.[1] as AbortSignal;
+
+    await wrapper.setProps({ host: second });
+    await flushPromises();
+    expect(firstSignal.aborted).toBe(true);
+    expect(wrapper.text()).toContain("SECOND GPU");
+
+    stale.resolve({
+      devices: [deviceWireForRace("STALE FIRST GPU")],
+      plan_version: 99,
+    });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("STALE FIRST GPU");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    const deviceTargets = apiJsonTo.mock.calls
+      .filter(([, path]) => path === "/api/devices")
+      .map(([target]) => target);
+    expect(deviceTargets.at(-1)).toEqual({
+      baseUrl: second.baseUrl,
+      apiKey: second.apiKey,
+    });
+    wrapper.unmount();
+  });
+
+  it("stops polling and suppresses an in-flight result after unmount", async () => {
+    vi.useFakeTimers();
+    const host = mobileHost("unmount-host");
+    const pending = deferred<unknown>();
+    let deviceCalls = 0;
+    apiJsonTo.mockImplementation((_target, path) => {
+      if (path === "/api/devices") {
+        deviceCalls += 1;
+        return pending.promise;
+      }
+      if (path === "/api/capabilities") return Promise.resolve(deviceCapabilities());
+      throw new Error(`unexpected ${path}`);
+    });
+
+    const wrapper = mountSettings(host);
+    await flushPromises();
+    const signal = subscribeMock.mock.calls[0]?.[1] as AbortSignal;
+    wrapper.unmount();
+
+    expect(signal.aborted).toBe(true);
+    pending.resolve({
+      devices: [deviceWireForRace("UNMOUNTED GPU")],
+      plan_version: 1,
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+
+    expect(deviceCalls).toBe(1);
+  });
 });
 
-function deviceWireForRace() {
+function mobileHost(id: string) {
   return {
-    id: "cuda:race",
+    id,
+    name: id,
+    baseUrl: `http://${id}:7680`,
+    apiKey: `${id}-secret`,
+    hostname: id,
+    version: "0.20.2",
+    online: true,
+  };
+}
+
+function mountSettings(host: ReturnType<typeof mobileHost>) {
+  return mount(MobileSettingsView, {
+    props: {
+      settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+      hostCount: 1,
+      appVersion: "0.20.2",
+      host,
+    },
+  });
+}
+
+function deviceCapabilities() {
+  return {
+    devices: { available: true, lifecycle: true, restart_enable: false },
+    dispatch: { active_mode: "v2", v2_authoritative: true },
+  };
+}
+
+function deviceWireForRace(name = "Race GPU") {
+  return {
+    id: `cuda:${name}`,
     backend: "cuda",
     ordinal: 0,
     device_kind: "full_gpu",
@@ -395,7 +637,7 @@ function deviceWireForRace() {
     mig_uuid: null,
     mig_parent_uuid: null,
     mig_profile: null,
-    name: "Race GPU",
+    name,
     pci_bus_id: null,
     compute_capability: "8.6",
     memory: {

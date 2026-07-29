@@ -53,6 +53,10 @@ const deviceMutations = ref(new Set<string>());
 const plan = ref<QueuePlan | null>(null);
 const deviceError = ref("");
 let deviceEventsAbort: AbortController | null = null;
+let devicePollTimer: ReturnType<typeof setTimeout> | null = null;
+let deviceRefreshPromise: Promise<void> | null = null;
+let deviceRefreshQueued = false;
+let deviceServicesEpoch = 0;
 let deviceRequestGeneration = 0;
 
 async function loadDevices(): Promise<void> {
@@ -68,28 +72,93 @@ async function loadDevices(): Promise<void> {
     props.host?.id === host.id &&
     props.host.baseUrl === host.baseUrl &&
     props.host.apiKey === host.apiKey;
-  try {
-    const target = mobileHostTarget(host);
-    const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
-      apiJsonTo<unknown>(target, "/api/devices"),
-      fetchServerCapabilities(target),
-      listQueue(target),
-    ]);
-    if (!isCurrent()) return;
-    plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
-    deviceCapabilities.value =
-      capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
-    devices.value =
-      deviceResult.status === "fulfilled"
-        ? parseDeviceListResponse(deviceResult.value).devices
-        : null;
-    deviceError.value = "";
-  } catch {
-    if (!isCurrent()) return;
-    // Older hosts do not expose runtime lifecycle controls.
-    devices.value = null;
-    deviceCapabilities.value = null;
+  const target = mobileHostTarget(host);
+  const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
+    apiJsonTo<unknown>(target, "/api/devices"),
+    fetchServerCapabilities(target),
+    listQueue(target),
+  ]);
+  if (!isCurrent()) return;
+
+  plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
+  deviceCapabilities.value =
+    capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+
+  let nextDevices: DeviceInfo[] | null = null;
+  let deviceFailure: unknown = null;
+  if (deviceResult.status === "fulfilled") {
+    try {
+      nextDevices = parseDeviceListResponse(deviceResult.value).devices;
+    } catch (error) {
+      deviceFailure = error;
+    }
+  } else {
+    deviceFailure = deviceResult.reason;
   }
+
+  if (deviceFailure === null) {
+    devices.value = nextDevices;
+    deviceError.value = "";
+    return;
+  }
+
+  // A fulfilled capabilities response is the compatibility authority. Hosts
+  // that predate the additive device API omit this group (and newer servers
+  // can explicitly report it unavailable), so their rejected endpoint remains
+  // a quiet legacy state. A failed capability request is uncertainty, not
+  // evidence that the host is old.
+  const legacyDeviceApi =
+    capabilityResult.status === "fulfilled" && capabilityResult.value.devices?.available !== true;
+  if (legacyDeviceApi) {
+    devices.value = null;
+    deviceError.value = "";
+    return;
+  }
+
+  const detail = describeTransportError(deviceFailure, host.name);
+  deviceError.value = `Couldn’t refresh compute devices. ${detail} Mold will try again automatically.`;
+}
+
+function requestDeviceRefresh(epoch = deviceServicesEpoch): Promise<void> {
+  if (epoch !== deviceServicesEpoch) return Promise.resolve();
+  if (deviceRefreshPromise) {
+    deviceRefreshQueued = true;
+    // Supersede the in-flight result immediately. The queued pass will publish
+    // the newest snapshot after the current request settles.
+    deviceRequestGeneration += 1;
+    return deviceRefreshPromise;
+  }
+
+  const refresh = (async () => {
+    do {
+      deviceRefreshQueued = false;
+      await loadDevices();
+    } while (deviceRefreshQueued && epoch === deviceServicesEpoch);
+  })();
+  deviceRefreshPromise = refresh;
+  return refresh.finally(() => {
+    if (deviceRefreshPromise === refresh) deviceRefreshPromise = null;
+  });
+}
+
+function scheduleDevicePoll(epoch: number): void {
+  if (epoch !== deviceServicesEpoch) return;
+  devicePollTimer = setTimeout(async () => {
+    devicePollTimer = null;
+    await requestDeviceRefresh(epoch);
+    scheduleDevicePoll(epoch);
+  }, 5_000);
+}
+
+function stopDeviceServices(): void {
+  deviceServicesEpoch += 1;
+  deviceRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
+  if (devicePollTimer) clearTimeout(devicePollTimer);
+  devicePollTimer = null;
+  deviceRefreshPromise = null;
+  deviceRefreshQueued = false;
 }
 
 async function toggleDevice(device: DeviceInfo): Promise<void> {
@@ -98,7 +167,7 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
     await setDeviceEnabled(mobileHostTarget(props.host), device.id, enabled);
-    await loadDevices();
+    await requestDeviceRefresh();
   } catch (error) {
     deviceError.value = describeTransportError(error, props.host.name);
   } finally {
@@ -118,7 +187,7 @@ async function unpinWork(workId: string): Promise<void> {
   if (!props.host) return;
   try {
     await setQueueDevicePin(mobileHostTarget(props.host), workId, null);
-    await loadDevices();
+    await requestDeviceRefresh();
   } catch (error) {
     deviceError.value = describeTransportError(error, props.host.name);
   }
@@ -127,28 +196,31 @@ async function unpinWork(workId: string): Promise<void> {
 watch(
   () => [props.host?.id, props.host?.baseUrl, props.host?.apiKey] as const,
   () => {
-    deviceEventsAbort?.abort();
-    deviceEventsAbort = null;
+    stopDeviceServices();
+    devices.value = null;
+    plan.value = null;
+    deviceCapabilities.value = null;
+    deviceError.value = "";
     if (!props.host) {
-      void loadDevices();
       return;
     }
+    const epoch = deviceServicesEpoch;
     // Do not make initial rendering depend on SSE support. The stream's
     // onOpen callback refetches again to close the subscribe/bootstrap gap.
-    void loadDevices();
+    void requestDeviceRefresh(epoch);
+    scheduleDevicePoll(epoch);
     deviceEventsAbort = new AbortController();
     subscribeToDeviceSnapshots(
       mobileHostTarget(props.host),
       deviceEventsAbort.signal,
-      () => void loadDevices(),
+      () => void requestDeviceRefresh(epoch),
     );
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
-  deviceRequestGeneration += 1;
-  deviceEventsAbort?.abort();
+  stopDeviceServices();
 });
 </script>
 
@@ -262,7 +334,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section
-      v-if="devices !== null || plan !== null"
+      v-if="devices !== null || plan !== null || deviceError"
       class="mobile-settings-section"
       aria-labelledby="mobile-settings-devices-title"
       data-test="mobile-settings-devices"
