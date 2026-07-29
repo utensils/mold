@@ -1014,6 +1014,7 @@ mod tests {
                 .collect(),
             finalizes: vec![],
             retakes: vec![],
+            amends: vec![],
             script: ChainScript::from(&request),
         }
     }

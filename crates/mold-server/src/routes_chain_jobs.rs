@@ -11,9 +11,9 @@ use axum::{
 use futures_core::Stream;
 use mold_core::chain::{ChainRequest, ChainScript};
 use mold_core::chain_job::{
-    settled, ChainJobDetail, ChainJobEvent, ChainJobListing, ChainJobManifest, ChainJobStageDetail,
-    ChainJobState, ChainJobSummary, CreateChainJobResponse, GcOutcome, JobDirLayout, RetakeRequest,
-    StageState,
+    settled, AmendRequest, AmendResponse, ChainJobDetail, ChainJobEvent, ChainJobListing,
+    ChainJobManifest, ChainJobStageDetail, ChainJobState, ChainJobSummary, CreateChainJobResponse,
+    GcOutcome, JobDirLayout, RetakeRequest, StageState,
 };
 use mold_db::chain_jobs::{self, ChainJobRow};
 use mold_db::MetadataDb;
@@ -407,6 +407,105 @@ pub async fn retake_chain_job(
     ))
 }
 
+/// 202 with the preserved-stage count. Accepts the FULL edited stage list
+/// (canonical order) plus optional chain-level overlays and requeues from
+/// the earliest genuinely-dirty stage; cached raw segments are reused.
+/// 409 CHAIN_JOB_RUNNING / CHAIN_JOB_EPHEMERAL; 422 on validation failure;
+/// 404 unknown.
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/{id}/amend",
+    tag = "chain-jobs",
+    params(("id" = String, Path, description = "Chain job id")),
+    request_body = mold_core::chain_job::AmendRequest,
+    responses(
+        (status = 202, description = "Amend queued", body = mold_core::chain_job::AmendResponse),
+        (status = 409, description = "Job running or ephemeral"),
+        (status = 422, description = "Amended request failed validation")
+    )
+)]
+pub async fn amend_chain_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AmendRequest>,
+) -> Result<(StatusCode, Json<AmendResponse>), ApiError> {
+    let handle = chain_jobs_handle(&state)?;
+    let db = metadata_db(&state)?;
+    let root = jobs_root()?;
+    let _guard = handle.lock_job(&id).await;
+
+    // Run the async create-time family/audio gate on the same candidate
+    // `apply_amend` will build (the sync gates — normalise + Mp4-only — run
+    // inside `apply_amend`). The gate may normalise chain-level fields (e.g.
+    // ltx-video forces motion_tail_frames to 0); carry that back into the
+    // amend overlays so the stored request matches what was validated.
+    let mut req = req;
+    {
+        let row = chain_jobs::get_job(db, &id)
+            .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
+            .ok_or_else(|| not_found(&id))?;
+        if row.state == ChainJobState::Running {
+            return Err(conflict(CHAIN_JOB_RUNNING, "chain job is running"));
+        }
+        if read_manifest_optional(&row, &root).is_some_and(|manifest| manifest.ephemeral) {
+            return Err(conflict(
+                CHAIN_JOB_EPHEMERAL,
+                "ephemeral chain jobs are internal to legacy generate/chain shims and cannot be amended",
+            ));
+        }
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+            .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+        let effective = crate::chain_job_runner::effective_request(&manifest)
+            .map_err(|e| ApiError::internal(format!("failed to load chain request: {e:#}")))?;
+        let mut candidate = crate::chain_job_runner::amend_candidate_request(&effective, &req);
+        let motion_tail_before = candidate.motion_tail_frames;
+        crate::routes_chain::validate_and_normalize_chain_family(&state, &mut candidate).await?;
+        if candidate.motion_tail_frames != motion_tail_before {
+            req.motion_tail_frames = Some(candidate.motion_tail_frames);
+        }
+    }
+
+    let (updated, preserved_stages) = crate::chain_job_runner::apply_amend(db, &root, &id, &req)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains(crate::chain_job_runner::CHAIN_JOB_AMEND_INVALID) {
+                ApiError::validation(msg.replace(
+                    &format!("{}: ", crate::chain_job_runner::CHAIN_JOB_AMEND_INVALID),
+                    "",
+                ))
+            } else if msg.contains("not found") {
+                not_found(&id)
+            } else if msg.contains(CHAIN_JOB_RUNNING) {
+                conflict(CHAIN_JOB_RUNNING, "chain job is running")
+            } else if msg.contains(CHAIN_JOB_EPHEMERAL) {
+                conflict(
+                    CHAIN_JOB_EPHEMERAL,
+                    "ephemeral chain jobs cannot be amended",
+                )
+            } else if msg.contains("not amendable") {
+                conflict("CHAIN_JOB_NOT_AMENDABLE", msg)
+            } else {
+                ApiError::internal(format!("failed to apply amend: {msg}"))
+            }
+        })?;
+    handle.kick();
+    state
+        .events
+        .publish(mold_core::ServerEvent::ChainJobQueued {
+            id: id.clone(),
+            model: updated.model.clone(),
+            stage_count: updated.stage_count,
+        });
+    let summary = summary_for_row(&updated, read_manifest_optional(&updated, &root).as_ref());
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AmendResponse {
+            summary,
+            preserved_stages,
+        }),
+    ))
+}
+
 /// 202, idempotent.
 #[utoipa::path(
     post,
@@ -596,6 +695,7 @@ pub(crate) fn job_detail_for(
         stages,
         finalizes: manifest.finalizes.clone(),
         retakes: manifest.retakes.clone(),
+        amends: manifest.amends.clone(),
         script: ChainScript::from(&effective),
     }))
 }
@@ -955,6 +1055,173 @@ mod tests {
             futures::executor::block_on(create_chain_job(
                 State(state),
                 Json(req(OutputFormat::Apng)),
+            ))
+        })
+        .unwrap_err();
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    fn amend_body(stages: Vec<ChainStage>) -> AmendRequest {
+        AmendRequest {
+            stages,
+            motion_tail_frames: None,
+            fps: None,
+            seed: None,
+            steps: None,
+            guidance: None,
+            enable_audio: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn amend_chain_job_returns_202_with_preserved_stages_and_requeues() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                Json(req(OutputFormat::Mp4)),
+            ))
+        })
+        .unwrap();
+
+        let mut events_rx = state.events.subscribe();
+        let mut stages = req(OutputFormat::Mp4).stages;
+        stages.push(ChainStage {
+            prompt: "appended clip".into(),
+            frames: 9,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Cut,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        });
+        let (status, Json(body)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(amend_chain_job(
+                State(state.clone()),
+                Path(created.job_id.clone()),
+                Json(amend_body(stages)),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            body.preserved_stages, 0,
+            "no leading completed stages on a queued job"
+        );
+        assert_eq!(body.summary.state, ChainJobState::Queued);
+        assert_eq!(body.summary.stage_count, 2);
+
+        let event = events_rx.try_recv().expect("chain_job_queued published");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "chain_job_queued");
+        assert_eq!(wire["id"], created.job_id.as_str());
+        assert_eq!(wire["stage_count"].as_u64(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn amend_running_job_returns_409() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                Json(req(OutputFormat::Mp4)),
+            ))
+        })
+        .unwrap();
+        let db_ref = db.as_ref().as_ref().unwrap();
+        assert!(chain_jobs::claim_job(db_ref, &created.job_id).unwrap());
+
+        let err = with_mold_home(home.path(), || {
+            futures::executor::block_on(amend_chain_job(
+                State(state.clone()),
+                Path(created.job_id.clone()),
+                Json(amend_body(req(OutputFormat::Mp4).stages)),
+            ))
+        })
+        .unwrap_err();
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn amend_ephemeral_job_returns_409() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let job_id = "01JBR55EPHAMEND";
+        with_mold_home(home.path(), || {
+            let jobs_root = home.path().join("jobs");
+            let db_ref = db.as_ref().as_ref().unwrap();
+            crate::chain_job_runner::create_job_with_params(
+                db_ref,
+                &jobs_root,
+                crate::chain_job_runner::CreateJobParams {
+                    id: job_id.into(),
+                    ephemeral: true,
+                    frozen_model: None,
+                    request: req(OutputFormat::Mp4).normalise().unwrap(),
+                },
+            )
+            .unwrap();
+        });
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        let err = with_mold_home(home.path(), || {
+            futures::executor::block_on(amend_chain_job(
+                State(state.clone()),
+                Path(job_id.to_string()),
+                Json(amend_body(req(OutputFormat::Mp4).stages)),
+            ))
+        })
+        .unwrap_err();
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn amend_with_invalid_stages_returns_422() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                Json(req(OutputFormat::Mp4)),
+            ))
+        })
+        .unwrap();
+
+        let mut stages = req(OutputFormat::Mp4).stages;
+        stages[0].frames = 10; // not 8k+1
+        let err = with_mold_home(home.path(), || {
+            futures::executor::block_on(amend_chain_job(
+                State(state.clone()),
+                Path(created.job_id.clone()),
+                Json(amend_body(stages)),
             ))
         })
         .unwrap_err();

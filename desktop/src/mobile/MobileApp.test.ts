@@ -91,6 +91,7 @@ import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
 import { ApiError } from "../lib/api/client";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 installMemoryLocalStorage();
 
@@ -381,6 +382,383 @@ describe("MobileApp sequence generation", () => {
       "The exact machine for this saved sequence is no longer available.",
     );
     expect(apiJsonTo).not.toHaveBeenCalledWith(expect.anything(), "/api/chain-jobs/saved-sequence");
+  });
+});
+
+describe("MobileApp Output field", () => {
+  const sequenceModel: ModelEntry = {
+    ...model,
+    name: "ltx-video-0.9.8-2b-distilled:bf16",
+    family: "ltx-video",
+    default_steps: 7,
+    default_guidance: 1,
+    default_width: 704,
+    default_height: 480,
+    default_frames: 25,
+    default_fps: 30,
+  };
+
+  function installModels(entries: ModelEntry[]): void {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve(entries);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+          supports_sequence: true,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  function outputSegment(label: string): DOMWrapper<Element> {
+    const button = wrapper
+      ?.get("[data-test='mobile-output-mode']")
+      .findAll("button")
+      .find((candidate) => candidate.text() === label);
+    if (!button) throw new Error(`Missing ${label} output segment`);
+    return button;
+  }
+
+  async function composeTwoClips(): Promise<void> {
+    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("a paper boat");
+    await prompts[1]!.setValue("fireflies gather");
+  }
+
+  it("replaces the Single | Sequence mode pair with an Output field above the model", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    // The old radiogroup pinned above the form is gone for good.
+    expect(wrapper.find("[data-test='mobile-create-mode']").exists()).toBe(false);
+
+    const output = wrapper.get("[data-test='mobile-output-mode']");
+    const modelField = wrapper
+      .findAll("label.field")
+      .find((field) => field.find("span").text() === "Model")!;
+    expect(
+      output.element.compareDocumentPosition(modelField.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(output.text()).toContain("One shot");
+    expect(output.text()).toContain("Sequence");
+    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(false);
+  });
+
+  it("migrates the legacy create-mode key into the shared draft and retires it", async () => {
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(true);
+    expect(outputSegment("Sequence").attributes("aria-checked")).toBe("true");
+    expect(localStorage.getItem("mold.mobile.create-mode.v1")).toBeNull();
+  });
+
+  it("carries the prompt between One shot and Sequence instead of losing it", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a paper boat crosses a moonlit pond");
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+
+    const clipPrompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
+    expect((clipPrompts[0]!.element as HTMLTextAreaElement).value).toBe(
+      "a paper boat crosses a moonlit pond",
+    );
+
+    await clipPrompts[0]!.setValue("a paper boat under fireflies");
+    await outputSegment("One shot").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a paper boat under fireflies",
+    );
+  });
+
+  it("narrows the picker to chain-capable models and restores the single pick on the way back", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(model.name);
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+
+    const picker = fieldControl("Video model");
+    const options = picker.findAll("option").map((option) => option.attributes("value"));
+    expect(options).toEqual([sequenceModel.name]);
+    expect((picker.element as HTMLSelectElement).value).toBe(sequenceModel.name);
+
+    await outputSegment("One shot").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(model.name);
+  });
+
+  it("guides to Video + Models in Discover when no chain-capable model is installed", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
+      if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.reject(new Error("not a chain model"));
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(false);
+    const empty = wrapper.get("[data-test='mobile-sequence-empty']");
+    expect(empty.text()).toContain("Sequences need a video model");
+
+    // Browsing must LAND on the filtered Discover shelf, not just switch tabs.
+    await empty.get("[data-test='mobile-sequence-browse']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
+    const media = wrapper
+      .get(".mobile-catalog-media")
+      .findAll("button")
+      .find((button) => button.text() === "Video")!;
+    expect(media.attributes("aria-pressed")).toBe("true");
+    const kinds = wrapper.get("[data-test='mobile-catalog-kind-chips']");
+    const checkpoints = kinds.findAll("button").find((button) => button.text() === "Models")!;
+    expect(checkpoints.attributes("aria-pressed")).toBe("true");
+  });
+
+  it("reads the selected model's fps into the shared params, not a generic 24", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+
+    expect(
+      (wrapper.get("[data-test='mobile-sequence-fps'] input").element as HTMLInputElement).value,
+    ).toBe("30");
+    expect(wrapper.get("[data-test='mobile-sequence-duration']").text()).toContain("@ 30fps");
+  });
+
+  it("submits the sequence with the form's live shared params, not composer copies", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+
+    await composeTwoClips();
+    // The shared params are the ONLY copy — editing them here is exactly what
+    // the outgoing chain request must carry.
+    await fieldControl("Steps").setValue(11);
+    await fieldControl("Guidance").setValue(2.5);
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const post = apiJsonTo.mock.calls.find(
+      (call: unknown[]) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method,
+    );
+    const body = JSON.parse((post?.[2] as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.model).toBe(sequenceModel.name);
+    expect(body.steps).toBe(11);
+    expect(body.guidance).toBe(2.5);
+    expect(body.width).toBe(sequenceModel.default_width);
+    expect(body.height).toBe(sequenceModel.default_height);
+    // The model's own fps, not the generic 24-fps form fallback.
+    expect(body.fps).toBe(sequenceModel.default_fps);
+    // LTX-Video carries no motion tail, so its seams are plain joins.
+    expect(body.motion_tail_frames).toBe(0);
+    expect(body.stages).toEqual([
+      { prompt: "a paper boat", frames: 25, transition: "smooth" },
+      { prompt: "fireflies gather", frames: 25, transition: "smooth" },
+    ]);
+
+    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
+    expect(JSON.parse(recovery ?? "null")).toEqual({
+      hostId: "studio-id",
+      baseUrl: target.baseUrl,
+      instanceId: "studio-id",
+      jobId: "sequence-job-1",
+    });
+    expect(recovery).not.toContain(target.apiKey);
+  });
+
+  it("watches the durable job over SSE on the frozen route and shows it in the one queue", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+    await composeTwoClips();
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const events = openStreams.find(
+      (stream) => stream.path === "/api/chain-jobs/sequence-job-1/events",
+    );
+    if (!events) throw new Error("The sequence event stream never opened");
+    expect((events.options as { target?: unknown }).target).toEqual(target);
+
+    events.options.onEvent(
+      "message",
+      JSON.stringify({
+        type: "snapshot",
+        job: {
+          id: "sequence-job-1",
+          state: "running",
+          model: sequenceModel.name,
+          stage_count: 2,
+          current_stage: 0,
+          created_at_unix_ms: 1_700_000_000_000,
+          updated_at_unix_ms: 1_700_000_000_000,
+          error: null,
+          stages: [
+            { idx: 0, state: "running" },
+            { idx: 1, state: "pending" },
+          ],
+        },
+      }),
+    );
+    events.options.onEvent(
+      "message",
+      JSON.stringify({ type: "denoise_step", stage_idx: 0, step: 4, total: 8 }),
+    );
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='mobile-sequence-job']");
+    expect(row.text()).toContain("2 clips");
+    expect(row.text()).toContain("running");
+    expect(row.text()).toContain("clip 1/2");
+    expect(row.text()).toContain("50%");
+    // Sequences and prints share ONE queue list.
+    expect(wrapper.get("[data-test='mobile-generation-queue']").element.contains(row.element)).toBe(
+      true,
+    );
+
+    await row.get("[data-test='mobile-sequence-cancel']").trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/cancel", {
+      method: "POST",
+    });
+  });
+
+  it("offers Resume and Dismiss once the durable job settles", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+    await composeTwoClips();
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    const events = openStreams.find(
+      (stream) => stream.path === "/api/chain-jobs/sequence-job-1/events",
+    )!;
+    events.options.onEvent(
+      "message",
+      JSON.stringify({
+        type: "snapshot",
+        job: {
+          id: "sequence-job-1",
+          state: "interrupted",
+          model: sequenceModel.name,
+          stage_count: 2,
+          current_stage: 1,
+          created_at_unix_ms: 1_700_000_000_000,
+          updated_at_unix_ms: 1_700_000_000_000,
+          error: "CUDA_ERROR_OUT_OF_MEMORY",
+          stages: [
+            { idx: 0, state: "completed" },
+            { idx: 1, state: "failed" },
+          ],
+        },
+      }),
+    );
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='mobile-sequence-job']");
+    expect(row.text()).toContain("needs more GPU memory");
+    expect(row.find("[data-test='mobile-sequence-cancel']").exists()).toBe(false);
+    expect(row.find("[data-test='mobile-sequence-dismiss']").exists()).toBe(true);
+    // The row survives for its actions, but a settled job is not active work.
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("0 active");
+    // A settled job has nothing left to stream.
+    expect(events.options.signal.aborted).toBe(true);
+    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
+
+    await row.get("[data-test='mobile-sequence-resume']").trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/resume", {
+      method: "POST",
+    });
+    // Resuming re-attaches on the SAME frozen route and re-arms recovery.
+    const resumed = wrapper.get("[data-test='mobile-sequence-job']");
+    expect(resumed.find("[data-test='mobile-sequence-cancel']").exists()).toBe(true);
+    expect(JSON.parse(localStorage.getItem("mold.mobile.sequence-job.v1") ?? "null")).toEqual({
+      hostId: "studio-id",
+      baseUrl: target.baseUrl,
+      instanceId: "studio-id",
+      jobId: "sequence-job-1",
+    });
+    const resumedStream = openStreams
+      .filter((stream) => stream.path === "/api/chain-jobs/sequence-job-1/events")
+      .at(-1)!;
+    expect(resumedStream).not.toBe(events);
+    resumedStream.options.onEvent(
+      "message",
+      JSON.stringify({
+        type: "snapshot",
+        job: {
+          id: "sequence-job-1",
+          state: "cancelled",
+          model: sequenceModel.name,
+          stage_count: 2,
+          current_stage: 1,
+          created_at_unix_ms: 1_700_000_000_000,
+          updated_at_unix_ms: 1_700_000_000_100,
+          error: null,
+          stages: [
+            { idx: 0, state: "completed" },
+            { idx: 1, state: "pending" },
+          ],
+        },
+      }),
+    );
+    await flushPromises();
+
+    await wrapper
+      .get("[data-test='mobile-sequence-job'] [data-test='mobile-sequence-dismiss']")
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-sequence-job']").exists()).toBe(false);
   });
 });
 
@@ -3625,6 +4003,79 @@ describe("MobileApp gallery", () => {
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
     expect(wrapper.get("[role='alert']").text()).toContain("Couldn’t load models from Remote");
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+  });
+
+  it("reuses a sequence print as a clip rail on the Create tab", async () => {
+    // iPhone gets Reuse only: the rail reloads from `metadata.chain`, no edit
+    // session, and the composer lands on Create with clip 1's prompt (never
+    // the newline join the print records as `metadata.prompt`).
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      supports_sequence: true,
+    } as ModelEntry;
+    const sequencePrint: GalleryImage = {
+      ...print,
+      filename: "sequence.mp4",
+      metadata: {
+        ...print.metadata,
+        model: sequenceModel.name,
+        prompt: "a harbour at dawn\nthe boats leave",
+        chain_job_id: "job-9",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 0,
+          stages: [
+            { prompt: "a harbour at dawn", frames: 25, transition: "smooth" },
+            { prompt: "the boats leave", frames: 33, transition: "cut" },
+          ],
+        },
+      },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([sequencePrint]);
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const pinia = createPinia();
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    const draft = useSequenceDraftStore(pinia);
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
+      "a harbour at dawn",
+      "the boats leave",
+    ]);
+    expect(draft.editing).toBeNull();
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {

@@ -1,25 +1,39 @@
 /**
  * `mold.chain.v1` TOML ↔ [`ChainScript`] for every surface's Import/Export
- * .toml file tools. Field names match the canonical files `mold run
- * --script` reads (top-level `schema`, one `[chain]` table, `[[stage]]`
- * tables), so old exports keep importing and new exports keep running.
+ * .toml file tools (desktop, web, and iPhone). Field names match the
+ * canonical files `mold run --script` reads (top-level `schema`, one
+ * `[chain]` table, `[[stage]]` tables — `stage` is serde's rename of the
+ * Rust `stages` field), so old exports keep importing and new exports keep
+ * running.
  *
  * Two Rust-side constraints shape this module:
  * - mold-core's `ChainScriptChain` has NO serde defaults — `strength` and
  *   `output_format` (which the studio `ChainScript` doesn't carry) must
- *   still be emitted or the CLI rejects the file.
- * - Seeds are u64; they ride as decimal strings in TS and are emitted as
- *   bare TOML integers via BigInt so no precision is lost either way.
+ *   still be emitted or the CLI rejects the file. Writing is hand-rolled
+ *   rather than smol-toml `stringify`, which collapses `1.0` to the integer
+ *   `1` and would trip mold-core's f64 fields.
+ * - Seeds are u64. They ride as decimal strings in TS
+ *   ([`ChainScriptChain.seed`]) because u64 exceeds `Number`'s safe range,
+ *   and cross the TOML boundary as bare integers via `BigInt`, so no
+ *   precision is lost in either direction.
  */
 
 import { parse as parseToml } from "smol-toml";
 import type { ChainScript, ChainScriptStage } from "./api/chainTypes";
 import type { SequenceTransition } from "./sequence";
 
-const SCHEMA = "mold.chain.v1";
+export const CHAIN_SCHEMA = "mold.chain.v1";
 
+/**
+ * TOML integer/float → `number`. `integersAsBigInt: "asNeeded"` only
+ * promotes values past `Number.MAX_SAFE_INTEGER`, so the bigint branch only
+ * fires on absurd (but parseable) documents — clamping to a finite number
+ * beats silently dropping the field.
+ */
 function num(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "bigint") return Number(v);
+  return undefined;
 }
 
 function str(v: unknown): string | undefined {
@@ -53,22 +67,25 @@ function tomlFloat(n: number): string {
   return Number.isInteger(n) ? `${n}.0` : String(n);
 }
 
+/** Decimal-string (or numeric) seed → bare TOML integer, u64-exact. */
+function tomlInt(value: string | number): string {
+  return BigInt(value).toString();
+}
+
 /**
- * Serialize a studio `ChainScript` to canonical `mold.chain.v1` TOML.
- * Hand-rolled writer (not smol-toml `stringify`, which collapses `1.0` to
- * the integer `1` and would trip mold-core's f64 fields), omitting fields
- * that are null/undefined.
+ * Serialize a studio `ChainScript` to canonical `mold.chain.v1` TOML,
+ * omitting fields that are null/undefined.
  */
 export function serializeChainScript(
   script: ChainScript & { chain: { strength?: number; output_format?: string } },
 ): string {
   const c = script.chain;
-  const lines: string[] = [`schema = ${tomlString(SCHEMA)}`, "", "[chain]"];
+  const lines: string[] = [`schema = ${tomlString(CHAIN_SCHEMA)}`, "", "[chain]"];
   lines.push(`model = ${tomlString(c.model)}`);
   if (c.width != null) lines.push(`width = ${c.width}`);
   if (c.height != null) lines.push(`height = ${c.height}`);
   if (c.fps != null) lines.push(`fps = ${c.fps}`);
-  if (c.seed != null) lines.push(`seed = ${BigInt(c.seed)}`);
+  if (c.seed != null) lines.push(`seed = ${tomlInt(c.seed)}`);
   if (c.steps != null) lines.push(`steps = ${c.steps}`);
   if (c.guidance != null) lines.push(`guidance = ${tomlFloat(c.guidance)}`);
   lines.push(`strength = ${tomlFloat(c.strength ?? 1.0)}`);
@@ -90,7 +107,7 @@ export function serializeChainScript(
     if (stage.source_image_b64) {
       lines.push(`source_image_b64 = ${tomlString(stage.source_image_b64)}`);
     }
-    if (stage.seed_offset != null) lines.push(`seed_offset = ${BigInt(stage.seed_offset)}`);
+    if (stage.seed_offset != null) lines.push(`seed_offset = ${tomlInt(stage.seed_offset)}`);
   }
 
   return `${lines.join("\n")}\n`;
@@ -141,15 +158,18 @@ export function parseChainScript(text: string): ChainScript {
   }
 
   const schema = doc.schema;
-  if (schema != null && schema !== SCHEMA) {
-    throw new Error(`Unsupported chain schema "${String(schema)}" (expected ${SCHEMA}).`);
+  if (schema != null && schema !== CHAIN_SCHEMA) {
+    throw new Error(`Unsupported chain schema "${String(schema)}" (expected ${CHAIN_SCHEMA}).`);
   }
   const chain = doc.chain;
   if (chain == null || typeof chain !== "object") {
     throw new Error("Chain TOML is missing its [chain] table.");
   }
   const c = chain as Record<string, unknown>;
-  const rawStages = Array.isArray(doc.stage) ? (doc.stage as Record<string, unknown>[]) : [];
+  // The canonical key is `stage` (Rust serde rename); the natural plural is
+  // accepted too so hand-written documents open.
+  const stageTables = doc.stage ?? doc.stages;
+  const rawStages = Array.isArray(stageTables) ? (stageTables as Record<string, unknown>[]) : [];
   if (rawStages.length === 0) {
     throw new Error("Chain TOML is missing its [[stage]] entries.");
   }
@@ -173,7 +193,7 @@ export function parseChainScript(text: string): ChainScript {
   });
 
   const script: ChainScript = {
-    schema: SCHEMA,
+    schema: CHAIN_SCHEMA,
     chain: { model: str(c.model) ?? "" },
     stages,
   };

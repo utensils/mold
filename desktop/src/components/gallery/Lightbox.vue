@@ -31,10 +31,32 @@ const props = withDefaults(
     /** Origin host's friendly name for the metadata block. */
     hostLabel?: string | null;
     canReveal?: boolean;
+    /** This print was stitched from a sequence (`metadata.chain` present), so
+     *  reuse loads a clip rail instead of the One shot composer. */
+    isSequence?: boolean;
+    /** The producing job is (as far as we know without probing) still on its
+     *  origin host — see `sequenceEditAvailability`. */
+    canEditSequence?: boolean;
   }>(),
-  { source: "host", target: null, cacheKey: null, hostLabel: null, canReveal: false },
+  {
+    source: "host",
+    target: null,
+    cacheKey: null,
+    hostLabel: null,
+    canReveal: false,
+    isSequence: false,
+    canEditSequence: false,
+  },
 );
-const emit = defineEmits<{ close: []; prev: []; next: []; delete: []; useSource: [] }>();
+const emit = defineEmits<{
+  close: [];
+  prev: [];
+  next: [];
+  delete: [];
+  useSource: [];
+  reuseSequence: [];
+  editSequence: [];
+}>();
 
 const router = useRouter();
 const composer = useComposerStore();
@@ -94,6 +116,12 @@ const when = computed(() =>
 );
 
 function reuseSettings() {
+  // One button, sequence-aware: the print already knows what it is, so asking
+  // the user which kind of reuse they meant would be a shrug in button form.
+  if (props.isSequence) {
+    emit("reuseSequence");
+    return;
+  }
   // Ship the full metadata — `applyPrefillToForm` restores every serialized
   // knob (negative prompt, LoRA stack, scheduler, strength, video params, …)
   // and prefers the pre-upscale generation canvas over the raster size.
@@ -390,6 +418,15 @@ async function saveMedia() {
         >
           <Icon name="reuse" :size="15" />
           Reuse these settings
+        </button>
+        <button
+          v-if="canEditSequence"
+          type="button"
+          data-test="lightbox-edit-sequence"
+          class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+          @click="emit('editSequence')"
+        >
+          Edit sequence
         </button>
         <div class="mt-2.5 flex gap-2.5">
           <button

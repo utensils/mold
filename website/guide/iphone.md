@@ -68,7 +68,9 @@ The mobile composer includes:
 - scheduler, CFG++, steps, guidance, output format, and post-generation
   upscaling where the selected family supports them;
 - validated video frames/FPS, audio, camera motion, source media, keyframes,
-  retake, and LTX-2 pipeline/spatial/temporal controls; and
+  retake, and LTX-2 pipeline/spatial/temporal controls;
+- an **Output** field (One shot | Sequence) above the model field that turns
+  the composer into a multi-clip sequence; and
 - a host-aware memory estimate before submission.
 
 For video-only LTX-2 community checkpoints, **Generate audio** is disabled with
@@ -146,7 +148,12 @@ iPhone and desktop.
 
 Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies
-the compatible fallback and removes non-portable adapter/component choices.
+the compatible fallback and removes non-portable adapter/component choices. On
+a print a sequence produced, **Use as prompt** instead reloads its recorded
+clips onto the Create clip rail as a new sequence — saying how many it restored
+and naming anything a print does not record — and substitutes a
+sequence-capable model when needed. Re-entering the original durable job
+(**Edit sequence**) is a desktop and web action.
 
 Authenticated hosts issue a short-lived read-only media ticket for the selected
 file. The app never puts a long-lived API key in a video URL or buffers an
@@ -242,17 +249,24 @@ mobile `index.html`, Mold icon catalog, native archive, App Store Connect
 processing, and internal tester access before it is considered complete.
 
 The iPhone app focuses on remote Create, Library, Models, Machines, and
-appearance settings. Create includes a guided **Sequence** mode for compatible
-installed video models: start with two clips, describe each shot, choose the
-duration, and generate while Mold keeps progress and cancellation attached to
-the exact host. An interrupted sequence can reconnect after relaunch without
-storing the host API key outside the Keychain; if the saved server identity
-cannot be verified, Mold discards the recovery record instead of attaching to
-an unproven machine. LTX-Video joins independent clips without a motion tail,
-while LTX-2 offers only durations longer than its continuation overlap. Use desktop or the CLI for a
-local engine, the TOML chain editor and full jobs-administration workspace,
-RunPod provisioning, engine configuration, and desktop Stable/Nightly
-self-update controls.
+appearance settings. Multi-clip video is a setting inside Create, not a
+separate screen: set **Output** to **Sequence** and the composer becomes a clip
+list, narrowed to compatible installed video models and sharing one set of
+size, FPS, steps, guidance, and seed fields with One shot. Start with two
+clips, describe each shot, choose the duration, and generate while Mold keeps
+progress and cancellation attached to the exact host — sequences share one
+queue list with single prints. Between clips, a seam control opens a sheet
+naming the transition in words (**Smooth**, **Cut**, **Fade**) with the
+fade-length stepper. New clips take their frame count from the selected model's
+own advertised default. An interrupted sequence can reconnect after relaunch
+without storing the host API key outside the Keychain; if the saved server
+identity cannot be verified, Mold discards the recovery record instead of
+attaching to an unproven machine. LTX-Video joins independent clips without a
+motion tail and labels its seams **Join clips**, while LTX-2 offers only
+durations longer than its continuation overlap. Use desktop or the CLI for a
+local engine, in-place sequence editing and the Sequences history tab, the TOML
+chain editor and full jobs-administration workspace, RunPod provisioning,
+engine configuration, and desktop Stable/Nightly self-update controls.
 
 For server networking and deployment options, continue with
 [Remote Workflows](/guide/remote-workflows). For supported model-family

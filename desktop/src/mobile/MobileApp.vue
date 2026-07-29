@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -8,7 +17,13 @@ import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
-import { modelSupportsSequence } from "@studio/lib/sequence";
+import {
+  defaultClipFrames,
+  modelsForOutput,
+  modelSupportsSequence,
+  sequenceMotionTailFrames,
+  type OutputMode,
+} from "@studio/lib/sequence";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
@@ -16,13 +31,17 @@ import {
   previewRequestForSiblingFanout,
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
+import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
+import { buildChainRequest } from "@studio/lib/sequenceForm";
+import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   CompleteEvent,
-  ChainJobDetail,
-  ChainRequest,
   CreateChainJobResponse,
   DownloadJob,
   ExpandCapabilities,
@@ -78,6 +97,7 @@ import {
   type PreparedExpansionInputs,
   type QuickExpansionSnapshot,
 } from "../lib/preparedExpansion";
+import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
@@ -110,10 +130,9 @@ import MobileHostDetail from "./MobileHostDetail.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
-import MobileResolutionPicker from "./MobileResolutionPicker.vue";
-import MobileSeedPicker from "./MobileSeedPicker.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
+import MobileSharedParams from "./MobileSharedParams.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
@@ -129,9 +148,22 @@ import {
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
 import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
+import { watchChainJob, type SequenceWatchHandle } from "./sequenceWatch";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
-type CreateMode = "single" | "sequence";
+
+/** Deep-link payload for the Discover shelf; `token` re-fires the intent even
+ *  when the (KeepAlive-cached) catalog is asked for the same filters twice. */
+interface CatalogFilterIntent {
+  mediaType: "all" | "image" | "video";
+  kind: "checkpoint" | "";
+  token: number;
+}
+
+/** One queue row, already resolved to the print or sequence it renders. */
+type ActivityRow =
+  | { key: string; print: Job; sequence: null }
+  | { key: string; print: null; sequence: Extract<ActivityJobVM, { kind: "sequence" }> };
 
 interface DiscoveredHost {
   name: string;
@@ -169,12 +201,18 @@ const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
 const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
-const CREATE_MODE_KEY = "mold.mobile.create-mode.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
+const OUTPUT_OPTIONS = [
+  { value: "single" as const, label: "One shot" },
+  { value: "sequence" as const, label: "Sequence" },
+];
 const tab = ref<Tab>("generate");
-const savedCreateMode = localStorage.getItem(CREATE_MODE_KEY);
-const createMode = ref<CreateMode>(savedCreateMode === "sequence" ? "sequence" : "single");
+// Output is a setting of Create, not a place. The store hydrates here (before
+// first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
+// the shared draft and existing installs land back in Sequence.
+const draft = useSequenceDraftStore();
+draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
@@ -184,6 +222,8 @@ const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current buil
 const hosts = ref<MobileHost[]>(loadHosts());
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? hosts.value[0]?.id ?? "");
 const catalogHostId = ref(selectedHostId.value || hosts.value[0]?.id || "");
+const catalogFilterIntent = ref<CatalogFilterIntent | null>(null);
+let catalogIntentToken = 0;
 const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
@@ -196,8 +236,16 @@ const modelLoadError = ref("");
 const sequenceJob = ref<ChainJobDetail | null>(null);
 const sequenceStarting = ref(false);
 const sequenceError = ref("");
-let sequencePollTimer: ReturnType<typeof setInterval> | null = null;
-let sequenceRoute: { hostId: string; target: ApiTarget } | null = null;
+const sequenceProgress = ref<{ step: number; total: number } | null>(null);
+const chainLimits = ref<ChainLimits | null>(null);
+/**
+ * The frozen route the durable job was created on. Identity IS the staleness
+ * guard, so this must be a `shallowRef`: a plain `ref` hands back a reactive
+ * proxy and every `sequenceRoute.value !== route` check would fire against a
+ * live watch, silently dropping its own events.
+ */
+const sequenceRoute = shallowRef<{ hostId: string; target: ApiTarget } | null>(null);
+let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const form = reactive<GenerateForm>(newGenerateForm());
 const seedValid = ref(true);
@@ -445,8 +493,16 @@ const quickStaleReasons = computed(() => {
 const generationModels = computed(() =>
   models.value.filter((model) => model.downloaded && isGenerationModel(model)),
 );
-const sequenceModels = computed(() =>
-  generationModels.value.filter((model) => modelSupportsSequence(model)),
+const isSequence = computed(() => draft.output === "sequence");
+const sequenceModels = computed(() => modelsForOutput(generationModels.value, "sequence"));
+/** Sequence output narrows the picker to chain-capable video models. */
+const pickerModels = computed(() => modelsForOutput(generationModels.value, draft.output));
+const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedGenerationModel.value));
+const sequenceDefaultFrames = computed(() =>
+  defaultClipFrames(selectedGenerationModel.value, chainLimits.value, sequenceMotionTail.value),
+);
+const sequenceSettingsSummary = computed(
+  () => `${form.width}×${form.height} · ${form.fps}fps · ${form.steps} steps`,
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, generationModels.value);
 const upscalers = computed(() =>
@@ -483,6 +539,67 @@ const estimateRequest = computed(() => {
   return buildGenerationEstimateRequest(buildRequest(form), form.family);
 });
 const queuedJobs = computed(() => railOrder(generation.pending));
+const printJobsByKey = computed(
+  () => new Map(generation.pending.map((job) => [`print:${job.clientId}`, job])),
+);
+const printActivity = computed<ActivityJobVM[]>(() => {
+  const ordered = queuedJobs.value;
+  // `mergeActivity` sorts active work by RECENCY, but a print queue is FIFO.
+  // Re-express each rail position as a descending timestamp so the merge can
+  // interleave sequences without ever reversing the queue the user submitted.
+  const newest = ordered.reduce((max, job) => Math.max(max, job.clientId), 0);
+  return ordered.map((job, index) => ({
+    kind: "print" as const,
+    key: `print:${job.clientId}`,
+    hostId: job.hostId ?? selectedHostId.value,
+    hostLabel: job.hostLabel ?? "",
+    model: job.model,
+    prompt: job.prompt,
+    phase: job.status === "queued" ? ("queued" as const) : ("running" as const),
+    progress: null,
+    chain: null,
+    actions: ["cancel" as const],
+    createdAtMs: newest - index,
+    // The iPhone queue renders `generation.pending` only, so nothing settled
+    // ever reaches this list — the strip's attention/expiry rules are a
+    // desktop and web concern for now.
+    settledAtMs: job.settledAtMs,
+    error: job.error,
+  }));
+});
+const sequenceActivity = computed<ActivityJobVM[]>(() => {
+  const route = sequenceRoute.value;
+  const job = sequenceJob.value;
+  if (!route || !job) return [];
+  return [
+    sequenceToVM(
+      job,
+      { hostId: route.hostId, hostLabel: sequenceHostName(route.hostId) },
+      sequenceProgress.value,
+    ),
+  ];
+});
+/** ONE queue: single prints and durable sequences in the same list. */
+const activityRows = computed<ActivityRow[]>(() =>
+  mergeActivity(printActivity.value, sequenceActivity.value).flatMap((vm): ActivityRow[] => {
+    if (vm.kind === "sequence") return [{ key: vm.key, sequence: vm, print: null }];
+    const print = printJobsByKey.value.get(vm.key);
+    return print ? [{ key: vm.key, sequence: null, print }] : [];
+  }),
+);
+/** A settled sequence keeps its row (for Resume / Dismiss) but is NOT active,
+ *  so the header counts real work rather than rows on screen. */
+const activeRowCount = computed(
+  () =>
+    activityRows.value.filter(
+      (row) =>
+        row.print !== null || row.sequence.state === "queued" || row.sequence.state === "running",
+    ).length,
+);
+const sequenceRowProgress = computed(() => {
+  const progress = sequenceProgress.value;
+  return progress && progress.total > 0 ? Math.round((progress.step / progress.total) * 100) : null;
+});
 const activeGeneration = computed(() => {
   const active = generation.active;
   return active && active.status !== "complete" && active.status !== "error" ? active : null;
@@ -824,13 +941,20 @@ function selectCatalogHost(id: string): void {
   if (hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
 }
 
-function openCatalog(id?: string): void {
+function openCatalog(id?: string, intent?: Omit<CatalogFilterIntent, "token">): void {
   if (id && hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
   else if (!hosts.value.some((host) => host.id === catalogHostId.value)) {
     catalogHostId.value = selectedHostId.value || hosts.value[0]?.id || "";
   }
   hostDetailId.value = "";
+  if (intent) catalogFilterIntent.value = { ...intent, token: ++catalogIntentToken };
   tab.value = "catalog";
+}
+
+/** The sequence empty state must LAND on the filtered Discover shelf — a bare
+ *  tab switch left the user to rediscover the Video + Models filters. */
+function browseSequenceModels(): void {
+  openCatalog(selectedHost.value?.id, { mediaType: "video", kind: "checkpoint" });
 }
 
 function catalogModelsChanged(hostId: string): void {
@@ -893,9 +1017,11 @@ async function refreshModels(): Promise<boolean> {
   }
 }
 
-function clearSequencePoll(): void {
-  if (sequencePollTimer) clearInterval(sequencePollTimer);
-  sequencePollTimer = null;
+/** Retire the transport but KEEP the row: a settled job still offers Resume
+ *  and Dismiss, and a settled job has nothing left to stream. */
+function stopSequenceTransport(): void {
+  sequenceWatch?.stop();
+  sequenceWatch = null;
 }
 
 function clearSequenceRecovery(): void {
@@ -922,77 +1048,81 @@ function persistSequenceRecovery(host: MobileHost, jobId: string): void {
   }
 }
 
-async function pollSequenceJob(): Promise<void> {
-  const route = sequenceRoute;
-  const jobId = sequenceJob.value?.id;
-  if (!route || !jobId) return;
-  try {
-    const job = await apiJsonTo<ChainJobDetail>(
-      route.target,
-      `/api/chain-jobs/${encodeURIComponent(jobId)}`,
-    );
-    if (sequenceRoute !== route) return;
-    sequenceJob.value = job;
-    sequenceError.value = "";
-    if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
-      clearSequencePoll();
-      clearSequenceRecovery();
-      generationAnnouncement.value =
-        job.state === "completed"
-          ? `Sequence completed on ${hosts.value.find((host) => host.id === route.hostId)?.name ?? "the selected host"}.`
-          : `Sequence ${job.state}. ${job.error ?? ""}`.trim();
-      if (job.state === "completed" && tab.value === "gallery") {
-        void refreshGallery();
-      }
-    }
-  } catch (error) {
-    if (sequenceRoute !== route) return;
-    sequenceError.value = describeTransportError(
-      error,
-      hosts.value.find((host) => host.id === route.hostId)?.name ?? "sequence host",
-    );
-  }
+function sequenceHostName(hostId: string): string {
+  return hosts.value.find((host) => host.id === hostId)?.name ?? "sequence host";
 }
 
-function watchSequenceJob(hostId: string, target: ApiTarget, jobId: string): void {
-  clearSequencePoll();
-  sequenceRoute = { hostId, target: { ...target } };
-  sequenceJob.value = {
+/** Optimistic row so an accepted job is visible before the first frame lands. */
+function pendingSequenceJob(jobId: string, model: string, stageCount: number): ChainJobDetail {
+  const now = Date.now();
+  return {
     id: jobId,
     state: "queued",
-    model: "",
-    stage_count: 0,
+    model,
+    stage_count: stageCount,
     current_stage: 0,
-    created_at_unix_ms: Date.now(),
-    updated_at_unix_ms: Date.now(),
+    created_at_unix_ms: now,
+    updated_at_unix_ms: now,
     error: null,
     ephemeral: false,
     stages: [],
-    finalizes: [],
-    retakes: [],
-    script: {
-      schema: "mold.chain.v1",
-      chain: {
-        model: "",
-        width: 0,
-        height: 0,
-        fps: 24,
-        steps: 0,
-        guidance: 0,
-        strength: 1,
-        motion_tail_frames: 0,
-        output_format: "mp4",
-      },
-      stage: [],
-    },
   };
-  void pollSequenceJob();
-  sequencePollTimer = setInterval(() => void pollSequenceJob(), 2_000);
 }
 
-async function submitMobileSequence(request: ChainRequest): Promise<void> {
+/**
+ * Attach to a durable job on ONE immutable route. SSE is primary; the watcher
+ * itself owns the 5s poll fallback and the wake re-sync (see sequenceWatch).
+ */
+function watchSequenceJob(
+  hostId: string,
+  target: ApiTarget,
+  jobId: string,
+  seed?: { model: string; stageCount: number },
+): void {
+  stopSequenceTransport();
+  const route = { hostId, target: { ...target } };
+  sequenceRoute.value = route;
+  sequenceProgress.value = null;
+  sequenceJob.value = pendingSequenceJob(jobId, seed?.model ?? "", seed?.stageCount ?? 0);
+  sequenceWatch = watchChainJob({
+    target: route.target,
+    jobId,
+    onUpdate: (live) => {
+      if (sequenceRoute.value !== route) return;
+      if (live.detail) sequenceJob.value = live.detail;
+      const active = live.activeStage;
+      sequenceProgress.value = active !== null ? (live.progress[active] ?? null) : null;
+      sequenceError.value = "";
+    },
+    onError: (error) => {
+      if (sequenceRoute.value !== route) return;
+      sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
+    },
+  });
+}
+
+// A settled durable job has nothing left to stream: drop the transport and the
+// recovery record, but keep the row so Resume / Dismiss stay reachable.
+watch(
+  () => sequenceJob.value?.state,
+  (state, previous) => {
+    const route = sequenceRoute.value;
+    if (!state || state === previous || !route) return;
+    if (state === "queued" || state === "running") return;
+    stopSequenceTransport();
+    clearSequenceRecovery();
+    generationAnnouncement.value =
+      state === "completed"
+        ? `Sequence completed on ${sequenceHostName(route.hostId)}.`
+        : `Sequence ${state}. ${sequenceJob.value?.error ?? ""}`.trim();
+    if (state === "completed" && tab.value === "gallery") void refreshGallery();
+  },
+);
+
+async function submitMobileSequence(): Promise<void> {
   const host = selectedHost.value;
-  if (!host || sequenceStarting.value) return;
+  const entry = selectedGenerationModel.value;
+  if (!host || !entry || sequenceStarting.value) return;
   const target = { ...mobileHostTarget(host) };
   const frozenRoute: HostRoute = {
     hostId: host.id,
@@ -1004,6 +1134,12 @@ async function submitMobileSequence(request: ChainRequest): Promise<void> {
   sequenceStarting.value = true;
   sequenceError.value = "";
   try {
+    // Stale limits would mis-gate audio and frame caps for the routed host.
+    if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
+    const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
+      motionTailFrames: sequenceMotionTail.value,
+      enableAudio: draft.enableAudio,
+    });
     let preview: GenerationPlacementPreview | null = null;
     let legacyUnsupported = false;
     try {
@@ -1031,7 +1167,10 @@ async function submitMobileSequence(request: ChainRequest): Promise<void> {
       body: JSON.stringify(request),
     });
     persistSequenceRecovery(host, response.job_id);
-    watchSequenceJob(host.id, target, response.job_id);
+    watchSequenceJob(host.id, target, response.job_id, {
+      model: entry.name,
+      stageCount: draft.clips.length,
+    });
   } catch (error) {
     sequenceError.value = describeTransportError(error, host.name);
   } finally {
@@ -1040,7 +1179,7 @@ async function submitMobileSequence(request: ChainRequest): Promise<void> {
 }
 
 async function cancelMobileSequence(): Promise<void> {
-  const route = sequenceRoute;
+  const route = sequenceRoute.value;
   const job = sequenceJob.value;
   if (!route || !job) return;
   sequenceError.value = "";
@@ -1048,20 +1187,38 @@ async function cancelMobileSequence(): Promise<void> {
     await apiFetchTo(route.target, `/api/chain-jobs/${encodeURIComponent(job.id)}/cancel`, {
       method: "POST",
     });
-    await pollSequenceJob();
+    await sequenceWatch?.refresh();
   } catch (error) {
-    sequenceError.value = describeTransportError(
-      error,
-      hosts.value.find((host) => host.id === route.hostId)?.name ?? "sequence host",
-    );
+    sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
+  }
+}
+
+async function resumeMobileSequence(): Promise<void> {
+  const route = sequenceRoute.value;
+  const job = sequenceJob.value;
+  if (!route || !job) return;
+  sequenceError.value = "";
+  try {
+    await apiFetchTo(route.target, `/api/chain-jobs/${encodeURIComponent(job.id)}/resume`, {
+      method: "POST",
+    });
+    const host = hosts.value.find((candidate) => candidate.id === route.hostId);
+    if (host) persistSequenceRecovery(host, job.id);
+    watchSequenceJob(route.hostId, route.target, job.id, {
+      model: job.model,
+      stageCount: job.stage_count,
+    });
+  } catch (error) {
+    sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
   }
 }
 
 function dismissMobileSequence(): void {
-  clearSequencePoll();
+  stopSequenceTransport();
   clearSequenceRecovery();
-  sequenceRoute = null;
+  sequenceRoute.value = null;
   sequenceJob.value = null;
+  sequenceProgress.value = null;
   sequenceError.value = "";
 }
 
@@ -1096,6 +1253,72 @@ function recoverMobileSequence(): void {
   }
   watchSequenceJob(host.id, mobileHostTarget(host), saved.jobId);
 }
+
+/**
+ * Output switching. A non-chain-capable pick is remembered and swapped for
+ * the first capable model; switching back restores it. Clips are PARKED in
+ * both directions — the draft store never erases them.
+ */
+function setOutputMode(mode: string | number): void {
+  const next: OutputMode = mode === "sequence" ? "sequence" : "single";
+  if (next === draft.output) return;
+  if (next === "sequence") {
+    const current = selectedGenerationModel.value;
+    if (!current || !sequenceModels.value.some((entry) => entry.name === current.name)) {
+      draft.lastSingleModel = form.model || null;
+      const pick = sequenceModels.value[0];
+      if (pick) applyModelDefaults(form, pick);
+    }
+  } else if (draft.lastSingleModel) {
+    const restored = generationModels.value.find((entry) => entry.name === draft.lastSingleModel);
+    if (restored) applyModelDefaults(form, restored);
+    draft.lastSingleModel = null;
+  }
+  draft.setOutput(
+    next,
+    { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+    sequenceDefaultFrames.value,
+  );
+}
+
+let chainLimitsFetch = 0;
+async function loadChainLimits(): Promise<void> {
+  const host = selectedHost.value;
+  const entry = selectedGenerationModel.value;
+  if (!host || !entry) {
+    chainLimits.value = null;
+    return;
+  }
+  const version = ++chainLimitsFetch;
+  try {
+    const limits = await apiJsonTo<ChainLimits>(
+      mobileHostTarget(host),
+      `/api/capabilities/chain-limits?model=${encodeURIComponent(entry.name)}`,
+    );
+    if (version !== chainLimitsFetch) return;
+    chainLimits.value = limits;
+    if (!limits.supports_audio) draft.enableAudio = false;
+    // A clip longer than the routed host's per-clip cap would be rejected on
+    // submit; shrink it here rather than failing the whole sequence.
+    for (const clip of draft.clips) {
+      if (clip.frames > limits.frames_per_clip_cap) clip.frames = limits.frames_per_clip_cap;
+    }
+  } catch {
+    if (version === chainLimitsFetch) chainLimits.value = null;
+  }
+}
+
+// Chain limits are per model AND per host — refetch when either moves, and
+// keep the two-clip floor stocked once Sequence is the active output.
+watch(
+  [isSequence, () => form.model, selectedHostId],
+  () => {
+    if (!isSequence.value) return;
+    draft.ensureClips(sequenceDefaultFrames.value);
+    if (form.model) void loadChainLimits();
+  },
+  { immediate: true },
+);
 
 function changeModel(): void {
   const model = generationModels.value.find((entry) => entry.name === form.model);
@@ -2334,11 +2557,33 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
-    setGenerationStatus(
-      reuse.substitutedModel
-        ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
-        : "Prompt settings restored",
-    );
+    if (reuse.sequence) {
+      // A sequence print reloads the clip rail as a NEW draft: no edit
+      // session, nothing cached (iPhone has no chain-detail recovery route,
+      // so Edit sequence stays a desktop/web action for now).
+      draft.stopEditing();
+      draft.output = "sequence";
+      draft.clips.splice(0, draft.clips.length, ...reuse.sequence.clips);
+      draft.activeClipId = reuse.sequence.clips[0]?.id ?? null;
+      draft.enableAudio = print.metadata.enable_audio === true;
+    }
+    const notes: string[] = [];
+    if (reuse.substitutedModel) {
+      notes.push(
+        `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`,
+      );
+    }
+    if (reuse.sequence) {
+      notes.push(sequenceReuseNote(reuse.sequence.clips.length, reuse.sequence.lossy));
+      if (reuse.sequence.raised > 0) {
+        notes.push(
+          sequenceReuseClampNote(modelDisplayNameForId(form.model, generationModels.value)),
+        );
+      }
+    } else if (notes.length === 0) {
+      notes.push("Prompt settings restored");
+    }
+    setGenerationStatus(notes.join(" · "));
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -2464,14 +2709,6 @@ watch(selectedHostId, (id, previousId) => {
   if (id !== previousId) clearHostScopedGenerationSelections();
   if (id) localStorage.setItem(SELECTED_KEY, id);
   else localStorage.removeItem(SELECTED_KEY);
-});
-
-watch(createMode, (mode) => {
-  try {
-    localStorage.setItem(CREATE_MODE_KEY, mode);
-  } catch {
-    // The selected mode can fall back to Single on the next launch.
-  }
 });
 
 watch(
@@ -2638,7 +2875,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pageshow", handleForegroundResume);
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
-  clearSequencePoll();
+  stopSequenceTransport();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
@@ -2721,90 +2958,113 @@ onBeforeUnmount(() => {
               </option>
             </select>
           </label>
+          <!-- Output is a FIELD of the Create form, not a mode pair pinned
+               above it: One shot and Sequence share this whole stack. -->
+          <div class="mobile-output-mode" data-test="mobile-output-mode">
+            <span class="mobile-output-mode-label">Output</span>
+            <SegmentedControl
+              :model-value="draft.output"
+              :options="OUTPUT_OPTIONS"
+              label="Output"
+              @update:model-value="setOutputMode"
+            />
+            <p v-if="isSequence" class="mobile-output-mode-hint">a sequence renders one timeline</p>
+          </div>
+          <label class="field">
+            <span>{{ isSequence ? "Video model" : "Model" }}</span>
+            <!-- Keyed on the output: the option universe changes wholesale
+                 between One shot and Sequence, and a patched-in-place select
+                 can keep the previous mode's selection highlighted. -->
+            <select
+              :key="`model-${draft.output}`"
+              v-model="form.model"
+              class="control"
+              :disabled="loadingModels || pickerModels.length === 0"
+              @change="changeModel"
+            >
+              <option v-if="!form.model" value="" disabled>
+                {{ loadingModels ? "Loading models…" : "No generation models available" }}
+              </option>
+              <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
+                {{ modelLabel(form.model) }} · not installed
+              </option>
+              <option v-for="model in pickerModels" :key="model.name" :value="model.name">
+                {{ modelDisplayName(model) }}
+              </option>
+            </select>
+          </label>
           <div
-            class="mobile-create-mode"
-            role="radiogroup"
-            aria-label="Create mode"
-            data-test="mobile-create-mode"
+            v-if="modelLoadError"
+            class="mobile-model-state is-error"
+            role="alert"
+            data-test="mobile-model-error"
           >
+            <p>{{ modelLoadError }}</p>
             <button
+              class="secondary-button"
               type="button"
-              role="radio"
-              :aria-checked="createMode === 'single'"
-              :class="{ active: createMode === 'single' }"
-              @click="createMode = 'single'"
+              data-test="mobile-model-retry"
+              @click="refreshModels"
             >
-              Single
-            </button>
-            <button
-              type="button"
-              role="radio"
-              :aria-checked="createMode === 'sequence'"
-              :class="{ active: createMode === 'sequence' }"
-              @click="createMode = 'sequence'"
-            >
-              Sequence
+              Retry
             </button>
           </div>
-          <MobileSequenceComposer
-            v-if="createMode === 'sequence' && selectedTarget"
-            :models="sequenceModels"
-            :target="selectedTarget"
-            :host-name="selectedHost.name"
-            :job="sequenceJob"
-            :starting="sequenceStarting"
-            :error="sequenceError"
-            @submit="submitMobileSequence"
-            @cancel="cancelMobileSequence"
-            @dismiss="dismissMobileSequence"
-            @browse="openCatalog(selectedHost.id)"
-          />
-          <template v-else>
-            <label class="field">
-              <span>Model</span>
-              <select
-                v-model="form.model"
-                class="control"
-                :disabled="loadingModels || generationModels.length === 0"
-                @change="changeModel"
-              >
-                <option v-if="!form.model" value="" disabled>
-                  {{ loadingModels ? "Loading models…" : "No generation models available" }}
-                </option>
-                <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
-                  {{ modelLabel(form.model) }} · not installed
-                </option>
-                <option v-for="model in generationModels" :key="model.name" :value="model.name">
-                  {{ modelDisplayName(model) }}
-                </option>
-              </select>
-            </label>
+          <div
+            v-else-if="!loadingModels && generationModels.length === 0"
+            class="mobile-model-state"
+            data-test="mobile-model-empty"
+          >
+            <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
+            <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
+              Open Catalog
+            </button>
+          </div>
+
+          <template v-if="isSequence">
             <div
-              v-if="modelLoadError"
-              class="mobile-model-state is-error"
-              role="alert"
-              data-test="mobile-model-error"
+              v-if="sequenceModels.length === 0"
+              class="mobile-sequence-empty"
+              data-test="mobile-sequence-empty"
             >
-              <p>{{ modelLoadError }}</p>
+              <strong>Sequences need a video model</strong>
+              <p>
+                Pull a chain-capable LTX Video or distilled LTX-2 checkpoint on
+                {{ selectedHost.name }}.
+              </p>
               <button
                 class="secondary-button"
                 type="button"
-                data-test="mobile-model-retry"
-                @click="refreshModels"
+                data-test="mobile-sequence-browse"
+                @click="browseSequenceModels"
               >
-                Retry
+                Browse video models
               </button>
             </div>
-            <div
-              v-else-if="!loadingModels && generationModels.length === 0"
-              class="mobile-model-state"
-              data-test="mobile-model-empty"
+            <MobileSequenceComposer
+              v-else
+              :selected-model="selectedGenerationModel"
+              :chain-limits="chainLimits"
+              :fps="form.fps"
+              :submitting="sequenceStarting"
+              :error="sequenceError"
+              :settings-summary="sequenceSettingsSummary"
+              @submit="submitMobileSequence"
             >
-              <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
-              <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
-                Open Catalog
-              </button>
-            </div>
+              <template #settings>
+                <MobileSharedParams
+                  :form="form"
+                  :last-seed="generation.lastSeedUsed"
+                  :disabled="loadingModels"
+                  show-fps
+                  :steps-error="stepsError"
+                  :guidance-error="guidanceError"
+                  @resolution-validity="resolutionValid = $event"
+                  @seed-validity="seedValid = $event"
+                />
+              </template>
+            </MobileSequenceComposer>
+          </template>
+          <template v-else>
             <label class="field">
               <span>Prompt</span>
               <textarea
@@ -2952,51 +3212,14 @@ onBeforeUnmount(() => {
               {{ mobileMediaBudgetError }}
             </p>
 
-            <MobileResolutionPicker
-              v-model:width="form.width"
-              v-model:height="form.height"
-              :family="form.family"
-              :disabled="loadingModels"
-              @validity-change="resolutionValid = $event"
-            />
-            <div class="field-grid">
-              <label class="field">
-                <span>Steps</span>
-                <input
-                  v-model.number="form.steps"
-                  class="control"
-                  type="number"
-                  inputmode="numeric"
-                  min="1"
-                  max="100"
-                  :aria-invalid="stepsError ? 'true' : undefined"
-                />
-              </label>
-              <label class="field"
-                ><span>Guidance</span
-                ><input
-                  v-model.number="form.guidance"
-                  class="control"
-                  type="number"
-                  inputmode="decimal"
-                  step="0.1"
-                  min="0"
-                  max="100"
-                  :aria-invalid="guidanceError ? 'true' : undefined"
-              /></label>
-            </div>
-            <p
-              v-if="stepsError || guidanceError"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-basic-parameter-error"
-            >
-              {{ stepsError || guidanceError }}
-            </p>
-            <MobileSeedPicker
-              v-model="form.seed"
+            <MobileSharedParams
+              :form="form"
               :last-seed="generation.lastSeedUsed"
-              @validity-change="seedValid = $event"
+              :disabled="loadingModels"
+              :steps-error="stepsError"
+              :guidance-error="guidanceError"
+              @resolution-validity="resolutionValid = $event"
+              @seed-validity="seedValid = $event"
             />
 
             <div class="mobile-advanced-row">
@@ -3111,42 +3334,6 @@ onBeforeUnmount(() => {
             >
               {{ developButtonLabel }}
             </button>
-            <section
-              v-if="queuedJobs.length"
-              class="mobile-generation-queue"
-              aria-label="Generation queue"
-              data-test="mobile-generation-queue"
-            >
-              <div class="mobile-generation-queue-head">
-                <h2>Queue</h2>
-                <span>{{ queuedJobs.length }} active</span>
-              </div>
-              <ol>
-                <li
-                  v-for="job in queuedJobs"
-                  :key="job.clientId"
-                  class="mobile-generation-job"
-                  data-test="mobile-generation-job"
-                >
-                  <div class="mobile-generation-job-copy">
-                    <p>{{ job.prompt }}</p>
-                    <span>{{ modelLabel(job.model) }} · {{ job.hostLabel }}</span>
-                  </div>
-                  <div class="mobile-generation-job-action">
-                    <span data-test="mobile-generation-status">{{ jobStatusCode(job) }}</span>
-                    <button
-                      class="mobile-generation-cancel"
-                      type="button"
-                      :aria-label="`Cancel ${job.prompt}`"
-                      data-test="mobile-generation-cancel"
-                      @click="cancelGeneration(job)"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </li>
-              </ol>
-            </section>
             <!-- Live develop bed: once the host streams latent previews the
                active print literally forms here — the preview's blur tightens
                with denoise progress while the Develop grain thins over it.
@@ -3228,6 +3415,105 @@ onBeforeUnmount(() => {
               />
             </button>
           </template>
+
+          <!-- ONE queue for both outputs: single prints and durable sequences
+               land in the same list (mockup 1c). -->
+          <section
+            v-if="activityRows.length"
+            class="mobile-generation-queue"
+            aria-label="Generation queue"
+            data-test="mobile-generation-queue"
+          >
+            <div class="mobile-generation-queue-head">
+              <h2>Queue</h2>
+              <span data-test="mobile-queue-count">{{ activeRowCount }} active</span>
+            </div>
+            <ol>
+              <li
+                v-for="row in activityRows"
+                :key="row.key"
+                class="mobile-generation-job"
+                :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+              >
+                <template v-if="row.print">
+                  <div class="mobile-generation-job-copy">
+                    <p>{{ row.print.prompt }}</p>
+                    <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
+                  </div>
+                  <div class="mobile-generation-job-action">
+                    <span data-test="mobile-generation-status">{{ jobStatusCode(row.print) }}</span>
+                    <button
+                      class="mobile-generation-cancel"
+                      type="button"
+                      :aria-label="`Cancel ${row.print.prompt}`"
+                      data-test="mobile-generation-cancel"
+                      @click="cancelGeneration(row.print)"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </template>
+                <template v-else-if="row.sequence">
+                  <div class="mobile-generation-job-copy">
+                    <p>
+                      {{ modelLabel(row.sequence.model) || "Sequence" }} ·
+                      {{ row.sequence.stageCount }} clips
+                    </p>
+                    <span>
+                      {{ row.sequence.state }} · clip
+                      {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
+                        row.sequence.stageCount
+                      }}
+                      <template v-if="sequenceRowProgress !== null">
+                        · {{ sequenceRowProgress }}%
+                      </template>
+                    </span>
+                    <span v-if="row.sequence.error" class="mobile-sequence-row-error" role="alert">
+                      {{ row.sequence.error }}
+                    </span>
+                  </div>
+                  <div class="mobile-generation-job-action">
+                    <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
+                    <button
+                      v-if="row.sequence.actions.includes('cancel')"
+                      class="mobile-generation-cancel"
+                      type="button"
+                      data-test="mobile-sequence-cancel"
+                      @click="cancelMobileSequence"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      v-else-if="row.sequence.actions.includes('resume')"
+                      class="mobile-generation-cancel mobile-sequence-resume"
+                      type="button"
+                      data-test="mobile-sequence-resume"
+                      @click="resumeMobileSequence"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      v-if="row.sequence.actions.includes('delete')"
+                      class="mobile-generation-cancel mobile-sequence-dismiss"
+                      type="button"
+                      data-test="mobile-sequence-dismiss"
+                      @click="dismissMobileSequence"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </template>
+              </li>
+            </ol>
+          </section>
+          <p
+            v-if="sequenceError && sequenceRoute"
+            class="status-line error-text"
+            role="alert"
+            data-test="mobile-sequence-route-error"
+          >
+            {{ sequenceError }}
+          </p>
         </template>
       </template>
 
@@ -3402,6 +3688,7 @@ onBeforeUnmount(() => {
           v-if="!settingsOpen && tab === 'catalog'"
           :hosts="hosts"
           :selected-host-id="catalogHostId"
+          :filter-intent="catalogFilterIntent"
           @select-host="selectCatalogHost"
           @models-changed="catalogModelsChanged"
         />

@@ -194,6 +194,36 @@ describe("sequence draft store", () => {
     expect(reloaded.clips[0]?.prompt).toBe("opening");
   });
 
+  it("migrates a real legacy web draft whose stages persist under `stage`", () => {
+    // web's ScriptComposer persisted its ChainScriptToml verbatim — the
+    // mold.chain.v1 TOML shape keys stages as `stage`, not `stages`.
+    localStorage.setItem(
+      LEGACY_WEB_DRAFT_KEY,
+      JSON.stringify({
+        schema: "mold.chain.v1",
+        chain: { model: "ltx-2-19b-distilled:fp8", enable_audio: true },
+        stage: [
+          { prompt: "opening", frames: 97 },
+          { prompt: "landing", frames: 33, transition: "cut" },
+        ],
+      }),
+    );
+
+    const store = freshStore();
+    store.hydrate();
+    expect(store.clips).toHaveLength(2);
+    expect(store.clips[0]?.prompt).toBe("opening");
+    expect(store.clips[1]?.transition).toBe("cut");
+    expect(store.enableAudio).toBe(true);
+    expect(localStorage.getItem(LEGACY_WEB_DRAFT_KEY)).toBeNull();
+
+    // Composes with the persist-on-migrate fix: a `stage`-keyed draft must
+    // also survive a reload taken before the user edits anything.
+    const reloaded = freshStore();
+    reloaded.hydrate();
+    expect(reloaded.clips.map((clip) => clip.prompt)).toEqual(["opening", "landing"]);
+  });
+
   it("tracks an edit session without persisting it", () => {
     const store = freshStore();
     store.hydrate();

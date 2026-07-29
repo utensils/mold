@@ -40,6 +40,29 @@ export interface ChainRequestWire {
   batch_count?: number | null;
 }
 
+/**
+ * Per-clip provenance recorded into a stitched chain output's gallery
+ * metadata (`OutputMetadata.chain.stages`) — the durable record of what each
+ * clip asked for, which is how the Library reloads a sequence's rail. Mirrors
+ * `mold_core::chain::ChainStageMetadata`. `seed` is the EFFECTIVE per-stage
+ * seed as a decimal string (full-range u64), not the request's offset.
+ */
+export interface ChainStageMetadata {
+  prompt: string;
+  frames: number;
+  transition: SequenceTransition;
+  fade_frames?: number | null;
+  seed?: string | null;
+}
+
+/** Structured multi-clip provenance block on `OutputMetadata` (additive;
+ * absent for single generations and pre-#564 rows). */
+export interface ChainOutputMetadata {
+  stage_count: number;
+  motion_tail_frames: number;
+  stages: ChainStageMetadata[];
+}
+
 /** `mold.chain.v1` TOML projection echoed by the server (`ChainJobDetail.script`). */
 export interface ChainScriptChain {
   model: string;

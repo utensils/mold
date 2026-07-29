@@ -720,6 +720,7 @@ describe("activeCanvasJob", () => {
       result: null,
       error: null,
       state: "running",
+      settledAt: null,
       chain: null,
       lastProgressAt: 0,
       workStarted: false,

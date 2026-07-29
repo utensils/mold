@@ -8,8 +8,15 @@ import logoUrl from "../../assets/logo.png";
 import StatusPopover from "./StatusPopover.vue";
 import PanelResizeHandle from "./PanelResizeHandle.vue";
 import { dragWidth } from "../../lib/panelResize";
+import {
+  mergeActivity,
+  partitionActivity,
+  sequenceToVM,
+  type ActivityJobVM,
+} from "@studio/lib/activity";
 import { useGenerationStore, jobStatusCode, railOrder, type Job } from "../../stores/generation";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useChainJobsStore } from "../../stores/chainJobs";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useGalleryStore } from "../../stores/gallery";
@@ -24,6 +31,7 @@ const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
+const chains = useChainJobsStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
@@ -101,6 +109,35 @@ const railJobs = computed<Job[]>(() => {
     .reverse();
   return [...live, ...done];
 });
+
+/** Now developing also means sequences (G14): the rail read `generation.jobs`
+ *  only, so a running sequence rendered on the canvas while the sidebar said
+ *  "nothing developing". Live work only — the last-3 finished window stays
+ *  prints-only, because settled sequences already have two homes (the print in
+ *  Library, the job in Library ▸ History ▸ Sequences). */
+const railSequences = computed(() =>
+  partitionActivity(
+    mergeActivity(
+      [],
+      chains.allJobs.map(({ hostId, job }) =>
+        sequenceToVM(job, {
+          hostId,
+          hostLabel: hosts.all.find((h) => h.id === hostId)?.label ?? hostId,
+        }),
+      ),
+    ),
+  ).active.filter((vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence"),
+);
+
+const developingCount = computed(() => generation.pending.length + railSequences.value.length);
+
+/** `clip 3/5 · developing…` — the sequence's answer to developingLabel. */
+function sequenceLine(vm: ActivityJobVM & { kind: "sequence" }): string {
+  const clip = Math.min(vm.currentStage + 1, vm.stageCount);
+  return vm.state === "queued"
+    ? `clip ${clip}/${vm.stageCount} · queued`
+    : `clip ${clip}/${vm.stageCount} · developing…`;
+}
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
 
 function jobRunning(job: Job): boolean {
@@ -198,15 +235,42 @@ function jobMenu(job: Job): MenuEntry[] {
     <div v-if="!collapsed" data-test="developing-region" class="flex min-h-0 flex-1 flex-col">
       <div class="mt-5 mb-1.5 flex items-center gap-2 px-3">
         <span class="rail-kicker">Now developing</span>
-        <span v-if="generation.pending.length > 1" class="rail-kicker ml-auto">
-          {{ generation.pending.length }}
+        <span v-if="developingCount > 1" class="rail-kicker ml-auto">
+          {{ developingCount }}
         </span>
       </div>
       <div
-        v-if="railJobs.length > 0"
+        v-if="railJobs.length > 0 || railSequences.length > 0"
         data-test="developing-jobs"
         class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2"
       >
+        <a
+          v-for="vm in railSequences"
+          :key="vm.key"
+          href="#"
+          data-test="developing-sequence"
+          class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+          @click.prevent="router.push('/create')"
+        >
+          <span
+            class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
+          >
+            <span
+              v-if="vm.state === 'running'"
+              class="ms-shimmer block h-full w-full"
+              aria-hidden="true"
+            />
+            <span v-else class="block h-full w-full bg-print-surface" aria-hidden="true" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-[11.5px] text-ink-2" :title="vm.model">
+              {{ modelLabel(vm.model) }} · {{ vm.hostLabel }}
+            </span>
+            <span class="block font-utility text-[9.5px] text-safelight">
+              {{ sequenceLine(vm) }}
+            </span>
+          </span>
+        </a>
         <a
           v-for="job in railJobs"
           :key="job.clientId"

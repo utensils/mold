@@ -4,6 +4,8 @@
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
 
+import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+
 export interface GpuSnapshot {
   ordinal: number;
   name: string;
@@ -134,6 +136,9 @@ export interface ModelEntry {
   /** Server-advertised per-clip frame default (LTX-2 ships 97, LTX-Video
    * 25); absent on older servers. Sizes new sequence clips. */
   default_frames?: number | null;
+  /** Server-advertised frame rate (LTX-Video ships 30, LTX-2 24); absent on
+   * older servers and image models. Applied like steps/guidance. */
+  default_fps?: number | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────
@@ -402,6 +407,13 @@ export interface OutputMetadata {
   /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
    * for Reuse-settings source restore (additive; newer servers only). */
   source_image_sha256?: string | null;
+  /** Durable sequence job this print was stitched from. Present only for
+   * chain jobs with a server-side record — ephemeral chain outputs and
+   * pre-#564 rows carry nothing (additive; newer servers only). */
+  chain_job_id?: string | null;
+  /** Per-clip provenance for a stitched sequence — what the Library's
+   * sequence-aware Reuse settings reloads into the clip rail. */
+  chain?: ChainOutputMetadata | null;
   /** Plain kebab-case name, or a serde-tagged object for parameterized
    * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
   scheduler?: string | Record<string, unknown> | null;

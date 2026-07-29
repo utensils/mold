@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watchEffect } from "vue";
+import { useRouter } from "vue-router";
 import ProgressBar from "@ui/components/ProgressBar.vue";
+import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
 import {
+  activityDigestLabel,
   mergeActivity,
+  partitionActivity,
   sequenceToVM,
   type ActivityAction,
   type ActivityJobVM,
 } from "@studio/lib/activity";
-import type { ChainJobState } from "@studio/lib/api/chainTypes";
 import PodCostMeter from "../machines/PodCostMeter.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { runPodForHostUrl } from "../../lib/runpod";
@@ -20,14 +23,18 @@ import { useRunPodStore } from "../../stores/runpod";
 import { useToastStore } from "../../stores/toasts";
 
 /**
- * Create activity strip (Mold Studio). One jobs surface: the running print
- * and queued siblings (generation store) merged with durable sequence jobs
- * from every connected host (chain-jobs store) via the shared @studio
- * activity merge — the old separate chain Jobs list is gone. Hidden when
- * nothing is in flight and no sequences exist.
+ * Create activity strip (Mold Studio) — present tense only.
+ *
+ * It shows work that is happening (running print + queued siblings + queued /
+ * running sequences), plus a capped, expiring set of settled-but-wrong rows
+ * that still want a decision, plus one digest chip counting the settled
+ * sequences it is deliberately not listing. Settled work resolves to the
+ * Library: the print in the grid, the durable job in Library ▸ History ▸
+ * Sequences, which is also where Clear inactive / Clean up disk now live.
  */
 const emit = defineEmits<{ "edit-sequence": [payload: { hostId: string; jobId: string }] }>();
 
+const router = useRouter();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
@@ -68,19 +75,31 @@ function cancel(job: Job) {
 const hostLabel = (hostId: string) => hosts.all.find((h) => h.id === hostId)?.label ?? hostId;
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
 
+/** Every print, not just the pending ones: a failed print earns an attention
+ *  row, so it has to survive the merge. `createdAtMs` is a real wall clock —
+ *  the old `job.clientId` counter sorted every print below every sequence. */
 const printVMs = computed<ActivityJobVM[]>(() =>
-  generation.pending.map((job) => ({
+  generation.jobs.map((job) => ({
     kind: "print" as const,
     key: `print:${job.clientId}`,
     hostId: job.hostId ?? "local",
     hostLabel: hostLabel(job.hostId ?? "local"),
     model: job.model,
     prompt: job.prompt,
-    phase: job.status === "queued" ? ("queued" as const) : ("running" as const),
+    phase:
+      job.status === "queued"
+        ? ("queued" as const)
+        : job.status === "error"
+          ? ("failed" as const)
+          : job.status === "complete"
+            ? ("done" as const)
+            : ("running" as const),
     progress: null,
     chain: null,
     actions: ["cancel" as const],
-    createdAtMs: job.clientId,
+    createdAtMs: job.submittedAtUnixMs,
+    settledAtMs: job.settledAtMs,
+    error: job.error,
   })),
 );
 
@@ -93,44 +112,64 @@ const sequenceVMs = computed<ActivityJobVM[]>(() =>
   }),
 );
 
-/** The merged surface keeps the print chrome; sequence rows render below. */
+/** Session-only dismissals keyed by VM key. Deliberately NOT persisted: the
+ *  5-minute age rule reads server timestamps and already survives a restart,
+ *  and a second retention mechanism could disagree with the first. reactive()
+ *  because rows are dismissed from click handlers. */
+const dismissed = reactive(new Set<string>());
+
+/** Re-partition on a timer so an attention row actually expires while the
+ *  window stays open, instead of waiting for the next store mutation. */
+const nowMs = ref(Date.now());
+const clock = setInterval(() => (nowMs.value = Date.now()), 30_000);
+onBeforeUnmount(() => clearInterval(clock));
+
+const partition = computed(() =>
+  partitionActivity(mergeActivity(printVMs.value, sequenceVMs.value), {
+    nowMs: nowMs.value,
+    dismissed,
+  }),
+);
+
+/** Active sequences render as rows; active prints keep the strip's own
+ *  running/queued chrome above. */
 const sequenceRows = computed(() =>
-  mergeActivity(printVMs.value, sequenceVMs.value).filter(
+  partition.value.active.filter(
     (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
   ),
 );
+const attentionSequences = computed(() =>
+  partition.value.attention.filter(
+    (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
+  ),
+);
+const attentionPrints = computed(() =>
+  partition.value.attention.filter(
+    (vm): vm is ActivityJobVM & { kind: "print" } => vm.kind === "print",
+  ),
+);
+const digest = computed(() => activityDigestLabel(partition.value));
+
+function dismiss(vm: ActivityJobVM) {
+  dismissed.add(vm.key);
+}
+
+function openHistory() {
+  void router.push({ path: "/library", query: { panel: "history", tab: "sequences" } });
+}
 
 const show = computed(
-  () => !!running.value || queued.value.length > 0 || sequenceRows.value.length > 0,
+  () =>
+    !!running.value ||
+    queued.value.length > 0 ||
+    sequenceRows.value.length > 0 ||
+    partition.value.attention.length > 0 ||
+    digest.value !== null,
 );
-
-// State color follows the development-temperature rule (design spec §2.1).
-const STATE_CLASS: Record<ChainJobState, string> = {
-  queued: "text-halide",
-  running: "text-safelight",
-  interrupted: "text-halide",
-  failed: "text-stop",
-  completed: "text-ink",
-  cancelled: "text-ink-3",
-};
-
-const ACTION_LABEL: Record<ActivityAction, string> = {
-  watch: "Watch",
-  cancel: "Cancel",
-  resume: "Resume",
-  edit: "Edit",
-  delete: "Delete",
-  retake: "Retake",
-};
-
-const seqPct = (vm: ActivityJobVM) =>
-  vm.progress && vm.progress.total > 0
-    ? Math.round((vm.progress.step / vm.progress.total) * 100)
-    : 0;
 
 const confirmDelete = ref<(ActivityJobVM & { kind: "sequence" }) | null>(null);
 
-function runAction(vm: ActivityJobVM & { kind: "sequence" }, action: ActivityAction) {
+function runAction(action: ActivityAction, vm: ActivityJobVM & { kind: "sequence" }) {
   switch (action) {
     case "watch":
       chains.watch(vm.hostId, vm.jobId);
@@ -159,32 +198,10 @@ function deleteConfirmed() {
   void chains.remove(vm.hostId, vm.jobId).catch((err) => toasts.push(String(err), "error"));
 }
 
-// ── Strip-level maintenance (mockup Jobs strip) ──────────────────────────────
-async function clearInactive() {
-  try {
-    const { cleared, failed } = await chains.clearInactive();
-    generation.prune(0);
-    if (failed > 0) toasts.push(`Cleared ${cleared}, ${failed} could not be deleted`, "error");
-    else toasts.push(`Cleared ${cleared} job${cleared === 1 ? "" : "s"}`);
-  } catch (err) {
-    toasts.push(String(err), "error");
-  }
-}
-
-async function cleanUpDisk() {
-  try {
-    let swept = 0;
-    let pruned = 0;
-    for (const hostId of Object.keys(chains.byHost)) {
-      const outcome = await chains.gc(hostId);
-      swept += outcome.swept_ephemeral_jobs;
-      pruned += outcome.pruned_artifact_dirs;
-    }
-    toasts.push(`Swept ${swept} jobs, pruned ${pruned} dirs`);
-  } catch (err) {
-    toasts.push(String(err), "error");
-  }
-}
+// `Clear inactive` and `Clean up disk` deliberately left this strip: they are
+// destructive, host-scoped, and rarely used, and their presence here is what
+// made the composer read as a control panel. They live in the History ▸
+// Sequences footer now.
 </script>
 
 <template>
@@ -225,62 +242,61 @@ async function cleanUpDisk() {
           ✕
         </button>
       </div>
-      <template v-if="sequenceRows.length > 0">
-        <button
-          type="button"
-          data-test="activity-clear-inactive"
-          class="ms-activity__maint"
-          title="Delete all sequence jobs that aren't running or queued and drop finished prints"
-          @click="clearInactive"
-        >
-          Clear inactive
-        </button>
-        <button
-          type="button"
-          data-test="activity-cleanup"
-          class="ms-activity__maint"
-          title="Sweep ephemeral jobs and prune artifact directories on every host"
-          @click="cleanUpDisk"
-        >
-          Clean up disk
-        </button>
-      </template>
+      <!-- Everything settled the strip is not listing, in one mono count. -->
+      <button
+        v-if="digest"
+        type="button"
+        data-test="activity-digest"
+        class="ms-activity__maint"
+        title="Show settled sequences in History"
+        @click="openHistory"
+      >
+        {{ digest }}
+      </button>
     </div>
 
-    <!-- Sequence rows (merged jobs surface) -->
-    <div
+    <!-- In-flight sequence rows (merged jobs surface) -->
+    <SequenceJobRow
       v-for="vm in sequenceRows"
       :key="vm.key"
-      class="ms-activity__seq"
       data-test="activity-sequence"
+      :vm="vm"
+      :model-label="modelLabel(vm.model)"
+      @action="runAction"
+    />
+
+    <!-- Settled but still wanting a decision: capped, expiring, dismissible. -->
+    <SequenceJobRow
+      v-for="vm in attentionSequences"
+      :key="vm.key"
+      data-test="activity-sequence"
+      :vm="vm"
+      :model-label="modelLabel(vm.model)"
+      dismissible
+      @action="runAction"
+      @dismiss="dismiss"
+    />
+
+    <div
+      v-for="vm in attentionPrints"
+      :key="vm.key"
+      class="ms-activity__seq"
+      data-test="activity-print-attention"
+      role="alert"
     >
-      <span class="ms-activity__state data-mono" :class="STATE_CLASS[vm.state]">{{
-        vm.state
-      }}</span>
-      <span class="ms-activity__seq-model" :title="modelLabel(vm.model)">{{
-        modelLabel(vm.model)
-      }}</span>
-      <span class="ms-activity__seq-meta data-mono">
-        {{ vm.stageCount }} clips · {{ Math.min(vm.currentStage + 1, vm.stageCount) }}/{{
-          vm.stageCount
-        }}
-        · {{ vm.hostLabel }}
-      </span>
-      <div v-if="vm.progress" class="ms-activity__seq-progress" data-test="seq-progress">
-        <ProgressBar :value="seqPct(vm)" :height="4" label="Sequence progress" />
-      </div>
+      <span class="ms-activity__state data-mono text-stop">failed</span>
+      <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>
       <div class="ms-activity__seq-spacer" />
       <span v-if="vm.error" class="ms-activity__seq-error" :title="vm.error">{{ vm.error }}</span>
       <button
-        v-for="action in vm.actions"
-        :key="action"
         type="button"
-        class="ms-activity__seq-btn"
-        :class="{ 'ms-activity__seq-btn--danger': action === 'cancel' || action === 'delete' }"
-        :data-test="`seq-${action}`"
-        @click="runAction(vm, action)"
+        class="ms-activity__cancel"
+        data-test="print-dismiss"
+        title="Hide this failure. Nothing is deleted."
+        :aria-label="`Dismiss failed print: ${vm.prompt}`"
+        @click="dismiss(vm)"
       >
-        {{ ACTION_LABEL[action] }}
+        ✕
       </button>
     </div>
 
@@ -417,10 +433,6 @@ async function cleanUpDisk() {
   color: var(--ink-3);
   flex: 0 0 auto;
 }
-.ms-activity__seq-progress {
-  flex: 0 1 160px;
-  min-width: 60px;
-}
 .ms-activity__seq-spacer {
   flex: 1;
 }
@@ -431,22 +443,5 @@ async function cleanUpDisk() {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 320px;
-}
-.ms-activity__seq-btn {
-  flex: 0 0 auto;
-  border: 1px solid var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: 7px;
-  padding: 3px 9px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.ms-activity__seq-btn:hover {
-  color: var(--rebate);
-}
-.ms-activity__seq-btn--danger:hover {
-  color: var(--stop);
-  border-color: var(--stop);
 }
 </style>

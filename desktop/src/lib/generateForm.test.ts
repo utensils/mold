@@ -269,6 +269,29 @@ describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
   });
 });
 
+describe("applyModelDefaults — model-advertised fps", () => {
+  it("takes the model's default_fps, exactly like steps and guidance", () => {
+    const form = ltx2Form();
+    expect(form.fps).toBe(24);
+
+    applyModelDefaults(form, {
+      ...ltx2Model(),
+      name: "ltx-video-0.9.6-distilled:bf16",
+      family: "ltx-video",
+      default_fps: 30,
+    });
+
+    expect(form.fps).toBe(30);
+  });
+
+  it("keeps the current fps when the server advertises none", () => {
+    const form = ltx2Form();
+    form.fps = 16;
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx2:fp8" });
+    expect(form.fps).toBe(16);
+  });
+});
+
 describe("applyModelDefaults resets advanced video on family change", () => {
   it("clears the LTX-2 fields when the new family has no advanced video", () => {
     const form = ltx2Form();

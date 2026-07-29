@@ -34,10 +34,13 @@ vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn().mockResolvedValue(undefine
 import GenerateView from "./GenerateView.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useGenerateFormStore } from "../stores/generateForm";
+import { useChainJobsStore } from "../stores/chainJobs";
+import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
-import type { ModelEntry } from "../lib/api/types";
+import type { ModelEntry, OutputMetadata } from "../lib/api/types";
+import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
 
 enableAutoUnmount(afterEach);
 
@@ -236,5 +239,183 @@ describe("GenerateView — sequence output", () => {
 
     expect(wrapper.find("[data-test='sequence-empty']").exists()).toBe(true);
     expect(wrapper.find("sequence-composer-stub").exists()).toBe(false);
+  });
+});
+
+// Settling must never blank the canvas: the strip no longer keeps a settled
+// row, so the canvas is where the finished sequence lands.
+describe("GenerateView — settled sequence canvas", () => {
+  function watchSequence(state: ChainJobDetail["state"], extra: Partial<ChainJobDetail> = {}) {
+    const chains = useChainJobsStore();
+    chains.watching = { hostId: "local", jobId: "job-1" };
+    chains.live = {
+      detail: {
+        id: "job-1",
+        state,
+        model: "ltx-video",
+        stage_count: 2,
+        current_stage: 1,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        stages: [],
+        ...extra,
+      } as unknown as ChainJobDetail,
+      progress: {},
+      activeStage: null,
+    };
+    return chains;
+  }
+
+  async function sequenceView() {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    useGenerateFormStore().form.model = "ltx-video";
+    const wrapper = mountView();
+    await flushPromises();
+    return wrapper;
+  }
+
+  it("holds the finished sequence with Edit sequence and Show in library", async () => {
+    watchSequence("completed");
+    const wrapper = await sequenceView();
+
+    const result = wrapper.get("[data-test='sequence-result']");
+    expect(result.find("[data-test='sequence-edit']").exists()).toBe(true);
+    expect(result.find("[data-test='sequence-show-in-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='empty-canvas']").exists()).toBe(false);
+  });
+
+  it("keeps a failed sequence inspectable with Resume", async () => {
+    const chains = watchSequence("failed", { error: "CUDA ran out of memory" });
+    vi.spyOn(chains, "resume").mockResolvedValue();
+    const wrapper = await sequenceView();
+
+    const notice = wrapper.get("[data-test='sequence-failed']");
+    expect(notice.attributes("message")).toContain("GPU memory");
+    await wrapper.get("[data-test='sequence-resume']").trigger("click");
+    expect(chains.resume).toHaveBeenCalledWith("local", "job-1");
+    expect(wrapper.find("[data-test='empty-canvas']").exists()).toBe(false);
+  });
+
+  it("re-enters a job handed over from the Library", async () => {
+    const chains = useChainJobsStore();
+    const detail = vi.spyOn(chains, "fetchDetail").mockRejectedValue(new Error("not in this test"));
+    useComposerStore().setSequence({ kind: "edit", hostId: "okra-7680", jobId: "job-9" });
+    await sequenceView();
+
+    expect(detail).toHaveBeenCalledWith("okra-7680", "job-9");
+    // One-shot: a back-nav must not replay the handoff.
+    expect(useComposerStore().pendingSequence).toBeNull();
+  });
+});
+
+// Reuse settings on a sequence print: a NEW draft from the recorded clips.
+// The load-bearing difference from Edit is that nothing is cached and no edit
+// session exists — Generate sequence queues a fresh job.
+describe("GenerateView — sequence reuse handoff", () => {
+  function chainMetadata(frames: number[], extra: Partial<OutputMetadata> = {}): OutputMetadata {
+    return {
+      prompt: frames.map((_, i) => `clip ${i + 1}`).join("\n"),
+      model: "ltx-video",
+      seed: 4242,
+      steps: 25,
+      guidance: 3,
+      width: 1024,
+      height: 576,
+      chain_job_id: "job-9",
+      chain: {
+        stage_count: frames.length,
+        motion_tail_frames: 8,
+        stages: frames.map((f, i) => ({
+          prompt: `clip ${i + 1}`,
+          frames: f,
+          transition: "smooth" as const,
+        })),
+      },
+      ...extra,
+    } as OutputMetadata;
+  }
+
+  async function reuseView(metadata: OutputMetadata, model: ModelEntry = videoModel) {
+    readyLocal();
+    installedPayload = [model];
+    useModelStore().all = [model];
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    useComposerStore().setSequence({ kind: "reuse", metadata });
+    const wrapper = mountView();
+    await flushPromises();
+    return { wrapper, draft };
+  }
+
+  it("loads the recorded clips as a fresh draft with no edit session", async () => {
+    const { wrapper, draft } = await reuseView(chainMetadata([97, 65, 33]));
+
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips.map((c) => c.prompt)).toEqual(["clip 1", "clip 2", "clip 3"]);
+    expect(draft.clips.map((c) => c.frames)).toEqual([97, 65, 33]);
+    expect(draft.editing).toBeNull();
+    expect(useGenerateFormStore().form.seed).toBe("4242");
+    // Never the newline join — that is the wart this path exists to avoid.
+    expect(useGenerateFormStore().form.prompt).toBe("clip 1");
+    expect(useComposerStore().pendingSequence).toBeNull();
+    // The confirmation line is always there; it just has nothing to disclaim.
+    expect(wrapper.get("[data-test='sequence-reuse-note']").text()).toBe("reused 3 clips");
+  });
+
+  it("discloses what the print could not give back, once", async () => {
+    const { wrapper } = await reuseView(
+      chainMetadata([97, 65], {
+        negative_prompt: "blurry",
+        source_image_sha256: "deadbeef",
+      } as Partial<OutputMetadata>),
+    );
+
+    const note = wrapper.get("[data-test='sequence-reuse-note']");
+    expect(note.text()).toBe(
+      "reused 2 clips · negatives and clip sources aren't recorded in prints",
+    );
+    expect(wrapper.findAll("[data-test='sequence-reuse-note']")).toHaveLength(1);
+  });
+
+  it("raises clips that no longer clear the current model's motion tail, and says so", async () => {
+    // The print was rendered on a zero-tail LTX-Video model; the reuse lands
+    // on an LTX-2 model whose tail is 17, so a 9-frame clip is now invalid.
+    const ltx2 = {
+      ...videoModel,
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+    } as ModelEntry;
+    const { wrapper, draft } = await reuseView(
+      chainMetadata([9, 65], { model: "ltx-2-19b-distilled:fp8" } as Partial<OutputMetadata>),
+      ltx2,
+    );
+
+    // 9 → the first 8n+1 duration that clears the 17-frame tail; 65 is fine.
+    expect(draft.clips.map((c) => c.frames)).toEqual([25, 65]);
+    expect(draft.clips.every((c) => c.frames > 17)).toBe(true);
+    expect(wrapper.get("[data-test='sequence-reuse-note']").text()).toContain(
+      "Clip durations raised to fit",
+    );
+  });
+
+  it("ignores a legacy print with no recorded clips", async () => {
+    const { draft } = await reuseView({
+      prompt: "one shot",
+      model: "ltx-video",
+      seed: 1,
+      steps: 25,
+      guidance: 3,
+      width: 1024,
+      height: 576,
+    } as OutputMetadata);
+
+    expect(draft.output).toBe("single");
+    expect(useComposerStore().pendingSequence).toBeNull();
   });
 });

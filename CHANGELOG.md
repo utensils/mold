@@ -12,12 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Desktop gallery publication now has one authority at a time.** While an embedded or separately-run local server exists, native list/save/delete and media access use its authenticated HTTP API; imported media streams into journaled atomic staging, validates the declared metadata and media structure, and preserves no-replace/DB/event semantics. Direct filesystem access is available only while the lifecycle lock proves the server is off, including failed starts and shutdown timeouts. `output_dir` is now explicitly startup-only over the live config API, thumbnail warmup observes one complete entry per gallery read lock, and transaction fault tests cover reservation release plus staging/archive cleanup.
 - **Server-authored gallery metadata now survives without SQLite.** Every committed batch, desktop import, ordinary image/video generation, and durable chain finalization enters a cross-process, generation-fenced authority under the gallery transaction namespace. Its checksummed mirrored checkpoint and write-ahead mutation record preserve exact filenames and stable file identity; warm processes invalidate stale caches from the durable generation marker, while startup stats every live name but hashes only new or changed media. SQLite is projected only after filesystem authority is durable. External removal or replacement quarantines one entry without blocking siblings or creating delete authority; explicit delete revalidates the exact archived identity while holding the machine-wide gallery lock, preserves replacements, and completes interrupted matching deletes on restart.
 - **GPU identity can no longer diverge between worker startup, scheduling, telemetry, and status.** Server discovery is consumed into one versioned `DeviceRegistry`; startup owners, dynamic re-enable construction, UUID-joined telemetry targets, planner candidates, `/api/devices`, and legacy `/api/status` all derive from its canonical records. Lifecycle changes now publish one coherent administrative/health/activity projection, including reordered CUDA ordinals, MIG/unknown CUDA devices, Metal, persisted-disabled startup, and arbitrary 64-device inventories.
-- **Desktop dev builds no longer crash when a generation completes.** Sending a completion notice calls Apple's UserNotifications framework, which aborts the process with an uncatchable `NSInternalInconsistencyException` when the binary runs outside an `.app` bundle. The native-notification command now detects the missing bundle identity and reports the notification as unsent; bundled release builds are unaffected.
-- **The desktop chain composer is now discoverable from Create.** The Create header carries the same **Single | Sequence** segmented switch as web and iPhone, and the chain composer uses the shared Mold Studio segmented control.
-- **Desktop Sequence now shares Create's chrome, model picker, and host selection.** The composer uses the same header anatomy, filters the shared model picker to installed chain-capable video models, explains disabled checkpoints, and routes limits, creation, and actions through the shared sticky/Auto/Most-capable host contract.
-- **A long chain jobs list no longer crushes the sequence filmstrip.** Fixed composer rows retain their height while the jobs list scrolls, and the jobs header exposes labeled inactive-job and disk-cleanup actions.
-- **The chain TOML panel is now a syntax-highlighted editor.** Edits apply through the same parser as Open TOML, parse errors leave the sequence intact, file tools dismiss correctly, and the start-image picker handles Escape consistently.
-- **The Library thumbnail-size slider no longer has a gap through its middle.** Desktop and web render one continuous ramp spanning the thumb's full travel.
 - **Scheduler V2 is now the default dispatcher, with a bounded rollback and real replan timing controls.** An unset `MOLD_DISPATCH_MODE` starts only authoritative V2 GPU owners; explicit `legacy` and `observe` remain restart-time rollback modes. The profile-scoped `scheduler.replan_debounce_ms`, `scheduler.replan_max_delay_ms`, and `scheduler.warm_wait_max_ms` settings replace hardcoded runtime values, validate 0–30000 ms with max delay at least debounce, and are marked restart-required across the config API, web, desktop, CLI, and docs. Queue mutations now run only the exact admission matcher so idle GPUs start promptly; the global optimizer waits for the sliding debounce/capped deadline instead of running on every mutation.
 - **Rejected durable-batch child completions no longer leave private staging authority behind.** The internal F1 bridge prevalidates the exact parent, attempt, child, and lease generation before writing an artifact, so stale and closing-attempt success results cannot block the live lease with a staged file or receipt. If parent persistence fails after valid staging, the uncertain receipt stays intact for joint recovery to either validate or remove before requeueing the child.
 - **Execution-equivalence identity now retains full collection-sized artifact topologies.** Transformer shards, text-encoder shards, and LoRA stacks keep their native indices instead of truncating at 8 or 16 bits, which could alias a later artifact onto an earlier map key and silently omit it from model and execution-equivalence fingerprints.
@@ -30,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-GPU administration now follows the dispatcher that actually owns the workers.** Legacy, observe, CPU-fallback, and all-disabled maintenance runtimes no longer advertise or accept live device enable/disable mutations, and a persisted V2 preference cannot make an actively used rollback worker appear disabled. CLI and TUI controls capability-check before mutation. Web machine detail now tears down and rebinds capabilities, queue polling, and authenticated device events when its route, host URL, or API key changes. Plans without a finite ETA remain unknown instead of becoming “now,” known estimates win equal-depth routing ties, and Discord paginates 64-device status output within every embed limit.
 - **GPU owner threads now shut down transactionally.** Any server initialization failure after GPU workers start requests typed shutdown and joins every owner before returning, while normal shutdown reports owner-thread join panics instead of discarding them. Panics anywhere in the owner entrypoint—including idle eviction and device-backed drops outside generation—now quarantine the context and store a fail-closed process-restart notification.
 - **LTX-2 Gemma no longer allocates on an unleased sibling GPU.** Automatic prompt-encoder placement now uses only the GPU assigned to the stage when it fits, otherwise CPU. Previously it walked every visible GPU and could double-book a sibling owned by another scheduler worker; explicit `gpu` still means the assigned GPU and never silently moves.
+- **Selecting a video model now applies its frame rate, not a hard-coded 24.** Steps, guidance, and size already followed the model, but `default_fps` was ignored, so picking a 30 fps checkpoint such as `ltx-video-0.9.6-distilled` left the sequence composer's duration note and the Advanced video summary reading 24 fps — and submitted the sequence or clip at 24 fps, playing it back 20% slow. Web, desktop, and iPhone now apply the model's advertised frame rate exactly as they apply steps and guidance, for one-shot video and sequences alike; models that advertise none keep the existing 24 fps fallback.
+
+- **The Create activity strip is present tense again.** Finished and failed sequences used to pile up between the canvas and the composer forever — `COMPLETED … 5 clips … [Watch][Edit][Delete]` rows that were a log, not a workspace — while the sidebar's **Now developing** insisted nothing was developing. Desktop and web now show only work that is happening, plus at most two dismissible rows for work that went wrong and still wants a decision (they expire five minutes after the server says the job settled), plus one mono chip counting the rest (`4 settled sequences`) that opens **Library ▸ History ▸ Sequences**. Dismissing a row is client-side and never deletes anything. A just-finished sequence now lands on the Create canvas with **Edit sequence** and **Show in library** instead of vanishing, a failed one keeps its error and a **Resume**, and running sequences finally appear in the sidebar's **Now developing** with their clip counter. Failed prints keep a row on desktop too, matching web. Along the way, print rows were sorting on a client-id counter rather than a clock, so any print row would have sunk below every sequence.
+
+- **Desktop dev builds no longer crash when a generation completes.** Sending a completion notice calls Apple's UserNotifications framework, which aborts the process with an uncatchable `NSInternalInconsistencyException` ("bundleProxyForCurrentProcess is nil") when the binary runs outside an `.app` bundle — exactly how `desktop-dev` runs it. The native-notification command now detects the missing bundle identity and quietly reports the notification as unsent instead of taking the app down; bundled release builds are unaffected.
+
+- **The desktop chain composer is now discoverable from Create.** Sequence authoring existed only behind File → New Chain and the ⌘K palette, so the Create workspace showed no path to it at all. The Create header now carries the same **Single | Sequence** segmented switch as web and iPhone, and the chain composer's hand-rolled toggle was replaced with the shared Mold Studio segmented control so the pair round-trips consistently.
+- **Desktop Sequence now shares Create's chrome and model picker.** Switching Single ↔ Sequence no longer swaps to a differently shaped page: the chain composer uses the same 52px header anatomy (title, summary pill, mode switch), and its plain dropdown was replaced with the Create inspector's model picker — extracted into a shared component — filtered to installed video models. Chain-incapable checkpoints such as two-stage LTX-2 `-dev` exports now appear disabled with the reason instead of silently vanishing from the list.
+- **Desktop Sequence now offers the same host selection as Single.** The chain composer header carries the shared generation-host chip — Auto (least busy), Most capable, or a sticky host, writing the same persisted `generateTargetHost` contract — and chain limits, creation, and job actions follow a sticky pick, while Auto keeps the model-aware default that escalates CUDA-only families to the most capable CUDA machine.
+- **A long chain jobs list no longer crushes the sequence filmstrip.** The chain composer's fixed rows (header, filmstrip, footer, TOML panel) were flex children of the scrolling column and compressed into overlapping slivers once enough jobs accumulated; they now hold their height and the jobs list scrolls instead. The jobs header also replaces the bare `GC` glyph with **Clear inactive** — deleting every job that isn't running or queued, including resumable ones, in one action — and a labeled **Clean up disk** sweep.
+- **The chain TOML panel is now a syntax-highlighted editor.** View as TOML shows the script with token-colored tables, keys, strings, numbers, and comments, and edits can be applied back to the filmstrip through the same parser as Open .toml — a parse error is shown inline without touching the sequence. The File tools menu also dismisses on outside click, Escape, and after picking an action, and the chain start-image picker closes on Escape even when focus sits outside the dialog (WKWebView never focuses clicked buttons).
+
+- **The Library thumbnail-size slider no longer has a gap through its middle.** The small-to-large ramp was drawn as two independently positioned wedges, which left roughly 29 px of empty track between them and a visible step where their thicknesses disagreed. Desktop and web now render one continuous ramp spanning the thumb's full travel.
 - **The iPhone Models family filter no longer stays stuck on "All families".** The family taxonomy was fetched once when the Models tab first mounted, so a host that was unreachable — or whose API key was still coming out of the Keychain — left the picker with its single placeholder option for the rest of the session, and a failed catalog search was never retried either. Mold now re-drives the taxonomy and a failed search whenever the browsed host's address, key, or reachability changes, keeps the last taxonomy that did load instead of blanking it on a failed reload, and falls back to a session-sticky set of the families seen in catalog results and installed host inventories when the taxonomy endpoint cannot be read at all — accumulated rather than derived from the rows on screen, which would collapse the picker to the family already filtered on.
 - **Desktop Library now uses native save language for gallery media.** The print-details action says **Save image** or **Save video** instead of the browser-oriented **Download**, while preserving the existing user-chosen file-save behavior.
 - **New video sequences now start at a GPU-safe clip duration.** Web,
@@ -88,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent runtime EWMA. Cold and warm planning therefore add the matching
   setup disposition exactly once instead of learning it into every run.
 - **Durable video chains now schedule one leased stage at a time.** In scheduler V2 mode, every parent is a resumable actor with persisted `mold.chain-execution.v1` authority (`Dormant → Ready → Submitted → Leased → Checkpointing → Finalizing → Settled`) and attempt-fenced `(parent, generation, stage, work)` identity. Different chains can occupy different GPUs concurrently without a fixed parent cap, each stage releases its lease before the next checkpoint becomes ready, and the previous GPU is only a deterministic locality preference. Job creation freezes canonical absolute companion paths behind an immutable runtime model identity, so restart-time config, environment, or catalog-sidecar changes cannot silently substitute artifacts. Queued and active cancellation use the F0 attempt token and settle as typed cancelled outcomes, LTX-2 and LTX-Video poll cooperative denoise safe points, invalidated plans re-resolve the same stage with bounded backoff, and starvation bypasses guarantee progress under continuous ordinary arrivals. `GET /api/queue` exposes internal stages additively under `plan.work_items` without changing legacy positions or PATCH behavior. `legacy` and `observe` retain the compatibility path for rollback.
+- **A sequence can now be remade or continued from the Library.** A print stitched from a sequence carries every clip's prompt, duration, and transition, and nothing read it — "make that again, but clip 3 is different" meant retyping five prompts. **Reuse settings** on such a print now loads those clips straight onto the Create clip rail as a new sequence (desktop, web, and iPhone) instead of dumping all five prompts, newline-joined, into the One shot box. Desktop and web add a second action, **Edit sequence**, which re-enters the original durable job on the machine that produced it so its already-rendered clips stay cached; it is checked once, on click, and if the job has since been deleted or swept it falls back to reusing the settings and says so rather than dying quietly. An unreachable machine says so and changes nothing — silently starting a fresh sequence would throw away those cached clips. Reuse is honest about its limits: it says how many clips it restored and names anything a print does not record (clips 2..n's negative prompts, clip sources), and if the model's motion tail has changed since, it raises the clip durations that no longer fit and tells you instead of silently resizing.
+
+- **Library ▸ History gained a Sequences tab, and web gained the History drawer.** Every durable sequence job on every connected machine is listed in one place, newest-first with active work on top: open or edit it, resume a failed one, delete it, or jump straight to the print it produced. The host-scoped **Clear inactive** (behind a confirm that names the machine and the count) and **Clean up disk** moved here from the Create composer, where destructive maintenance never belonged. The list renders the 200 newest jobs and says how many it is holding back. The tab lives in the URL, so `/library?panel=history&tab=sequences` — where the Create activity chip points — opens straight onto it.
+
 - **Desktop Create now makes sequences where you make everything else.** The
   Single | Sequence switch and the separate chain page are gone: **Output**
   (One shot | Sequence) is a setting in the Create inspector beside Model.
@@ -105,6 +116,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-renders only from the earliest changed clip. Legacy `/create/chain`
   and `/chains` URLs permanently redirect to `/create?output=sequence`, and
   File → New Chain became **New Sequence**.
+- **Web Create now makes sequences where you make everything else.** The
+  Single | Sequence switch and the separate script composer are gone:
+  **Output** (One shot | Sequence) is a setting in the Create controls
+  column beside Model. Choosing Sequence turns the composer into a clip
+  rail — clip pills joined by seam pills that name each transition in
+  words, with a click opening the seam editor's teaching rows and
+  fade-length stepper — filters the model picker to sequence-capable video
+  models (auto-picking one and remembering your single-mode model),
+  defaults new clips to the selected model's own frame count, locks batch
+  to one timeline, and relabels the button **Generate sequence**. Sequences
+  now submit the **live** inspector: the composer used to keep private
+  copies of width, steps, and guidance, so changing those controls silently
+  did nothing to the queued chain. Sequence jobs share the one Create
+  activity strip with prints (watch, cancel, resume, edit, clear inactive,
+  clean up disk) instead of a separate jobs list, clip prompts survive
+  navigation and restarts, and a finished sequence can be edited in place:
+  clips reload onto the rail, pills show cached ✓ versus re-render ↻ as you
+  edit, and **Update sequence** re-renders only from the earliest changed
+  clip. Existing drafts and tracked jobs migrate on first load
+  (`mold.composer.mode` and `mold.chain.draft.v2` into the shared sequence
+  draft; `mold.create.chain-job` / `-host` into
+  `mold.create.tracked-sequences.v1`), and Import/Export `.toml` keeps
+  reading and writing canonical `mold.chain.v1` scripts.
+- **Sequences can now be edited in place with cached clips reused.** New
+  `POST /api/chain-jobs/:id/amend` accepts the full edited stage list (plus
+  optional chain-level `motion_tail_frames` / `fps` / `seed` / `steps` /
+  `guidance` / `enable_audio` overlays) and requeues from the earliest
+  genuinely-dirty clip: editing clip N re-renders N..end only, appending
+  clips renders just the new ones, removing trailing clips or toggling
+  Cut↔Crossfade (or a fade length) re-finalizes with zero re-renders.
+  A clip is invalidated by changes to its prompt, frame count, negative
+  prompt, source image, effective seed, or Smooth↔(Cut/Fade) carry — and
+  everything is invalidated by chain-level seed/steps/guidance/fps/
+  motion-tail changes or turning audio on (turning it off keeps every clip;
+  finalize just ignores the sidecars). Model, resolution, output format,
+  placement, strength, and batch provenance are not amendable — create a
+  fresh job for those. The manifest records each amend with the pre-amend
+  effective request, folding and clearing any pending retakes, and
+  `GET /api/chain-jobs/:id` exposes the additive `amends` history.
+  Underpinning this, stage artifacts switched to RAW untrimmed segments:
+  every boundary trim and crossfade now happens at finalize from the
+  effective script, tail PNGs are always persisted for bit-exact carry, and
+  jobs recorded by older versions still finalize unchanged (their trimmed
+  segments pass through; older mold versions cannot correctly finalize new
+  raw-segment jobs — downgrade is unsupported).
 - **Chain jobs now announce their lifecycle on the server event stream.**
   `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
   and `chain_job_ended` events — emitted on durable-job creation, resume,
@@ -112,10 +168,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can track sequences in a unified activity surface without polling
   `/api/chain-jobs`. Ephemeral legacy-shim jobs stay silent, and old clients
   ignore the unknown event types.
-- **Pausing the queue now also holds the chain runner.** `POST
-  /api/queue/pause` previously only stopped print dispatch while a running
-  sequence kept claiming GPU stage after stage; the runner now holds before
-  claiming new chain work and between stages (the running stage always
+- **Pausing the queue now also holds the chain runner.**
+  `POST /api/queue/pause` previously only stopped print dispatch while a
+  running sequence kept claiming GPU stage after stage; the runner now holds
+  before claiming new chain work and between stages (the running stage always
   finishes), and a cancel still lands while held.
 - **Chain stages now honor explicit GPU placement and see live config.**
   A sequence submitted with a `gpu:N` placement previously had it silently
@@ -123,6 +179,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and force model reloads; and the stage executor held a config snapshot
   from server boot, so a model pulled after startup could fail in a chain
   stage while running fine on the normal queue. Both fixed.
+- **iPhone Create now makes sequences in the same flow as stills.** The
+  Single | Sequence mode pair above the form is gone: **Output** (One shot |
+  Sequence) is a segmented field in the Create form stack, directly above the
+  model field, so a sequence is a setting of Create rather than a separate
+  place. Both outputs share one form — the model picker narrows to
+  chain-capable video models in Sequence (auto-picking one, restoring the
+  previous single pick on the way back, and naming the host's reason when a
+  checkpoint can't chain), and size, frame rate, steps, guidance, and seed are
+  the same fields read live at submit time instead of the composer's old
+  private copies that silently drifted from what was on screen. Clip prompts
+  now survive tab switches and relaunches in the shared sequence draft, which
+  also carries the prompt across an Output switch; existing installs migrate
+  out of the retired `mold.mobile.create-mode.v1` key and land back in
+  Sequence. Clips are full-width cards separated by a 44pt seam pill that
+  opens a bottom sheet with the shared seam editor — the iPhone's first
+  fade-length control, clamped to the host's `fade_frames_max` — and new clip
+  durations follow each model's own server-advertised default rather than a
+  fixed 25 frames. Durable sequences stream over SSE (with a 5s poll fallback
+  and a forced re-sync when iOS wakes the webview) instead of a 2s poll, and
+  they appear in the SAME queue list as single prints with Cancel, Resume, and
+  Dismiss. Browsing for a video model from the sequence empty state now lands
+  on Discover with the Video + Models filters applied. API keys remain
+  Keychain-only, and recovery still refuses to reattach unless the saved
+  address and server instance identity both match.
 - **The shared sequence kit for the unified Create view landed.** A studio
   sequence-draft store persists the clip list (with legacy web/iPhone
   draft-and-mode migration) so clip prompts survive navigation, reloads,

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SEQUENCE_CLIP_FRAMES,
+  DEFAULT_VIDEO_FPS,
   defaultClipFrames,
   defaultSequenceStages,
+  defaultVideoFps,
   friendlySequenceError,
   modelSupportsSequence,
   modelsForOutput,
@@ -182,6 +184,20 @@ describe("sequence authoring", () => {
     expect(defaultClipFrames({ default_frames: 500 }, limits, 17)).toBe(97);
     // Never at or below the motion tail — raised to the first valid option.
     expect(defaultClipFrames({ default_frames: 9 }, limits, 17)).toBe(25);
+  });
+
+  it("defaults fps from the model, then the current value, then the fallback", () => {
+    // The server-advertised default wins — LTX-Video ships 30, LTX-2 24.
+    expect(defaultVideoFps({ default_fps: 30 })).toBe(30);
+    expect(defaultVideoFps({ default_fps: 24 })).toBe(24);
+    // It wins over whatever the form is holding, exactly like steps/guidance.
+    expect(defaultVideoFps({ default_fps: 30 }, 24)).toBe(30);
+    // Nothing advertised (older server, image model) → the form value stands.
+    expect(defaultVideoFps({}, 30)).toBe(30);
+    expect(defaultVideoFps(null, 12)).toBe(12);
+    // Nothing at all → the 24-fps fallback.
+    expect(defaultVideoFps(null)).toBe(DEFAULT_VIDEO_FPS);
+    expect(defaultVideoFps({ default_fps: null }, null)).toBe(24);
   });
 
   it("turns GPU memory failures into actionable sequence recovery", () => {

@@ -368,6 +368,64 @@ pub fn reset_one_stage(
     })
 }
 
+/// Delete every stage row with `stage_idx >= from_idx` (amend shrink /
+/// suffix invalidation). Returns the number of rows removed.
+pub fn delete_stages_from(db: &MetadataDb, job_id: &str, from_idx: u32) -> Result<usize> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "DELETE FROM chain_job_stages
+             WHERE job_id = ?1 AND stage_idx >= ?2",
+            params![job_id, from_idx as i64],
+        )?;
+        Ok(n)
+    })
+}
+
+/// Persist an amended job's new shape: stage count and the stage rendering
+/// resumes from. Returns `false` when `job_id` is unknown.
+pub fn update_stage_shape(
+    db: &MetadataDb,
+    job_id: &str,
+    stage_count: u32,
+    current_stage: u32,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_jobs
+             SET stage_count = ?1, current_stage = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![
+                stage_count as i64,
+                current_stage as i64,
+                updated_at_ms,
+                job_id
+            ],
+        )?;
+        Ok(n > 0)
+    })
+}
+
+/// Rewrite the indexed copy of the canonical request JSON (amend rewrites
+/// the manifest's `request_json`; the DB row mirrors it). Returns `false`
+/// when `job_id` is unknown.
+pub fn set_request_json(
+    db: &MetadataDb,
+    job_id: &str,
+    request_json: &str,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_jobs
+             SET request_json = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![request_json, updated_at_ms, job_id],
+        )?;
+        Ok(n > 0)
+    })
+}
+
 /// Deletes the job row; stage rows cascade via the v11 foreign key
 /// (`ON DELETE CASCADE` is the contract — see the cascade contract test).
 pub fn delete_job(db: &MetadataDb, id: &str) -> Result<bool> {
@@ -831,6 +889,60 @@ mod tests {
             assert_eq!(stage.segment_rel_path, None);
             assert_eq!(stage.error, None);
         }
+    }
+
+    #[test]
+    fn delete_stages_from_removes_trailing_rows() {
+        let db = db();
+        let row = job("01JBR55SHRINK", ChainJobState::Completed, 1_000);
+        insert_job(&db, &row).unwrap();
+        for idx in 0..4 {
+            upsert_stage(
+                &db,
+                &stage(&row.id, idx, StageState::Completed, 42 + idx as u64),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(delete_stages_from(&db, &row.id, 2).unwrap(), 2);
+
+        let remaining = stages_for_job(&db, &row.id).unwrap();
+        assert_eq!(
+            remaining.iter().map(|s| s.stage_idx).collect::<Vec<_>>(),
+            vec![0, 1],
+            "only rows with stage_idx >= from_idx are removed"
+        );
+        assert_eq!(delete_stages_from(&db, &row.id, 2).unwrap(), 0);
+        assert_eq!(delete_stages_from(&db, "missing", 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn update_stage_shape_persists_new_count_and_current_stage() {
+        let db = db();
+        let row = job("01JBR55SHAPE", ChainJobState::Completed, 1_000);
+        insert_job(&db, &row).unwrap();
+
+        assert!(update_stage_shape(&db, &row.id, 5, 3, 9_000).unwrap());
+
+        let got = get_job(&db, &row.id).unwrap().unwrap();
+        assert_eq!(got.stage_count, 5);
+        assert_eq!(got.current_stage, 3);
+        assert_eq!(got.updated_at_ms, 9_000);
+        assert!(!update_stage_shape(&db, "missing", 1, 0, 9_000).unwrap());
+    }
+
+    #[test]
+    fn set_request_json_rewrites_indexed_request() {
+        let db = db();
+        let row = job("01JBR55REQJSON", ChainJobState::Completed, 1_000);
+        insert_job(&db, &row).unwrap();
+
+        assert!(set_request_json(&db, &row.id, r#"{"model":"amended"}"#, 9_500).unwrap());
+
+        let got = get_job(&db, &row.id).unwrap().unwrap();
+        assert_eq!(got.request_json, r#"{"model":"amended"}"#);
+        assert_eq!(got.updated_at_ms, 9_500);
+        assert!(!set_request_json(&db, "missing", "{}", 9_500).unwrap());
     }
 
     #[test]

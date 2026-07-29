@@ -1,3 +1,4 @@
+import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
@@ -50,6 +51,13 @@ export interface OutputMetadata {
   generation_width?: number | null;
   generation_height?: number | null;
   strength?: number | null;
+  /** Durable sequence job this print was stitched from. Present only for
+   * chain jobs with a server-side record — ephemeral chain outputs and
+   * pre-#564 rows carry nothing (additive; newer servers only). */
+  chain_job_id?: string | null;
+  /** Per-clip provenance for a stitched sequence — what the Library's
+   * sequence-aware Reuse settings reloads into the clip rail. */
+  chain?: ChainOutputMetadata | null;
   scheduler?: Scheduler | null;
   output_format?: OutputFormat | null;
   cfg_plus?: boolean | null;
@@ -259,6 +267,12 @@ export interface ModelInfoExtended extends ModelDefaults {
   supports_audio?: boolean | null;
   /** Model-specific sequence support; absent on older servers. */
   supports_sequence?: boolean | null;
+  /** Model's own default frame count (`/api/models`, additive) — LTX-2
+   * ships 97, LTX-Video 25; absent on older servers and image models. */
+  default_frames?: number | null;
+  /** Model's own default frame rate (`/api/models`, additive) — LTX-Video
+   * ships 30, LTX-2 24; absent on older servers and image models. */
+  default_fps?: number | null;
 }
 
 export interface GpuInfo {
@@ -523,7 +537,7 @@ export interface RetakeAmendment {
   at_unix_ms: number;
 }
 
-// script is a NEW wire-exact mirror (NOT lib/chainToml.ts's ChainScriptToml):
+// script is a NEW wire-exact mirror (NOT @studio/lib/chainToml's ChainScript):
 // Rust ChainScript serializes stages under the key "stage"
 // (#[serde(rename = "stage")], chain.rs:236) — mirror pins that name.
 export interface ChainScriptWire {

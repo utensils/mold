@@ -38,6 +38,10 @@ const props = defineProps<{
   // Global audio preference; native controls still let the user override.
   muted: boolean;
   models?: ModelInfoExtended[] | undefined;
+  /** Stitched from a sequence (`metadata.chain`): reuse loads a clip rail. */
+  isSequence?: boolean;
+  /** Its producing job is (without probing) still on its origin host. */
+  canEditSequence?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +52,7 @@ const emit = defineEmits<{
   (e: "use-source", item: GalleryImage): void;
   (e: "upscale", item: GalleryImage): void;
   (e: "delete", item: GalleryImage): void;
+  (e: "edit-sequence", item: GalleryImage): void;
 }>();
 
 const menuOpen = ref(false);
@@ -247,6 +252,9 @@ watch(
   },
 );
 
+function onEditSequence() {
+  if (props.item) emit("edit-sequence", props.item);
+}
 function onReuse() {
   if (props.item) emit("reuse", props.item);
 }
@@ -470,6 +478,14 @@ function onDelete() {
             </svg>
             Reuse these settings
           </button>
+          <button
+            v-if="canEditSequence"
+            class="lb__quiet lb__edit-sequence"
+            data-test="lightbox-edit-sequence"
+            @click="onEditSequence"
+          >
+            Edit sequence
+          </button>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">
               Use as source
@@ -670,6 +686,14 @@ function onDelete() {
               <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
             </svg>
             Reuse these settings
+          </button>
+          <button
+            v-if="canEditSequence"
+            class="lb__quiet lb__edit-sequence"
+            data-test="lightbox-edit-sequence"
+            @click="onEditSequence"
+          >
+            Edit sequence
           </button>
           <div class="lb__pair">
             <button class="lb__quiet" @click="onUseSource">

@@ -24,6 +24,7 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
+import { defaultVideoFps } from "@studio/lib/sequence";
 
 /** The prompt actually sent to the server: the textarea content composed with
  * the active style preset (the shared kit substitutes a "{prompt}" template,
@@ -170,7 +171,9 @@ function modelDefaultsPatch(
   const capabilities = generationCapabilitiesForFamily(model.family);
   if (capabilities.supportsVideo) {
     next.frames ??= 25;
-    next.fps ??= 24;
+    // The model's advertised rate is applied like steps/guidance — it is only
+    // absent-server/absent-field that leaves the current value in place.
+    next.fps = defaultVideoFps(model, next.fps);
   } else {
     next.frames = null;
     next.fps = null;

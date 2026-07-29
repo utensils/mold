@@ -183,9 +183,9 @@ with prompt, model, seed, and generation metadata.
   LoRA, prompt expansion, and Real-ESRGAN upscaling
 - Text/image-to-video, multi-prompt video chains, native MP4 output, and
   checkpoint-dependent generated audio
-- Guided Sequence authoring with per-clip prompts, duration, source images,
-  Continue motion / Cut / Crossfade transitions, resumable jobs, and explicit
-  remote-machine routing
+- Sequence authoring inside Create with per-clip prompts, duration, source
+  images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
+  re-renders only the changed clips, and explicit remote-machine routing
 - Quantized model variants, encoder fallback, smart VRAM placement, and FLUX
   block offloading
 - Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated

@@ -128,15 +128,21 @@ MOLD_HOME/jobs/<job_id>/
 ├── manifest.toml            # self-contained job description + per-stage status
 ├── stages/
 │   ├── 000/
-│   │   ├── segment.mp4      # trimmed, boundary-handled H.264 segment
-│   │   ├── tail/            # trailing RGB frames, %03d.png — written when the NEXT
-│   │   │                    #   stage's transition is Smooth (carryover input)
-│   │   ├── boundary-out/    # trailing fade_len raw frames — written when the NEXT
-│   │   │                    #   stage's transition is Fade (blend source)
-│   │   ├── boundary-in/     # leading fade_len raw (pre-blend) frames — written when
-│   │   │                    #   THIS stage's incoming transition is Fade (enables
-│   │   │                    #   splice re-blend without re-rendering, §8.2)
-│   │   ├── audio.pcm        # f32-interleaved PCM sidecar (only when audio enabled)
+│   │   ├── segment.mp4      # H.264 segment. Amended (2026-07-28, §17): RAW —
+│   │   │                    #   every frame the engine emitted, no boundary
+│   │   │                    #   trims/blends. Legacy stages (raw_segment=false)
+│   │   │                    #   hold the old trimmed, boundary-handled form.
+│   │   ├── tail/            # trailing RGB frames, %03d.png — amended (§17):
+│   │   │                    #   ALWAYS written when the engine produced a tail
+│   │   │                    #   (bit-exact carry for resume/amend). Legacy
+│   │   │                    #   stages wrote it only before a Smooth successor.
+│   │   ├── boundary-out/    # LEGACY only — trailing fade_len raw frames,
+│   │   │                    #   written before a Fade successor (blend source)
+│   │   ├── boundary-in/     # LEGACY only — leading fade_len raw (pre-blend)
+│   │   │                    #   frames of a Fade stage (splice re-blend, §8.2)
+│   │   ├── audio.pcm        # f32-interleaved PCM sidecar (only when audio
+│   │   │                    #   enabled). Amended (§17): full untrimmed track
+│   │   │                    #   for raw stages.
 │   │   └── preview.jpg      # last-frame thumbnail for the composer stage card
 │   ├── 001/ …
 └── final/
@@ -184,7 +190,7 @@ its trailing decoded RGB frames, and the next stage VAE-encodes them fresh
 only difference is that the tail now round-trips through PNGs on disk:
 
 - **Live path:** the runner passes the in-memory `ChainTail` straight to the
-  next stage (no decode from disk) *and* persists it. Zero added latency.
+  next stage (no decode from disk) _and_ persists it. Zero added latency.
 - **Resume/retake path:** `ChainTail` is reconstructed by loading
   `stages/NNN/tail/*.png`. PNG is lossless, so the reconstructed tail is
   bit-identical to the live one, and the VAE encode of it is deterministic —
@@ -192,7 +198,7 @@ only difference is that the tail now round-trips through PNGs on disk:
 
 Seed determinism already holds: stage seeds are stable-by-design
 (`derive_stage_seed`), initial noise is CPU-seeded (`seeded_randn`). The
-stage's *effective* seed is persisted in both manifest and DB so a retake can
+stage's _effective_ seed is persisted in both manifest and DB so a retake can
 change it without touching the base request.
 
 ## 5. Boundary handling at write time
@@ -201,18 +207,18 @@ Today `StitchPlan::assemble` does all boundary work at the end, in RAM. This
 design moves it to stage-write time so final assembly is concatenation:
 
 - **Smooth:** continuation stages drop their leading `motion_tail_frames`
-  *before* encoding their segment. (The orchestrator already knows the
+  _before_ encoding their segment. (The orchestrator already knows the
   incoming transition; the trim moves from stitch to segment-encode.)
 - **Cut:** segment encoded as-is.
 - **Fade:** the incoming stage blends its leading `fade_len` frames against
   the prior stage's stored `boundary-out/` frames, then encodes (its raw
   pre-blend leading frames are persisted to `boundary-in/` first). The prior
-  segment must *not* contain those consumed frames — so a stage followed by a
+  segment must _not_ contain those consumed frames — so a stage followed by a
   Fade trims its trailing `fade_len` frames from its own segment. Because the
   following stage's transition is known from the request up front (not
   discovered later), each stage knows its trailing trim at encode time.
   Retake preserves this: transitions are part of the request, and a retake
-  that edits a stage's *transition* re-renders is out of scope for v1 (seed
+  that edits a stage's _transition_ re-renders is out of scope for v1 (seed
   and prompt edits only, §8).
 - **Audio:** per-stage PCM sidecars carry the same trims (samples are
   frame-aligned: `samples_per_frame = sample_rate / fps` at constant rate).
@@ -224,6 +230,11 @@ surgery, yields the final video.** This is the property that makes finalize
 re-runnable and retake-splice (§8.2) cheap. A unit test asserts frame-count
 equality against the current `StitchPlan::assemble` for mixed-transition
 chains (the `mixed_transitions_end_to_end` case: 97+72+97+89 = 355).
+
+> **Amended (2026-07-28, §17):** this section describes the LEGACY artifact
+> contract, still honored for stages with `raw_segment = false`. New stages
+> are written RAW and the concat invariant no longer holds for them —
+> finalize applies the whole boundary plan (§17).
 
 ### 5.1 Finalize
 
@@ -240,7 +251,7 @@ for simplicity and to keep GIF-preview/APNG fallbacks working unchanged.
 ## 6. Execution model: cooperative yield
 
 A single `ChainJobRunner` task (spawned per job, at most one active job — the
-existing `chain_lock` becomes "one chain *runner* at a time") drives:
+existing `chain_lock` becomes "one chain _runner_ at a time") drives:
 
 ```
 for stage in remaining_stages:
@@ -312,7 +323,7 @@ Only stage N is re-rendered; N+1..end keep their segments. Sound **only**
 when stage N+1's transition is `Cut` or `Fade` (no temporal handoff across
 that boundary, so the seam is seamless by construction). For fade, stage N's
 new `boundary-out/` frames re-blend against stage N+1's stored raw
-`boundary-in/` frames, and only N+1's segment is re-*encoded* — no re-render
+`boundary-in/` frames, and only N+1's segment is re-_encoded_ — no re-render
 (this is why `boundary-in/` keeps the pre-blend frames, §3.2). The API
 rejects `splice` when N+1's transition is `Smooth` with an error explaining
 why. Amended (Run 3): the machine-readable code is
@@ -333,18 +344,18 @@ intact for provenance.
 
 New (all under the existing auth / `MOLD_API_KEY` regime):
 
-| Route | Effect |
-|---|---|
-| `POST /api/chain-jobs` | Validate + normalise ChainRequest, create job dir + rows, start runner. 202 `{job_id}` |
-| `GET /api/chain-jobs` | List jobs (state, model, progress, timestamps) |
-| `GET /api/chain-jobs/:id` | Job detail incl. per-stage states + preview URLs |
-| `GET /api/chain-jobs/:id/events` | SSE; re-attachable at any time (replays current state as first event, then live progress) |
-| `POST /api/chain-jobs/:id/resume` | Resume interrupted/failed/cancelled job |
-| `POST /api/chain-jobs/:id/retake` | §8 |
-| `POST /api/chain-jobs/:id/cancel` | Stop at next boundary, keep artifacts |
-| `DELETE /api/chain-jobs/:id` | Remove job + directory (409 while running) |
-| `POST /api/chain-jobs/gc` | Amended (Run 3): force retention/ephemeral artifact GC |
-| `GET /api/chain-jobs/:id/stages/:idx/preview` | Stage thumbnail (`preview.jpg`) |
+| Route                                         | Effect                                                                                    |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `POST /api/chain-jobs`                        | Validate + normalise ChainRequest, create job dir + rows, start runner. 202 `{job_id}`    |
+| `GET /api/chain-jobs`                         | List jobs (state, model, progress, timestamps)                                            |
+| `GET /api/chain-jobs/:id`                     | Job detail incl. per-stage states + preview URLs                                          |
+| `GET /api/chain-jobs/:id/events`              | SSE; re-attachable at any time (replays current state as first event, then live progress) |
+| `POST /api/chain-jobs/:id/resume`             | Resume interrupted/failed/cancelled job                                                   |
+| `POST /api/chain-jobs/:id/retake`             | §8                                                                                        |
+| `POST /api/chain-jobs/:id/cancel`             | Stop at next boundary, keep artifacts                                                     |
+| `DELETE /api/chain-jobs/:id`                  | Remove job + directory (409 while running)                                                |
+| `POST /api/chain-jobs/gc`                     | Amended (Run 3): force retention/ephemeral artifact GC                                    |
+| `GET /api/chain-jobs/:id/stages/:idx/preview` | Stage thumbnail (`preview.jpg`)                                                           |
 
 Compatibility: `POST /api/generate/chain` and `/api/generate/chain/stream`
 become shims — create a job, block/stream on its events, return the existing
@@ -382,6 +393,7 @@ Moves as part of this work (not a separate workstream):
   independent-clip fallback becomes `CarryoverKind::IndependentClips` instead
   of a comment. New families implement the trait and appear in chain limits
   automatically.
+
 - `runtime.rs` (7.5k lines) is **not** decomposed wholesale; the pieces this
   project touches (chain-stage entry points) move out with the module split,
   consistent with refactor-as-we-go.
@@ -481,3 +493,110 @@ steps that change user-facing surface, per repo policy.
   `mold-core`; the job API is plain HTTP, so nothing structural blocks it).
 - Retake with edited `frames`/`transition` (changes boundary math of
   neighbors) — deliberately excluded from v1; revisit with real usage.
+
+## 17. Amend + raw segments (amended 2026-07-28)
+
+Users can edit an existing multi-clip sequence and re-render only the clips
+that need it, reusing cached stages. Two coupled changes:
+
+### 17.1 Raw-segment artifact contract
+
+`write_stage_artifacts` no longer trims or blends. For every new stage:
+
+- `segment.mp4` is RAW — every frame the engine emitted.
+- The audio sidecar is the FULL untrimmed track.
+- `tail/` PNGs are ALWAYS written when the engine produced a motion tail —
+  even when the next transition isn't Smooth, and even for the last stage.
+  They are the bit-exact carry source for resume/amend; carry is never
+  derived from lossy H.264 decode.
+- `boundary-in/` / `boundary-out/` are no longer written.
+- `preview.jpg` is unchanged.
+
+`StageStatus` gains `#[serde(default)] raw_segment: bool` to distinguish raw
+artifacts from legacy trimmed ones; the manifest schema string stays
+`mold.chainjob.v1` and old manifests parse via the default.
+
+**Finalize is the single place boundary math happens** for raw stages, from
+the EFFECTIVE script: a continuation entering with Smooth drops its leading
+`motion_tail_frames` (frames + audio); a Fade boundary blends the prior raw
+segment's trailing `fade_len` with the incoming stage's leading `fade_len`
+via `fade_boundary` (with an audio crossfade) while the prior stage's
+trailing `fade_len` is withheld from the output. Legacy stages pass through
+exactly as before, and mixed legacy+raw jobs finalize correctly (a legacy
+predecessor's blend inputs come from its `boundary-out/`).
+`maybe_reencode_next_after_fade` survives ONLY for legacy Fade successors;
+raw successors are never re-encoded in place — a retake/amend of the stage
+before them simply re-finalizes.
+
+`frames_emitted` keeps its wire meaning — frames the stage contributes to
+the final video after boundary accounting — computed by the shared pure
+helper `mold_core::chain::stage_contributed_frames`, which
+`ChainRequest::estimated_total_frames` also sums.
+
+**Downgrade note:** an older mold finalizing a raw-segment job would
+concatenate untrimmed segments and produce a wrong video. Downgrade across
+this change is unsupported. Upgrade is safe: legacy jobs resume, retake, and
+finalize unchanged.
+
+### 17.2 Amend endpoint
+
+`POST /api/chain-jobs/:id/amend` accepts `AmendRequest`: the FULL edited
+stage list (canonical order) plus optional chain-level overlays
+(`motion_tail_frames`, `fps`, `seed` as a decimal string, `steps`,
+`guidance`, `enable_audio`; omitted = keep current). NOT amendable — the
+client must create a fresh job: model, width, height, output_format,
+placement, strength, batch provenance.
+
+Semantics (all under the per-job mutation lock, like retake):
+
+- 409 `CHAIN_JOB_RUNNING` while running; 409 `CHAIN_JOB_EPHEMERAL` for shim
+  jobs; allowed from Queued/Interrupted/Failed/Cancelled/Completed; 422 when
+  the candidate request fails the create-time gates
+  (`validate_and_normalize_chain_family` + `normalise()` + Mp4-only).
+- The candidate request is the current `effective_request` (retakes folded)
+  with the stages replaced and overlays applied.
+- **Invalidation** — `preserved_stages` is:
+  1. `0` when seed/steps/guidance/fps/motion_tail_frames changed or
+     `enable_audio` flipped OFF→ON (ON→OFF preserves everything; finalize
+     just ignores sidecars).
+  2. Otherwise the longest common prefix of per-stage render identity:
+     `(prompt, frames, negative_prompt, source_image bytes, effective
+per-stage seed, uses_carry)` with `uses_carry = idx > 0 && transition
+== Smooth`. Cut↔Fade toggles and `fade_frames` edits do NOT break the
+     prefix (finalize-only under raw segments); Smooth↔(Cut|Fade) does.
+  3. Clamped to the leading run of Completed stages, then shrunk past any
+     LEGACY stage whose baked-in artifacts can't serve the new boundary plan
+     (changed incoming boundary, missing tail before a new Smooth successor,
+     trailing truncation that no longer matches the new successor).
+  4. Appending clips preserves all old stages; removing trailing clips can
+     make the amend "boundary-only" (zero renders, just a re-finalize).
+     Preserved stage dirs are never renumbered.
+- Application: CAS → Queued; `AmendRecord { at_unix_ms,
+previous_request_json (pre-amend EFFECTIVE request), preserved_stages }`
+  appended to the manifest's `amends`; `request_json` rewritten to the
+  normalized candidate; `retakes` cleared (folded into the snapshot);
+  preserved `stage_status` rows kept verbatim (raw rows' `frames_emitted`
+  re-derived for the new plan), fresh Pending rows appended, trailing rows
+  dropped; invalidated `stages/NNN/` dirs deleted; DB index follows
+  (`set_request_json`, `delete_stages_from`, stage upserts,
+  `update_stage_shape`); runner kicked; `chain_job_queued` emitted.
+- A Completed job whose amend preserves every stage still requeues: the
+  runner's stage loop finds no incomplete stage and falls through to
+  `finalize_job`, producing a new versioned take from the cached raw
+  segments under the new boundary plan.
+- Response: 202 `AmendResponse` (`ChainJobSummary` + `preserved_stages`).
+  `ChainJobDetail` gains the additive `amends` history.
+
+## 18. Shipped (2026-07-28)
+
+Section 17 is no longer a proposal — `POST /api/chain-jobs/:id/amend` and the
+raw-segment / finalize-time-boundary artifact contract are both merged, along
+with the additive `chain_job_queued` / `chain_job_started` / `chain_job_ended`
+`ServerEvent` variants that let clients track sequences without polling
+`/api/chain-jobs`. The user-facing story is the **Update sequence** action on
+the unified Create clip rail (desktop and web).
+
+See `CHANGELOG.md` `[Unreleased]` — "Sequences can now be edited in place with
+cached clips reused" and "Chain jobs now announce their lifecycle on the server
+event stream" — and the wire reference in `website/api/index.md`
+(`POST /api/chain-jobs/:id/amend`, `/api/events`).

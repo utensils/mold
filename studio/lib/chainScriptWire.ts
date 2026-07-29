@@ -1,19 +1,23 @@
 /**
- * Native compatibility normalization for a durable job's echoed script.
+ * Server-wire → studio normalization for a durable sequence job's echoed
+ * script, shared by desktop, web, and iPhone.
  *
- * Today's server serializes `ChainScript` with serde rename `stage`, the
- * canonical `source_image` field, and a numeric seed; the shared studio
- * contract (`@studio/lib/api/chainTypes`) reads `stages`,
- * `source_image_b64`, and decimal-string seeds. The Edit-sequence flow
- * loads through this normalizer so BOTH wire generations feed
- * `chainScriptToClips` correctly.
+ * Today's server serializes `ChainJobDetail.script` from Rust's
+ * `ChainScript`: stages ride under the serde rename `stage`, a stage's
+ * opening image is the canonical `source_image`, and seeds are numeric.
+ * The shared studio contract (`./api/chainTypes`) reads `stages`,
+ * `source_image_b64`, and decimal-string seeds — u64 exceeds `Number`'s safe
+ * range, so seeds only stay exact as strings.
+ *
+ * Both wire generations (and the studio shape itself, which older servers
+ * and re-imported exports produce) must feed `chainScriptToClips` correctly,
+ * so this reader is deliberately defensive: it takes `unknown`, whitelists
+ * the fields the studio contract owns, and returns `null` rather than a
+ * half-built script when there is nothing editable.
  */
-import type {
-  ChainJobStageDetail,
-  ChainScript,
-  ChainScriptStage,
-} from "@studio/lib/api/chainTypes";
-import type { SequenceTransition } from "@studio/lib/sequence";
+
+import type { ChainJobStageDetail, ChainScript, ChainScriptStage } from "./api/chainTypes";
+import type { SequenceTransition } from "./sequence";
 
 function num(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
@@ -33,6 +37,11 @@ function asTransition(v: unknown): SequenceTransition | undefined {
   return v === "smooth" || v === "cut" || v === "fade" ? v : undefined;
 }
 
+/**
+ * Read a server-echoed chain script into the studio `ChainScript` shape.
+ * Returns `null` when the payload carries nothing editable (absent script,
+ * no `[chain]` table, or no model).
+ */
 export function normalizeServerChainScript(raw: unknown): ChainScript | null {
   if (raw == null || typeof raw !== "object") return null;
   const doc = raw as Record<string, unknown>;

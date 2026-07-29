@@ -25,6 +25,7 @@ import {
   pruneRequestForFamily,
 } from "./capabilities";
 import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/sourceFit";
+import { defaultVideoFps } from "@studio/lib/sequence";
 import { findInstalledModel } from "./generateModels";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
@@ -198,6 +199,9 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.height = m.default_height;
   form.steps = m.default_steps;
   form.guidance = m.default_guidance;
+  // The model's advertised rate is applied like steps/guidance — it is only
+  // absent-server/absent-field that leaves the current value in place.
+  form.fps = defaultVideoFps(m, form.fps);
   form.loras = [];
   reconcileModelCapabilities(form, m);
 }

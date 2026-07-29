@@ -284,4 +284,74 @@ describe("ControlsAside", () => {
       "Run on Studio",
     );
   });
+
+  // ── Output card (mockup 1c/3a: "mode is a setting, not a place") ─────
+  it("renders the Output card ahead of Shape and emits the mode change", async () => {
+    const wrapper = factory();
+    const card = wrapper.get("[data-test='output-card']");
+    // The Output card is the first group so it reads as part of the model
+    // decision, above Shape.
+    const firstGroup = wrapper.find(".controls__group");
+    expect(firstGroup.element).toBe(card.element);
+    const sequenceButton = card
+      .findAll("button")
+      .find((b) => b.text() === "Sequence")!;
+    await sequenceButton.trigger("click");
+    expect(wrapper.emitted("update:output")?.[0]).toEqual(["sequence"]);
+  });
+
+  it("captions Sequence mode with the parked-clips explanation", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm(),
+        family: "ltx2",
+        advCount: 0,
+        output: "sequence",
+        clipCount: 3,
+      },
+    });
+    expect(wrapper.get("[data-test='output-caption']").text()).toBe(
+      "3 clips on the composer rail · switching back keeps clip 1 and parks the rest.",
+    );
+  });
+
+  it("locks Batch to 1 in sequence mode with the one-timeline caption", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ batchSize: 4 }),
+        family: "ltx2",
+        advCount: 0,
+        output: "sequence",
+        clipCount: 2,
+      },
+    });
+    const stepper = wrapper
+      .findAllComponents(Stepper)
+      .find((s) => s.props("label") === "Batch size")!;
+    expect(stepper.props("modelValue")).toBe(1);
+    expect(stepper.props("max")).toBe(1);
+    expect(wrapper.get("[data-test='batch-locked']").text()).toContain(
+      "a sequence renders one timeline",
+    );
+  });
+
+  it("keeps Shape, Resolution, Detail, Prompt strength, and Seed live in sequence mode", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ width: 1024, height: 1024 }),
+        family: "ltx2",
+        advCount: 0,
+        output: "sequence",
+        clipCount: 2,
+      },
+    });
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
+    const labels = wrapper
+      .findAllComponents(SliderRow)
+      .map((row) => row.props("label"));
+    expect(labels).toContain("Detail");
+    expect(labels).toContain("Prompt strength");
+    expect(wrapper.find("[data-test='seed-seg']").exists()).toBe(true);
+  });
 });
