@@ -314,6 +314,20 @@ describe("mobile safe areas", () => {
       expect(css).not.toContain(selector);
     }
   });
+
+  it("renders Output as two flush segments instead of nested rounded pills", () => {
+    const control = css.match(/\.mobile-output-mode \.ms-seg\s*\{([^}]*)\}/s);
+    const button = css.match(/\.mobile-output-mode \.ms-seg \.ms-seg__btn\s*\{([^}]*)\}/s);
+    const seam = css.match(
+      /\.mobile-output-mode \.ms-seg \.ms-seg__btn \+ \.ms-seg__btn\s*\{([^}]*)\}/s,
+    );
+
+    expect(control?.[1]).toMatch(/gap:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/padding:\s*0\s*;/);
+    expect(control?.[1]).toMatch(/overflow:\s*hidden\s*;/);
+    expect(button?.[1]).toMatch(/border-radius:\s*0\s*;/);
+    expect(seam?.[1]).toMatch(/border-left:\s*1px solid var\(--ce\)\s*;/);
+  });
 });
 
 describe("mobile develop bed", () => {

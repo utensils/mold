@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ClipRail from "./ClipRail.vue";
+import railSource from "./ClipRail.vue?raw";
+import pillSource from "./ClipPill.vue?raw";
 import type { RailClip } from "./types";
 
 function clips(count: number): RailClip[] {
@@ -70,5 +72,25 @@ describe("ClipRail", () => {
     });
     expect(wrapper.find(".ms-clip__plan--cached").exists()).toBe(true);
     expect(wrapper.find(".ms-clip__plan--rerender").exists()).toBe(true);
+  });
+
+  it("keeps long rails scrollable without exposing a desktop scrollbar", () => {
+    expect(railSource).toMatch(/\.ms-rail__clips\s*\{[^}]*flex:\s*0 0 auto/s);
+    expect(railSource).toMatch(/\.ms-rail\s*\{[^}]*scrollbar-width:\s*none/s);
+    expect(railSource).toMatch(
+      /\.ms-rail::-webkit-scrollbar\s*\{[^}]*display:\s*none/s,
+    );
+  });
+
+  it("reserves an in-pill slot for remove so it cannot cover the frame count", () => {
+    expect(pillSource).toMatch(
+      /\.ms-clip:has\(\.ms-clip__remove\) \.ms-clip__body\s*\{[^}]*padding-right:\s*36px/s,
+    );
+    expect(pillSource).toMatch(
+      /\.ms-clip__remove\s*\{[^}]*top:\s*50%[^}]*right:\s*7px[^}]*opacity:\s*0/s,
+    );
+    expect(pillSource).toMatch(
+      /\.ms-clip:hover \.ms-clip__remove,[\s\S]*\.ms-clip:focus-within \.ms-clip__remove\s*\{[^}]*opacity:\s*1/s,
+    );
   });
 });

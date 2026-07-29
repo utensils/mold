@@ -178,8 +178,23 @@ button {
   margin-top: 14px;
 }
 
+.mobile-output-mode .ms-seg {
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
 .mobile-output-mode .ms-seg .ms-seg__btn {
   min-height: 44px;
+  border-radius: 0;
+}
+
+.mobile-output-mode .ms-seg .ms-seg__btn + .ms-seg__btn {
+  border-left: 1px solid var(--ce);
+}
+
+.mobile-output-mode .ms-seg .ms-seg__btn[data-on="true"] {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--safelight) 60%, transparent);
 }
 
 .mobile-output-mode-label {
