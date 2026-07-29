@@ -1003,7 +1003,9 @@ photo plus Use as prompt/source, and opens generated stills in the same viewer.
 Its persistent New markers mirror desktop Library visits; both shells badge
 upscaled images from saved output provenance.
 Host detail shows telemetry, models-disk, queue, downloads, and installed
-models. Models merges installed/live results, lets Pull target a different host
+models; still-queued rows have a confirmed 44pt cancellation action routed to
+that exact Keychain-authenticated host, while running work remains
+non-cancellable. Models merges installed/live results, lets Pull target a different host
 without changing Create, and immediately shows Connecting → Starting → Queued
 → Pulling N% while preventing duplicate/racing requests.
 

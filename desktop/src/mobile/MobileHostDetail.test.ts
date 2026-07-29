@@ -457,6 +457,65 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
   });
 
+  it("confirms and cancels only a queued job on the exact authenticated host", async () => {
+    let currentQueue = [...queueEntries];
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: currentQueue });
+      return originalApi(requestTarget, path);
+    });
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        expect(String(input)).toBe(`${studio.baseUrl}/api/queue/job-queued`);
+        expect(init?.method).toBe("DELETE");
+        expect((init?.headers as Headers).get("x-api-key")).toBe(studio.apiKey);
+        currentQueue = currentQueue.filter((entry) => entry.id !== "job-queued");
+        return new Response(null, { status: 204 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mountDetail();
+
+    expect(view.find("[data-test='host-detail-queue-cancel-job-running']").exists()).toBe(false);
+    const cancel = view.get("[data-test='host-detail-queue-cancel-job-queued']");
+    expect(cancel.attributes("aria-label")).toBe("Cancel queued z-image:q8 job");
+
+    await cancel.trigger("click");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cancel.text()).toBe("Cancel?");
+
+    await cancel.trigger("click");
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(view.get("[data-test='host-detail-queue']").text()).not.toContain("z-image:q8");
+    expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
+  });
+
+  it("keeps a queued job visible and reports the host refusal when cancellation fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { error: "queue job job-queued is already running; only queued jobs can be cancelled" },
+          { status: 409, statusText: "Conflict" },
+        ),
+      ),
+    );
+    const view = await mountDetail();
+    const cancel = view.get("[data-test='host-detail-queue-cancel-job-queued']");
+
+    await cancel.trigger("click");
+    await cancel.trigger("click");
+    await flushPromises();
+
+    expect(view.text()).toContain("z-image:q8");
+    expect(view.get("[role='alert']").text()).toContain(
+      "queue job job-queued is already running; only queued jobs can be cancelled",
+    );
+    expect(cancel.text()).toBe("Cancel");
+  });
+
   it("ignores older same-host queue and device refetches after a newer event refresh", async () => {
     const view = await mountDetail();
     const olderQueue = deferred<unknown>();

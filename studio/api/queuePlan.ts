@@ -1,4 +1,9 @@
-import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
+import {
+  IncompatibleHostError,
+  apiFetchTo,
+  apiJsonTo,
+  type ApiTarget,
+} from "./client";
 
 export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
 export type QueueLaneKind = "device" | "host_utility" | (string & {});
@@ -127,6 +132,16 @@ export function parseQueuePlan(value: unknown): QueuePlan {
 
 export async function listQueue(target: ApiTarget): Promise<QueueListing> {
   return parseQueueListing(await apiJsonTo<unknown>(target, "/api/queue"));
+}
+
+/** Cancel work that is still waiting in the explicit host's generation queue. */
+export async function cancelQueueJob(
+  target: ApiTarget,
+  workId: string,
+): Promise<void> {
+  await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}`, {
+    method: "DELETE",
+  });
 }
 
 /** Set or clear a durable stable-device pin for queued work. */

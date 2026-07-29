@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import { parseQueueListing, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import {
+  cancelQueueJob,
+  parseQueueListing,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
@@ -60,6 +65,8 @@ const renaming = ref(false);
 const renameValue = ref("");
 const forgetPending = ref(false);
 const unloading = ref<Set<string>>(new Set());
+const cancelConfirmId = ref<string | null>(null);
+const cancellingQueueIds = ref(new Set<string>());
 let loadEpoch = 0;
 let queueRequestGeneration = 0;
 let deviceRequestGeneration = 0;
@@ -318,6 +325,8 @@ async function loadHost(): Promise<void> {
   renameValue.value = props.host.name;
   renaming.value = false;
   forgetPending.value = false;
+  cancelConfirmId.value = null;
+  cancellingQueueIds.value = new Set();
 
   try {
     const [nextStatus, models] = await Promise.all([
@@ -369,6 +378,48 @@ async function unpinWork(workId: string): Promise<void> {
   } catch (caught) {
     error.value = describeTransportError(caught, props.host.name);
   }
+}
+
+async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
+  if (entry.state !== "queued" || cancellingQueueIds.value.has(entry.id)) return;
+  if (cancelConfirmId.value !== entry.id) {
+    cancelConfirmId.value = entry.id;
+    return;
+  }
+
+  cancelConfirmId.value = null;
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  error.value = "";
+  cancellingQueueIds.value = new Set(cancellingQueueIds.value).add(entry.id);
+  try {
+    await cancelQueueJob(requestTarget, entry.id);
+    if (
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      await refreshQueue(epoch);
+    }
+  } catch (caught) {
+    if (
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      error.value = describeTransportError(caught, props.host.name);
+    }
+  } finally {
+    if (epoch === loadEpoch) {
+      const next = new Set(cancellingQueueIds.value);
+      next.delete(entry.id);
+      cancellingQueueIds.value = next;
+    }
+  }
+}
+
+function clearCancelConfirmation(id: string): void {
+  if (cancelConfirmId.value === id) cancelConfirmId.value = null;
 }
 
 function saveRename(): void {
@@ -607,6 +658,30 @@ onBeforeUnmount(() => {
               <strong>{{ modelLabel(entry.model) }}</strong>
               <span>{{ queueCode(entry) }}</span>
             </div>
+            <button
+              v-if="entry.state === 'queued'"
+              type="button"
+              class="mobile-inline-danger mobile-host-queue-cancel"
+              :data-test="`host-detail-queue-cancel-${entry.id}`"
+              :disabled="cancellingQueueIds.has(entry.id)"
+              :aria-label="
+                cancellingQueueIds.has(entry.id)
+                  ? `Cancelling queued ${modelLabel(entry.model)} job`
+                  : cancelConfirmId === entry.id
+                    ? `Confirm cancellation of queued ${modelLabel(entry.model)} job`
+                    : `Cancel queued ${modelLabel(entry.model)} job`
+              "
+              @click="cancelQueuedJob(entry)"
+              @blur="clearCancelConfirmation(entry.id)"
+            >
+              {{
+                cancellingQueueIds.has(entry.id)
+                  ? "Cancelling…"
+                  : cancelConfirmId === entry.id
+                    ? "Cancel?"
+                    : "Cancel"
+              }}
+            </button>
           </li>
         </ul>
         <p v-else class="mobile-empty-note">Queue is empty.</p>
