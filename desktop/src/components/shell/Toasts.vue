@@ -24,25 +24,62 @@ const ordered = computed(() => [...toasts.items].reverse());
       <div
         v-for="toast in ordered"
         :key="toast.id"
-        class="border-edge pointer-events-auto flex items-center gap-2 rounded-chrome border bg-bench px-3 py-2 text-body shadow-raised"
-        :class="toast.kind === 'error' ? 'text-stop' : 'text-ink'"
+        class="border-edge pointer-events-auto grid w-[min(25rem,calc(100vw-2rem))] grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 rounded-[var(--radius-card)] border bg-bench px-4 py-3 text-body shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
         :role="toast.kind === 'error' ? 'alert' : 'status'"
         :aria-live="toast.kind === 'error' ? 'assertive' : 'polite'"
         @click.self="toasts.click(toast.id)"
       >
+        <span
+          data-test="toast-status-icon"
+          aria-hidden="true"
+          class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold"
+          :class="
+            toast.kind === 'error'
+              ? 'bg-stop text-[var(--desk)]'
+              : 'bg-[color-mix(in_srgb,var(--halide)_18%,transparent)] text-halide'
+          "
+        >
+          {{ toast.kind === "error" ? "!" : "i" }}
+        </span>
         <button
           type="button"
-          class="min-w-0 flex-1 truncate text-left"
+          class="min-w-0 text-left"
           :title="toast.onClick ? undefined : 'Dismiss'"
           @click="toasts.click(toast.id)"
         >
-          {{ toast.message }}
+          <span data-test="toast-title" class="block font-semibold text-ink">
+            {{ toast.message }}
+          </span>
+          <span
+            v-if="toast.description"
+            data-test="toast-description"
+            class="mt-0.5 block text-caption leading-relaxed text-ink-2"
+          >
+            {{ toast.description }}
+          </span>
+        </button>
+        <button
+          type="button"
+          data-test="toast-dismiss"
+          class="-mt-1 -mr-1 flex h-7 w-7 items-center justify-center rounded-full text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_8%,transparent)] hover:text-ink"
+          aria-label="Dismiss notification"
+          @click="toasts.dismiss(toast.id)"
+        >
+          <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" aria-hidden="true">
+            <path
+              d="m3.75 3.75 8.5 8.5m0-8.5-8.5 8.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-width="1.5"
+            />
+          </svg>
         </button>
         <button
           v-if="toast.action"
           type="button"
           data-test="toast-action"
-          class="shrink-0 rounded-control px-2 py-0.5 text-caption font-semibold text-safelight hover:brightness-110"
+          class="col-start-2 col-end-4 justify-self-end rounded-control px-2 py-1 text-caption font-semibold text-safelight transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] hover:brightness-110"
           @click="toasts.runAction(toast.id)"
         >
           {{ toast.action.label }}

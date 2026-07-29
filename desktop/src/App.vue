@@ -91,7 +91,14 @@ watch(
   () => {
     const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
     for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
-      toasts.push(`Can't reach ${host.label} — check Machines.`, "error", { sticky: true });
+      toasts.push(`Can't reach ${host.label}`, "error", {
+        description: "It stays listed for reconnect.",
+        action: {
+          label: "Open Machines",
+          run: () => void router.push("/machines"),
+        },
+        sticky: true,
+      });
     }
     hostStatusSnapshot = snapshotHostStatuses(current);
   },
