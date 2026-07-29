@@ -190,10 +190,12 @@ pub struct ChainJobManifest {
     ///
     /// `finalizes` is historical: retakes and amends keep earlier takes, so
     /// non-emptiness cannot prove that the current revision is finalized.
-    /// Older manifests predate editable revisions and therefore default to
-    /// `false`; an empty finalize history still keeps them unfinalized.
+    /// `None` preserves the fact that a legacy manifest omitted this field.
+    /// That absence is intentionally not collapsed to `false`: pre-field
+    /// binaries already supported retakes/amends under the same schema, so a
+    /// historical finalize record may belong to an older revision.
     #[serde(default)]
-    pub needs_finalize: bool,
+    pub needs_finalize: Option<bool>,
     /// Amend history (spec §17): each entry snapshots the pre-amend
     /// EFFECTIVE request so any preserved stage remains attributable.
     #[serde(default)]
@@ -312,15 +314,30 @@ impl ChainJobManifest {
             stage_status,
             retakes: vec![],
             finalizes: vec![],
-            needs_finalize: true,
+            needs_finalize: Some(true),
             amends: vec![],
         })
     }
 
     /// True only when a finalize record belongs to the current manifest
     /// revision rather than to a historical retake/amend take.
-    pub fn current_revision_is_finalized(&self) -> bool {
-        !self.needs_finalize && !self.finalizes.is_empty()
+    pub fn current_revision_is_finalized(&self, indexed_state: ChainJobState) -> bool {
+        if self.finalizes.is_empty()
+            || self
+                .stage_status
+                .iter()
+                .any(|stage| stage.state != StageState::Completed)
+        {
+            return false;
+        }
+        match self.needs_finalize {
+            Some(needs_finalize) => !needs_finalize,
+            // Legacy omission is ambiguous for a non-terminal DB row: it may
+            // be an accepted retake/amend whose replacement stages were
+            // checkpointed before finalization. Prefer one conservative
+            // re-finalization over silently losing that accepted revision.
+            None => indexed_state == ChainJobState::Completed,
+        }
     }
 
     /// Parsed-value access to the embedded request. Reconcile logic
@@ -876,7 +893,7 @@ mod tests {
         let request = sample_request();
         let mut manifest =
             ChainJobManifest::new("01JBR55TEST".into(), 1_783_200_000_000, &request).unwrap();
-        assert!(manifest.needs_finalize);
+        assert_eq!(manifest.needs_finalize, Some(true));
         manifest.stage_status[1].state = StageState::Completed;
         manifest.stage_status[1].frames_emitted = Some(97);
         manifest.stage_status[1].generation_time_ms = Some(12_345);
@@ -911,7 +928,10 @@ mod tests {
         let mut manifest =
             ChainJobManifest::new("01JBR55LEGACYFINAL".into(), 1_783_200_000_000, &request)
                 .unwrap();
-        manifest.needs_finalize = false;
+        for stage in &mut manifest.stage_status {
+            stage.state = StageState::Completed;
+        }
+        manifest.needs_finalize = Some(false);
         manifest.finalizes.push(FinalizeRecord {
             output: "final/output-1.mp4".into(),
             at_unix_ms: 1_783_200_000_500,
@@ -926,8 +946,12 @@ mod tests {
 
         let parsed = ChainJobManifest::from_toml(&legacy).unwrap();
 
-        assert!(!parsed.needs_finalize);
-        assert!(parsed.current_revision_is_finalized());
+        assert_eq!(parsed.needs_finalize, None);
+        assert!(parsed.current_revision_is_finalized(ChainJobState::Completed));
+        assert!(
+            !parsed.current_revision_is_finalized(ChainJobState::Queued),
+            "a flag-less non-terminal revision must conservatively re-finalize"
+        );
     }
 
     #[test]

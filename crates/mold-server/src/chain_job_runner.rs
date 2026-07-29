@@ -711,7 +711,7 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
         authority.recover(RecoveryFacts {
             stage_count: manifest.stage_status.len() as u32,
             first_incomplete_stage: first_incomplete_stage(&manifest),
-            finalized: manifest.current_revision_is_finalized(),
+            finalized: manifest.current_revision_is_finalized(row.state),
             terminal: row.state.is_terminal(),
         })?;
         authority.persist_atomic(&job_dir)?;
@@ -741,7 +741,7 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
         }
         let finalized_at = row.finalized_at_ms.or_else(|| {
             manifest
-                .current_revision_is_finalized()
+                .current_revision_is_finalized(row.state)
                 .then(|| {
                     manifest
                         .finalizes
@@ -1150,7 +1150,7 @@ async fn run_chain_actor_inner(
         authority.recover(RecoveryFacts {
             stage_count: manifest.stage_status.len() as u32,
             first_incomplete_stage: first_incomplete_stage(&manifest),
-            finalized: manifest.current_revision_is_finalized(),
+            finalized: manifest.current_revision_is_finalized(job.state),
             terminal: false,
         })?;
         if authority.identity.stage_index < start_stage {
@@ -2251,7 +2251,7 @@ fn finalize_job(
             .map(|stage| stage.seed)
             .collect(),
     });
-    manifest.needs_finalize = false;
+    manifest.needs_finalize = Some(false);
     manifest.write_atomic(layout.root())?;
     chain_jobs::set_finalized_at(db, &job.id, i64::try_from(now).unwrap_or(i64::MAX))?;
     let completed = chain_jobs::try_transition(
@@ -2369,7 +2369,7 @@ pub fn apply_retake(
         new_prompt: req.prompt.clone(),
         at_unix_ms: now,
     });
-    manifest.needs_finalize = true;
+    manifest.needs_finalize = Some(true);
     manifest.stage_status[stage_idx].seed = new_seed;
 
     let reset_end = match req.mode {
@@ -2673,7 +2673,7 @@ pub fn apply_amend(
         previous_request_json: serde_json::to_string(&old_effective)?,
         preserved_stages: preserved,
     });
-    manifest.needs_finalize = true;
+    manifest.needs_finalize = Some(true);
     manifest.request_json = serde_json::to_string(&candidate)?;
     manifest.retakes.clear();
 
@@ -3228,7 +3228,7 @@ fn manifest_index_state(
     let current_stage =
         first_incomplete_stage(manifest).unwrap_or(manifest.stage_status.len() as u32);
     if current_stage == manifest.stage_status.len() as u32
-        && manifest.current_revision_is_finalized()
+        && manifest.current_revision_is_finalized(existing_state)
     {
         (ChainJobState::Completed, current_stage, None)
     } else if existing_state == ChainJobState::Running {
@@ -4320,6 +4320,17 @@ mod tests {
             .unwrap();
         }
         row
+    }
+
+    fn remove_needs_finalize_from_manifest(job_dir: &Path) {
+        let path = job_dir.join(mold_core::chain_job::MANIFEST_FILE);
+        let encoded = std::fs::read_to_string(&path).unwrap();
+        let legacy = encoded
+            .lines()
+            .filter(|line| !line.starts_with("needs_finalize = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{legacy}\n")).unwrap();
     }
 
     /// Fabricate a stage persisted under the OLD write-time-trim contract:
@@ -5936,6 +5947,112 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn v2_actor_flagless_checkpointed_retake_refinalizes_historical_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55LEGACYRETAKE",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = Arc::new(deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        ));
+        let initial_deps = deps.clone();
+        let initial_row = row.clone();
+        tokio::task::spawn_blocking(move || execute_job(&initial_deps, &initial_row, 0))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let layout = JobDirLayout::new(job_dir.clone());
+        let old_segment = std::fs::read(layout.segment_path(0)).unwrap();
+        let old_status = ChainJobManifest::read_from_dir(&job_dir)
+            .unwrap()
+            .stage_status[0]
+            .clone();
+        let queued = apply_retake(
+            db,
+            dir.path(),
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 0,
+                mode: RetakeMode::Cascade,
+                seed_offset: Some(17),
+                prompt: None,
+            },
+        )
+        .unwrap();
+
+        layout.ensure_stage_dirs(0).unwrap();
+        std::fs::write(layout.segment_path(0), old_segment).unwrap();
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let replacement_seed = manifest.stage_status[0].seed;
+        manifest.stage_status[0] = StageStatus {
+            seed: replacement_seed,
+            ..old_status
+        };
+        manifest.write_atomic(&job_dir).unwrap();
+        chain_jobs::upsert_stage(
+            db,
+            &ChainJobStageRow {
+                job_id: row.id.clone(),
+                stage_idx: 0,
+                state: StageState::Completed,
+                seed: replacement_seed,
+                frames_emitted: manifest.stage_status[0].frames_emitted,
+                generation_time_ms: manifest.stage_status[0].generation_time_ms,
+                segment_rel_path: manifest.stage_status[0].segment.clone(),
+                error: None,
+                updated_at_ms: now_ms_i64(),
+            },
+        )
+        .unwrap();
+        chain_jobs::set_current_stage(db, &row.id, 1, now_ms_i64()).unwrap();
+        remove_needs_finalize_from_manifest(&job_dir);
+
+        ChainExecutionAuthority::dormant(row.id.clone())
+            .persist_atomic(&job_dir)
+            .unwrap();
+        let claim_deps = deps.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || claim_for_execution(&claim_deps, &queued))
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        let running = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
+        let calls_before = executor.calls.load(Ordering::SeqCst);
+
+        run_chain_actor(deps.clone(), running, 1).await.unwrap();
+
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            calls_before,
+            "a checkpointed retake must re-finalize without rendering"
+        );
+        let recovered = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(recovered.finalizes.len(), 2);
+        assert!(job_dir.join("final/output-2.mp4").exists());
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
     #[test]
     fn amend_shrink_deletes_trailing_db_rows_and_updates_stage_count() {
         let dir = tempfile::tempdir().unwrap();
@@ -6659,10 +6776,11 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            !ChainJobManifest::read_from_dir(&job_dir)
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
                 .unwrap()
-                .needs_finalize
+                .needs_finalize,
+            Some(false)
         );
     }
 
@@ -7078,6 +7196,7 @@ mod tests {
             apply_amend(db, &jobs_root, &row.id, &amend_with_stages(stages)).unwrap();
         assert_eq!(preserved, 2);
         assert_eq!(queued.state, ChainJobState::Queued);
+        remove_needs_finalize_from_manifest(&job_dir);
 
         startup_reconcile(db, &jobs_root).unwrap();
 
