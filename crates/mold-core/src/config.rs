@@ -346,6 +346,18 @@ impl ModelPaths {
     /// admission so a restart cannot silently substitute different artifacts.
     pub fn resolve_from_model_config_exact(model_cfg: &ModelConfig) -> Option<Self> {
         let path = |value: Option<&str>| value.map(PathBuf::from);
+        let vae = match model_cfg.vae.as_deref().filter(|path| !path.is_empty()) {
+            Some(path) => PathBuf::from(path),
+            None if model_cfg.family.as_deref().is_some_and(|family| {
+                family == "ltx2"
+                    || crate::manifest::UTILITY_FAMILIES.contains(&family)
+                    || crate::manifest::UPSCALER_FAMILIES.contains(&family)
+            }) =>
+            {
+                PathBuf::new()
+            }
+            None => return None,
+        };
         Some(Self {
             transformer: PathBuf::from(model_cfg.transformer.as_deref()?),
             transformer_shards: model_cfg
@@ -353,7 +365,7 @@ impl ModelPaths {
                 .as_ref()
                 .map(|paths| paths.iter().map(PathBuf::from).collect())
                 .unwrap_or_default(),
-            vae: PathBuf::from(model_cfg.vae.as_deref()?),
+            vae,
             spatial_upscaler: path(model_cfg.spatial_upscaler.as_deref()),
             temporal_upscaler: path(model_cfg.temporal_upscaler.as_deref()),
             distilled_lora: path(model_cfg.distilled_lora.as_deref()),
