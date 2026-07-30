@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import LibraryPage from "./LibraryPage.vue";
 import {
   requestConfirm,
@@ -165,6 +166,8 @@ async function mounted() {
   await flushPromises();
   return wrapper;
 }
+
+beforeEach(() => setActivePinia(createPinia()));
 
 describe("LibraryPage", () => {
   beforeEach(() => {

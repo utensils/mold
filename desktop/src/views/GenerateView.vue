@@ -2108,6 +2108,20 @@ function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
   restoreEpoch += 1;
+  // A gallery/history metadata prefill represents one rendered print. Sequence
+  // prints use the separate sequence handoff above; every other print must
+  // restore into One shot even when the persisted Create draft is currently a
+  // sequence. Switch first so the sequence-only model guard cannot replace the
+  // print's model after its settings land.
+  if ("metadata" in prefill && prefill.metadata && isSequence.value) {
+    draft.setOutput(
+      "single",
+      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+      sequenceDefaultFrames.value,
+    );
+    draft.stopEditing();
+    draft.lastSingleModel = null;
+  }
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
   applyPrefillToForm(form, prefill, installedModels.value);

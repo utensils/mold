@@ -61,6 +61,7 @@ import GalleryFeed from "../components/GalleryFeed.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -93,6 +94,8 @@ const hostFilter = ref("all");
 const thumbnailSize = ref(loadGalleryThumbnailSize());
 
 const form = useGenerateForm();
+const draft = useSequenceDraftStore();
+draft.hydrate();
 const chainJobs = useChainJobs();
 const route = useRoute();
 const router = useRouter();
@@ -555,7 +558,19 @@ function onReuse(item: GalleryImage) {
     reuseSequence(item);
     return;
   }
-  // Existing recreate flow — restore serialized knobs, then land on Create.
+  // A rendered non-sequence print is always a One shot. Switch before
+  // restoring its metadata so Create's persisted Sequence mode and
+  // sequence-only model guard cannot replace the recorded settings.
+  draft.setOutput(
+    "single",
+    {
+      getPrompt: () => form.state.value.prompt,
+      setPrompt: (prompt) => (form.state.value.prompt = prompt),
+    },
+    25,
+  );
+  draft.stopEditing();
+  draft.lastSingleModel = null;
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,

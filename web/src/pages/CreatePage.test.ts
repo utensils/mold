@@ -527,6 +527,33 @@ describe("CreatePage layout and behavior", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("restores a recent normal print into One shot while Sequence is active", async () => {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="open-recent" @click="$emit(\'open\', entries[0])">open</button>',
+    });
+    stubs.Lightbox = defineComponent({
+      props: ["item"],
+      template:
+        '<button v-if="item" data-test="lightbox-reuse" @click="$emit(\'reuse\', item)">reuse</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    const draft = enterSequenceMode();
+    await flushPromises();
+
+    await wrapper.get('[data-test="open-recent"]').trigger("click");
+    await wrapper.get('[data-test="lightbox-reuse"]').trigger("click");
+    await flushPromises();
+
+    expect(draft.output).toBe("single");
+    expect(useGenerateForm().state.value.model).toBe(entry.metadata.model);
+    expect(useGenerateForm().state.value.prompt).toBe(entry.metadata.prompt);
+    expect(useGenerateForm().state.value.seed).toBe(entry.metadata.seed);
+  });
+
   it("resets the rail settings to the model defaults, undoably", async () => {
     hostModelsMock.mockResolvedValue([
       {

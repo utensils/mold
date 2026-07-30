@@ -58,6 +58,16 @@ const videoModel: ModelEntry = {
   default_guidance: 3,
 } as ModelEntry;
 
+const imageModel: ModelEntry = {
+  name: "flux-schnell:q8",
+  family: "flux",
+  downloaded: true,
+  default_width: 1024,
+  default_height: 1024,
+  default_steps: 4,
+  default_guidance: 1,
+} as ModelEntry;
+
 function readyLocal() {
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
@@ -97,6 +107,77 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
+  it.each([
+    {
+      kind: "image",
+      model: imageModel,
+      metadata: {
+        prompt: "a lighthouse at dawn",
+        model: imageModel.name,
+        seed: 101,
+        steps: 4,
+        guidance: 1,
+        width: 1024,
+        height: 1024,
+      } as OutputMetadata,
+    },
+    {
+      kind: "video",
+      model: videoModel,
+      metadata: {
+        prompt: "a plane crosses the runway",
+        model: videoModel.name,
+        seed: 202,
+        steps: 31,
+        guidance: 4,
+        width: 1024,
+        height: 576,
+        frames: 121,
+        fps: 30,
+      } as OutputMetadata,
+    },
+  ])(
+    "restores a normal $kind print into One shot while Sequence is active",
+    async ({ model, metadata }) => {
+      readyLocal();
+      installedPayload = [imageModel, videoModel];
+      useModelStore().all = [imageModel, videoModel];
+      const formStore = useGenerateFormStore();
+      formStore.form.model = videoModel.name;
+      formStore.form.family = videoModel.family;
+      const draft = useSequenceDraftStore();
+      draft.output = "sequence";
+      draft.ensureClips(25);
+      draft.clips[0]!.prompt = "stale sequence opening";
+      draft.loadFromJob(
+        {
+          jobId: "sequence-being-edited",
+          hostId: "local",
+          baseline: draft.clips.map((clip) => ({ ...clip })),
+          completedStages: 0,
+        },
+        draft.clips.map((clip) => ({ ...clip })),
+        false,
+      );
+      useComposerStore().set({ metadata });
+
+      mountView();
+      await flushPromises();
+
+      expect(draft.output).toBe("single");
+      expect(draft.editing).toBeNull();
+      expect(draft.lastSingleModel).toBeNull();
+      expect(formStore.form.model).toBe(model.name);
+      expect(formStore.form.prompt).toBe(metadata.prompt);
+      expect(formStore.form.seed).toBe(String(metadata.seed));
+      expect(formStore.form.steps).toBe(metadata.steps);
+      if (metadata.frames) {
+        expect(formStore.form.frames).toBe(metadata.frames);
+        expect(formStore.form.fps).toBe(metadata.fps);
+      }
+    },
+  );
+
   it("consumes ?output=sequence once, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];

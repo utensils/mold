@@ -8,6 +8,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import LibraryPage from "./LibraryPage.vue";
 import { resetNotifications, useNotifications } from "../lib/toasts";
 import { __testing__ as formTesting } from "../composables/useGenerateForm";
@@ -20,6 +21,8 @@ import {
   takeSequenceHandoff,
 } from "../composables/useSequenceHandoff";
 import type { GalleryImage } from "../types";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useGenerateForm } from "../composables/useGenerateForm";
 
 const { listGalleryMock, deleteMock, fetchModelsMock, getChainJobMock } =
   vi.hoisted(() => ({
@@ -117,6 +120,23 @@ const legacyPrint: GalleryImage = {
     version: "test",
   },
 };
+const oneShotVideoPrint: GalleryImage = {
+  filename: "one-shot.mp4",
+  timestamp: 1,
+  format: "mp4",
+  metadata: {
+    prompt: "a plane crosses the runway",
+    model: "ltx-video",
+    seed: 202,
+    steps: 31,
+    guidance: 4,
+    width: 1024,
+    height: 576,
+    frames: 121,
+    fps: 30,
+    version: "test",
+  },
+};
 
 const GalleryGridStub = defineComponent({
   name: "GalleryGrid",
@@ -132,6 +152,7 @@ const GalleryGridStub = defineComponent({
   template: `<div data-test="grid">
     <button data-test="grid-open" @click="$emit('open', entries[0])">open</button>
     <button data-test="grid-open-legacy" @click="$emit('open', entries[1])">open legacy</button>
+    <button data-test="grid-open-video" @click="$emit('open', entries[2])">open video</button>
   </div>`,
 });
 
@@ -190,11 +211,14 @@ async function mounted() {
 
 beforeEach(() => {
   localStorage.clear();
+  setActivePinia(createPinia());
   resetNotifications();
   formTesting.resetForTest();
   chainTesting.reset();
   takeSequenceHandoff();
-  listGalleryMock.mockReset().mockResolvedValue([sequencePrint, legacyPrint]);
+  listGalleryMock
+    .mockReset()
+    .mockResolvedValue([sequencePrint, legacyPrint, oneShotVideoPrint]);
   fetchModelsMock.mockReset().mockResolvedValue([
     {
       name: "ltx-video",
@@ -229,15 +253,41 @@ describe("LibraryPage — sequence prints", () => {
     });
   });
 
-  it("leaves a legacy print on the single-print reuse path", async () => {
-    const wrapper = await mounted();
-    await wrapper.get("[data-test='grid-open-legacy']").trigger("click");
-    await wrapper.get("[data-test='lb-reuse']").trigger("click");
-    await flushPromises();
+  it.each([
+    {
+      kind: "image",
+      selector: "[data-test='grid-open-legacy']",
+      expected: legacyPrint.metadata,
+    },
+    {
+      kind: "video",
+      selector: "[data-test='grid-open-video']",
+      expected: oneShotVideoPrint.metadata,
+    },
+  ])(
+    "restores a normal $kind print into One shot while Sequence is active",
+    async ({ selector, expected }) => {
+      const draft = useSequenceDraftStore();
+      draft.hydrate();
+      draft.setOutput(
+        "sequence",
+        { getPrompt: () => "stale sequence", setPrompt: () => {} },
+        25,
+      );
+      const wrapper = await mounted();
+      await wrapper.get(selector).trigger("click");
+      await wrapper.get("[data-test='lb-reuse']").trigger("click");
+      await flushPromises();
 
-    expect(pendingSequenceHandoff().value).toBeNull();
-    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
-  });
+      expect(pendingSequenceHandoff().value).toBeNull();
+      expect(draft.output).toBe("single");
+      expect(useGenerateForm().state.value.model).toBe(expected.model);
+      expect(useGenerateForm().state.value.prompt).toBe(expected.prompt);
+      expect(useGenerateForm().state.value.seed).toBe(expected.seed);
+      expect(useGenerateForm().state.value.steps).toBe(expected.steps);
+      expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+    },
+  );
 
   it("offers Edit sequence only on a sequence print", async () => {
     const wrapper = await mounted();
