@@ -42,6 +42,7 @@ assets add to download and disk requirements.
 - Keyframe interpolation via repeatable `--keyframe`
 - Retake / partial regeneration via `--video` + `--retake`
 - IC-LoRA and stacked LoRAs via repeatable `--lora`
+- Official IC-LoRA reference controls via `--ic-lora-control`
 - Camera-control preset names for the published LTX-2 19B camera LoRAs
 - Spatial upscale `x2` across the family and `x1.5` for `ltx-2.3-*`
 - Temporal upscale `x2`
@@ -52,19 +53,19 @@ The in-tree test matrix in `crates/mold-inference/src/ltx2/runtime.rs` keeps
 the supported native planning surface explicit without requiring full weights.
 It covers the real-runtime route for these published workflow combinations:
 
-| Workflow                      | 19B                                   | 22B / LTX-2.3                   | Coverage                                                  |
-| ----------------------------- | ------------------------------------- | ------------------------------- | --------------------------------------------------------- |
-| Text-to-audio+video           | Yes                                   | Yes                             | Planning test + manual CUDA smoke                         |
-| First-frame image-to-video    | Yes                                   | Yes                             | Planning test                                             |
-| Audio-to-video                | Yes                                   | Yes                             | Planning test                                             |
-| Keyframe interpolation        | Yes                                   | Yes                             | Planning test                                             |
-| Retake / partial regeneration | Yes                                   | Yes                             | Planning test                                             |
-| Public IC-LoRA                | Yes                                   | Not published as preset aliases | Planning test for 19B; explicit LoRA paths still accepted |
-| Two-stage dev checkpoint      | Yes                                   | Yes                             | Planning test                                             |
-| Two-stage HQ                  | Not published as the default 19B path | Yes                             | Planning test                                             |
-| Spatial upscale `x2`          | Yes                                   | Yes                             | Planning test                                             |
-| Spatial upscale `x1.5`        | Not published                         | Yes                             | Planning test                                             |
-| Temporal upscale `x2`         | Yes                                   | Yes                             | Planning test                                             |
+| Workflow                      | 19B                                   | 22B / LTX-2.3       | Coverage                                       |
+| ----------------------------- | ------------------------------------- | ------------------- | ---------------------------------------------- |
+| Text-to-audio+video           | Yes                                   | Yes                 | Planning test + manual CUDA smoke              |
+| First-frame image-to-video    | Yes                                   | Yes                 | Planning test                                  |
+| Audio-to-video                | Yes                                   | Yes                 | Planning test                                  |
+| Keyframe interpolation        | Yes                                   | Yes                 | Planning test                                  |
+| Retake / partial regeneration | Yes                                   | Yes                 | Planning test                                  |
+| Official IC-LoRA controls     | Union, Pose, Detailer                 | Union, Motion Track | Registry, planning, and request-contract tests |
+| Two-stage dev checkpoint      | Yes                                   | Yes                 | Planning test                                  |
+| Two-stage HQ                  | Not published as the default 19B path | Yes                 | Planning test                                  |
+| Spatial upscale `x2`          | Yes                                   | Yes                 | Planning test                                  |
+| Spatial upscale `x1.5`        | Not published                         | Yes                 | Planning test                                  |
+| Temporal upscale `x2`         | Yes                                   | Yes                 | Planning test                                  |
 
 The fixed-seed CUDA reference case is tracked in the matrix with the 22B
 distilled docs-gallery seed (`424303`). Full numeric comparisons still require
@@ -81,6 +82,15 @@ should compare generated contact sheets or clips from that fixed seed.
 - `x2` temporal upscaling is wired through the native LTX-2 runtime.
 - Camera-control preset aliases are currently published for LTX-2 19B only. For
   LTX-2.3, pass an explicit `.safetensors` path.
+- Built-in reference controls require an effective distilled checkpoint. Mold
+  rejects dev or architecture-unknown catalog checkpoints before starting a
+  download. Raw custom IC-LoRAs remain available through
+  `--pipeline ic-lora --lora /path/custom.safetensors`.
+- Guide video formats are adapter-specific: Union consumes an already
+  preprocessed Canny, depth, or pose video; Motion Track consumes colored
+  trajectory overlays; Pose consumes a rendered pose video; Detailer consumes
+  the ordinary source clip. Preprocessing, attention masks, and multiple
+  reference videos are not performed by Mold.
 - The Gemma text encoder source is gated on Hugging Face, so you must have
   access approved before `mold pull` will complete.
 - When you send source media through `mold serve`, the built-in request body
@@ -126,6 +136,21 @@ mold run ltx-2-19b-distilled:fp8 \
 mold run ltx-2-19b-distilled:fp8 \
   "a lantern-lit cave entrance" \
   --camera-control dolly-in \
+  --format mp4
+
+# Official Union control. The guide must already be a frame-aligned
+# Canny, depth, or pose video; Mold does not preprocess it.
+mold run ltx-2-19b-distilled:fp8 \
+  "a dancer follows the guide" \
+  --ic-lora-control union \
+  --video ./canny-guide.mp4 \
+  --format mp4
+
+# LTX-2.3 Motion Track consumes a video with colored trajectory overlays.
+mold run ltx-2.3-22b-distilled:fp8 \
+  "the drone follows the marked trajectory" \
+  --ic-lora-control motion-track \
+  --video ./trajectory-overlay.mp4 \
   --format mp4
 
 # Retake a source clip over a time range

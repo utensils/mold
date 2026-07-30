@@ -394,6 +394,7 @@ fn build_stage_generate_request(
         source_video_path: None,
         keyframes: None,
         pipeline: None,
+        ic_lora_control: None,
         loras: None,
         retake_range: None,
         spatial_upscale: None,

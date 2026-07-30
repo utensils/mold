@@ -36,6 +36,9 @@ pub(crate) use crate::memory_preflight::{
 };
 
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
+    if req.ic_lora_control.is_some() {
+        return true;
+    }
     const ZERO_SCALE_EPS: f64 = 1e-8;
     if let Some(loras) = &req.loras {
         if !loras.is_empty() {
@@ -3666,6 +3669,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,

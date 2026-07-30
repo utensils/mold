@@ -14,6 +14,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
   GenerateFormState,
+  Ltx2ControlAdapterInfo,
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
@@ -34,6 +35,36 @@ const props = withDefaults(
   { audioOutputSupported: true },
 );
 const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
+const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+let controlEpoch = 0;
+watch(
+  () => props.modelValue.model,
+  async (model) => {
+    const epoch = ++controlEpoch;
+    controlAdapters.value = [];
+    if (!model) return;
+    try {
+      const response = await fetch(
+        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(model)}`,
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const options = (await response.json()) as Ltx2ControlAdapterInfo[];
+      if (epoch !== controlEpoch) return;
+      controlAdapters.value = options;
+      if (
+        props.modelValue.icLoraControl &&
+        !options.some(
+          (adapter) => adapter.id === props.modelValue.icLoraControl,
+        )
+      ) {
+        patch({ icLoraControl: null });
+      }
+    } catch {
+      if (epoch === controlEpoch) patch({ icLoraControl: null });
+    }
+  },
+  { immediate: true },
+);
 
 function patch(next: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...next });
@@ -62,7 +93,18 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
 ];
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
 function setPipeline(raw: string) {
-  patch({ pipeline: (raw || null) as Ltx2PipelineMode | null });
+  const pipeline = (raw || null) as Ltx2PipelineMode | null;
+  patch({
+    pipeline,
+    icLoraControl:
+      pipeline === "ic-lora" ? props.modelValue.icLoraControl : null,
+  });
+}
+function setControlAdapter(raw: string) {
+  patch({
+    icLoraControl: raw || null,
+    pipeline: raw ? "ic-lora" : props.modelValue.pipeline,
+  });
 }
 
 // Camera-control LoRAs published for LTX-2 19B. LTX-2.3 uses a different
@@ -201,6 +243,37 @@ function removeKeyframe(index: number) {
         data-test="ltx2-enable-audio"
         @update:model-value="setAudio"
       />
+    </div>
+
+    <div class="ltx2__field">
+      <label class="ltx2__label">Reference control</label>
+      <select
+        class="ltx2__select"
+        data-test="ltx2-reference-control"
+        :value="modelValue.icLoraControl ?? ''"
+        @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
+      >
+        <option value="">Custom / none</option>
+        <option
+          v-for="adapter in controlAdapters"
+          :key="adapter.id"
+          :value="adapter.id"
+        >
+          {{ adapter.label }}{{ adapter.installed ? "" : " · download" }}
+        </option>
+      </select>
+      <p
+        v-if="modelValue.icLoraControl"
+        class="ltx2__hint"
+        data-test="ltx2-reference-guide"
+      >
+        {{
+          controlAdapters.find(
+            (adapter) => adapter.id === modelValue.icLoraControl,
+          )?.guide ??
+          "Choose the frame-aligned guide video this control expects."
+        }}
+      </p>
     </div>
     <p
       v-if="!audioOutputSupported"

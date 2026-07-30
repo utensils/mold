@@ -56,7 +56,23 @@ describe("useGenerateForm", () => {
     expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.outputFormat).toBe("png");
     expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.icLoraControl).toBeNull();
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "pad-repaint" });
+  });
+
+  it("serializes a host-provided IC-LoRA control without replacing custom LoRAs", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2.3-22b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.icLoraControl = "motion-track";
+    form.state.value.sourceVideoPath = "/guides/trajectory.mp4";
+    form.state.value.loras = [{ path: "/loras/style.safetensors", scale: 0.8 }];
+    expect(form.toRequest()).toMatchObject({
+      pipeline: "ic-lora",
+      ic_lora_control: "motion-track",
+      source_video_path: "/guides/trajectory.mp4",
+      loras: [{ path: "/loras/style.safetensors", scale: 0.8 }],
+    });
   });
 
   it("shares a singleton state across route remounts", () => {

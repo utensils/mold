@@ -1424,6 +1424,7 @@ const advCount = computed(() =>
       (form.state.value.gifPreview ||
         form.state.value.enableAudio === false ||
         form.state.value.pipeline != null ||
+        form.state.value.icLoraControl != null ||
         form.state.value.audioFile != null ||
         form.state.value.audioFilePath.trim() !== "" ||
         form.state.value.sourceVideo != null ||
@@ -1726,6 +1727,22 @@ function validateSubmit(): boolean {
   ) {
     composerError.value = "Mask image needs a source image.";
     return false;
+  }
+  if (form.state.value.icLoraControl) {
+    if (
+      !form.state.value.sourceVideo &&
+      !form.state.value.sourceVideoPath.trim()
+    ) {
+      composerError.value = "Reference control requires a guide video.";
+      showAdvanced.value = true;
+      return false;
+    }
+    if (form.state.value.loras.length + 1 > 4) {
+      composerError.value =
+        "Reference control plus custom LoRAs exceeds the four-LoRA limit.";
+      showAdvanced.value = true;
+      return false;
+    }
   }
   return true;
 }
@@ -2386,6 +2403,7 @@ function openJob(job: Job) {
     image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
   }));
   form.state.value.pipeline = request.pipeline ?? null;
+  form.state.value.icLoraControl = request.ic_lora_control ?? null;
   form.state.value.retakeRange = request.retake_range ?? null;
   form.state.value.spatialUpscale = request.spatial_upscale ?? null;
   form.state.value.temporalUpscale = request.temporal_upscale ?? null;

@@ -1272,6 +1272,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras,
             retake_range: None,
             spatial_upscale: None,

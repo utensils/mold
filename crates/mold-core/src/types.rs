@@ -391,6 +391,10 @@ pub struct GenerateRequest {
     /// Explicit LTX-2 pipeline mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
+    /// First-party IC-LoRA control adapter id. The server resolves this to an
+    /// exact model-profile-compatible artifact before placement/admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic_lora_control: Option<String>,
     /// Repeatable LoRA stack for model families that support multiple adapters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loras: Option<Vec<LoraWeight>>,
@@ -696,6 +700,8 @@ pub struct OutputMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ic_lora_control: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retake_range: Option<TimeRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
@@ -779,6 +785,7 @@ impl OutputMetadata {
             audio_file_path: req.audio_file_path.clone(),
             source_video_path: req.source_video_path.clone(),
             pipeline: req.pipeline,
+            ic_lora_control: req.ic_lora_control.clone(),
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
@@ -2460,6 +2467,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: Some("union".to_string()),
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2473,6 +2481,7 @@ mod tests {
         assert_eq!(back.seed, req.seed);
         assert_eq!(back.embed_metadata, req.embed_metadata);
         assert_eq!(back.scheduler, None);
+        assert_eq!(back.ic_lora_control.as_deref(), Some("union"));
     }
 
     #[test]
@@ -2646,6 +2655,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2700,6 +2710,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2751,6 +2762,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2817,6 +2829,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2900,6 +2913,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2951,6 +2965,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -3005,6 +3020,7 @@ mod tests {
             source_video_path: Some("/srv/mold/source.mp4".to_string()),
             keyframes: None,
             pipeline: Some(Ltx2PipelineMode::Retake),
+            ic_lora_control: None,
             loras: Some(vec![LoraWeight {
                 path: "/loras/camera.safetensors".to_string(),
                 scale: 0.7,
@@ -3055,6 +3071,16 @@ mod tests {
         );
         assert_eq!(metadata.spatial_upscale, Some(Ltx2SpatialUpscale::X1_5));
         assert_eq!(metadata.temporal_upscale, Some(Ltx2TemporalUpscale::X2));
+
+        let mut control_req = req;
+        control_req.pipeline = Some(Ltx2PipelineMode::IcLora);
+        control_req.ic_lora_control = Some("motion-track".to_string());
+        let control_metadata =
+            OutputMetadata::from_generate_request(&control_req, 9, None, "0.1.0");
+        assert_eq!(
+            control_metadata.ic_lora_control.as_deref(),
+            Some("motion-track")
+        );
     }
 
     // ── SSE type tests ──────────────────────────────────────────────────────
@@ -3430,6 +3456,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -3487,6 +3514,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -3557,6 +3585,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -3612,6 +3641,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -3726,6 +3756,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,

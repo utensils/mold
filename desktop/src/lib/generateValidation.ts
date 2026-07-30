@@ -125,6 +125,12 @@ export function advancedVideoValidationError(form: GenerateForm): string | null 
   }
   const keyframeError = keyframePositionValidationError(form);
   if (keyframeError) return keyframeError;
+  if (form.icLoraControl) {
+    if (!form.sourceVideo) return "Reference control requires a guide video.";
+    if (form.loras.length + 1 > 4) {
+      return "Reference control plus custom LoRAs exceeds the four-LoRA limit.";
+    }
+  }
 
   switch (form.pipeline) {
     case "a2vid":
@@ -148,11 +154,13 @@ export function advancedVideoValidationError(form: GenerateForm): string | null 
         ? null
         : "Keyframe generation requires at least two keyframe images.";
     case "ic-lora":
-      if (!form.sourceVideo && form.loras.length === 0) {
+      if (!form.sourceVideo && form.loras.length === 0 && !form.icLoraControl) {
         return "IC-LoRA requires a source video and at least one LoRA.";
       }
       if (!form.sourceVideo) return "IC-LoRA requires a source video.";
-      return form.loras.length > 0 ? null : "IC-LoRA requires at least one LoRA.";
+      return form.loras.length > 0 || form.icLoraControl
+        ? null
+        : "IC-LoRA requires at least one LoRA.";
     default:
       return null;
   }

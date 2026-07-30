@@ -175,6 +175,7 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
     delete next.source_video;
     delete next.keyframes;
     delete next.pipeline;
+    delete next.ic_lora_control;
     delete next.retake_range;
     delete next.spatial_upscale;
     delete next.temporal_upscale;

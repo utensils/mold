@@ -259,6 +259,7 @@ function resetAdvanced() {
     sourceVideoPath: "",
     keyframes: [],
     pipeline: null,
+    icLoraControl: null,
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,

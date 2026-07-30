@@ -715,6 +715,7 @@ mod tests {
             audio_file_path: None,
             source_video_path: None,
             pipeline: None,
+            ic_lora_control: None,
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
@@ -776,6 +777,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ltx2_control_capabilities_return_only_the_effective_distilled_profile() {
+        let app = app_empty();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-control-adapters?model=ltx-2-19b-distilled%3Afp8",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(status, StatusCode::OK, "response body: {body}");
+        let ids = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["union", "pose", "detailer"]);
+
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/ltx2-control-adapters?model=ltx-2-19b-dev%3Afp8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(json_body(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("distilled"));
+    }
+
+    #[tokio::test]
+    async fn invalid_built_in_control_pairing_is_rejected_before_media_or_queue_work() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "test",
+                            "model": "ltx-2-19b-distilled:fp8",
+                            "width": 960,
+                            "height": 576,
+                            "steps": 8,
+                            "guidance": 3.0,
+                            "batch_size": 1,
+                            "output_format": "mp4",
+                            "source_video_path": "/does/not/exist.mp4",
+                            "ic_lora_control": "motion-track"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("not compatible with LTX-2 19B distilled"));
     }
 
     // ── /api/status ──────────────────────────────────────────────────────────
@@ -6871,6 +6946,7 @@ mod tests {
             audio_file_path: None,
             source_video_path: None,
             pipeline: None,
+            ic_lora_control: None,
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
@@ -7770,6 +7846,7 @@ mod tests {
             audio_file_path: None,
             source_video_path: None,
             pipeline: None,
+            ic_lora_control: None,
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,

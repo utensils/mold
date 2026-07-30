@@ -2,7 +2,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, reactive } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
-import type { ModelEntry } from "../lib/api/types";
+import type { Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 
 const { fileToBase64 } = vi.hoisted(() => ({ fileToBase64: vi.fn() }));
@@ -34,12 +34,13 @@ function mountParameters(
   initial: GenerateForm,
   upscalers: ModelEntry[] = [],
   audioOutputSupported = true,
+  controlAdapters: Ltx2ControlAdapterInfo[] = [],
 ): { wrapper: VueWrapper; form: GenerateForm } {
   const form = reactive(initial) as GenerateForm;
   const Harness = defineComponent({
     components: { MobileGenerateParameters },
-    setup: () => ({ audioOutputSupported, form, upscalers }),
-    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" />`,
+    setup: () => ({ audioOutputSupported, controlAdapters, form, upscalers }),
+    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" />`,
   });
   return { wrapper: mount(Harness), form };
 }
@@ -52,6 +53,34 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
+  it("renders host-provided reference controls and guide copy", async () => {
+    const adapters: Ltx2ControlAdapterInfo[] = [
+      {
+        id: "detailer",
+        label: "Detailer",
+        guide: "Use the source clip.",
+        size_bytes: 2_617_401_920,
+        installed: false,
+        download_model: "ltx2-control-detailer-19b",
+        download_repo: "Lightricks/control",
+        download_filename: "control.safetensors",
+        download_sha256: "a".repeat(64),
+      },
+    ];
+    const { wrapper, form } = mountParameters(
+      formFor("ltx2", "ltx-2-19b-distilled:fp8"),
+      [],
+      true,
+      adapters,
+    );
+    await wrapper.get("[data-test='mobile-ltx2-reference-control']").setValue("detailer");
+    expect(form.icLoraControl).toBe("detailer");
+    expect(form.pipeline).toBe("ic-lora");
+    expect(wrapper.get("[data-test='mobile-ltx2-reference-guide']").text()).toContain(
+      "source clip",
+    );
+  });
+
   it("offers an editable unbounded batch stepper and image-only post upscale", async () => {
     const { wrapper, form } = mountParameters(formFor("flux"), [upscaler]);
 

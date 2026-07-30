@@ -12,6 +12,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/generate/stream`                        | Generate with SSE progress streaming                                                                              |
 | `POST`   | `/api/generate/estimate`                      | Estimate request-sensitive peak memory for a generation request                                                   |
 | `POST`   | `/api/generate/chain`                         | Chained video generation (LTX-2)                                                                                  |
+| `GET`    | `/api/capabilities/ltx2-control-adapters`     | Compatible official IC-LoRA controls for an installed LTX-2 model                                                 |
 | `POST`   | `/api/generate/chain/stream`                  | Chained video with SSE progress                                                                                   |
 | `POST`   | `/api/chain-jobs`                             | Create a durable async chain job                                                                                  |
 | `GET`    | `/api/chain-jobs`                             | List durable chain jobs                                                                                           |
@@ -103,6 +104,13 @@ only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
+
+`GET /api/capabilities/ltx2-control-adapters?model=<id>` returns only the
+controls compatible with that host's effective installed model profile. Each
+row includes `id`, `label`, guide-video `guide`, `size_bytes`, `installed`,
+and the exact `download_model`, `download_repo`, `download_filename`, and
+`download_sha256` identity. Dev checkpoints, unknown catalog architectures,
+and unsupported profiles return `422`.
 
 ## Authentication
 
@@ -325,22 +333,23 @@ multiple parents or independent prepared siblings.
 
 Important fields:
 
-| Field                                               | Purpose                                                                                                                                          |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `source_image`, `mask_image`                        | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                         |
-| `edit_images`                                       | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                        |
-| `control_image`, `control_model`, `control_scale`   | SD1.5 ControlNet conditioning                                                                                                                    |
-| `lora`, `loras`                                     | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                    |
-| `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                     |
-| `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`. |
-| `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.            |
-| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
-| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                             |
-| `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
-| `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
-| `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
-| `batch_id`, `batch_index`, `batch_count`            | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata         |
-| `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                |
+| Field                                               | Purpose                                                                                                                                                           |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source_image`, `mask_image`                        | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                                          |
+| `edit_images`                                       | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                                         |
+| `control_image`, `control_model`, `control_scale`   | SD1.5 ControlNet conditioning                                                                                                                                     |
+| `lora`, `loras`                                     | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                                     |
+| `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                                      |
+| `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                  |
+| `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                             |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`)                  |
+| `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`. |
+| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                              |
+| `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                                 |
+| `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                                            |
+| `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                                           |
+| `batch_id`, `batch_index`, `batch_count`            | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                          |
+| `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                                 |
 
 When `upscale_model` is set, the server gallery retains both artifacts as
 `-original` and `-upscaled` files. The SSE `complete` event returns the
