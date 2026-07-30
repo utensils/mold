@@ -186,7 +186,8 @@ with prompt, model, seed, and generation metadata.
   checkpoint-dependent generated audio
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
-  re-renders only the changed clips, and explicit remote-machine routing
+  re-renders only the changed clips, explicit remote-machine routing, and a
+  web dry run that shows the server-normalized plan before anything is queued
 - Quantized model variants, encoder fallback, smart VRAM placement, and FLUX
   block offloading
 - Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated

@@ -16,6 +16,7 @@ import {
   retakeChainJob,
   upscaleStream,
   updateQueueJobTargetGpu,
+  validateChain,
   type ChainStreamHandlers,
   type GenerateStreamHandlers,
   type UpscaleStreamHandlers,
@@ -175,6 +176,82 @@ describe("queue api", () => {
       body: JSON.stringify({ target_gpu: null }),
       signal: undefined,
     });
+  });
+});
+
+describe("chain validation api", () => {
+  it("validates on the exact authenticated host without creating a job", async () => {
+    const response = {
+      model: "ltx-2-19b-distilled:fp8",
+      width: 1216,
+      height: 704,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 1,
+      estimated_total_frames: 97,
+      estimated_duration_ms: 4042,
+      stages: [
+        {
+          prompt: "a cat",
+          frames: 97,
+          output_frames: 97,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: false,
+          has_negative_prompt: false,
+        },
+      ],
+      warnings: [],
+      vram_estimate: null,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(response), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await validateChain(chainRequest(), {
+      baseUrl: "http://render-box:7680",
+      apiKey: "secret",
+    });
+
+    expect(result).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://render-box:7680/api/generate/chain/validate",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "content-type": "application/json",
+          "x-api-key": "secret",
+        }),
+        body: JSON.stringify(chainRequest()),
+      }),
+    );
+  });
+
+  it("surfaces the server's structured validation detail without raw JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: "motion_tail_frames must be less than clip 2 frames",
+            code: "VALIDATION_ERROR",
+          }),
+          { status: 422 },
+        ),
+      ),
+    );
+
+    const error = await validateChain(chainRequest()).catch(
+      (candidate: unknown) => candidate,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
+      "motion_tail_frames must be less than clip 2 frames",
+    );
+    expect((error as Error).message).not.toContain("VALIDATION_ERROR");
   });
 });
 

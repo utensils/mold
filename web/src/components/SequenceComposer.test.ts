@@ -11,10 +11,12 @@ import { settleConfirm } from "../lib/toasts";
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api")>()),
   fetchChainLimits: vi.fn(),
+  validateChain: vi.fn(),
   listGallery: vi.fn(async () => []),
 }));
 
 const fetchChainLimitsMock = vi.mocked(api.fetchChainLimits);
+const validateChainMock = vi.mocked(api.validateChain);
 
 function ltx2Limits(overrides: Partial<api.ChainLimits> = {}): api.ChainLimits {
   return {
@@ -68,6 +70,7 @@ describe("SequenceComposer", () => {
     setActivePinia(pinia);
     fetchChainLimitsMock.mockReset();
     fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
+    validateChainMock.mockReset();
   });
 
   afterEach(() => {
@@ -189,6 +192,194 @@ describe("SequenceComposer", () => {
     expect(wrapper.get("[data-test='sequence-fit-note']").text()).toContain(
       "177f · 7.4s",
     );
+  });
+
+  it("validates the current sequence on its exact host and renders the normalized plan", async () => {
+    validateChainMock.mockResolvedValue({
+      model: "ltx-2-19b-distilled:fp8",
+      width: 1216,
+      height: 704,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 2,
+      estimated_total_frames: 177,
+      estimated_duration_ms: 7_375,
+      stages: [
+        {
+          prompt: "clip 1",
+          frames: 97,
+          output_frames: 97,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: true,
+          has_negative_prompt: false,
+        },
+        {
+          prompt: "clip 2",
+          frames: 97,
+          output_frames: 80,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: false,
+          has_negative_prompt: true,
+        },
+      ],
+      warnings: ["Opening transition normalized to Continue motion."],
+      vram_estimate: {
+        worst_case_bytes: 12_884_901_888,
+        fits: true,
+      },
+    });
+    const target = {
+      baseUrl: "http://render-box:7680",
+      apiKey: "secret",
+    };
+    const wrapper = mountComposer({ target });
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips.forEach((clip, i) => {
+      clip.prompt = `clip ${i + 1}`;
+      if (i === 0)
+        clip.sourceImage = { filename: "opening.png", base64: "AAAA" };
+      if (i === 1) clip.negativePrompt = "camera shake";
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await flushPromises();
+
+    expect(validateChainMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "ltx-2-19b-distilled:fp8",
+        width: 1216,
+        height: 704,
+        stages: [
+          expect.objectContaining({
+            prompt: "clip 1",
+            source_image: "AAAA",
+          }),
+          expect.objectContaining({
+            prompt: "clip 2",
+            negative_prompt: "camera shake",
+          }),
+        ],
+      }),
+      target,
+    );
+    const plan = wrapper.get("[data-test='sequence-validation-plan']");
+    expect(plan.text()).toContain("Validated · 2 clips · 177f · 7.4s");
+    expect(plan.text()).toContain("Clip 1");
+    expect(plan.text()).toContain("97f output");
+    expect(plan.text()).toContain("Opening image");
+    expect(plan.text()).toContain("VRAM");
+    expect(plan.text()).toContain("12.0 GiB");
+    expect(plan.text()).toContain("fits");
+    expect(plan.text()).toContain("Opening transition normalized");
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
+  it("shows server validation errors inline and clears stale plans after edits", async () => {
+    validateChainMock
+      .mockResolvedValueOnce({
+        model: "ltx-2-19b-distilled:fp8",
+        width: 1216,
+        height: 704,
+        fps: 24,
+        motion_tail_frames: 17,
+        stage_count: 2,
+        estimated_total_frames: 177,
+        estimated_duration_ms: 7_375,
+        stages: [
+          {
+            prompt: "clip 1",
+            frames: 97,
+            output_frames: 97,
+            transition: "smooth",
+            fade_frames: null,
+            has_source_image: false,
+            has_negative_prompt: false,
+          },
+          {
+            prompt: "clip 2",
+            frames: 97,
+            output_frames: 80,
+            transition: "smooth",
+            fade_frames: null,
+            has_source_image: false,
+            has_negative_prompt: false,
+          },
+        ],
+        warnings: [],
+        vram_estimate: null,
+      })
+      .mockRejectedValueOnce(new Error("motion tail exceeds clip 2"));
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.find("[data-test='sequence-validation-plan']").exists(),
+    ).toBe(true);
+
+    await wrapper.get("[data-test='clip-prompt']").setValue("edited opening");
+    await flushPromises();
+    expect(
+      wrapper.find("[data-test='sequence-validation-plan']").exists(),
+    ).toBe(false);
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='sequence-validation-error']").text(),
+    ).toContain("motion tail exceeds clip 2");
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
+  it("discards an in-flight result when a same-sized source payload changes", async () => {
+    let resolveValidation!: (value: api.ChainValidationResponse) => void;
+    validateChainMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveValidation = resolve;
+      }),
+    );
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+    store.clips[0]!.sourceImage = {
+      filename: "opening.png",
+      base64: "AAAA",
+    };
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    store.clips[0]!.sourceImage = {
+      filename: "opening.png",
+      base64: "BBBB",
+    };
+    await flushPromises();
+    resolveValidation({
+      model: "ltx-2-19b-distilled:fp8",
+      width: 1216,
+      height: 704,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 2,
+      estimated_total_frames: 177,
+      estimated_duration_ms: 7_375,
+      stages: [],
+      warnings: [],
+      vram_estimate: null,
+    });
+    await flushPromises();
+
+    expect(
+      wrapper.find("[data-test='sequence-validation-plan']").exists(),
+    ).toBe(false);
   });
 
   it("copies TOML built from the LIVE shared params", async () => {

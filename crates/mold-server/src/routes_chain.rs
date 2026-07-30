@@ -15,7 +15,7 @@ use axum::{
 use base64::Engine as _;
 use mold_core::chain::{
     ChainFailure, ChainProgressEvent, ChainRequest, ChainResponse, ChainScript,
-    SseChainCompleteEvent,
+    ChainValidationResponse, SseChainCompleteEvent, TransitionMode,
 };
 use mold_core::chain_job::{settled, ChainJobEvent, ChainJobState};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
@@ -655,6 +655,61 @@ pub(crate) fn validate_and_normalize_chain_family(
         )));
     }
     Ok(())
+}
+
+/// `POST /api/generate/chain/validate` — normalize and validate a chain
+/// without creating a job, starting downloads, or touching an inference
+/// engine.
+#[utoipa::path(
+    post,
+    path = "/api/generate/chain/validate",
+    tag = "generation",
+    request_body = mold_core::ChainRequest,
+    responses(
+        (status = 200, description = "Normalized chain plan", body = mold_core::ChainValidationResponse),
+        (status = 422, description = "Invalid request or unsupported model"),
+    )
+)]
+pub async fn validate_chain(
+    State(state): State<AppState>,
+    Json(mut req): Json<ChainRequest>,
+) -> Result<Json<ChainValidationResponse>, ApiError> {
+    let opening_transition = req.stages.first().map(|stage| stage.transition);
+    let requested_motion_tail = req.motion_tail_frames;
+    let mut warnings = Vec::new();
+
+    {
+        let config = state.config.read().await;
+        validate_and_normalize_chain_family(&config, &mut req)?;
+    }
+    if req.motion_tail_frames != requested_motion_tail {
+        warnings.push(format!(
+            "The selected model normalized motion_tail_frames from {requested_motion_tail} to {}.",
+            req.motion_tail_frames
+        ));
+    }
+
+    let mut req = req
+        .normalise()
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    if opening_transition.is_some_and(|transition| transition != TransitionMode::Smooth) {
+        warnings.push("The opening clip transition was normalized to smooth.".to_string());
+    }
+    {
+        let config = state.config.read().await;
+        let before = req.motion_tail_frames;
+        validate_and_normalize_chain_family(&config, &mut req)?;
+        if req.motion_tail_frames != before && req.motion_tail_frames != requested_motion_tail {
+            warnings.push(format!(
+                "The selected model normalized motion_tail_frames from {before} to {}.",
+                req.motion_tail_frames
+            ));
+        }
+    }
+
+    Ok(Json(ChainValidationResponse::from_normalized(
+        &req, warnings,
+    )))
 }
 
 /// `POST /api/generate/chain` — synchronous chained video generation.

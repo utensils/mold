@@ -14,6 +14,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/generate/chain`                         | Chained video generation (LTX-2)                                                                                  |
 | `GET`    | `/api/capabilities/ltx2-control-adapters`     | Compatible official IC-LoRA controls for an installed LTX-2 model                                                 |
 | `POST`   | `/api/generate/chain/stream`                  | Chained video with SSE progress                                                                                   |
+| `POST`   | `/api/generate/chain/validate`                | Normalize and validate a chain without queueing work                                                              |
 | `POST`   | `/api/chain-jobs`                             | Create a durable async chain job                                                                                  |
 | `GET`    | `/api/chain-jobs`                             | List durable chain jobs                                                                                           |
 | `GET`    | `/api/chain-jobs/:id`                         | Get durable chain-job detail                                                                                      |
@@ -801,6 +802,52 @@ boundaries when other work is waiting, then deletes successful ephemeral shim
 artifacts after building the legacy response. The public chain-job API keeps
 artifacts for resume and retake.
 :::
+
+## `/api/generate/chain/validate`
+
+Accepts the same `ChainRequest` body as `/api/generate/chain`, but performs
+only build-feature, model-family, and structural normalization. It does not
+create a durable job, start a download, lease a device, or touch inference.
+The response reports normalized stage transitions, each stage's contributed
+output frames, source/negative-prompt presence, warnings, and the optional
+`vram_estimate` field:
+
+```json
+{
+  "model": "ltx-2-19b-distilled:fp8",
+  "width": 1216,
+  "height": 704,
+  "fps": 24,
+  "motion_tail_frames": 17,
+  "stage_count": 2,
+  "estimated_total_frames": 177,
+  "estimated_duration_ms": 7375,
+  "stages": [
+    {
+      "prompt": "a cat enters the forest",
+      "frames": 97,
+      "output_frames": 97,
+      "transition": "smooth",
+      "has_source_image": true,
+      "has_negative_prompt": false
+    },
+    {
+      "prompt": "the forest opens to a clearing",
+      "frames": 97,
+      "output_frames": 80,
+      "transition": "smooth",
+      "has_source_image": false,
+      "has_negative_prompt": false
+    }
+  ],
+  "warnings": [],
+  "vram_estimate": null
+}
+```
+
+Media and negative-prompt contents are not echoed. HTTP `422` uses the normal
+structured `VALIDATION_ERROR` response. `vram_estimate` is currently `null`
+until the chain estimator is populated.
 
 ## `/api/generate/chain/stream`
 

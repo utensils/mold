@@ -424,6 +424,80 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn chain_validation_returns_normalized_plan_without_job_storage() {
+        let app = app_empty();
+        let mut request = route_chain_request();
+        request.stages[0].transition = TransitionMode::Cut;
+        let mut continuation = route_chain_stage("second shot", TransitionMode::Fade);
+        continuation.source_image = Some(vec![1, 2, 3]);
+        continuation.negative_prompt = Some("camera shake".into());
+        request.stages.push(continuation);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/chain/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+
+        assert_eq!(body["model"], "ltx-2-19b-distilled:fp8");
+        assert_eq!(body["stage_count"], 2);
+        assert_eq!(body["estimated_total_frames"], 16);
+        assert_eq!(body["estimated_duration_ms"], 2_000);
+        assert_eq!(body["stages"][0]["transition"], "smooth");
+        assert_eq!(body["stages"][0]["output_frames"], 7);
+        assert_eq!(body["stages"][1]["transition"], "fade");
+        assert_eq!(body["stages"][1]["output_frames"], 9);
+        assert_eq!(body["stages"][1]["has_source_image"], true);
+        assert_eq!(body["stages"][1]["has_negative_prompt"], true);
+        assert!(
+            body["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("opening clip"),
+            "normalization warning should explain the coerced first transition: {body}"
+        );
+        assert!(body["vram_estimate"].is_null());
+
+        let queue = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(queue.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(queue).await["entries"].as_array().unwrap().len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_validation_surfaces_normalization_errors_without_queueing() {
+        let app = app_empty();
+        let mut request = route_chain_request();
+        request.stages[0].frames = 10;
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate/chain/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("8k+1"));
+    }
+
     fn seed_chain_job(
         db: &mold_db::MetadataDb,
         mold_home: &std::path::Path,
@@ -5085,6 +5159,10 @@ mod tests {
         assert!(
             spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
             "spec should document POST /api/chain-jobs/placement-preview"
+        );
+        assert!(
+            spec["paths"]["/api/generate/chain/validate"]["post"].is_object(),
+            "spec should document POST /api/generate/chain/validate"
         );
     }
 

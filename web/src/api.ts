@@ -68,6 +68,33 @@ export interface ChainLimits {
   sequence_unsupported_reason?: string | null;
 }
 
+export interface ChainValidationStage {
+  prompt: string;
+  frames: number;
+  output_frames: number;
+  transition: "smooth" | "cut" | "fade";
+  fade_frames?: number | null;
+  has_source_image: boolean;
+  has_negative_prompt: boolean;
+}
+
+export interface ChainValidationResponse {
+  model: string;
+  width: number;
+  height: number;
+  fps: number;
+  motion_tail_frames: number;
+  stage_count: number;
+  estimated_total_frames: number;
+  estimated_duration_ms: number;
+  stages: ChainValidationStage[];
+  warnings: string[];
+  vram_estimate?: {
+    worst_case_bytes: number;
+    fits: boolean;
+  } | null;
+}
+
 export function imageUrl(filename: string): string {
   return `${base}/api/gallery/image/${encodeURIComponent(filename)}`;
 }
@@ -238,6 +265,34 @@ function targetBase(target?: StreamTarget): string {
 
 function targetHeaders(target?: StreamTarget): Record<string, string> {
   return target?.apiKey ? { "x-api-key": target.apiKey } : {};
+}
+
+/** Normalize and validate a sequence on its exact rendering host without
+ * creating a durable job or starting any downloads. */
+export async function validateChain(
+  req: ChainRequestWire,
+  target?: StreamTarget,
+): Promise<ChainValidationResponse> {
+  const res = await fetch(`${targetBase(target)}/api/generate/chain/validate`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...targetHeaders(target),
+    },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const body = await res
+      .clone()
+      .json()
+      .catch(() => null);
+    const detail =
+      typeof body === "object" && body !== null && "error" in body
+        ? String((body as { error: unknown }).error)
+        : await res.text().catch(() => "");
+    throw new ApiHttpError("Sequence validation", res.status, detail);
+  }
+  return (await res.json()) as ChainValidationResponse;
 }
 
 /** Advisory VRAM preflight against the machine that will render the print. */

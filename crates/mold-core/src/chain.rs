@@ -331,6 +331,87 @@ pub struct VramEstimate {
     pub fits: bool,
 }
 
+/// One normalized stage in a chain validation response. Media and negative
+/// prompt contents are deliberately not echoed; callers only need to know
+/// which conditioning inputs survived normalization.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainValidationStage {
+    pub prompt: String,
+    pub frames: u32,
+    pub output_frames: u32,
+    pub transition: TransitionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_frames: Option<u32>,
+    pub has_source_image: bool,
+    pub has_negative_prompt: bool,
+}
+
+/// Read-only normalized plan returned by
+/// `POST /api/generate/chain/validate`. This endpoint never creates a durable
+/// job or starts downloads.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainValidationResponse {
+    pub model: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub motion_tail_frames: u32,
+    pub stage_count: u32,
+    pub estimated_total_frames: u32,
+    pub estimated_duration_ms: u64,
+    pub stages: Vec<ChainValidationStage>,
+    pub warnings: Vec<String>,
+    /// Reserved until the server's chain estimator is populated. Kept in the
+    /// stable response now so clients can render it additively when available.
+    pub vram_estimate: Option<VramEstimate>,
+}
+
+impl ChainValidationResponse {
+    pub fn from_normalized(req: &ChainRequest, warnings: Vec<String>) -> Self {
+        let estimated_total_frames = req.estimated_total_frames();
+        let fps = req.fps.max(1);
+        Self {
+            model: req.model.clone(),
+            width: req.width,
+            height: req.height,
+            fps,
+            motion_tail_frames: req.motion_tail_frames,
+            stage_count: req.stages.len() as u32,
+            estimated_total_frames,
+            estimated_duration_ms: u64::from(estimated_total_frames) * 1_000 / u64::from(fps),
+            stages: req
+                .stages
+                .iter()
+                .enumerate()
+                .map(|(idx, stage)| {
+                    let next = req.stages.get(idx + 1);
+                    ChainValidationStage {
+                        prompt: stage.prompt.clone(),
+                        frames: stage.frames,
+                        output_frames: stage_contributed_frames(
+                            idx,
+                            stage.frames,
+                            stage.transition,
+                            next.map(|candidate| candidate.transition),
+                            next.and_then(|candidate| candidate.fade_frames),
+                            req.motion_tail_frames,
+                        ),
+                        transition: stage.transition,
+                        fade_frames: stage.fade_frames,
+                        has_source_image: stage.source_image.is_some(),
+                        has_negative_prompt: stage
+                            .negative_prompt
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty()),
+                    }
+                })
+                .collect(),
+            warnings,
+            vram_estimate: None,
+        }
+    }
+}
+
 /// Response from a chained generation request. The `video` is the stitched
 /// output; individual per-stage clips are not returned.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
