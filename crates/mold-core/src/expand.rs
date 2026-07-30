@@ -4,18 +4,40 @@
 //! - `ApiExpander`: calls any OpenAI-compatible `/v1/chat/completions` endpoint
 //! - Local GGUF inference (in `mold-inference`, behind the `expand` feature flag)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::expand_prompts::{build_batch_messages, build_single_messages};
-
-/// Maximum number of prompt variations the server API accepts.
-pub const MAX_VARIATIONS: usize = 10;
+use crate::expand_prompts::{build_batch_messages_with_context, build_single_messages};
 
 /// Maximum number of prompt variations for Discord (embed character limit).
 pub const DISCORD_MAX_VARIATIONS: usize = 5;
+
+/// Maximum number of prompts requested from an expansion model in one
+/// completion. Large logical batches are assembled from bounded chunks so the
+/// response remains reliable without imposing a product-level batch limit.
+pub const EXPANSION_CHUNK_SIZE: usize = 4;
+
+/// Number of attempts allowed for each bounded chunk. A partial response keeps
+/// its non-empty prompts and retries only the missing count.
+pub const EXPANSION_CHUNK_ATTEMPTS: usize = 3;
+
+/// Per-request safety ceiling for prepared prompt expansion.
+///
+/// The total number of prints remains unbounded because clients may queue
+/// additional prepared batches. Keeping one reviewed set bounded prevents an
+/// accidental value from retaining billions of prompts and jobs in memory.
+pub const MAX_EXPANSION_VARIATIONS: usize = 10_000;
+
+/// Logical position metadata for one bounded expansion attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpansionAttempt {
+    /// One-based position of the first requested prompt.
+    pub start: usize,
+    /// Total prompts in the logical batch.
+    pub total: usize,
+}
 
 /// Per-family word limit and style notes override.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,6 +108,106 @@ pub trait PromptExpander: Send + Sync {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult>;
 }
 
+/// Validate the size of one reviewed expansion set before any model or network
+/// work begins.
+pub fn validate_expansion_variation_count(variations: usize) -> Result<()> {
+    anyhow::ensure!(variations > 0, "variations must be at least 1");
+    anyhow::ensure!(
+        variations <= MAX_EXPANSION_VARIATIONS,
+        "variations exceeds the per-request safety limit of {}",
+        MAX_EXPANSION_VARIATIONS
+    );
+    Ok(())
+}
+
+/// Generate an exact logical expansion from bounded backend completions.
+///
+/// `generate` receives a cloned config whose `variations` and `max_tokens` are
+/// scoped to one attempt. The configured token allowance is per prompt, rather
+/// than one fixed allowance shared by an arbitrarily large batch.
+pub fn expand_exact_with<F>(config: &ExpandConfig, mut generate: F) -> Result<Vec<String>>
+where
+    F: FnMut(&ExpandConfig, ExpansionAttempt) -> Result<Vec<String>>,
+{
+    validate_expansion_variation_count(config.variations)?;
+
+    // Never reserve the caller-controlled logical count up front. Only the
+    // active completion chunk has bounded allocation.
+    let mut expanded = Vec::new();
+    let mut normalized = HashSet::new();
+    while expanded.len() < config.variations {
+        let chunk_target = (config.variations - expanded.len()).min(EXPANSION_CHUNK_SIZE);
+        let mut chunk = Vec::with_capacity(chunk_target);
+
+        for _ in 0..EXPANSION_CHUNK_ATTEMPTS {
+            let missing = chunk_target - chunk.len();
+            if missing == 0 {
+                break;
+            }
+
+            let mut attempt_config = config.clone();
+            attempt_config.variations = missing;
+            attempt_config.max_tokens = config.max_tokens.saturating_mul(missing as u32);
+
+            let attempt_context = ExpansionAttempt {
+                start: expanded.len() + chunk.len() + 1,
+                total: config.variations,
+            };
+            let attempt = generate(&attempt_config, attempt_context)?;
+            if attempt.len() > missing {
+                anyhow::bail!(
+                    "expansion backend returned {} prompts when exactly {missing} were requested",
+                    attempt.len()
+                );
+            }
+            for prompt in attempt {
+                let key = normalize_expanded_prompt(&prompt);
+                if !key.is_empty() && normalized.insert(key) {
+                    chunk.push(prompt);
+                }
+            }
+        }
+
+        if chunk.len() != chunk_target {
+            anyhow::bail!(
+                "expected exactly {} distinct non-empty prompts, but the expansion backend returned {}",
+                config.variations,
+                expanded.len() + chunk.len()
+            );
+        }
+        expanded.extend(chunk);
+    }
+
+    debug_assert_eq!(expanded.len(), config.variations);
+    Ok(expanded)
+}
+
+/// Validate an expansion received across a protocol boundary.
+///
+/// New expanders enforce this internally; clients use it defensively when
+/// talking to older or third-party hosts.
+pub fn validate_expanded_prompts(prompts: &[String], expected: usize) -> Result<()> {
+    let distinct: HashSet<String> = prompts
+        .iter()
+        .map(|prompt| normalize_expanded_prompt(prompt))
+        .filter(|prompt| !prompt.is_empty())
+        .collect();
+    anyhow::ensure!(
+        prompts.len() == expected && distinct.len() == expected,
+        "Expected exactly {expected} distinct non-empty prompts, but the host returned {}",
+        distinct.len()
+    );
+    Ok(())
+}
+
+fn normalize_expanded_prompt(prompt: &str) -> String {
+    prompt
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>()
+}
+
 // ── API expander ─────────────────────────────────────────────────────────────
 
 /// OpenAI-compatible chat completion message.
@@ -146,71 +268,78 @@ impl ApiExpander {
 
 impl PromptExpander for ApiExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
-        let family_override = config.family_overrides.get(&config.model_family);
-        let messages = if config.variations > 1 {
-            build_batch_messages(
-                prompt,
-                &config.model_family,
-                config.variations,
-                config.batch_prompt.as_deref(),
-                family_override,
-                config.style.as_deref(),
-            )
-        } else {
-            build_single_messages(
-                prompt,
-                &config.model_family,
-                config.system_prompt.as_deref(),
-                family_override,
-                config.style.as_deref(),
-            )
-        };
+        let expanded = expand_exact_with(config, |attempt_config, attempt| {
+            let family_override = attempt_config
+                .family_overrides
+                .get(&attempt_config.model_family);
+            let messages = if attempt.total > 1 {
+                build_batch_messages_with_context(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.variations,
+                    Some((attempt.start, attempt.total)),
+                    attempt_config.batch_prompt.as_deref(),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                )
+            } else {
+                build_single_messages(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.system_prompt.as_deref(),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                )
+            };
 
-        let chat_messages: Vec<ChatMessage> = messages
-            .into_iter()
-            .map(|(role, content)| ChatMessage { role, content })
-            .collect();
+            let chat_messages: Vec<ChatMessage> = messages
+                .into_iter()
+                .map(|(role, content)| ChatMessage { role, content })
+                .collect();
 
-        let req_body = ChatCompletionRequest {
-            model: self.model.clone(),
-            messages: chat_messages,
-            temperature: config.temperature,
-            top_p: config.top_p,
-            max_tokens: config.max_tokens,
-            enable_thinking: config.thinking,
-        };
+            let req_body = ChatCompletionRequest {
+                model: self.model.clone(),
+                messages: chat_messages,
+                temperature: attempt_config.temperature,
+                top_p: attempt_config.top_p,
+                max_tokens: attempt_config.max_tokens,
+                enable_thinking: attempt_config.thinking,
+            };
 
-        let url = format!("{}/v1/chat/completions", self.endpoint);
+            let url = format!("{}/v1/chat/completions", self.endpoint);
 
-        // Use ureq (blocking HTTP) — this trait method is sync and may be
-        // called from within a tokio runtime via spawn_blocking, so we cannot
-        // use async reqwest or Handle::block_on (which panics inside a runtime).
-        let body = serde_json::to_string(&req_body)?;
-        let response_text: String = ureq::post(&url)
-            .header("Content-Type", "application/json")
-            .send(body.as_str())
-            .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
+            // Use ureq (blocking HTTP) — this trait method is sync and may be
+            // called from within a tokio runtime via spawn_blocking, so we cannot
+            // use async reqwest or Handle::block_on (which panics inside a runtime).
+            let body = serde_json::to_string(&req_body)?;
+            let response_text: String = ureq::post(&url)
+                .header("Content-Type", "application/json")
+                .send(body.as_str())
+                .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
 
-        let completion: ChatCompletionResponse = serde_json::from_str(&response_text)
-            .map_err(|e| anyhow::anyhow!("failed to parse expand API response: {e}"))?;
+            let completion: ChatCompletionResponse = serde_json::from_str(&response_text)
+                .map_err(|e| anyhow::anyhow!("failed to parse expand API response: {e}"))?;
 
-        let content = completion
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .filter(|c| !c.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("expand API returned empty response (no choices or empty content)")
-            })?;
+            let content = completion
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .filter(|c| !c.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "expand API returned empty response (no choices or empty content)"
+                    )
+                })?;
 
-        let expanded = if config.variations > 1 {
-            parse_variations(&content, config.variations)
-        } else {
-            vec![clean_expanded_prompt(&content)]
-        };
+            Ok(if attempt.total > 1 {
+                parse_variations(&content, attempt_config.variations)
+            } else {
+                vec![clean_expanded_prompt(&content)]
+            })
+        })?;
 
         Ok(ExpandResult {
             original: prompt.to_string(),
@@ -659,6 +788,167 @@ mod tests {
         let input = "[\"a cat\"]\n[\"a dog\"]\n[\"a bird\"]";
         let result = parse_variations(input, 3);
         assert_eq!(result, vec!["a cat", "a dog", "a bird"]);
+    }
+
+    // ── bounded exact expansion ─────────────────────────────────────────
+
+    #[test]
+    fn exact_expansion_chunks_large_batches_and_scales_token_budget() {
+        let config = ExpandConfig {
+            variations: 10,
+            max_tokens: 300,
+            ..Default::default()
+        };
+        let mut attempts = Vec::new();
+
+        let expanded = expand_exact_with(&config, |attempt, context| {
+            attempts.push((
+                attempt.variations,
+                attempt.max_tokens,
+                context.start,
+                context.total,
+            ));
+            Ok((0..attempt.variations)
+                .map(|index| format!("prompt {}", context.start + index))
+                .collect())
+        })
+        .unwrap();
+
+        assert_eq!(expanded.len(), 10);
+        assert_eq!(
+            attempts,
+            vec![(4, 1200, 1, 10), (4, 1200, 5, 10), (2, 600, 9, 10)]
+        );
+    }
+
+    #[test]
+    fn exact_expansion_retries_only_missing_prompts() {
+        let config = ExpandConfig {
+            variations: 8,
+            ..Default::default()
+        };
+        let mut requested = Vec::new();
+
+        let expanded = expand_exact_with(&config, |attempt, context| {
+            requested.push(attempt.variations);
+            let returned = match requested.as_slice() {
+                [4] => 3,
+                [4, 1] => {
+                    let messages = build_batch_messages_with_context(
+                        "source",
+                        "flux",
+                        attempt.variations,
+                        Some((context.start, context.total)),
+                        None,
+                        None,
+                        None,
+                    );
+                    assert!(messages[0].1.contains("variations 4 through 4 of 8"));
+                    1
+                }
+                _ => attempt.variations,
+            };
+            Ok((0..returned)
+                .map(|index| format!("prompt {}", context.start + index))
+                .collect())
+        })
+        .unwrap();
+
+        assert_eq!(expanded.len(), 8);
+        assert_eq!(requested, vec![4, 1, 4]);
+    }
+
+    #[test]
+    fn exact_expansion_fails_after_bounded_partial_attempts() {
+        let config = ExpandConfig {
+            variations: 8,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let error = expand_exact_with(&config, |_, _| {
+            attempts += 1;
+            Ok(vec!["only one".to_string()])
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, EXPANSION_CHUNK_ATTEMPTS);
+        assert!(
+            error
+                .to_string()
+                .contains("expected exactly 8 distinct non-empty prompts"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn exact_expansion_rejects_zero_variations() {
+        let config = ExpandConfig {
+            variations: 0,
+            ..Default::default()
+        };
+        let error = expand_exact_with(&config, |_, _| unreachable!()).unwrap_err();
+        assert!(error.to_string().contains("at least 1"));
+    }
+
+    #[test]
+    fn exact_expansion_rejects_counts_above_the_safety_limit_without_allocating() {
+        let config = ExpandConfig {
+            variations: MAX_EXPANSION_VARIATIONS + 1,
+            ..Default::default()
+        };
+        let error = expand_exact_with(&config, |_, _| unreachable!()).unwrap_err();
+        assert!(error.to_string().contains("safety limit"), "{error}");
+    }
+
+    #[test]
+    fn exact_expansion_rejects_excess_results_instead_of_truncating() {
+        let config = ExpandConfig {
+            variations: 2,
+            ..Default::default()
+        };
+        let error = expand_exact_with(&config, |_, _| {
+            Ok(vec!["one".into(), "two".into(), "three".into()])
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("exactly 2 were requested"));
+    }
+
+    #[test]
+    fn exact_expansion_retries_duplicates_from_prior_chunks() {
+        let config = ExpandConfig {
+            variations: 6,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let expanded = expand_exact_with(&config, |attempt, context| {
+            attempts += 1;
+            if context.start == 5 && attempts == 2 {
+                Ok(vec!["prompt 1".into(), "prompt 5".into()])
+            } else {
+                Ok((0..attempt.variations)
+                    .map(|index| format!("prompt {}", context.start + index))
+                    .collect())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(expanded.len(), 6);
+        assert_eq!(expanded[4], "prompt 5");
+        assert_eq!(expanded[5], "prompt 6");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn protocol_validation_rejects_duplicate_or_empty_prompts() {
+        let duplicate = vec!["A cat".into(), " a  cat! ".into()];
+        let error = validate_expanded_prompts(&duplicate, 2).unwrap_err();
+        assert!(error.to_string().contains("returned 1"), "{error}");
+
+        let empty = vec!["A cat".into(), "   ".into()];
+        let error = validate_expanded_prompts(&empty, 2).unwrap_err();
+        assert!(error.to_string().contains("returned 1"), "{error}");
     }
 
     // ── ExpandSettings ───────────────────────────────────────────────────

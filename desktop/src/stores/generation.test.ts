@@ -188,6 +188,35 @@ describe("batch sequencing", () => {
     ]);
   });
 
+  it("preserves exact count, order, and provenance for a large prepared batch", () => {
+    const prompts = Array.from({ length: 1_000 }, (_, index) => `variation ${index + 1}`);
+    const plans = planBatchRequests(req, prompts.length, 500, {
+      prompts,
+      originalPrompt: req.prompt,
+      batchId: "batch-large",
+    });
+
+    expect(plans).toHaveLength(1_000);
+    expect(plans[0]).toMatchObject({
+      prompt: "variation 1",
+      original_prompt: req.prompt,
+      batch_id: "batch-large",
+      batch_index: 1,
+      batch_count: 1_000,
+      seed: 500,
+      batch_size: 1,
+    });
+    expect(plans[999]).toMatchObject({
+      prompt: "variation 1000",
+      original_prompt: req.prompt,
+      batch_id: "batch-large",
+      batch_index: 1_000,
+      batch_count: 1_000,
+      seed: 1_499,
+      batch_size: 1,
+    });
+  });
+
   it("rejects prompt lists that do not exactly match the normalized batch size", () => {
     expect(() =>
       planBatchRequests(req, 3, 7, {

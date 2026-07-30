@@ -57,8 +57,8 @@ your prompt, model choice, and any prepared batch.
 
 The mobile composer includes:
 
-- Batch 1 quick prompt expansion with undo, Batch N prepared-variation review,
-  and remote prompt history;
+- a directly editable Batch count, Batch 1 quick prompt expansion with undo,
+  compact/paged Batch N prepared-variation review, and remote prompt history;
 - local templates that can be saved, searched, sorted, renamed, loaded, and
   deleted;
 - batch generation as independent queued jobs, each with its own progress and
@@ -94,9 +94,15 @@ status line.
 
 Batch is also the expansion count. Batch 1 freezes the selected host through
 the next **Develop** while keeping quick undo. Batch 2 or greater first requests
-exactly N non-empty prompts from that host and opens an inline workspace where
+exactly N distinct non-empty prompts from that host and opens an inline
+workspace where
 you can edit, intentionally remove, regenerate, refresh, or discard them before
-anything is queued. Reducing two prompts to one requires confirmation. Changes
+anything is queued. Above eight, the workspace shows a compact first-eight
+summary and bounded pages on demand. Queue acceptance immediately restores the
+composer so another batch can be prepared while the earlier one runs. A single
+reviewed set has a 10,000-variation memory-safety ceiling, but you can keep
+queueing additional sets. Reducing
+two prompts to one requires confirmation. Changes
 to the source prompt, model, family, Batch count, host endpoint, Keychain key,
 or server identity preserve the reviewed work with a specific stale reason and
 block Develop until you choose Refresh or Discard.

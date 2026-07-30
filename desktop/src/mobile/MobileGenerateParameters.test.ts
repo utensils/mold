@@ -52,10 +52,10 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
-  it("offers a bounded batch stepper and image-only post upscale", async () => {
+  it("offers an editable unbounded batch stepper and image-only post upscale", async () => {
     const { wrapper, form } = mountParameters(formFor("flux"), [upscaler]);
 
-    expect(wrapper.get("[data-test='mobile-batch-value']").text()).toBe("1");
+    expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("1");
     expect(wrapper.find("[data-test='mobile-scheduler']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-cfg-plus']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-upscale']").text()).toContain("downloads on first use");
@@ -63,13 +63,23 @@ describe("MobileGenerateParameters", () => {
     for (let index = 0; index < 10; index += 1) {
       await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     }
-    expect(form.batchSize).toBe(8);
-    expect(wrapper.get("[data-test='mobile-batch-increment']").attributes()).toHaveProperty(
+    expect(form.batchSize).toBe(11);
+    expect(wrapper.get("[data-test='mobile-batch-increment']").attributes()).not.toHaveProperty(
       "disabled",
     );
 
+    await wrapper.get("[data-test='mobile-batch-value']").setValue("250");
+    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
+    expect(form.batchSize).toBe(250);
+
+    await wrapper.get("[data-test='mobile-batch-value']").setValue("999999999999");
+    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
+    expect(form.batchSize).toBe(10_000);
+
+    await wrapper.get("[data-test='mobile-batch-value']").setValue("250");
+    await wrapper.get("[data-test='mobile-batch-value']").trigger("change");
     await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
-    expect(form.batchSize).toBe(7);
+    expect(form.batchSize).toBe(249);
     await wrapper.get("[data-test='mobile-upscale']").setValue(upscaler.name);
     expect(form.upscaleModel).toBe(upscaler.name);
   });

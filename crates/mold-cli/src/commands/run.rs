@@ -669,6 +669,9 @@ pub async fn run(
     } else {
         expand || expand_settings.enabled
     };
+    if should_expand {
+        mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
+    }
 
     // Expansion strategy:
     // - If --local or server unreachable: expand client-side (existing path)
@@ -708,6 +711,7 @@ pub async fn run(
             crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
 
             let result = expander.expand(&prompt, &expand_config)?;
+            validate_run_expansion(&result.expanded, batch)?;
 
             if result.expanded.len() == 1 {
                 let expanded = &result.expanded[0];
@@ -766,6 +770,7 @@ pub async fn run(
 
             match client.expand_prompt(&expand_req).await {
                 Ok(result) if result.expanded.len() == 1 => {
+                    validate_run_expansion(&result.expanded, batch)?;
                     let expanded = &result.expanded[0];
                     let display = if expanded.chars().count() > 80 {
                         let truncated: String = expanded.chars().take(77).collect();
@@ -781,6 +786,7 @@ pub async fn run(
                     (expanded.clone(), Some(prompt.clone()), None, None)
                 }
                 Ok(result) => {
+                    validate_run_expansion(&result.expanded, batch)?;
                     crate::output::status!(
                         "{} Generated {} prompt variations (server)",
                         crate::theme::icon_ok(),
@@ -821,6 +827,7 @@ pub async fn run(
                     match super::expand::create_expander(&settings, &config).await {
                         Ok(expander) => match expander.expand(&prompt, &expand_config) {
                             Ok(result) => {
+                                validate_run_expansion(&result.expanded, batch)?;
                                 let first = result.expanded[0].clone();
                                 if result.expanded.len() == 1 {
                                     (first, Some(prompt.clone()), None, None)
@@ -928,6 +935,10 @@ pub async fn run(
         server_expand,
     )
     .await
+}
+
+fn validate_run_expansion(expanded: &[String], batch: u32) -> Result<()> {
+    mold_core::expand::validate_expanded_prompts(expanded, batch.max(1) as usize)
 }
 
 #[cfg(test)]
@@ -1146,6 +1157,33 @@ mod tests {
 
         assert_eq!(model, "cv:1759168");
         assert_eq!(prompt.unwrap(), "a cat");
+    }
+
+    #[test]
+    fn expanded_run_requires_exact_distinct_batch_prompts() {
+        let valid = mold_core::ExpandResult {
+            original: "source".into(),
+            expanded: (1..=100).map(|index| format!("prompt {index}")).collect(),
+        };
+        validate_run_expansion(&valid.expanded, 100).unwrap();
+
+        let partial = mold_core::ExpandResult {
+            original: "source".into(),
+            expanded: vec!["only one".into()],
+        };
+        let error = validate_run_expansion(&partial.expanded, 8).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Expected exactly 8 distinct non-empty prompts"),
+            "{error}"
+        );
+
+        let duplicate = mold_core::ExpandResult {
+            original: "source".into(),
+            expanded: vec!["same prompt".into(), "Same, prompt!".into()],
+        };
+        assert!(validate_run_expansion(&duplicate.expanded, 2).is_err());
     }
 
     #[test]

@@ -114,9 +114,15 @@ The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
 overscroll. The Library viewer keeps its scoped horizontal swipe gesture.
 
 Prepared expansion always snapshots the selected remote host ID, endpoint,
-Keychain-provided key, and server instance. Batch N requires exactly N non-empty
-prompts before its inline review workspace appears; edits and specifically named
+Keychain-provided key, and server instance. Batch is a directly editable
+positive count. Batch N requires exactly N distinct non-empty prompts before
+its inline review workspace appears; counts above eight use a compact
+first-eight summary and bounded Review all pages. Edits and specifically named
 stale work remain local until explicit approval, refresh, collapse, or discard.
+One reviewed set is capped at 10,000 variations for memory safety; accepted
+sets do not impose a cumulative queue limit.
+Once the host accepts the batch, the composer is immediately available to
+prepare another while earlier siblings remain queued or running.
 After source preprocessing, Create performs one read-only placement preview for
 the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
 route. A URL, Keychain key, or instance change, an authoritative infeasible

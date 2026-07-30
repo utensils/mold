@@ -34,6 +34,9 @@ const emit = defineEmits<{
 const confirmingRemovalId = ref<string | null>(null);
 const confirmButton = ref<HTMLButtonElement | null>(null);
 const sectionEl = ref<HTMLElement | null>(null);
+const REVIEW_PAGE_SIZE = 8;
+const reviewAll = ref(false);
+const reviewPage = ref(0);
 const hasStaleReasons = computed(() => props.staleReasons.length > 0);
 const emptyPromptIndexes = computed(() =>
   props.batch.prompts.flatMap((prompt, index) => (prompt.text.trim() ? [] : [index])),
@@ -45,6 +48,16 @@ const canGenerate = computed(
     !hasStaleReasons.value &&
     emptyPromptIndexes.value.length === 0,
 );
+const hasCompactReview = computed(() => props.batch.prompts.length > REVIEW_PAGE_SIZE);
+const reviewPageCount = computed(() =>
+  Math.max(1, Math.ceil(props.batch.prompts.length / REVIEW_PAGE_SIZE)),
+);
+const visiblePrompts = computed(() => {
+  const start = reviewAll.value ? reviewPage.value * REVIEW_PAGE_SIZE : 0;
+  return props.batch.prompts
+    .slice(start, start + REVIEW_PAGE_SIZE)
+    .map((prompt, offset) => ({ prompt, index: start + offset }));
+});
 
 const policyLabel = computed(() => {
   const labels = new Map([[props.batch.route.hostId, props.batch.route.label]]);
@@ -94,6 +107,8 @@ function requestReplacement(kind: "refresh" | "regenerate") {
 watch(
   () => props.batch.batchId,
   async () => {
+    reviewAll.value = false;
+    reviewPage.value = 0;
     if (!replacementFocusPending.value) return;
     replacementFocusPending.value = false;
     const active = document.activeElement;
@@ -106,6 +121,14 @@ watch(
     sectionEl.value?.querySelector<HTMLTextAreaElement>('[data-test="prepared-prompt"]')?.focus();
   },
   { flush: "post" },
+);
+
+watch(
+  () => props.batch.prompts.length,
+  () => {
+    reviewPage.value = Math.min(reviewPage.value, reviewPageCount.value - 1);
+    if (!hasCompactReview.value) reviewAll.value = false;
+  },
 );
 
 function confirmCollapse() {
@@ -196,9 +219,67 @@ function confirmCollapse() {
       @retry-expansion="emit('retry-expansion')"
     />
 
+    <div
+      v-if="hasCompactReview && !reviewAll"
+      data-test="compact-review-summary"
+      class="border-edge mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-bench px-2.5 py-2"
+    >
+      <p class="text-caption text-ink-2">
+        Showing the first {{ REVIEW_PAGE_SIZE }} prompts.
+        {{ batch.prompts.length - REVIEW_PAGE_SIZE }} more are ready to queue.
+      </p>
+      <button
+        type="button"
+        data-test="review-all-prompts"
+        class="border-edge min-h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+        @click="reviewAll = true"
+      >
+        Review all
+      </button>
+    </div>
+
+    <div
+      v-else-if="hasCompactReview"
+      data-test="review-pagination"
+      class="mt-3 flex flex-wrap items-center justify-between gap-2"
+    >
+      <button
+        type="button"
+        data-test="compact-prompt-review"
+        class="min-h-7 rounded-control px-2 text-caption text-ink-2 hover:text-ink"
+        @click="
+          reviewAll = false;
+          reviewPage = 0;
+        "
+      >
+        Compact review
+      </button>
+      <div class="flex items-center gap-2 text-caption text-ink-2">
+        <button
+          type="button"
+          data-test="previous-prompt-page"
+          class="border-edge min-h-7 rounded-control border px-2 disabled:opacity-50"
+          :disabled="reviewPage === 0"
+          @click="reviewPage -= 1"
+        >
+          Previous
+        </button>
+        <span>Page {{ reviewPage + 1 }} of {{ reviewPageCount }}</span>
+        <button
+          type="button"
+          data-test="next-prompt-page"
+          class="border-edge min-h-7 rounded-control border px-2 disabled:opacity-50"
+          :disabled="reviewPage >= reviewPageCount - 1"
+          @click="reviewPage += 1"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+
     <ol class="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
       <li
-        v-for="(prompt, index) in batch.prompts"
+        v-for="{ prompt, index } in visiblePrompts"
         :key="prompt.id"
         class="border-edge grid grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-2 rounded-control border bg-bench p-2 max-[560px]:grid-cols-[2rem_minmax(0,1fr)]"
       >
@@ -291,7 +372,13 @@ function confirmCollapse() {
           :disabled="!canGenerate"
           @click="emit('generate')"
         >
-          {{ submitting ? "Queueing variations…" : `Generate ${batch.prompts.length} variations` }}
+          {{
+            submitting
+              ? "Queueing variations…"
+              : hasCompactReview
+                ? `Queue all ${batch.prompts.length}`
+                : `Generate ${batch.prompts.length} variations`
+          }}
         </button>
       </div>
     </footer>

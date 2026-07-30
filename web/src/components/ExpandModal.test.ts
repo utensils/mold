@@ -78,6 +78,16 @@ describe("ExpandModal", () => {
     );
   });
 
+  it("keeps preview enabled for a valid prompt", async () => {
+    const wrapper = factory();
+    const preview = wrapper.get("[data-test='expand-preview']");
+    expect(preview.attributes()).not.toHaveProperty("disabled");
+
+    await preview.trigger("click");
+    await flushPromises();
+    expect(expandPromptMock).toHaveBeenCalledTimes(1);
+  });
+
   describe("overlay contract", () => {
     function dialog(): HTMLElement {
       const el = document.body.querySelector<HTMLElement>("[role=dialog]");

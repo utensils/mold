@@ -1249,12 +1249,7 @@ async fn expand_prompt(
     State(state): State<AppState>,
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
-    if req.variations == 0 || req.variations > mold_core::expand::MAX_VARIATIONS {
-        return Err(ApiError::validation(format!(
-            "variations must be between 1 and {}",
-            mold_core::expand::MAX_VARIATIONS,
-        )));
-    }
+    validate_expand_variations(req.variations)?;
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
@@ -1294,6 +1289,11 @@ async fn expand_prompt(
         original: req.prompt,
         expanded: result.expanded,
     }))
+}
+
+fn validate_expand_variations(variations: usize) -> Result<(), ApiError> {
+    mold_core::expand::validate_expansion_variation_count(variations)
+        .map_err(|error| ApiError::validation(error.to_string()))
 }
 
 // ── /api/upscale ────────────────────────────────────────────────────────────
@@ -5617,6 +5617,13 @@ mod tests {
             style: None,
         };
         assert!(expand_config_for_request(&settings, &bare).style.is_none());
+    }
+
+    #[test]
+    fn expand_variation_admission_allows_large_counts_but_rejects_unsafe_sets() {
+        validate_expand_variations(10_000).unwrap();
+        assert!(validate_expand_variations(0).is_err());
+        assert!(validate_expand_variations(10_001).is_err());
     }
 
     #[test]

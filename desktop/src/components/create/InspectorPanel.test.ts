@@ -102,7 +102,28 @@ describe("InspectorPanel — batch", () => {
     wrapper.findComponent(Stepper).vm.$emit("update:modelValue", 3);
     await flushPromises();
     expect(form.batchSize).toBe(3);
-    expect(wrapper.findComponent(Stepper).props("max")).toBe(8);
+    expect(wrapper.findComponent(Stepper).props("max")).toBe(10_000);
+    expect(wrapper.findComponent(Stepper).props("editable")).toBe(true);
+  });
+
+  it("accepts a directly entered large positive batch", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const input = wrapper.get('input[aria-label="Batch size"]');
+    await input.setValue("1000");
+    await input.trigger("change");
+    await flushPromises();
+    expect(form.batchSize).toBe(1000);
+  });
+
+  it("does not overwrite an uncommitted direct entry on an arrow key", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const input = wrapper.get('input[aria-label="Batch size"]');
+    (input.element as HTMLInputElement).value = "120";
+    await input.trigger("keydown", { key: "ArrowUp" });
+    expect(form.batchSize).toBe(1);
+    expect((input.element as HTMLInputElement).value).toBe("120");
   });
 
   it("locks the batch to one for edit models", () => {

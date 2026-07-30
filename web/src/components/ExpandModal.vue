@@ -22,10 +22,6 @@ const props = defineProps<{
   prompt: string;
   expand: ExpandFormState;
   currentModel: ModelInfoExtended | null;
-  /** Preview hits the LLM server-side; the queue is a single lane, so
-   * previewing while a generation is running would block the UI on the
-   * inference slot. Disable the button instead of silently queueing it. */
-  queueBusy?: boolean;
   /**
    * The composer's active style as a natural-language directive (`styleHint`)
    * the server weaves into the expander's system message. Null for a chain
@@ -173,20 +169,12 @@ function pick(text: string) {
             <button
               type="button"
               class="xm__go"
-              :disabled="previewing || !prompt.trim() || queueBusy"
-              :title="
-                queueBusy
-                  ? 'Another generation is in the queue — wait for it to finish before previewing.'
-                  : undefined
-              "
+              :disabled="previewing || !prompt.trim()"
               data-test="expand-preview"
               @click="preview"
             >
               {{ previewing ? "Expanding…" : "Preview" }}
             </button>
-            <span v-if="queueBusy" class="xm__note">
-              queue busy — preview disabled
-            </span>
           </div>
 
           <p v-if="previewError" class="xm__error">{{ previewError }}</p>

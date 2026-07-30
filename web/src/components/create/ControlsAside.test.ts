@@ -136,12 +136,17 @@ describe("ControlsAside", () => {
 
   it("steps the batch size", async () => {
     const wrapper = factory({ batchSize: 1 });
-    wrapper.getComponent(Stepper).vm.$emit("update:modelValue", 3);
+    const stepper = wrapper
+      .findAllComponents(Stepper)
+      .find((candidate) => candidate.props("label") === "Batch size")!;
+    expect(stepper.props("editable")).toBe(true);
+    expect(stepper.props("max")).toBe(10_000);
+    stepper.vm.$emit("update:modelValue", 300);
     await wrapper.vm.$nextTick();
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
     ];
-    expect(next.batchSize).toBe(3);
+    expect(next.batchSize).toBe(300);
   });
 
   it("shows the advanced badge and opens the sheet on phones", async () => {

@@ -11,19 +11,24 @@ const props = withDefaults(
   defineProps<{
     modelValue: number;
     min: number;
-    max: number;
+    /** Omit for a control with no product-imposed upper bound. */
+    max?: number | undefined;
     /** Accessible name for the control. */
     label?: string;
     /** Optional value renderer (e.g. fade frames show "8f"). */
     format?: (value: number) => string;
+    /** Allow direct numeric entry in addition to the step buttons. */
+    editable?: boolean;
   }>(),
-  {},
+  { editable: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const atMin = computed(() => props.modelValue <= props.min);
-const atMax = computed(() => props.modelValue >= props.max);
+const atMax = computed(
+  () => props.max !== undefined && props.modelValue >= props.max,
+);
 const valueText = computed(() =>
   props.format ? props.format(props.modelValue) : String(props.modelValue),
 );
@@ -35,8 +40,29 @@ const increaseLabel = computed(() =>
 );
 
 function set(next: number) {
-  const clamped = Math.min(props.max, Math.max(props.min, next));
+  if (!Number.isFinite(next)) return;
+  const integer = Math.floor(next);
+  const clamped = Math.min(
+    props.max ?? Number.MAX_SAFE_INTEGER,
+    Math.max(props.min, integer),
+  );
   if (clamped !== props.modelValue) emit("update:modelValue", clamped);
+}
+
+function commitInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const next = Number(input.value);
+  if (input.value.trim() === "" || !Number.isFinite(next)) {
+    input.value = String(props.modelValue);
+    return;
+  }
+  set(next);
+  input.value = String(
+    Math.min(
+      props.max ?? Number.MAX_SAFE_INTEGER,
+      Math.max(props.min, Math.floor(next)),
+    ),
+  );
 }
 
 function decrement() {
@@ -50,6 +76,10 @@ function increment() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  // Editable inputs own their in-progress value and native arrow behavior.
+  // Handling the bubbled event here would apply the last committed prop and
+  // overwrite text the user has not blurred yet.
+  if (props.editable) return;
   const delta =
     event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0;
   if (delta === 0) return;
@@ -61,13 +91,13 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-stepper"
-    role="spinbutton"
-    tabindex="0"
-    :aria-valuenow="modelValue"
-    :aria-valuemin="min"
-    :aria-valuemax="max"
-    :aria-valuetext="valueText"
-    :aria-label="label"
+    :role="editable ? undefined : 'spinbutton'"
+    :tabindex="editable ? undefined : 0"
+    :aria-valuenow="editable ? undefined : modelValue"
+    :aria-valuemin="editable ? undefined : min"
+    :aria-valuemax="editable ? undefined : max"
+    :aria-valuetext="editable ? undefined : valueText"
+    :aria-label="editable ? undefined : label"
     @keydown="onKeydown"
   >
     <button
@@ -80,7 +110,23 @@ function onKeydown(event: KeyboardEvent) {
     >
       −
     </button>
-    <span class="ms-stepper__value" aria-hidden="true">{{ valueText }}</span>
+    <input
+      v-if="editable"
+      class="ms-stepper__value ms-stepper__input"
+      type="number"
+      inputmode="numeric"
+      pattern="[0-9]*"
+      :aria-label="label"
+      :min="min"
+      :max="max"
+      :value="modelValue"
+      @change="commitInput"
+      @blur="commitInput"
+      @keydown.enter="($event.target as HTMLInputElement).blur()"
+    />
+    <span v-else class="ms-stepper__value" aria-hidden="true">{{
+      valueText
+    }}</span>
     <button
       type="button"
       class="ms-stepper__btn"
@@ -156,5 +202,26 @@ function onKeydown(event: KeyboardEvent) {
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
+}
+
+.ms-stepper__input {
+  width: 52px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--rebate);
+  appearance: textfield;
+}
+
+.ms-stepper__input:focus-visible {
+  border-radius: var(--radius-control-sm);
+  outline: 2px solid var(--safelight);
+  outline-offset: 1px;
+}
+
+.ms-stepper__input::-webkit-inner-spin-button,
+.ms-stepper__input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
 }
 </style>

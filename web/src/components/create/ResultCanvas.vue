@@ -10,7 +10,7 @@
  *    plus Discard / Queue N.
  * Presentational only: the parent owns job state and the submit paths.
  */
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
@@ -44,8 +44,18 @@ const props = withDefaults(
     errorCopy?: string;
     /** variations — the editable prompt list. */
     variations?: string[];
+    /** variations — durable identity used to reset bounded review state. */
+    variationBatchId?: string;
+    /** variations — route revalidation owns the reviewed batch while true. */
+    queueingVariations?: boolean;
   }>(),
-  { progress: 0, stage: "", progressFraction: 0, variations: () => [] },
+  {
+    progress: 0,
+    stage: "",
+    progressFraction: 0,
+    variations: () => [],
+    queueingVariations: false,
+  },
 );
 
 // Desktop parity (GenerateView.vue): the preview's blur tightens as denoising
@@ -79,6 +89,45 @@ function editVariation(index: number, value: string) {
   next[index] = value;
   emit("update:variations", next);
 }
+
+const REVIEW_PREVIEW_COUNT = 8;
+const REVIEW_PAGE_SIZE = 50;
+const reviewPage = ref<number | null>(null);
+const reviewStart = computed(() =>
+  reviewPage.value === null ? 0 : reviewPage.value * REVIEW_PAGE_SIZE,
+);
+const reviewEnd = computed(() =>
+  Math.min(
+    props.variations.length,
+    reviewStart.value +
+      (reviewPage.value === null ? REVIEW_PREVIEW_COUNT : REVIEW_PAGE_SIZE),
+  ),
+);
+const visibleVariations = computed(() =>
+  props.variations
+    .slice(reviewStart.value, reviewEnd.value)
+    .map((text, offset) => ({ text, index: reviewStart.value + offset })),
+);
+const hiddenVariationCount = computed(() =>
+  Math.max(0, props.variations.length - REVIEW_PREVIEW_COUNT),
+);
+watch(
+  () => props.variations.length,
+  (count) => {
+    if (count <= REVIEW_PREVIEW_COUNT) reviewPage.value = null;
+    else if (
+      reviewPage.value !== null &&
+      reviewPage.value * REVIEW_PAGE_SIZE >= count
+    )
+      reviewPage.value = Math.max(0, Math.ceil(count / REVIEW_PAGE_SIZE) - 1);
+  },
+);
+watch(
+  () => [props.mode, props.variationBatchId] as const,
+  () => {
+    reviewPage.value = null;
+  },
+);
 </script>
 
 <template>
@@ -165,7 +214,7 @@ function editVariation(index: number, value: string) {
       </div>
       <div class="canvas__var-list">
         <div
-          v-for="(text, index) in variations"
+          v-for="{ text, index } in visibleVariations"
           :key="index"
           class="canvas__var-row"
           :data-test="`variation-row-${index}`"
@@ -175,6 +224,7 @@ function editVariation(index: number, value: string) {
             class="canvas__var-input"
             :data-test="`variation-input-${index}`"
             :value="text"
+            :disabled="queueingVariations"
             @input="
               editVariation(index, ($event.target as HTMLTextAreaElement).value)
             "
@@ -183,17 +233,74 @@ function editVariation(index: number, value: string) {
             type="button"
             class="canvas__var-use"
             :data-test="`variation-use-${index}`"
+            :disabled="queueingVariations"
             @click="emit('use-variation', index)"
           >
             Use
           </button>
         </div>
       </div>
+      <div
+        v-if="hiddenVariationCount"
+        class="canvas__var-more"
+        data-test="variations-compact-review"
+      >
+        <span v-if="reviewPage === null">
+          {{ hiddenVariationCount }} more variations are ready to queue.
+        </span>
+        <template v-if="reviewPage === null">
+          <button
+            type="button"
+            class="canvas__var-use"
+            data-test="variations-review-all"
+            :disabled="queueingVariations"
+            @click="reviewPage = 0"
+          >
+            Review all {{ variations.length }}
+          </button>
+        </template>
+        <template v-else>
+          <span data-test="variations-review-range">
+            Variations {{ reviewStart + 1 }}–{{ reviewEnd }} of
+            {{ variations.length }}
+          </span>
+          <div class="canvas__var-paging">
+            <button
+              type="button"
+              class="canvas__var-use"
+              data-test="variations-review-previous"
+              :disabled="queueingVariations || reviewPage === 0"
+              @click="reviewPage = Math.max(0, reviewPage - 1)"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              class="canvas__var-use"
+              data-test="variations-review-next"
+              :disabled="queueingVariations || reviewEnd >= variations.length"
+              @click="reviewPage += 1"
+            >
+              Next
+            </button>
+            <button
+              type="button"
+              class="canvas__var-use"
+              data-test="variations-review-summary"
+              :disabled="queueingVariations"
+              @click="reviewPage = null"
+            >
+              Show summary
+            </button>
+          </div>
+        </template>
+      </div>
       <div class="canvas__var-actions">
         <button
           type="button"
           class="canvas__discard"
           data-test="variations-discard"
+          :disabled="queueingVariations"
           @click="emit('discard')"
         >
           Discard
@@ -202,9 +309,14 @@ function editVariation(index: number, value: string) {
           type="button"
           class="canvas__queue"
           data-test="variations-queue"
+          :disabled="queueingVariations"
           @click="emit('queue')"
         >
-          Queue {{ variations.length }} prints
+          {{
+            queueingVariations
+              ? "Checking machine…"
+              : `Queue ${variations.length} prints`
+          }}
         </button>
       </div>
     </div>
@@ -350,6 +462,22 @@ function editVariation(index: number, value: string) {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.canvas__var-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.canvas__var-paging {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .canvas__var-row {

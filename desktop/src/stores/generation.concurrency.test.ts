@@ -150,6 +150,28 @@ describe("submitBatch connection cap", () => {
     await Promise.all([first.settled, second.settled, third.settled]);
   });
 
+  it("shares the two-stream host cap across overlapping batches", async () => {
+    const store = useGenerationStore();
+    const first = store.submitBatch({ ...req, seed: 400 }, 3);
+    const second = store.submitBatch({ ...req, seed: 500 }, 3);
+    await flushPromises();
+
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([400, 401]);
+
+    resolveStream(400);
+    await flushPromises();
+    expect(streams).toHaveLength(2);
+    resolveStream(401);
+    await flushPromises();
+    expect(streams).toHaveLength(2);
+
+    while (streams.length > 0) {
+      streams[0]!.resolve();
+      await flushPromises();
+    }
+    await Promise.all([first.settled, second.settled]);
+  });
+
   it("releases a slot on a terminal frame even when the peer does not close", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 300 }, 1);

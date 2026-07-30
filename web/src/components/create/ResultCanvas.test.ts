@@ -190,4 +190,64 @@ describe("ResultCanvas", () => {
     await wrapper.get("[data-test='variations-queue']").trigger("click");
     expect(wrapper.emitted("queue")).toHaveLength(1);
   });
+
+  it("keeps large prepared batches compact and can reveal every prompt", async () => {
+    const variations = Array.from(
+      { length: 120 },
+      (_, index) => `variation ${index + 1}`,
+    );
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "variations", variations },
+    });
+
+    expect(wrapper.findAll(".canvas__var-row")).toHaveLength(8);
+    expect(
+      wrapper.get("[data-test='variations-compact-review']").text(),
+    ).toContain("112 more variations");
+    expect(wrapper.get("[data-test='variations-queue']").text()).toContain(
+      "Queue 120 prints",
+    );
+
+    await wrapper.get("[data-test='variations-review-all']").trigger("click");
+    expect(wrapper.findAll(".canvas__var-row")).toHaveLength(50);
+    expect(
+      wrapper.get("[data-test='variations-review-range']").text(),
+    ).toContain("Variations 1–50 of 120");
+    await wrapper.get("[data-test='variations-review-next']").trigger("click");
+    expect(wrapper.findAll(".canvas__var-row")).toHaveLength(50);
+    expect(
+      wrapper.get("[data-test='variations-review-range']").text(),
+    ).toContain("Variations 51–100 of 120");
+    expect(
+      wrapper.get("[data-test='variation-input-50']").attributes("data-test"),
+    ).toBe("variation-input-50");
+
+    await wrapper.setProps({ variationBatchId: "replacement" });
+    expect(wrapper.findAll(".canvas__var-row")).toHaveLength(8);
+    expect(wrapper.find("[data-test='variations-review-range']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("freezes the reviewed set while its route is being revalidated", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: {
+        mode: "variations",
+        variations: ["one", "two"],
+        queueingVariations: true,
+      },
+    });
+    expect(
+      wrapper.get("[data-test='variations-queue']").attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get("[data-test='variations-discard']").attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get("[data-test='variation-input-0']").attributes("disabled"),
+    ).toBeDefined();
+    expect(wrapper.get("[data-test='variations-queue']").text()).toContain(
+      "Checking machine",
+    );
+  });
 });

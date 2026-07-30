@@ -384,6 +384,11 @@ const quickExpansionNegative = ref<{ before: string; baked: string } | null>(nul
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
+// Completion is detached from authoring once the store accepts a batch. Only
+// the newest accepted submission may publish mutable recovery authority:
+// older batches can finish later, but must not replace a newer pull/resume
+// decision.
+let latestAcceptedSubmissionId = 0;
 
 let stopNativeImageDrop: (() => void) | null = null;
 let nativeImageDropUnmounted = false;
@@ -2010,11 +2015,19 @@ async function generate() {
         }
       : {};
     const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
+    const acceptedSubmissionId = ++latestAcceptedSubmissionId;
+    missingModel.value = null;
     if (preparedSubmission) {
       preparationGuard.invalidate();
       preparedBatch.value = null;
       expansionError.value = null;
       expansionMissingModel.value = null;
+      // The store has synchronously snapshotted every sibling and its exact
+      // route. The composer no longer owns this work: release it immediately
+      // so another batch can be prepared while these jobs remain queued or
+      // generating. Completion feedback is handled by the detached promise
+      // below.
+      preparedSubmitting.value = false;
       void nextTick(() => composerRef.value?.focus?.());
     }
     if (
@@ -2024,45 +2037,50 @@ async function generate() {
       quickExpansionSnapshot.value = null;
     }
     composerRef.value?.record?.(preparedSubmission?.originalPrompt ?? request.prompt);
-    const done = await settled;
-    void loadPromptHistory();
-    const ok = done.filter((s) => s.status === "complete").length;
-    const failedCount = done.filter((s) => s.status === "error").length;
-    const failed = done.find((s) => s.status === "error");
-    if (ok > 0) {
-      if (failedCount > 0) {
-        toasts.push(
-          `Generated ${ok} of ${done.length} variations. ${failedCount} failed; successful prints were saved to Gallery.`,
-          "error",
-        );
-      } else {
-        toasts.push(
-          ok === 1 ? "Generated, saved to Gallery" : `Generated ${ok} prints, saved to Gallery`,
-        );
+    void settled.then((done) => {
+      void loadPromptHistory();
+      const ok = done.filter((s) => s.status === "complete").length;
+      const failedCount = done.filter((s) => s.status === "error").length;
+      const failed = done.find((s) => s.status === "error");
+      if (ok > 0) {
+        if (failedCount > 0) {
+          toasts.push(
+            `Generated ${ok} of ${done.length} variations. ${failedCount} failed; successful prints were saved to Gallery.`,
+            "error",
+          );
+        } else {
+          toasts.push(
+            ok === 1 ? "Generated, saved to Gallery" : `Generated ${ok} prints, saved to Gallery`,
+          );
+        }
+        // Gallery refresh is handled by the generation store's complete hook
+        // (per-origin bucket) plus the SSE / fallback-poll paths.
+      } else if (failed?.error && failed.error !== "Cancelled") {
+        // A 404 also fires on proxy/base-URL mismatches — only offer the pull
+        // when the availability snapshot doesn't CONTRADICT "model missing"
+        // (unknown availability still offers; the pull endpoint will say no).
+        const routedId = route?.hostId ?? "local";
+        const hostSaysInstalled =
+          (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
+          hostModels.installedOn(routedId).some((m) => m.name === request.model);
+        if (
+          acceptedSubmissionId === latestAcceptedSubmissionId &&
+          isMissingModelError(failed.error) &&
+          !hostSaysInstalled
+        ) {
+          // The routed host doesn't have the model — offer pull-and-resume
+          // instead of the raw HTTP error.
+          missingModel.value = {
+            model: request.model,
+            route,
+            request,
+            batch,
+            chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+            requestOptions,
+          };
+        }
       }
-      // Gallery refresh is handled by the generation store's complete hook
-      // (per-origin bucket) plus the SSE / fallback-poll paths.
-    } else if (failed?.error && failed.error !== "Cancelled") {
-      // A 404 also fires on proxy/base-URL mismatches — only offer the pull
-      // when the availability snapshot doesn't CONTRADICT "model missing"
-      // (unknown availability still offers; the pull endpoint will say no).
-      const routedId = route?.hostId ?? "local";
-      const hostSaysInstalled =
-        (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
-        hostModels.installedOn(routedId).some((m) => m.name === request.model);
-      if (isMissingModelError(failed.error) && !hostSaysInstalled) {
-        // The routed host doesn't have the model — offer pull-and-resume
-        // instead of the raw HTTP error.
-        missingModel.value = {
-          model: request.model,
-          route,
-          request,
-          batch,
-          chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
-          requestOptions,
-        };
-      }
-    }
+    });
   } finally {
     preparedSubmitting.value = false;
   }

@@ -71,6 +71,54 @@ describe("MobilePreparedExpansionBatch", () => {
     expect(wrapper.emitted("remove")).toEqual([["prepared-1-2"]]);
   });
 
+  it("keeps large reviews compact until Review all is requested", async () => {
+    const large = createPreparedExpansionBatch(
+      {
+        sourcePrompt: "source",
+        model: "flux-dev:q8",
+        family: "flux",
+        requestedCount: 120,
+        stylePreset: null,
+        selectedHostPolicy: "studio",
+      },
+      route,
+      Array.from({ length: 120 }, (_, index) => `variation ${index + 1}`),
+      1,
+      "large-mobile-batch",
+    );
+    const wrapper = mountBatch({ batch: large });
+
+    expect(wrapper.findAll("textarea")).toHaveLength(8);
+    expect(wrapper.get('[data-test="mobile-prepared-compact-review"]').text()).toContain(
+      "112 more variations",
+    );
+    expect(wrapper.get('[data-test="mobile-develop-prepared"]').text()).toBe(
+      "Develop 120 variations",
+    );
+
+    await wrapper.get('[data-test="mobile-prepared-review-all"]').trigger("click");
+    expect(wrapper.findAll("textarea")).toHaveLength(50);
+    expect(wrapper.get('[data-test="mobile-prepared-review-range"]').text()).toContain(
+      "Variations 1–50 of 120",
+    );
+    await wrapper.get('[data-test="mobile-prepared-review-next"]').trigger("click");
+    expect(wrapper.findAll("textarea")).toHaveLength(50);
+    expect(wrapper.get('[data-test="mobile-prepared-review-range"]').text()).toContain(
+      "Variations 51–100 of 120",
+    );
+    expect(wrapper.get('textarea[aria-label="Variation 51 of 120"]').attributes("aria-label")).toBe(
+      "Variation 51 of 120",
+    );
+
+    await wrapper.get('[data-test="mobile-prepared-review-next"]').trigger("click");
+    const shortened = { ...large, prompts: large.prompts.slice(0, 40) };
+    await wrapper.setProps({ batch: shortened });
+    expect(wrapper.findAll("textarea")).toHaveLength(40);
+    expect(wrapper.get('[data-test="mobile-prepared-review-range"]').text()).toContain(
+      "Variations 1–40 of 40",
+    );
+  });
+
   it("requires explicit confirmation before collapsing two prompts to Batch 1", async () => {
     const two = batch();
     two.prompts.pop();

@@ -24,6 +24,26 @@ const batch = () =>
     1,
   );
 
+const largeBatch = () =>
+  createPreparedExpansionBatch(
+    {
+      sourcePrompt: "source",
+      model: "flux-dev:q8",
+      family: "flux",
+      requestedCount: 20,
+      stylePreset: null,
+      selectedHostPolicy: null,
+    },
+    {
+      hostId: "studio",
+      label: "Studio 4090",
+      kind: "remote",
+      target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+    },
+    Array.from({ length: 20 }, (_, index) => `variation ${index + 1}`),
+    2,
+  );
+
 const wrappers: ReturnType<typeof mount>[] = [];
 function mountBatch(
   props: Partial<{
@@ -77,6 +97,29 @@ describe("PreparedExpansionBatch", () => {
 
     await editors[0]!.setValue("edited one");
     expect(wrapper.emitted("edit")).toEqual([[{ id: "prepared-1-1", text: "edited one" }]]);
+  });
+
+  it("keeps large batches compact by default and pages the full editor on demand", async () => {
+    const wrapper = mountBatch({ batch: largeBatch() });
+
+    expect(wrapper.findAll('[data-test="prepared-prompt"]')).toHaveLength(8);
+    expect(wrapper.get('[data-test="compact-review-summary"]').text()).toContain(
+      "12 more are ready to queue",
+    );
+    expect(wrapper.get('[data-test="generate-prepared"]').text()).toBe("Queue all 20");
+
+    await wrapper.get('[data-test="review-all-prompts"]').trigger("click");
+    expect(wrapper.get('[data-test="review-pagination"]').text()).toContain("Page 1 of 3");
+    await wrapper.get('[data-test="next-prompt-page"]').trigger("click");
+    expect(wrapper.get('[data-test="review-pagination"]').text()).toContain("Page 2 of 3");
+    expect(wrapper.findAll('[data-test="prepared-prompt"]')[0]!.attributes("aria-label")).toBe(
+      "Variation 9 of 20",
+    );
+    await wrapper.get('[data-test="next-prompt-page"]').trigger("click");
+    expect(wrapper.findAll('[data-test="prepared-prompt"]')).toHaveLength(4);
+    expect(wrapper.findAll('[data-test="prepared-prompt"]')[3]!.attributes("aria-label")).toBe(
+      "Variation 20 of 20",
+    );
   });
 
   it("removes a prompt directly when more than two remain", async () => {

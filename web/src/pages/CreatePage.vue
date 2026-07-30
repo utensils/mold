@@ -200,6 +200,7 @@ const prevStyle = ref<{
 } | null>(null);
 const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
+const queueingVariations = ref(false);
 const expandRoute = ref<HostRoute | null>(null);
 interface QuickPreparedExpansion {
   expandedPrompt: string;
@@ -2156,6 +2157,7 @@ function discardVariations() {
 }
 
 async function queueVariations() {
+  if (queueingVariations.value) return;
   const prepared = preparedBatch.value;
   if (!prepared) {
     composerError.value =
@@ -2173,49 +2175,68 @@ async function queueVariations() {
       "Every prepared variation needs a prompt before queueing.";
     return;
   }
-  const revalidated =
-    prepared.decision.kind === "chain"
-      ? await routing.revalidateFeasibleChain(
-          prepared.route,
-          resolveChainRequest(prepared.baseRequest, prepared.decision),
-          list.length,
-        )
-      : await routing.revalidateFeasible(
-          prepared.route,
-          prepared.baseRequest,
-          list.length,
-        );
-  if (
-    revalidated.kind !== "route" ||
-    !sameRoute(prepared.route, revalidated.route)
-  ) {
-    composerError.value =
-      revalidated.kind === "route"
-        ? "The prepared machine can no longer run this complete batch. Nothing was queued; your reviewed variations are preserved."
-        : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
-    return;
+  queueingVariations.value = true;
+  try {
+    const revalidated =
+      prepared.decision.kind === "chain"
+        ? await routing.revalidateFeasibleChain(
+            prepared.route,
+            resolveChainRequest(prepared.baseRequest, prepared.decision),
+            list.length,
+          )
+        : await routing.revalidateFeasible(
+            prepared.route,
+            prepared.baseRequest,
+            list.length,
+          );
+    const stillOwned =
+      preparedBatch.value?.batchId === prepared.batchId &&
+      variations.value.length === list.length &&
+      variations.value.every((prompt, index) => prompt.trim() === list[index]);
+    if (!stillOwned) {
+      composerError.value =
+        "The prepared variations changed while the machine was being checked. Nothing was queued; review the current batch and try again.";
+      return;
+    }
+    const refreshedStale = preparedStaleReasons(prepared);
+    if (refreshedStale.length) {
+      composerError.value = refreshedStale.join(" ");
+      return;
+    }
+    if (
+      revalidated.kind !== "route" ||
+      !sameRoute(prepared.route, revalidated.route)
+    ) {
+      composerError.value =
+        revalidated.kind === "route"
+          ? "The prepared machine can no longer run this complete batch. Nothing was queued; your reviewed variations are preserved."
+          : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
+      return;
+    }
+    for (const [index, prompt] of list.entries()) {
+      // Each variation already carries the style extras, so it is the final
+      // prompt — override the base request's prompt rather than re-appending.
+      // Each is one print; the batch size drove the variation count, not the
+      // per-job image count.
+      stream.submit(
+        {
+          ...prepared.baseRequest,
+          prompt,
+          batch_size: 1,
+          original_prompt: prepared.sourcePrompt,
+          batch_id: prepared.batchId,
+          batch_index: index + 1,
+          batch_count: list.length,
+        },
+        prepared.decision,
+        normalizeSubmitRoute(revalidated.route),
+      );
+    }
+    variations.value = [];
+    preparedBatch.value = null;
+  } finally {
+    queueingVariations.value = false;
   }
-  for (const [index, prompt] of list.entries()) {
-    // Each variation already carries the style extras, so it is the final
-    // prompt — override the base request's prompt rather than re-appending.
-    // Each is one print; the batch size drove the variation count, not the
-    // per-job image count.
-    stream.submit(
-      {
-        ...prepared.baseRequest,
-        prompt,
-        batch_size: 1,
-        original_prompt: prepared.sourcePrompt,
-        batch_id: prepared.batchId,
-        batch_index: index + 1,
-        batch_count: list.length,
-      },
-      prepared.decision,
-      normalizeSubmitRoute(revalidated.route),
-    );
-  }
-  variations.value = [];
-  preparedBatch.value = null;
 }
 
 // ── Source image handling (preserved) ─────────────────────────────────
@@ -2888,6 +2909,8 @@ onBeforeUnmount(() => {
             :error="latestErrorMessage"
             :error-copy="latestErrorCopy"
             :variations="variations"
+            :variation-batch-id="preparedBatch?.batchId"
+            :queueing-variations="queueingVariations"
             @update:variations="variations = $event"
             @use-variation="useVariation"
             @discard="discardVariations"
@@ -2981,7 +3004,6 @@ onBeforeUnmount(() => {
       "
       :expand="form.state.value.expand"
       :current-model="currentModel"
-      :queue-busy="!!runningJob"
       :style-directive="expandStyleDirective"
       :target="expandRoute?.target"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
