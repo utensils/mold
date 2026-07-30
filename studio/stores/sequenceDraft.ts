@@ -24,6 +24,11 @@ import {
   type SequenceClipSourceImage,
 } from "../lib/sequenceForm";
 import { chainScriptToClips } from "../lib/sequenceForm";
+import {
+  deleteDraftMedia,
+  getDraftMedia,
+  putDraftMedia,
+} from "../lib/draftMediaStore";
 import type { OutputMode, SequenceTransition } from "../lib/sequence";
 import type { ChainScript } from "../lib/api/chainTypes";
 
@@ -63,6 +68,10 @@ export interface SequenceEditSession {
   hostId: string;
   /** The loaded job's clips at load time — `stageInvalidation`'s baseline. */
   baseline: SequenceClipForm[];
+  /** The durable job's opening frame, restored when edits are discarded. */
+  baselineOpeningImage?: SequenceClipSourceImage | null;
+  /** The durable job's audio choice, restored when edits are discarded. */
+  baselineEnableAudio?: boolean;
   /** Leading stages the job has actually completed (cache ceiling). */
   completedStages: number;
 }
@@ -76,6 +85,8 @@ interface PersistedDraftV1 {
   version: 1;
   output: OutputMode;
   clips: PersistedClip[];
+  openingImage?:
+    (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
   enableAudio: boolean;
   lastSingleModel: string | null;
 }
@@ -89,6 +100,8 @@ function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
   }));
 }
 
+const OPENING_MEDIA_ID = "sequence-opening-image";
+
 function readJson<T>(key: string): T | null {
   try {
     const raw = draftStorage()?.getItem(key) ?? null;
@@ -101,6 +114,8 @@ function readJson<T>(key: string): T | null {
 export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   const output = ref<OutputMode>("single");
   const clips = reactive<SequenceClipForm[]>([]);
+  const openingImage = ref<SequenceClipSourceImage | null>(null);
+  const mediaRestoring = ref(false);
   const activeClipId = ref<string | null>(null);
   const enableAudio = ref(false);
   const editing = ref<SequenceEditSession | null>(null);
@@ -110,10 +125,36 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   function persistNow() {
+    if (openingImage.value?.base64) {
+      const draftId = openingImage.value.draftId ?? OPENING_MEDIA_ID;
+      openingImage.value.draftId = draftId;
+      void putDraftMedia({
+        ...openingImage.value,
+        draftId,
+        base64: openingImage.value.base64,
+      });
+    }
+    for (const clip of clips) {
+      if (!clip.sourceImage?.base64) continue;
+      const draftId = clip.sourceImage.draftId ?? `sequence-clip-${clip.id}`;
+      clip.sourceImage.draftId = draftId;
+      void putDraftMedia({
+        ...clip.sourceImage,
+        draftId,
+        base64: clip.sourceImage.base64,
+      });
+    }
     const draft: PersistedDraftV1 = {
       version: 1,
       output: output.value,
       clips: persistableClips(clips),
+      openingImage: openingImage.value
+        ? {
+            filename: openingImage.value.filename,
+            draftId: openingImage.value.draftId ?? OPENING_MEDIA_ID,
+            base64: null,
+          }
+        : null,
       enableAudio: enableAudio.value,
       lastSingleModel: lastSingleModel.value,
     };
@@ -133,8 +174,50 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   function applyPersisted(saved: PersistedDraftV1) {
     output.value = saved.output;
     clips.splice(0, clips.length, ...saved.clips.map((clip) => ({ ...clip })));
+    openingImage.value = saved.openingImage ?? null;
     enableAudio.value = saved.enableAudio;
     lastSingleModel.value = saved.lastSingleModel ?? null;
+  }
+
+  async function restorePersistedMedia() {
+    const pending: Array<Promise<void>> = [];
+    if (openingImage.value && !openingImage.value.base64) {
+      const marker = openingImage.value;
+      pending.push(
+        getDraftMedia<SequenceClipSourceImage & { draftId: string }>(
+          marker.draftId ?? OPENING_MEDIA_ID,
+        ).then((stored) => {
+          if (stored?.base64 && openingImage.value === marker) {
+            openingImage.value = {
+              filename: stored.filename,
+              draftId: stored.draftId,
+              base64: stored.base64,
+            };
+          }
+        }),
+      );
+    }
+    for (const clip of clips) {
+      const marker = clip.sourceImage;
+      if (!marker || marker.base64) continue;
+      pending.push(
+        getDraftMedia<SequenceClipSourceImage & { draftId: string }>(
+          marker.draftId ?? `sequence-clip-${clip.id}`,
+        ).then((stored) => {
+          if (stored?.base64 && clip.sourceImage === marker) {
+            clip.sourceImage = {
+              filename: stored.filename,
+              draftId: stored.draftId,
+              base64: stored.base64,
+            };
+          }
+        }),
+      );
+    }
+    if (pending.length === 0) return;
+    mediaRestoring.value = true;
+    await Promise.all(pending);
+    mediaRestoring.value = false;
   }
 
   /** One-shot migrations from the pre-unification keys. */
@@ -152,6 +235,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
         stages: legacyStages,
       });
       clips.splice(0, clips.length, ...loaded.clips);
+      openingImage.value = loaded.openingImage;
       enableAudio.value = loaded.enableAudio;
       // Deliberately NOT importing the legacy chain-level width/steps/
       // guidance — those private copies were the stale-inspector bug.
@@ -180,6 +264,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
       activeClipId.value = clips[clips.length - 1]?.id ?? null;
     }
     hydrated.value = true;
+    void restorePersistedMedia();
     // migrateLegacy() consumed the legacy keys while `hydrated` was still
     // false (the watcher won't schedule persistence), so a reload before
     // any edit would lose the migrated draft — make it durable right away.
@@ -203,7 +288,9 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     if (clips.length <= 2) return;
     const idx = clips.findIndex((clip) => clip.id === id);
     if (idx < 0) return;
-    clips.splice(idx, 1);
+    const [removed] = clips.splice(idx, 1);
+    if (removed?.sourceImage?.draftId)
+      void deleteDraftMedia(removed.sourceImage.draftId);
     if (activeClipId.value === id) {
       activeClipId.value = clips[Math.min(idx, clips.length - 1)]?.id ?? null;
     }
@@ -266,10 +353,18 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     session: SequenceEditSession,
     loadedClips: SequenceClipForm[],
     loadedEnableAudio: boolean,
+    loadedOpeningImage: SequenceClipSourceImage | null = null,
   ) {
     clips.splice(0, clips.length, ...loadedClips);
     enableAudio.value = loadedEnableAudio;
-    editing.value = session;
+    openingImage.value = loadedOpeningImage;
+    editing.value = {
+      ...session,
+      baselineOpeningImage: loadedOpeningImage
+        ? { ...loadedOpeningImage }
+        : null,
+      baselineEnableAudio: loadedEnableAudio,
+    };
     output.value = "sequence";
     activeClipId.value = clips[0]?.id ?? null;
   }
@@ -284,6 +379,12 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
    * over", not "leave sequence mode" (that's the Output control's job).
    */
   function clearSequence(defaultFrames: number) {
+    if (openingImage.value?.draftId)
+      void deleteDraftMedia(openingImage.value.draftId);
+    for (const clip of clips) {
+      if (clip.sourceImage?.draftId)
+        void deleteDraftMedia(clip.sourceImage.draftId);
+    }
     clips.splice(
       0,
       clips.length,
@@ -292,13 +393,21 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     );
     activeClipId.value = clips[0]?.id ?? null;
     enableAudio.value = false;
+    openingImage.value = null;
     editing.value = null;
   }
 
   function reset() {
+    if (openingImage.value?.draftId)
+      void deleteDraftMedia(openingImage.value.draftId);
+    for (const clip of clips) {
+      if (clip.sourceImage?.draftId)
+        void deleteDraftMedia(clip.sourceImage.draftId);
+    }
     clips.splice(0, clips.length);
     activeClipId.value = null;
     enableAudio.value = false;
+    openingImage.value = null;
     editing.value = null;
     output.value = "single";
   }
@@ -306,7 +415,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   // Sync flush so the debounce timer arms on the mutation itself (the
   // callback only re-arms a setTimeout — cheap enough for every keystroke).
   watch(
-    [output, clips, enableAudio, lastSingleModel],
+    [output, clips, openingImage, enableAudio, lastSingleModel],
     () => schedulePersist(),
     { deep: true, flush: "sync" },
   );
@@ -314,6 +423,8 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   return {
     output,
     clips,
+    openingImage,
+    mediaRestoring,
     activeClipId,
     enableAudio,
     editing,

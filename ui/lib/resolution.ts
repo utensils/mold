@@ -1,7 +1,8 @@
 /*
  * Megapixel-based resolution math (spec §03 — Resolution selector).
  * Dimensions derive from a target megapixel budget and an aspect ratio,
- * rounded to the /64 grid diffusion models expect, floored at 64px.
+ * rounded to the legacy /64 grid, with a /16 under-ceiling correction for
+ * the 1.8 MP tier used by newer model contracts.
  */
 
 export interface AspectOption {
@@ -25,7 +26,7 @@ export const ASPECTS: readonly AspectOption[] = [
 export const RESOLUTIONS = [
   { mp: 0.5, label: "0.5 MP", sub: "Draft" },
   { mp: 1, label: "1 MP", sub: "Standard" },
-  { mp: 2, label: "2 MP", sub: "Large" },
+  { mp: 1.8, label: "1.8 MP", sub: "Large" },
 ] as const;
 
 function snap64(value: number): number {
@@ -38,7 +39,15 @@ export function dimsForMp(
   ratio: number,
 ): { width: number; height: number } {
   const width = Math.sqrt(mp * 1e6 * ratio);
-  return { width: snap64(width), height: snap64(width / ratio) };
+  let snappedWidth = snap64(width);
+  let snappedHeight = snap64(width / ratio);
+  const maxPixels = mp * 1e6;
+  if (snappedWidth * snappedHeight > maxPixels && mp >= 1.8) {
+    const scale = Math.sqrt(maxPixels / (snappedWidth * snappedHeight));
+    snappedWidth = Math.max(16, Math.floor((snappedWidth * scale) / 16) * 16);
+    snappedHeight = Math.max(16, Math.floor((snappedHeight * scale) / 16) * 16);
+  }
+  return { width: snappedWidth, height: snappedHeight };
 }
 
 /** "1024×1024" display form. */

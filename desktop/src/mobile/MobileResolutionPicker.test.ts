@@ -47,17 +47,17 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
     const active = wrapper.get("[data-test='mobile-resolution-tier'] [aria-checked='true']");
     expect(active.get(".ms-seg__label").text()).toBe("1 MP");
-    expect(active.get(".ms-seg__sub").text()).toBe("Recommended");
+    expect(active.get(".ms-seg__sub").text()).toBe("High");
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
-    expect(state).toMatchObject({ width: 896, height: 1152 });
+    expect(state).toMatchObject({ width: 768, height: 1024 });
     expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
-      "Selected resolution: 896 by 1152 pixels, 3:4, Portrait.",
+      "Selected resolution: 768 by 1024 pixels, 3:4, Portrait.",
     );
     expect(wrapper.get("[data-aspect='3:4']").attributes("aria-pressed")).toBe("true");
 
     await wrapper.get("[data-aspect='9:16']").trigger("click");
-    expect(state).toMatchObject({ width: 768, height: 1344 });
+    expect(state).toMatchObject({ width: 576, height: 1024 });
   });
 
   it("offers named resolution tiers for repeated Qwen aspect buckets", async () => {
@@ -104,10 +104,12 @@ describe("MobileResolutionPicker", () => {
 
   it("renders however many tiers the family's aspect bucket provides", () => {
     const single = tierSegments(mountPicker(1024, 1024, "flux").wrapper);
-    expect(single).toHaveLength(1);
-    expect(single[0]?.get(".ms-seg__label").text()).toBe("1 MP");
-    expect(single[0]?.get(".ms-seg__sub").text()).toBe("Recommended");
-    expect(single[0]?.attributes("aria-checked")).toBe("true");
+    expect(single).toHaveLength(2);
+    expect(single.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+      "0.6 MP",
+      "1 MP",
+    ]);
+    expect(single[1]?.attributes("aria-checked")).toBe("true");
 
     const pair = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
     expect(pair.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
@@ -194,11 +196,11 @@ describe("MobileResolutionPicker", () => {
     expect(picker.emitted("validity-change")?.at(-1)).toEqual([true]);
   });
 
-  it("disables orientations that the desktop family does not recommend", async () => {
+  it("exposes every orientation recommended by the shared video contract", async () => {
     const { wrapper, state } = mountPicker(1024, 576, "ltx2");
 
-    expect(wrapper.get("[data-orientation='square']").attributes()).toHaveProperty("disabled");
-    expect(wrapper.get("[data-orientation='portrait']").attributes()).toHaveProperty("disabled");
+    expect(wrapper.get("[data-orientation='square']").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get("[data-orientation='portrait']").attributes("disabled")).toBeUndefined();
     expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.findAll(".mobile-resolution-aspect").map((button) => button.text())).toEqual([
       "22:15",
@@ -208,7 +210,7 @@ describe("MobileResolutionPicker", () => {
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
     await flushPromises();
-    expect(state).toMatchObject({ width: 1024, height: 576 });
+    expect(state).toMatchObject({ width: 576, height: 1024 });
   });
 
   it("exposes controlled width and height update events", async () => {

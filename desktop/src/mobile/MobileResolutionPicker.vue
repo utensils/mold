@@ -6,9 +6,10 @@ import {
   aspectRatioLabel,
   matchPreset,
   orientationLabel,
-  presetsForFamily,
+  presetsForModel,
   type ResolutionPreset,
 } from "../lib/resolutions";
+import type { ModelEntry } from "../lib/api/types";
 import {
   aspectsForOrientation,
   closestResolutionPreset,
@@ -23,9 +24,10 @@ import {
 const props = withDefaults(
   defineProps<{
     family: string;
+    model?: ModelEntry | null;
     disabled?: boolean;
   }>(),
-  { disabled: false },
+  { disabled: false, model: null },
 );
 
 const width = defineModel<number>("width", { required: true });
@@ -33,10 +35,14 @@ const height = defineModel<number>("height", { required: true });
 const emit = defineEmits<{ "validity-change": [valid: boolean] }>();
 
 const manualOpen = ref(false);
-const presets = computed(() => presetsForFamily(props.family));
-const currentPreset = computed(() => matchPreset(width.value, height.value, props.family));
+const presets = computed(() => presetsForModel(props.model ?? props.family));
+const currentPreset = computed(() =>
+  matchPreset(width.value, height.value, props.model ?? props.family),
+);
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
-const currentAspect = computed(() => aspectRatioLabel(width.value, height.value, props.family));
+const currentAspect = computed(() =>
+  aspectRatioLabel(width.value, height.value, props.model ?? props.family),
+);
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
 const resolutionError = computed(() => resolutionValidationError(width.value, height.value));
 watch(resolutionError, (next) => emit("validity-change", !next), { immediate: true });

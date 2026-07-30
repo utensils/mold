@@ -38,6 +38,8 @@ import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities"
 import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import type { OutputMode } from "@studio/lib/sequence";
 
 const props = withDefaults(
   defineProps<{
@@ -54,6 +56,8 @@ const props = withDefaults(
     models?: ModelInfoExtended[];
     /** Selected model's resolved audio assets are available. */
     audioOutputSupported?: boolean;
+    output?: OutputMode;
+    sequenceSupportsAudio?: boolean;
   }>(),
   {
     open: false,
@@ -62,6 +66,8 @@ const props = withDefaults(
     placementGpus: () => [],
     models: () => [],
     audioOutputSupported: true,
+    output: "single",
+    sequenceSupportsAudio: false,
   },
 );
 
@@ -74,6 +80,19 @@ const emit = defineEmits<{
   "append-prompt": [phrase: string];
 }>();
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const draft = useSequenceDraftStore();
+const sequenceMode = computed(() => props.output === "sequence");
+const activeSequenceClip = computed(
+  () =>
+    draft.clips.find((clip) => clip.id === draft.activeClipId) ??
+    draft.clips[0] ??
+    null,
+);
+const activeSequenceIndex = computed(() =>
+  activeSequenceClip.value
+    ? draft.clips.findIndex((clip) => clip.id === activeSequenceClip.value?.id)
+    : -1,
+);
 const overlayOpen = computed(() => props.mobile && props.open);
 const { onKeydown } = useOverlayFocus(overlayOpen, host, () => emit("close"));
 
@@ -238,6 +257,12 @@ function clampFrames(n: number): number {
 
 // ── Reset (advanced fields only — prompt/model/shape/seed survive) ────
 function resetAdvanced() {
+  if (sequenceMode.value) {
+    draft.openingImage = null;
+    draft.enableAudio = false;
+    for (const clip of draft.clips) clip.negativePrompt = "";
+    return;
+  }
   patch({
     negativePrompt: "",
     scheduler: null,
@@ -312,399 +337,488 @@ function resetAdvanced() {
     </div>
 
     <div class="adv__sections">
-      <AccordionSection
-        v-if="showScheduler"
-        icon="scheduler"
-        title="Scheduler & sampling"
-        :summary="schedulerSummary"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-scheduler"
-      >
-        <div v-if="caps.supportsScheduler" class="adv__field">
-          <label class="adv__label">Scheduler</label>
-          <select
-            class="adv__select"
-            data-test="scheduler-select"
-            :value="schedulerName"
-            @change="setScheduler(($event.target as HTMLSelectElement).value)"
-          >
-            <option v-for="s in schedulerChoices" :key="s" :value="s">
-              {{ s }}
-            </option>
-          </select>
-        </div>
-        <div v-if="caps.supportsCfgPlus" class="adv__row">
-          <span class="adv__label">CFG++</span>
-          <SwitchToggle
-            :model-value="modelValue.cfgPlus"
-            label="CFG++"
-            data-test="cfg-plus"
-            @update:model-value="patch({ cfgPlus: $event })"
-          />
-        </div>
-      </AccordionSection>
-
-      <AccordionSection
-        v-if="caps.supportsNegativePrompt"
-        icon="negative"
-        title="Negative prompt"
-        summary="What to steer away from"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-negative"
-      >
-        <textarea
-          class="adv__textarea"
-          data-test="negative-input"
-          placeholder="blurry, low quality, deformed…"
-          :value="modelValue.negativePrompt"
-          @input="
-            patch({
-              negativePrompt: ($event.target as HTMLTextAreaElement).value,
-            })
+      <template v-if="sequenceMode">
+        <AccordionSection
+          icon="image"
+          title="Opening sequence image"
+          :summary="
+            draft.openingImage?.filename ?? 'Optional original starting frame'
           "
-        />
-        <div class="adv__chips">
-          <Chip
-            v-for="word in NEG_CHIPS"
-            :key="word"
-            :data-test="`neg-chip-${word.replace(/\s+/g, '-')}`"
-            @click="addNegative(word)"
-            >+ {{ word }}</Chip
-          >
-        </div>
-      </AccordionSection>
-
-      <AccordionSection
-        icon="image"
-        :title="
-          caps.sourceImageMode === 'qwen-edit' ? 'Edit images' : 'Source image'
-        "
-        :summary="
-          hasSource
-            ? caps.sourceImageMode === 'qwen-edit'
-              ? `${modelValue.imageAttachments.length} attached`
-              : `1 image · denoise ${modelValue.strength.toFixed(2)}`
-            : caps.sourceImageMode === 'qwen-edit'
-              ? 'Target and reference images'
-              : 'Image-to-image & inpainting'
-        "
-        :open="true"
-        :header-interactive="false"
-        data-test="section-source"
-      >
-        <button
-          v-if="!hasSource"
-          type="button"
-          class="adv__dropzone"
-          data-test="source-attach"
-          @click="emit('open-picker')"
+          :open="true"
+          :header-interactive="false"
+          data-test="sequence-section-opening-image"
         >
-          {{
-            caps.sourceImageMode === "qwen-edit"
-              ? "Attach images or "
-              : "Drop an image or "
-          }}<span class="adv__accent">browse</span>
-        </button>
-        <div v-else>
-          <div class="adv__source-row">
-            <span class="adv__source-name">{{
-              modelValue.imageAttachments[0]?.filename
-            }}</span>
-            <button
-              type="button"
-              class="adv__remove"
-              data-test="source-remove"
-              @click="emit('clear-source')"
-            >
-              Remove
-            </button>
-          </div>
-          <SliderRow
-            v-if="caps.sourceImageMode === 'single'"
-            label="Denoise strength"
-            :model-value="modelValue.strength"
-            :min="0"
-            :max="1"
-            :step="0.01"
-            :value-label="modelValue.strength.toFixed(2)"
-            @update:model-value="patch({ strength: $event })"
-          />
-          <div v-if="caps.sourceImageMode === 'single'" class="adv__field">
-            <label class="adv__label">Fit to canvas</label>
-            <SegmentedControl
-              :model-value="fitMode"
-              :options="fitOptions"
-              label="Fit to canvas"
-              @update:model-value="setFit"
-            />
-          </div>
           <button
-            v-if="caps.supportsMask"
             type="button"
-            class="adv__mask"
-            data-test="source-mask"
-            @click="emit('open-mask')"
+            class="adv__dropzone"
+            data-test="sequence-opening-image-pick"
+            @click="emit('open-picker')"
           >
             {{
-              modelValue.maskImage ? "Mask applied · edit" : "Edit inpaint mask"
+              draft.openingImage
+                ? `Replace ${draft.openingImage.filename}`
+                : "Drop an image or browse for the original starting frame"
             }}
           </button>
-        </div>
-
-        <div
-          v-if="showControlNet"
-          class="adv__controlnet"
-          data-test="controlnet-block"
-        >
-          <div class="adv__subhead">ControlNet</div>
-          <label
-            v-if="!hasControl"
-            class="adv__filezone"
-            data-test="control-attach"
+          <button
+            v-if="draft.openingImage"
+            type="button"
+            class="adv__remove"
+            data-test="sequence-opening-image-clear"
+            @click="draft.openingImage = null"
           >
-            <span
-              >Attach a control image or
-              <span class="adv__accent">browse</span></span
+            Remove opening image
+          </button>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="activeSequenceClip"
+          icon="negative"
+          :title="`Clip ${activeSequenceIndex + 1} negative prompt`"
+          summary="What to steer away from in this clip"
+          :open="true"
+          :header-interactive="false"
+          data-test="sequence-section-negative"
+        >
+          <textarea
+            v-model="activeSequenceClip.negativePrompt"
+            class="adv__textarea"
+            data-test="sequence-negative-input"
+            placeholder="blurry, low quality, deformed…"
+          />
+          <div class="adv__chips">
+            <Chip
+              v-for="word in NEG_CHIPS"
+              :key="word"
+              @click="
+                activeSequenceClip.negativePrompt =
+                  activeSequenceClip.negativePrompt.trim()
+                    ? `${activeSequenceClip.negativePrompt.trim()}, ${word}`
+                    : word
+              "
+              >+ {{ word }}</Chip
             >
-            <input
-              type="file"
-              accept="image/png,image/jpeg"
-              class="adv__file-input"
-              @change="onControlImage"
+          </div>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="sequenceSupportsAudio"
+          icon="video"
+          title="Sequence audio"
+          summary="Generate and mux audio for this timeline"
+          :open="true"
+          :header-interactive="false"
+          data-test="sequence-section-audio"
+        >
+          <div class="adv__row">
+            <span class="adv__label">Generate audio</span>
+            <SwitchToggle
+              :model-value="draft.enableAudio"
+              label="Generate sequence audio"
+              @update:model-value="draft.enableAudio = $event"
             />
-          </label>
-          <template v-else>
+          </div>
+        </AccordionSection>
+      </template>
+      <template v-else>
+        <AccordionSection
+          v-if="showScheduler"
+          icon="scheduler"
+          title="Scheduler & sampling"
+          :summary="schedulerSummary"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-scheduler"
+        >
+          <div v-if="caps.supportsScheduler" class="adv__field">
+            <label class="adv__label">Scheduler</label>
+            <select
+              class="adv__select"
+              data-test="scheduler-select"
+              :value="schedulerName"
+              @change="setScheduler(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="s in schedulerChoices" :key="s" :value="s">
+                {{ s }}
+              </option>
+            </select>
+          </div>
+          <div v-if="caps.supportsCfgPlus" class="adv__row">
+            <span class="adv__label">CFG++</span>
+            <SwitchToggle
+              :model-value="modelValue.cfgPlus"
+              label="CFG++"
+              data-test="cfg-plus"
+              @update:model-value="patch({ cfgPlus: $event })"
+            />
+          </div>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="caps.supportsNegativePrompt"
+          icon="negative"
+          title="Negative prompt"
+          summary="What to steer away from"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-negative"
+        >
+          <textarea
+            class="adv__textarea"
+            data-test="negative-input"
+            placeholder="blurry, low quality, deformed…"
+            :value="modelValue.negativePrompt"
+            @input="
+              patch({
+                negativePrompt: ($event.target as HTMLTextAreaElement).value,
+              })
+            "
+          />
+          <div class="adv__chips">
+            <Chip
+              v-for="word in NEG_CHIPS"
+              :key="word"
+              :data-test="`neg-chip-${word.replace(/\s+/g, '-')}`"
+              @click="addNegative(word)"
+              >+ {{ word }}</Chip
+            >
+          </div>
+        </AccordionSection>
+
+        <AccordionSection
+          icon="image"
+          :title="
+            caps.sourceImageMode === 'qwen-edit'
+              ? 'Edit images'
+              : 'Source image'
+          "
+          :summary="
+            hasSource
+              ? caps.sourceImageMode === 'qwen-edit'
+                ? `${modelValue.imageAttachments.length} attached`
+                : `1 image · denoise ${modelValue.strength.toFixed(2)}`
+              : caps.sourceImageMode === 'qwen-edit'
+                ? 'Target and reference images'
+                : 'Image-to-image & inpainting'
+          "
+          :open="true"
+          :header-interactive="false"
+          data-test="section-source"
+        >
+          <button
+            v-if="!hasSource"
+            type="button"
+            class="adv__dropzone"
+            data-test="source-attach"
+            @click="emit('open-picker')"
+          >
+            {{
+              caps.sourceImageMode === "qwen-edit"
+                ? "Attach images or "
+                : "Drop an image or "
+            }}<span class="adv__accent">browse</span>
+          </button>
+          <div v-else>
             <div class="adv__source-row">
               <span class="adv__source-name">{{
-                modelValue.controlImage?.filename
+                modelValue.imageAttachments[0]?.filename
               }}</span>
               <button
                 type="button"
                 class="adv__remove"
-                data-test="control-remove"
-                @click="clearControl"
+                data-test="source-remove"
+                @click="emit('clear-source')"
               >
                 Remove
               </button>
             </div>
-            <div class="adv__field">
-              <label class="adv__label">Control model</label>
-              <input
-                class="adv__input"
-                data-test="control-model"
-                list="installed-controlnet-models"
-                placeholder="e.g. control_v11p_sd15_canny"
-                :value="modelValue.controlModel"
-                @input="
-                  patch({
-                    controlModel: ($event.target as HTMLInputElement).value,
-                  })
-                "
-              />
-              <datalist id="installed-controlnet-models">
-                <option
-                  v-for="model in controlModels"
-                  :key="model.name"
-                  :value="model.name"
-                />
-              </datalist>
-            </div>
             <SliderRow
-              label="Control scale"
-              data-test="control-scale"
-              :model-value="modelValue.controlScale"
+              v-if="caps.sourceImageMode === 'single'"
+              label="Denoise strength"
+              :model-value="modelValue.strength"
               :min="0"
-              :max="2"
-              :step="0.05"
-              :value-label="modelValue.controlScale.toFixed(2)"
-              @update:model-value="patch({ controlScale: $event })"
+              :max="1"
+              :step="0.01"
+              :value-label="modelValue.strength.toFixed(2)"
+              @update:model-value="patch({ strength: $event })"
             />
-          </template>
-        </div>
-      </AccordionSection>
-
-      <AccordionSection
-        v-if="caps.supportsLora"
-        icon="layers"
-        title="LoRA stack"
-        :summary="`${modelValue.loras.length} active · style adapters`"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-lora"
-      >
-        <LoraPicker
-          :family="family"
-          :model-value="modelValue.loras"
-          @update:model-value="setLoras"
-          @append-prompt="emit('append-prompt', $event)"
-        />
-      </AccordionSection>
-
-      <UpscaleSection
-        v-if="showUpscale"
-        :model-value="modelValue.upscaleModel"
-        @update:model-value="patch({ upscaleModel: $event })"
-      />
-
-      <AccordionSection
-        icon="output"
-        title="Output & seed"
-        summary="Format and reproducibility"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-output"
-      >
-        <div class="adv__field">
-          <label class="adv__label">File format</label>
-          <SegmentedControl
-            :model-value="modelValue.outputFormat"
-            :options="
-              formats.map((f) => ({ value: f, label: f.toUpperCase() }))
-            "
-            label="File format"
-            @update:model-value="
-              patch({ outputFormat: $event as OutputFormat })
-            "
-          />
-        </div>
-        <div class="adv__field">
-          <label class="adv__label">Exact size</label>
-          <div class="adv__size">
-            <input
-              class="adv__input"
-              type="number"
-              min="16"
-              step="16"
-              data-test="exact-width"
-              aria-label="Width in pixels"
-              :value="modelValue.width"
-              @change="setWidth(($event.target as HTMLInputElement).value)"
-            />
+            <div v-if="caps.sourceImageMode === 'single'" class="adv__field">
+              <label class="adv__label">Fit to canvas</label>
+              <SegmentedControl
+                :model-value="fitMode"
+                :options="fitOptions"
+                label="Fit to canvas"
+                @update:model-value="setFit"
+              />
+            </div>
             <button
+              v-if="caps.supportsMask"
               type="button"
-              class="adv__swap"
-              data-test="exact-swap"
-              aria-label="Swap width and height"
-              title="Swap width and height"
-              @click="swapDims"
+              class="adv__mask"
+              data-test="source-mask"
+              @click="emit('open-mask')"
             >
-              <Icon name="swap" :size="15" />
+              {{
+                modelValue.maskImage
+                  ? "Mask applied · edit"
+                  : "Edit inpaint mask"
+              }}
             </button>
-            <input
-              class="adv__input"
-              type="number"
-              min="16"
-              step="16"
-              data-test="exact-height"
-              aria-label="Height in pixels"
-              :value="modelValue.height"
-              @change="setHeight(($event.target as HTMLInputElement).value)"
+          </div>
+
+          <div
+            v-if="showControlNet"
+            class="adv__controlnet"
+            data-test="controlnet-block"
+          >
+            <div class="adv__subhead">ControlNet</div>
+            <label
+              v-if="!hasControl"
+              class="adv__filezone"
+              data-test="control-attach"
+            >
+              <span
+                >Attach a control image or
+                <span class="adv__accent">browse</span></span
+              >
+              <input
+                type="file"
+                accept="image/png,image/jpeg"
+                class="adv__file-input"
+                @change="onControlImage"
+              />
+            </label>
+            <template v-else>
+              <div class="adv__source-row">
+                <span class="adv__source-name">{{
+                  modelValue.controlImage?.filename
+                }}</span>
+                <button
+                  type="button"
+                  class="adv__remove"
+                  data-test="control-remove"
+                  @click="clearControl"
+                >
+                  Remove
+                </button>
+              </div>
+              <div class="adv__field">
+                <label class="adv__label">Control model</label>
+                <input
+                  class="adv__input"
+                  data-test="control-model"
+                  list="installed-controlnet-models"
+                  placeholder="e.g. control_v11p_sd15_canny"
+                  :value="modelValue.controlModel"
+                  @input="
+                    patch({
+                      controlModel: ($event.target as HTMLInputElement).value,
+                    })
+                  "
+                />
+                <datalist id="installed-controlnet-models">
+                  <option
+                    v-for="model in controlModels"
+                    :key="model.name"
+                    :value="model.name"
+                  />
+                </datalist>
+              </div>
+              <SliderRow
+                label="Control scale"
+                data-test="control-scale"
+                :model-value="modelValue.controlScale"
+                :min="0"
+                :max="2"
+                :step="0.05"
+                :value-label="modelValue.controlScale.toFixed(2)"
+                @update:model-value="patch({ controlScale: $event })"
+              />
+            </template>
+          </div>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="caps.supportsLora"
+          icon="layers"
+          title="LoRA stack"
+          :summary="`${modelValue.loras.length} active · style adapters`"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-lora"
+        >
+          <LoraPicker
+            :family="family"
+            :model-value="modelValue.loras"
+            @update:model-value="setLoras"
+            @append-prompt="emit('append-prompt', $event)"
+          />
+        </AccordionSection>
+
+        <UpscaleSection
+          v-if="showUpscale"
+          :model-value="modelValue.upscaleModel"
+          @update:model-value="patch({ upscaleModel: $event })"
+        />
+
+        <AccordionSection
+          icon="output"
+          title="Output & seed"
+          summary="Format and reproducibility"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-output"
+        >
+          <div class="adv__field">
+            <label class="adv__label">File format</label>
+            <SegmentedControl
+              :model-value="modelValue.outputFormat"
+              :options="
+                formats.map((f) => ({ value: f, label: f.toUpperCase() }))
+              "
+              label="File format"
+              @update:model-value="
+                patch({ outputFormat: $event as OutputFormat })
+              "
             />
           </div>
-          <p class="adv__hint">snaps to the nearest 16px.</p>
-        </div>
-        <div class="adv__field">
-          <label class="adv__label">Seed</label>
-          <SegmentedControl
-            :model-value="modelValue.seedMode"
-            :options="seedModes"
-            label="Seed mode"
-            @update:model-value="patch({ seedMode: $event })"
-          />
-        </div>
-        <input
-          v-if="modelValue.seedMode !== 'random'"
-          class="adv__input"
-          data-test="output-seed"
-          type="number"
-          min="0"
-          placeholder="Seed"
-          :value="modelValue.seed ?? ''"
-          @input="
-            patch({
-              seed: Number(($event.target as HTMLInputElement).value) || null,
-            })
-          "
-        />
-      </AccordionSection>
-
-      <AccordionSection
-        v-if="caps.supportsVideo"
-        icon="video"
-        title="Video"
-        :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-video"
-      >
-        <div class="adv__field">
-          <label class="adv__label">Frames (8n+1)</label>
+          <div class="adv__field">
+            <label class="adv__label">Exact size</label>
+            <div class="adv__size">
+              <input
+                class="adv__input"
+                type="number"
+                min="16"
+                step="16"
+                data-test="exact-width"
+                aria-label="Width in pixels"
+                :value="modelValue.width"
+                @change="setWidth(($event.target as HTMLInputElement).value)"
+              />
+              <button
+                type="button"
+                class="adv__swap"
+                data-test="exact-swap"
+                aria-label="Swap width and height"
+                title="Swap width and height"
+                @click="swapDims"
+              >
+                <Icon name="swap" :size="15" />
+              </button>
+              <input
+                class="adv__input"
+                type="number"
+                min="16"
+                step="16"
+                data-test="exact-height"
+                aria-label="Height in pixels"
+                :value="modelValue.height"
+                @change="setHeight(($event.target as HTMLInputElement).value)"
+              />
+            </div>
+            <p class="adv__hint">snaps to the nearest 16px.</p>
+          </div>
+          <div class="adv__field">
+            <label class="adv__label">Seed</label>
+            <SegmentedControl
+              :model-value="modelValue.seedMode"
+              :options="seedModes"
+              label="Seed mode"
+              @update:model-value="patch({ seedMode: $event })"
+            />
+          </div>
           <input
+            v-if="modelValue.seedMode !== 'random'"
             class="adv__input"
-            data-test="video-frames"
+            data-test="output-seed"
             type="number"
-            :value="modelValue.frames ?? 25"
-            @change="
+            min="0"
+            placeholder="Seed"
+            :value="modelValue.seed ?? ''"
+            @input="
               patch({
-                frames: clampFrames(
-                  Number(($event.target as HTMLInputElement).value),
-                ),
+                seed: Number(($event.target as HTMLInputElement).value) || null,
               })
             "
           />
-          <p class="adv__hint">Frames must be 8n+1 — try 97.</p>
-        </div>
-        <div class="adv__field">
-          <label class="adv__label">Frames per second</label>
-          <input
-            class="adv__input"
-            data-test="video-fps"
-            type="number"
-            min="1"
-            :value="modelValue.fps ?? 24"
-            @change="
-              patch({
-                fps: Number(($event.target as HTMLInputElement).value) || 24,
-              })
-            "
-          />
-        </div>
-        <div class="adv__row">
-          <span class="adv__label">GIF preview</span>
-          <SwitchToggle
-            :model-value="modelValue.gifPreview"
-            label="Generate GIF preview"
-            data-test="video-gif-preview"
-            @update:model-value="patch({ gifPreview: $event })"
-          />
-        </div>
-        <Ltx2VideoControls
-          v-if="showLtx2"
-          :model-value="modelValue"
-          :audio-output-supported="audioOutputSupported"
-          @update:model-value="emit('update:modelValue', $event)"
-        />
-      </AccordionSection>
+        </AccordionSection>
 
-      <AccordionSection
-        v-if="showPlacement"
-        icon="machines"
-        title="GPU placement"
-        summary="Pin this job to a device"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-placement"
-      >
-        <PlacementPanel
-          :model-value="modelValue.placement"
-          :family="family"
-          :model="modelValue.model"
-          :gpus="placementGpus"
-          @update:model-value="setPlacement"
-        />
-      </AccordionSection>
+        <AccordionSection
+          v-if="caps.supportsVideo"
+          icon="video"
+          title="Video"
+          :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-video"
+        >
+          <div class="adv__field">
+            <label class="adv__label">Frames (8n+1)</label>
+            <input
+              class="adv__input"
+              data-test="video-frames"
+              type="number"
+              :value="modelValue.frames ?? 25"
+              @change="
+                patch({
+                  frames: clampFrames(
+                    Number(($event.target as HTMLInputElement).value),
+                  ),
+                })
+              "
+            />
+            <p class="adv__hint">Frames must be 8n+1 — try 97.</p>
+          </div>
+          <div class="adv__field">
+            <label class="adv__label">Frames per second</label>
+            <input
+              class="adv__input"
+              data-test="video-fps"
+              type="number"
+              min="1"
+              :value="modelValue.fps ?? 24"
+              @change="
+                patch({
+                  fps: Number(($event.target as HTMLInputElement).value) || 24,
+                })
+              "
+            />
+          </div>
+          <div class="adv__row">
+            <span class="adv__label">GIF preview</span>
+            <SwitchToggle
+              :model-value="modelValue.gifPreview"
+              label="Generate GIF preview"
+              data-test="video-gif-preview"
+              @update:model-value="patch({ gifPreview: $event })"
+            />
+          </div>
+          <Ltx2VideoControls
+            v-if="showLtx2"
+            :model-value="modelValue"
+            :audio-output-supported="audioOutputSupported"
+            @update:model-value="emit('update:modelValue', $event)"
+          />
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="showPlacement"
+          icon="machines"
+          title="GPU placement"
+          summary="Pin this job to a device"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-placement"
+        >
+          <PlacementPanel
+            :model-value="modelValue.placement"
+            :family="family"
+            :model="modelValue.model"
+            :gpus="placementGpus"
+            @update:model-value="setPlacement"
+          />
+        </AccordionSection>
+      </template>
     </div>
 
     <div v-if="mobile" class="adv__footer">

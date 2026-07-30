@@ -320,11 +320,10 @@ describe("MobileSequenceComposer guardrails", () => {
     picker.vm.$emit("pick", { filename: "opening.jpg", base64: "wire-bytes" });
     await wrapper!.vm.$nextTick();
 
-    expect(draft.clips[0]!.sourceImage).toEqual({
+    expect(draft.openingImage).toEqual({
       filename: "opening.jpg",
       base64: "wire-bytes",
     });
-    expect(draft.clips[1]!.sourceImage).toBeNull();
     expect(wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src")).toBe(
       "data:image/jpeg;base64,wire-bytes",
     );

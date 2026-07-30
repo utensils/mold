@@ -746,20 +746,18 @@
               let
                 moduleWarnings =
                   cudaArch: package:
-                  (
-                    lib.nixosSystem {
-                      inherit system;
-                      modules = [
-                        ./nix/module.nix
-                        {
-                          services.mold = {
-                            enable = true;
-                            inherit cudaArch package;
-                          };
-                        }
-                      ];
-                    }
-                  ).config.warnings;
+                  (lib.nixosSystem {
+                    inherit system;
+                    modules = [
+                      ./nix/module.nix
+                      {
+                        services.mold = {
+                          enable = true;
+                          inherit cudaArch package;
+                        };
+                      }
+                    ];
+                  }).config.warnings;
                 correctPairs = [
                   {
                     cudaArch = "ampere";
@@ -778,14 +776,10 @@
                     package = mkMold "120";
                   }
                 ];
-                correct = builtins.all (
-                  pair: moduleWarnings pair.cudaArch pair.package == [ ]
-                ) correctPairs;
+                correct = builtins.all (pair: moduleWarnings pair.cudaArch pair.package == [ ]) correctPairs;
                 mismatch = builtins.length (moduleWarnings "ada" (mkMold "86")) == 1;
                 unknownPackage =
-                  builtins.length (
-                    moduleWarnings "ada" (pkgs.writeShellScriptBin "mold" "exit 0")
-                  ) == 1;
+                  builtins.length (moduleWarnings "ada" (pkgs.writeShellScriptBin "mold" "exit 0")) == 1;
               in
               assert correct;
               assert mismatch;

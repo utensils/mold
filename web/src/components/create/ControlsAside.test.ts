@@ -5,7 +5,6 @@ import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
-import { dimsForMp } from "@ui/lib/resolution";
 import {
   useGenerateForm,
   __testing__,
@@ -62,7 +61,7 @@ describe("ControlsAside", () => {
       "square",
     );
     expect(wrapper.getComponent(ResolutionSelector).props("modelValue")).toBe(
-      1,
+      (1024 * 1024) / 1_000_000,
     );
   });
 
@@ -94,21 +93,28 @@ describe("ControlsAside", () => {
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
     ];
-    const expected = dimsForMp(1, 4 / 3);
-    expect(next.width).toBe(expected.width);
-    expect(next.height).toBe(expected.height);
+    expect(next.width).toBe(1024);
+    expect(next.height).toBe(768);
   });
 
   it("applies the projected dims when resolution changes", async () => {
-    const wrapper = factory({ width: 1024, height: 1024 });
-    wrapper.getComponent(ResolutionSelector).vm.$emit("update:modelValue", 2);
+    const wrapper = factory({ width: 1024, height: 1024 }, "qwen-image");
+    wrapper
+      .getComponent(ResolutionSelector)
+      .vm.$emit("update:modelValue", (1328 * 1328) / 1_000_000);
     await wrapper.vm.$nextTick();
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
     ];
-    const expected = dimsForMp(2, 1);
-    expect(next.width).toBe(expected.width);
-    expect(next.height).toBe(expected.height);
+    expect(next.width).toBe(1328);
+    expect(next.height).toBe(1328);
+  });
+
+  it("labels a model's only runnable bucket as Native", () => {
+    const wrapper = factory({ width: 1024, height: 1024 }, "wuerstchen");
+    expect(wrapper.getComponent(ResolutionSelector).props("options")).toEqual([
+      expect.objectContaining({ sub: "Native" }),
+    ]);
   });
 
   function seedButton(wrapper: ReturnType<typeof factory>, label: string) {

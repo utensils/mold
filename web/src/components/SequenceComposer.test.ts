@@ -141,27 +141,12 @@ describe("SequenceComposer", () => {
     expect(store.clips[1]?.transition).toBe("cut");
   });
 
-  it("gates the audio toggle on chain-limits supports_audio", async () => {
+  it("keeps sequence audio out of the composer footer", async () => {
     const wrapper = mountComposer();
-    await flushPromises();
-    expect(wrapper.find("[data-test='sequence-enable-audio']").exists()).toBe(
-      true,
-    );
-
-    fetchChainLimitsMock.mockResolvedValue(
-      ltx2Limits({ supports_audio: false }),
-    );
-    const store = useSequenceDraftStore();
-    store.enableAudio = true;
-    await wrapper.setProps({
-      model: "ltx-video-distilled",
-      family: "ltx-video",
-    });
     await flushPromises();
     expect(wrapper.find("[data-test='sequence-enable-audio']").exists()).toBe(
       false,
     );
-    expect(store.enableAudio).toBe(false);
   });
 
   it("shows the sequence_unsupported_reason inline and disables Generate", async () => {
@@ -239,10 +224,9 @@ describe("SequenceComposer", () => {
     const store = useSequenceDraftStore();
     store.clips.forEach((clip, i) => {
       clip.prompt = `clip ${i + 1}`;
-      if (i === 0)
-        clip.sourceImage = { filename: "opening.png", base64: "AAAA" };
       if (i === 1) clip.negativePrompt = "camera shake";
     });
+    store.openingImage = { filename: "opening.png", base64: "AAAA" };
     await flushPromises();
 
     await wrapper.get("[data-test='sequence-validate']").trigger("click");
@@ -480,14 +464,8 @@ describe("SequenceComposer", () => {
     expect(Math.max(...options)).toBeLessThanOrEqual(97);
   });
 
-  it("attaches an opening image to clip 1 only", async () => {
+  it("keeps opening-image controls out of the clip editor", async () => {
     const wrapper = mountComposer();
-    await flushPromises();
-    const store = useSequenceDraftStore();
-    expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(
-      true,
-    );
-    store.activeClipId = store.clips[1]?.id ?? null;
     await flushPromises();
     expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(
       false,

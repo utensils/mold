@@ -1,5 +1,20 @@
 use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, visible_manifests};
-use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended};
+use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended, RecommendedDimensions};
+
+fn resolution_defaults(family: &str) -> (Option<u64>, Vec<RecommendedDimensions>, Option<u32>) {
+    (
+        Some(crate::validation::MAX_PIXELS),
+        crate::validation::recommended_dimensions(family)
+            .iter()
+            .map(|&(width, height)| RecommendedDimensions { width, height })
+            .collect(),
+        Some(if matches!(family, "ltx-video" | "ltx2") {
+            32
+        } else {
+            16
+        }),
+    )
+}
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
 /// Hidden manifests are excluded from the catalog (CLI list, TUI model selector).
@@ -11,6 +26,8 @@ pub fn build_model_catalog(
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
 
     for manifest in visible_manifests() {
+        let (max_pixels, recommended_dimensions, dimension_alignment) =
+            resolution_defaults(&manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
@@ -30,6 +47,9 @@ pub fn build_model_catalog(
                 default_fps: model_cfg.effective_fps(),
                 max_frames: crate::validation::max_frames_for_family(&manifest.family),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
+                max_pixels,
+                recommended_dimensions,
+                dimension_alignment,
                 description: model_cfg
                     .description
                     .unwrap_or_else(|| manifest.name.clone()),
@@ -81,6 +101,8 @@ pub fn build_model_catalog(
             .family
             .clone()
             .unwrap_or_else(|| "flux".to_string());
+        let (max_pixels, recommended_dimensions, dimension_alignment) =
+            resolution_defaults(&family);
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -93,6 +115,9 @@ pub fn build_model_catalog(
                 default_fps: model_cfg.effective_fps(),
                 max_frames: crate::validation::max_frames_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
+                max_pixels,
+                recommended_dimensions,
+                dimension_alignment,
                 description: model_cfg
                     .description
                     .clone()
@@ -190,9 +215,8 @@ mod tests {
         }
     }
 
-    /// Video models must advertise their manifest frame defaults and the
-    /// family frame constraints so clients stop hardcoding 25 frames; image
-    /// models must omit all four fields.
+    /// Models advertise both their family frame contract and the exact
+    /// runnable resolution buckets consumed by every Studio surface.
     #[test]
     fn build_model_catalog_emits_video_frame_defaults() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -211,6 +235,18 @@ mod tests {
             "no-temporal-upscale RoPE ceiling",
         );
         assert_eq!(ltx2.defaults.frame_step, Some(8));
+        assert_eq!(
+            ltx2.defaults.max_pixels,
+            Some(crate::validation::MAX_PIXELS)
+        );
+        assert_eq!(ltx2.defaults.dimension_alignment, Some(32));
+        assert!(
+            ltx2.defaults
+                .recommended_dimensions
+                .iter()
+                .any(|size| size.width == 1216 && size.height == 704),
+            "LTX-2's default landscape bucket must be advertised to every client",
+        );
 
         let ltx_video = catalog
             .iter()
@@ -229,6 +265,12 @@ mod tests {
         assert_eq!(flux.defaults.default_fps, None);
         assert_eq!(flux.defaults.max_frames, None);
         assert_eq!(flux.defaults.frame_step, None);
+        assert_eq!(
+            flux.defaults.max_pixels,
+            Some(crate::validation::MAX_PIXELS)
+        );
+        assert_eq!(flux.defaults.dimension_alignment, Some(16));
+        assert!(!flux.defaults.recommended_dimensions.is_empty());
     }
 
     #[test]

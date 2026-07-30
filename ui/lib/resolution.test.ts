@@ -13,12 +13,12 @@ describe("dimsForMp", () => {
     expect(dimsForMp(1, 1)).toEqual({ width: 1024, height: 1024 });
   });
 
-  it("snaps every canonical shape × step to the /64 grid", () => {
+  it("snaps every canonical shape × step to the server's /16 grid", () => {
     for (const aspect of ASPECTS) {
       for (const step of RESOLUTIONS) {
         const { width, height } = dimsForMp(step.mp, aspect.ratio);
-        expect(width % 64, `${step.label} ${aspect.label} width`).toBe(0);
-        expect(height % 64, `${step.label} ${aspect.label} height`).toBe(0);
+        expect(width % 16, `${step.label} ${aspect.label} width`).toBe(0);
+        expect(height % 16, `${step.label} ${aspect.label} height`).toBe(0);
         expect(width).toBeGreaterThanOrEqual(64);
         expect(height).toBeGreaterThanOrEqual(64);
       }
@@ -27,9 +27,9 @@ describe("dimsForMp", () => {
 
   it("tracks the megapixel budget within grid tolerance", () => {
     for (const aspect of ASPECTS) {
-      const { width, height } = dimsForMp(2, aspect.ratio);
+      const { width, height } = dimsForMp(1.8, aspect.ratio);
       expect((width * height) / 1e6).toBeGreaterThan(1.5);
-      expect((width * height) / 1e6).toBeLessThan(2.5);
+      expect((width * height) / 1e6).toBeLessThanOrEqual(1.8);
     }
   });
 
@@ -45,8 +45,8 @@ describe("nearestMp", () => {
   it("maps 704×704 to the 0.5 MP step", () => {
     expect(nearestMp(704, 704)).toBe(0.5);
   });
-  it("maps 1408×1408 to the 2 MP step", () => {
-    expect(nearestMp(1408, 1408)).toBe(2);
+  it("maps 1328×1328 to the 1.8 MP step", () => {
+    expect(nearestMp(1328, 1328)).toBe(1.8);
   });
 });
 

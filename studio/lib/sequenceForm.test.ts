@@ -95,13 +95,13 @@ describe("buildChainRequest", () => {
     const clips = [
       clip({
         negativePrompt: "no rain",
-        sourceImage: { filename: "open.png", base64: "QUJD" },
       }),
       clip({ prompt: "b" }),
     ];
     const req = buildChainRequest(shared(), clips, {
       motionTailFrames: 17,
       enableAudio: false,
+      openingImage: { filename: "open.png", base64: "QUJD" },
     });
     expect(req.stages[0]?.negative_prompt).toBe("no rain");
     expect(req.stages[0]?.source_image).toBe("QUJD");
@@ -124,7 +124,7 @@ describe("script round-trip", () => {
         enable_audio: true,
       },
       stages: [
-        { prompt: "opening", frames: 97 },
+        { prompt: "opening", frames: 97, source_image_b64: "QUJD" },
         { prompt: "landing", frames: 33, transition: "fade", fade_frames: 8 },
       ],
     };
@@ -135,6 +135,7 @@ describe("script round-trip", () => {
     expect(loaded.clips[0]?.frames).toBe(97);
     expect(loaded.clips[1]?.transition).toBe("fade");
     expect(loaded.clips[1]?.fadeFrames).toBe(8);
+    expect(loaded.openingImage?.base64).toBe("QUJD");
     expect(loaded.enableAudio).toBe(true);
     expect(loaded.shared.model).toBe("ltx-2-19b-distilled:fp8");
     expect(loaded.shared.width).toBe(1216);
@@ -142,11 +143,23 @@ describe("script round-trip", () => {
     const back = clipsToChainScript(shared(), loaded.clips, {
       motionTailFrames: 17,
       enableAudio: true,
+      openingImage: loaded.openingImage,
     });
     expect(back.schema).toBe("mold.chain.v1");
     expect(back.stages).toHaveLength(2);
     expect(back.stages[1]?.transition).toBe("fade");
     expect(back.stages[1]?.fade_frames).toBe(8);
+    expect(back.stages[0]?.source_image_b64).toBe("QUJD");
+  });
+
+  it("refuses to silently drop an opening image whose payload is still restoring", () => {
+    expect(() =>
+      buildChainRequest(shared(), [clip(), clip()], {
+        motionTailFrames: 17,
+        enableAudio: false,
+        openingImage: { filename: "open.png", base64: null },
+      }),
+    ).toThrow("Reattach opening image open.png");
   });
 });
 

@@ -115,6 +115,9 @@ export interface ModelEntry {
   default_guidance: number;
   default_width: number;
   default_height: number;
+  max_pixels?: number | null;
+  recommended_dimensions?: { width: number; height: number }[];
+  dimension_alignment?: number | null;
   description: string;
   downloaded: boolean;
   disk_usage_bytes?: number | null;

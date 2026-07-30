@@ -19,6 +19,8 @@ import type { SequenceTransition } from "./sequence";
 
 export interface SequenceClipSourceImage {
   filename: string;
+  /** IndexedDB key used to restore the payload without localStorage quota risk. */
+  draftId?: string;
   /** Raw base64 payload; stripped before persistence (quota), kept in memory. */
   base64: string | null;
 }
@@ -62,7 +64,11 @@ export function newSequenceClip(frames: number): SequenceClipForm {
   };
 }
 
-function stageForWire(clip: SequenceClipForm, idx: number): ChainStageWire {
+function stageForWire(
+  clip: SequenceClipForm,
+  idx: number,
+  openingImage: SequenceClipSourceImage | null,
+): ChainStageWire {
   const transition: SequenceTransition = idx === 0 ? "smooth" : clip.transition;
   const stage: ChainStageWire = {
     prompt: clip.prompt,
@@ -71,20 +77,39 @@ function stageForWire(clip: SequenceClipForm, idx: number): ChainStageWire {
   };
   if (idx > 0 && transition === "fade") stage.fade_frames = clip.fadeFrames;
   if (clip.negativePrompt.trim()) stage.negative_prompt = clip.negativePrompt;
-  if (clip.sourceImage?.base64) stage.source_image = clip.sourceImage.base64;
+  const sourceImage = idx === 0 ? openingImage : clip.sourceImage;
+  if (sourceImage?.base64) stage.source_image = sourceImage.base64;
   return stage;
+}
+
+export function sequenceOpeningImageError(
+  openingImage: SequenceClipSourceImage | null,
+  restoring = false,
+): string | null {
+  if (!openingImage || openingImage.base64) return null;
+  return restoring
+    ? `Restoring opening image ${openingImage.filename}…`
+    : `Reattach opening image ${openingImage.filename} before generating.`;
 }
 
 /** Build the `POST /api/chain-jobs` request from the LIVE shared params. */
 export function buildChainRequest(
   shared: SequenceSharedParams,
   clips: readonly SequenceClipForm[],
-  opts: { motionTailFrames: number; enableAudio: boolean },
+  opts: {
+    motionTailFrames: number;
+    enableAudio: boolean;
+    openingImage?: SequenceClipSourceImage | null;
+  },
 ): ChainRequestWire {
+  const openingError = sequenceOpeningImageError(opts.openingImage ?? null);
+  if (openingError) throw new Error(openingError);
   const seed = shared.seed.trim() === "" ? undefined : Number(shared.seed);
   const req: ChainRequestWire = {
     model: shared.model,
-    stages: clips.map(stageForWire),
+    stages: clips.map((clip, idx) =>
+      stageForWire(clip, idx, opts.openingImage ?? null),
+    ),
     motion_tail_frames: opts.motionTailFrames,
     width: shared.width,
     height: shared.height,
@@ -105,7 +130,9 @@ export function chainScriptToClips(script: ChainScript): {
   shared: Partial<SequenceSharedParams>;
   enableAudio: boolean;
   motionTailFrames: number | null;
+  openingImage: SequenceClipSourceImage | null;
 } {
+  let openingImage: SequenceClipSourceImage | null = null;
   const clips = script.stages.map((stage, idx) => {
     const clip = newSequenceClip(stage.frames ?? 97);
     clip.prompt = stage.prompt;
@@ -113,10 +140,12 @@ export function chainScriptToClips(script: ChainScript): {
     clip.fadeFrames = stage.fade_frames ?? DEFAULT_FADE_FRAMES;
     clip.negativePrompt = stage.negative_prompt ?? "";
     if (stage.source_image_b64) {
-      clip.sourceImage = {
+      const sourceImage = {
         filename: stage.source_image_path ?? "opening image",
         base64: stage.source_image_b64,
       };
+      if (idx === 0) openingImage = sourceImage;
+      else clip.sourceImage = sourceImage;
     }
     return clip;
   });
@@ -133,6 +162,7 @@ export function chainScriptToClips(script: ChainScript): {
     shared,
     enableAudio: chain.enable_audio === true,
     motionTailFrames: chain.motion_tail_frames ?? null,
+    openingImage,
   };
 }
 
@@ -140,7 +170,11 @@ export function chainScriptToClips(script: ChainScript): {
 export function clipsToChainScript(
   shared: SequenceSharedParams,
   clips: readonly SequenceClipForm[],
-  opts: { motionTailFrames: number; enableAudio: boolean },
+  opts: {
+    motionTailFrames: number;
+    enableAudio: boolean;
+    openingImage?: SequenceClipSourceImage | null;
+  },
 ): ChainScript {
   return {
     schema: "mold.chain.v1",
@@ -165,8 +199,9 @@ export function clipsToChainScript(
         stage.fade_frames = clip.fadeFrames;
       if (clip.negativePrompt.trim())
         stage.negative_prompt = clip.negativePrompt;
-      if (clip.sourceImage?.base64)
-        stage.source_image_b64 = clip.sourceImage.base64;
+      const sourceImage =
+        idx === 0 ? (opts.openingImage ?? null) : clip.sourceImage;
+      if (sourceImage?.base64) stage.source_image_b64 = sourceImage.base64;
       return stage;
     }),
   };

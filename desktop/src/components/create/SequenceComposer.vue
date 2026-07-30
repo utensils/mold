@@ -10,7 +10,6 @@ import { computed, ref } from "vue";
 import ClipRail from "@ui/components/ClipRail.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
-import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
@@ -26,17 +25,17 @@ import {
 import {
   chainScriptToClips,
   clipsToChainScript,
+  sequenceOpeningImageError,
   stageInvalidation,
 } from "@studio/lib/sequenceForm";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
-import type { GenerateForm, PickedImage } from "../../lib/generateForm";
+import type { GenerateForm } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import type { ClipRailMedia } from "@ui/components/types";
-import ImagePickerModal from "../generate/ImagePickerModal.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -106,7 +105,6 @@ const activeMeta = computed(() => {
   }
   return parts.join(" · ");
 });
-const negativeOpen = ref(false);
 
 function onPromptKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -150,17 +148,6 @@ function applySeamToAll(transition: "smooth" | "cut" | "fade") {
   openSeamId.value = null;
 }
 
-// ── Opening image (clip 1) ───────────────────────────────────────────────────
-const imagePickerOpen = ref(false);
-
-function onPickImage(images: PickedImage[]) {
-  const image = images[0];
-  const clip = draft.clips[0];
-  imagePickerOpen.value = false;
-  if (!image || !clip) return;
-  clip.sourceImage = { filename: image.filename, base64: image.base64 };
-}
-
 // ── Validation, duration, fit ────────────────────────────────────────────────
 const stages = computed<SequenceStage[]>(() =>
   draft.clips.map((clip) => ({
@@ -189,6 +176,8 @@ const disabledReason = computed(() => {
     );
   }
   if (!props.form.model) return "Pick a video model first.";
+  const openingError = sequenceOpeningImageError(draft.openingImage, draft.mediaRestoring);
+  if (openingError) return openingError;
   return validation.value[0] ?? null;
 });
 
@@ -218,6 +207,8 @@ function discardEdit() {
   const editing = draft.editing;
   if (!editing) return;
   draft.clips.splice(0, draft.clips.length, ...editing.baseline.map((clip) => ({ ...clip })));
+  draft.openingImage = editing.baselineOpeningImage ? { ...editing.baselineOpeningImage } : null;
+  draft.enableAudio = editing.baselineEnableAudio ?? false;
   draft.stopEditing();
 }
 
@@ -236,7 +227,6 @@ const clearMessage = computed(() => {
 function clearSequence() {
   clearConfirmOpen.value = false;
   openSeamId.value = null;
-  negativeOpen.value = false;
   draft.clearSequence(newClipFrames.value);
   toasts.push("Sequence cleared");
 }
@@ -249,6 +239,7 @@ function currentScript() {
   return clipsToChainScript(sequenceParams(props.form, props.selectedModel), draft.clips, {
     motionTailFrames: motionTail.value,
     enableAudio: draft.enableAudio,
+    openingImage: draft.openingImage,
   });
 }
 
@@ -266,6 +257,7 @@ async function onTomlFile(event: Event) {
     const script = parseChainScript(await file.text());
     const loaded = chainScriptToClips(script);
     draft.clips.splice(0, draft.clips.length, ...loaded.clips);
+    draft.openingImage = loaded.openingImage;
     draft.activeClipId = draft.clips[0]?.id ?? null;
     draft.enableAudio = loaded.enableAudio;
     // Shared params flow to the LIVE generate form — the one source of truth.
@@ -413,60 +405,7 @@ async function copyToml() {
         aria-label="Clip prompt"
         @keydown="onPromptKeydown"
       />
-      <div class="ms-seqbench__cliptools">
-        <template v-if="activeIndex === 0">
-          <button
-            type="button"
-            data-test="opening-image-attach"
-            class="ms-seqbench__tool"
-            @click="imagePickerOpen = true"
-          >
-            {{
-              activeClip.sourceImage
-                ? `Image: ${activeClip.sourceImage.filename}`
-                : "Attach opening image…"
-            }}
-          </button>
-          <button
-            v-if="activeClip.sourceImage"
-            type="button"
-            data-test="opening-image-clear"
-            class="ms-seqbench__tool ms-seqbench__tool--danger"
-            aria-label="Remove opening image"
-            @click="activeClip.sourceImage = null"
-          >
-            ✕
-          </button>
-        </template>
-        <button
-          type="button"
-          data-test="clip-negative-toggle"
-          class="ms-seqbench__tool"
-          :aria-expanded="negativeOpen"
-          @click="negativeOpen = !negativeOpen"
-        >
-          {{ negativeOpen ? "Hide negative prompt" : "Negative prompt…" }}
-        </button>
-      </div>
-      <textarea
-        v-if="negativeOpen"
-        v-model="activeClip.negativePrompt"
-        data-test="clip-negative"
-        data-selectable
-        rows="2"
-        class="ms-seqbench__prompt ms-seqbench__prompt--negative"
-        placeholder="What to avoid in this clip…"
-        aria-label="Clip negative prompt"
-      />
     </div>
-
-    <ImagePickerModal
-      :open="imagePickerOpen"
-      title="Opening image"
-      :multiple="false"
-      @pick="onPickImage"
-      @close="imagePickerOpen = false"
-    />
 
     <!-- Footer: file tools · audio · validation/fit · primary action -->
     <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
@@ -531,19 +470,6 @@ async function copyToml() {
       >
         Clear sequence
       </button>
-
-      <label
-        v-if="chainLimits?.supports_audio"
-        class="ms-seqbench__audio"
-        data-test="sequence-audio"
-      >
-        <SwitchToggle
-          :model-value="draft.enableAudio"
-          label="Generate audio"
-          @update:model-value="draft.enableAudio = $event"
-        />
-        <span>Audio</span>
-      </label>
 
       <span
         v-if="disabledReason"

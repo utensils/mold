@@ -7,7 +7,6 @@ import SliderRow from "@ui/components/SliderRow.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { nearestMp } from "@ui/lib/resolution";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -24,7 +23,14 @@ import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { applyAspectId, applyMp, aspectIdFor } from "../../lib/resolutions";
+import { ASPECTS } from "@ui/lib/resolution";
+import {
+  aspectIdFor,
+  closestResolutionPreset,
+  megapixelLabel,
+  presetsForModel,
+  presetsNearRatio,
+} from "../../lib/resolutions";
 import { resolutionValidationError, stepsValidationError } from "../../lib/generateValidation";
 import { randomSeed } from "../../stores/generation";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -35,6 +41,7 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { dragWidth } from "../../lib/panelResize";
 import ModelPicker from "./ModelPicker.vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
+import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
 import { formatGB } from "../../lib/format";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
@@ -122,7 +129,13 @@ function onInspectorReset() {
 }
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
-const advancedCount = computed(() => advancedActiveCount(props.form));
+const advancedCount = computed(() =>
+  isSequence.value
+    ? Number(Boolean(draft.openingImage)) +
+      Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(draft.enableAudio)
+    : advancedActiveCount(props.form),
+);
 const advancedExpanded = ref(false);
 
 // ── Model picker (the shared ModelPicker; chains uses the same control) ──────
@@ -224,18 +237,67 @@ function pickModel(m: ModelEntry) {
 
 // ── Shape + resolution projection ────────────────────────────────────────────
 const shapeId = computed(() => aspectIdFor(props.form.width, props.form.height) ?? "");
-const resolutionMp = computed(() => nearestMp(props.form.width, props.form.height));
 const resolutionRatio = computed(() => props.form.width / props.form.height);
+const resolutionPresets = computed(() =>
+  presetsNearRatio(
+    presetsForModel(selectedModel.value ?? props.form.family),
+    resolutionRatio.value,
+  ),
+);
+const resolutionOptions = computed(() =>
+  resolutionPresets.value.map((preset, index, all) => ({
+    mp: (preset.width * preset.height) / 1_000_000,
+    label: megapixelLabel(preset.width, preset.height),
+    sub:
+      all.length === 1
+        ? "Native"
+        : index === 0
+          ? "Small"
+          : index === all.length - 1
+            ? "Native"
+            : "Standard",
+    width: preset.width,
+    height: preset.height,
+  })),
+);
+const resolutionMp = computed(() => {
+  const exact = resolutionOptions.value.find(
+    (option) => option.width === props.form.width && option.height === props.form.height,
+  );
+  if (exact) return exact.mp;
+  const current = (props.form.width * props.form.height) / 1_000_000;
+  return (
+    [...resolutionOptions.value].sort(
+      (a, b) => Math.abs(a.mp - current) - Math.abs(b.mp - current),
+    )[0]?.mp ?? current
+  );
+});
 const resolutionError = computed(() =>
   resolutionValidationError(props.form.width, props.form.height),
 );
 const stepsError = computed(() => stepsValidationError(props.form.steps));
 
 function onShape(id: string) {
-  applyAspectId(props.form, id);
+  const aspect = ASPECTS.find((option) => option.id === id);
+  if (!aspect) return;
+  const preset = closestResolutionPreset(
+    presetsNearRatio(presetsForModel(selectedModel.value ?? props.form.family), aspect.ratio),
+    props.form.width,
+    props.form.height,
+  );
+  if (preset) {
+    props.form.width = preset.width;
+    props.form.height = preset.height;
+  }
 }
 function onResolution(mp: number) {
-  applyMp(props.form, mp);
+  const preset = resolutionPresets.value.find(
+    (candidate) => (candidate.width * candidate.height) / 1_000_000 === mp,
+  );
+  if (preset) {
+    props.form.width = preset.width;
+    props.form.height = preset.height;
+  }
 }
 
 // ── Seed (mode is UI-owned to avoid focus loss — see the previous ParamPanel) ─
@@ -348,6 +410,7 @@ function resetSettings() {
         <ResolutionSelector
           :model-value="resolutionMp"
           :ratio="resolutionRatio"
+          :options="resolutionOptions"
           @update:model-value="onResolution"
         />
         <p v-if="resolutionError" class="ms-field__error" role="alert">{{ resolutionError }}</p>
@@ -495,8 +558,13 @@ function resetSettings() {
           <Icon :name="advancedExpanded ? 'chevron-up' : 'chevron-down'" :size="15" />
         </span>
       </button>
+      <SequenceAdvancedSettings
+        v-if="advancedExpanded && isSequence"
+        id="desktop-inline-advanced"
+        :chain-limits="chainLimits"
+      />
       <AdvancedSettings
-        v-if="advancedExpanded"
+        v-else-if="advancedExpanded"
         id="desktop-inline-advanced"
         :form="form"
         :selected-model="selectedModel"

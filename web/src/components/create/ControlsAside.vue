@@ -16,8 +16,14 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { ASPECTS, dimsForMp } from "@ui/lib/resolution";
-import type { GenerateFormState } from "../../types";
+import { ASPECTS } from "@ui/lib/resolution";
+import type { GenerateFormState, ModelInfoExtended } from "../../types";
+import {
+  closestResolutionPreset,
+  megapixelLabel,
+  presetsForModel,
+  presetsNearRatio,
+} from "@studio/lib/resolutions";
 import type { OutputMode } from "@studio/lib/sequence";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
@@ -28,6 +34,7 @@ const props = withDefaults(
   defineProps<{
     modelValue: GenerateFormState;
     family: string;
+    model?: ModelInfoExtended | null;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
@@ -48,6 +55,7 @@ const props = withDefaults(
     lastSeed: null,
     output: "single",
     clipCount: 0,
+    model: null,
   },
 );
 
@@ -110,16 +118,60 @@ function patch(patch: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...patch });
 }
 
+const resolutionPresets = computed(() =>
+  presetsNearRatio(
+    presetsForModel(props.model ?? props.family),
+    currentRatio.value,
+  ),
+);
+const resolutionOptions = computed(() =>
+  resolutionPresets.value.map((preset, index, all) => ({
+    mp: (preset.width * preset.height) / 1_000_000,
+    label: megapixelLabel(preset.width, preset.height),
+    sub:
+      all.length === 1
+        ? "Native"
+        : index === 0
+          ? "Small"
+          : index === all.length - 1
+            ? "Native"
+            : "Standard",
+    width: preset.width,
+    height: preset.height,
+  })),
+);
+const selectedMp = computed(() => {
+  const exact = resolutionOptions.value.find(
+    (option) =>
+      option.width === props.modelValue.width &&
+      option.height === props.modelValue.height,
+  );
+  if (exact) return exact.mp;
+  const current =
+    (props.modelValue.width * props.modelValue.height) / 1_000_000;
+  return (
+    [...resolutionOptions.value].sort(
+      (a, b) => Math.abs(a.mp - current) - Math.abs(b.mp - current),
+    )[0]?.mp ?? mp.value
+  );
+});
+
 function setAspect(id: string) {
   const a = ASPECTS.find((x) => x.id === id);
   if (!a) return;
-  const dims = dimsForMp(mp.value, a.ratio);
-  patch({ width: dims.width, height: dims.height });
+  const preset = closestResolutionPreset(
+    presetsNearRatio(presetsForModel(props.model ?? props.family), a.ratio),
+    props.modelValue.width,
+    props.modelValue.height,
+  );
+  if (preset) patch({ width: preset.width, height: preset.height });
 }
 
 function setMp(nextMp: number) {
-  const dims = dimsForMp(nextMp, currentRatio.value);
-  patch({ width: dims.width, height: dims.height });
+  const preset = resolutionPresets.value.find(
+    (candidate) => (candidate.width * candidate.height) / 1_000_000 === nextMp,
+  );
+  if (preset) patch({ width: preset.width, height: preset.height });
 }
 
 // Seed: Random / Fixed segments. "Fixed" covers the persisted static and
@@ -192,8 +244,9 @@ function lockLastSeed() {
     <div class="controls__group">
       <div class="controls__label">Resolution</div>
       <ResolutionSelector
-        :model-value="mp"
+        :model-value="selectedMp"
         :ratio="currentRatio"
+        :options="resolutionOptions"
         @update:model-value="setMp"
       />
     </div>

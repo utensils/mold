@@ -1926,7 +1926,12 @@ describe("CreatePage layout and behavior", () => {
           output_format: "mp4",
         },
         stages: [
-          { prompt: "one", frames: 97 },
+          {
+            prompt: "one",
+            frames: 97,
+            source_image_b64: "QUJD",
+            source_image_path: "opening.png",
+          },
           { prompt: "two", frames: 97, transition: "cut" },
         ],
       },
@@ -1950,6 +1955,10 @@ describe("CreatePage layout and behavior", () => {
       completedStages: 2,
     });
     expect(draft.clips.map((c) => c.prompt)).toEqual(["one", "two"]);
+    expect(draft.openingImage).toEqual({
+      filename: "opening image",
+      base64: "QUJD",
+    });
     expect(draft.clips[1]?.transition).toBe("cut");
     // The job's shared params landed on the LIVE form.
     const form = useGenerateForm();
@@ -1977,7 +1986,10 @@ describe("CreatePage layout and behavior", () => {
       "job-9",
       expect.objectContaining({
         stages: [
-          expect.objectContaining({ prompt: "one" }),
+          expect.objectContaining({
+            prompt: "one",
+            source_image: "QUJD",
+          }),
           expect.objectContaining({ prompt: "two, but stormier" }),
         ],
       }),
