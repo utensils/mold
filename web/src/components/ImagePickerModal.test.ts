@@ -128,6 +128,10 @@ describe("ImagePickerModal", () => {
     expect(document.body.textContent).toContain("Only PNG or JPEG");
     expect(input.value).toBe("");
 
+    await w.setProps({ open: false });
+    await w.setProps({ open: true });
+    expect(document.body.textContent).not.toContain("Only PNG or JPEG");
+
     await w
       .get("[aria-label='Image source']")
       .findAll("button")[1]!

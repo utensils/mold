@@ -10,7 +10,7 @@
  * `useOverlayFocus` for the Tab trap and opener restoration the kit leaves to
  * the host.
  */
-import { computed, markRaw, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, markRaw, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -48,6 +48,16 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const host = ref<HTMLElement | null>(null);
 const isOpen = computed(() => props.open);
 const { onKeydown } = useOverlayFocus(isOpen, host, () => emit("close"));
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) return;
+    uploadError.value = null;
+    dragging.value = false;
+    if (fileInput.value) fileInput.value.value = "";
+  },
+);
 
 const tabOptions = [
   { value: "upload" as const, label: "Upload" },
