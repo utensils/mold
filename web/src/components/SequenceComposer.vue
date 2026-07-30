@@ -13,6 +13,7 @@ import SeamEditor from "@ui/components/SeamEditor.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
+  buildChainRequest,
   chainScriptToClips,
   clipsToChainScript,
   stageInvalidation,
@@ -29,7 +30,13 @@ import {
   type SequenceStage,
 } from "@studio/lib/sequence";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
-import { fetchChainLimits, type ChainLimits, type StreamTarget } from "../api";
+import {
+  fetchChainLimits,
+  validateChain,
+  type ChainLimits,
+  type ChainValidationResponse,
+  type StreamTarget,
+} from "../api";
 import { requestConfirm, toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import type { SourceImageState } from "../types";
@@ -76,6 +83,9 @@ const limits = ref<ChainLimits | null>(null);
 const limitsLoaded = ref(false);
 const openSeamId = ref<string | null>(null);
 const fileToolsOpen = ref(false);
+const validating = ref(false);
+const validationPlan = ref<ChainValidationResponse | null>(null);
+const validationError = ref("");
 
 /** Confirmed full clear: back to two fresh clips, staying in Sequence. */
 async function clearSequence() {
@@ -223,6 +233,56 @@ const canGenerate = computed(
     !sequenceUnsupported.value &&
     validationErrors.value.length === 0,
 );
+
+const validationInputSignature = computed(() =>
+  JSON.stringify({
+    model: props.model,
+    family: props.family,
+    shared: props.shared,
+    motionTail: motionTail.value,
+    enableAudio: draft.enableAudio,
+    clips: draft.clips,
+    target: props.target,
+  }),
+);
+
+watch(validationInputSignature, () => {
+  validationPlan.value = null;
+  validationError.value = "";
+});
+
+async function validatePlan() {
+  if (!canGenerate.value || validating.value) return;
+  const inputSignature = validationInputSignature.value;
+  validating.value = true;
+  validationPlan.value = null;
+  validationError.value = "";
+  try {
+    const request = buildChainRequest(props.shared, draft.clips, {
+      motionTailFrames: motionTail.value,
+      enableAudio: draft.enableAudio,
+    });
+    const plan = await validateChain(request, props.target);
+    if (validationInputSignature.value === inputSignature) {
+      validationPlan.value = plan;
+    }
+  } catch (error) {
+    if (validationInputSignature.value === inputSignature) {
+      validationError.value =
+        error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    validating.value = false;
+  }
+}
+
+function validationDuration(plan: ChainValidationResponse): string {
+  return `${(plan.estimated_duration_ms / 1_000).toFixed(1)}s`;
+}
+
+function formatBytes(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+}
 
 function trySubmit() {
   if (!canGenerate.value) return;
@@ -602,6 +662,56 @@ defineExpose({ importTomlText });
       {{ fitNote }}
     </p>
 
+    <section
+      v-if="validationPlan"
+      class="rounded-control border border-halide/30 bg-halide/10 px-3 py-2 text-xs text-ink-2"
+      data-test="sequence-validation-plan"
+      aria-live="polite"
+    >
+      <p class="font-semibold text-rebate">
+        Validated · {{ validationPlan.stage_count }} clips ·
+        {{ validationPlan.estimated_total_frames }}f ·
+        {{ validationDuration(validationPlan) }}
+      </p>
+      <ol class="mt-2 space-y-1 font-mono text-[11px]">
+        <li
+          v-for="(stage, index) in validationPlan.stages"
+          :key="index"
+          class="flex flex-wrap gap-x-2"
+        >
+          <span class="text-rebate">Clip {{ index + 1 }}</span>
+          <span>{{ stage.frames }}f input</span>
+          <span>{{ stage.output_frames }}f output</span>
+          <span>{{
+            transitionLabel(stage.transition, validationPlan.motion_tail_frames)
+          }}</span>
+          <span v-if="stage.has_source_image">Opening image</span>
+          <span v-if="stage.has_negative_prompt">Negative prompt</span>
+        </li>
+      </ol>
+      <p v-if="validationPlan.vram_estimate" class="mt-2 font-mono text-[11px]">
+        VRAM {{ formatBytes(validationPlan.vram_estimate.worst_case_bytes) }} ·
+        {{ validationPlan.vram_estimate.fits ? "fits" : "does not fit" }}
+      </p>
+      <ul
+        v-if="validationPlan.warnings.length"
+        class="mt-2 list-disc space-y-1 pl-4 text-warning"
+      >
+        <li v-for="warning in validationPlan.warnings" :key="warning">
+          {{ warning }}
+        </li>
+      </ul>
+    </section>
+
+    <p
+      v-if="validationError"
+      class="rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+      data-test="sequence-validation-error"
+      role="alert"
+    >
+      {{ validationError }}
+    </p>
+
     <p
       v-if="!limitsLoaded && limits === null"
       class="text-center font-mono text-[11px] text-ink-3"
@@ -628,19 +738,30 @@ defineExpose({ importTomlText });
       }}
     </p>
 
-    <button
-      class="w-full rounded-control-lg py-2.5 text-sm font-semibold transition"
-      :class="
-        canGenerate
-          ? 'bg-safelight text-on-accent hover:brightness-110'
-          : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
-      "
-      :disabled="!canGenerate"
-      data-test="sequence-generate"
-      @click="trySubmit"
-    >
-      {{ draft.editing ? "Update sequence" : "Generate sequence" }}
-    </button>
+    <div class="grid grid-cols-2 gap-2">
+      <button
+        type="button"
+        class="rounded-control-lg border border-ce py-2.5 text-sm font-semibold text-ink-2 transition hover:border-halide hover:text-rebate disabled:cursor-not-allowed disabled:opacity-50"
+        :disabled="!canGenerate || validating"
+        data-test="sequence-validate"
+        @click="validatePlan"
+      >
+        {{ validating ? "Validating…" : "Validate plan" }}
+      </button>
+      <button
+        class="rounded-control-lg py-2.5 text-sm font-semibold transition"
+        :class="
+          canGenerate
+            ? 'bg-safelight text-on-accent hover:brightness-110'
+            : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
+        "
+        :disabled="!canGenerate"
+        data-test="sequence-generate"
+        @click="trySubmit"
+      >
+        {{ draft.editing ? "Update sequence" : "Generate sequence" }}
+      </button>
+    </div>
 
     <ImagePickerModal
       :open="pickerOpen"

@@ -227,6 +227,7 @@ use crate::queue::clean_error_message;
         stream_events,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
+        crate::routes_chain::validate_chain,
         crate::routes_chain_jobs::create_chain_job,
         crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
@@ -278,6 +279,8 @@ use crate::queue::clean_error_message;
         mold_core::ChainStage,
         mold_core::ChainProgressEvent,
         mold_core::SseChainCompleteEvent,
+        mold_core::ChainValidationResponse,
+        mold_core::ChainValidationStage,
         mold_core::chain_job::ChainJobSummary,
         mold_core::chain_job::ChainJobStageDetail,
         mold_core::chain_job::ChainJobDetail,
@@ -349,6 +352,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/generate/chain/stream",
             post(crate::routes_chain::generate_chain_stream),
+        )
+        .route(
+            "/api/generate/chain/validate",
+            post(crate::routes_chain::validate_chain),
         )
         .route(
             "/api/chain-jobs",
