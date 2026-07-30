@@ -638,7 +638,10 @@ function applyDecodedSourceResolution(
     setDimensions(null, null);
     return { base64: "", resolution: null };
   }
-  const dimensions = imageDimensionsFromBase64(base64);
+  const dimensions =
+    base64 === previous.base64 && previous.resolution
+      ? previous.resolution.source
+      : imageDimensionsFromBase64(base64);
   if (!dimensions) {
     setDimensions(null, null);
     return { base64, resolution: null };
