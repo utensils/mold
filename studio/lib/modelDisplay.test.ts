@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { modelDisplayName, modelDisplayNameForId } from "./modelDisplay";
+import {
+  isCatalogModelId,
+  modelDisplayName,
+  modelDisplayNameForId,
+} from "./modelDisplay";
+
+describe("isCatalogModelId", () => {
+  it("recognizes only opaque catalog identifiers", () => {
+    expect(isCatalogModelId("cv:252914")).toBe(true);
+    expect(isCatalogModelId("hf:org/repo")).toBe(true);
+    expect(isCatalogModelId("flux-dev:q8")).toBe(false);
+  });
+});
 
 describe("modelDisplayName", () => {
   it("prefers the server-provided display name", () => {

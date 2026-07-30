@@ -14,7 +14,10 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
-import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
+import {
+  modelDisplayName,
+  modelDisplayNameForId,
+} from "@studio/lib/modelDisplay";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
 import {
