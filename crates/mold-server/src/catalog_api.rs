@@ -1108,9 +1108,25 @@ fn entry_download_supported(entry: &mold_catalog::entry::CatalogEntry) -> bool {
         Source::Hf => {
             entry.kind == Kind::Lora
                 || mold_core::manifest::find_manifest(&entry.source_id).is_some()
-                || mold_core::manifest::find_manifest_by_hf_repo(&entry.source_id).is_some()
+                || hf_repo_has_one_builtin_model(&entry.source_id)
         }
     }
+}
+
+fn hf_repo_has_one_builtin_model(hf_repo: &str) -> bool {
+    let mut matches = mold_core::manifest::known_manifests()
+        .iter()
+        .filter(|manifest| {
+            manifest.is_generation_model()
+                && manifest.files.iter().any(|file| {
+                    matches!(
+                        file.component,
+                        mold_core::manifest::ModelComponent::Transformer
+                            | mold_core::manifest::ModelComponent::TransformerShard
+                    ) && file.hf_repo == hf_repo
+                })
+        });
+    matches.next().is_some() && matches.next().is_none()
 }
 
 fn catalog_download_unsupported_reason(entry: &mold_catalog::entry::CatalogEntry) -> String {

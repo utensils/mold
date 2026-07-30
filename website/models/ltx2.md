@@ -16,12 +16,23 @@ audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` /
 
 ## Supported Models
 
-| Model                       | Path      | Notes                                        |
-| --------------------------- | --------- | -------------------------------------------- |
-| `ltx-2-19b-dev:fp8`         | Two-stage | Highest-quality published 19B FP8 checkpoint |
-| `ltx-2-19b-distilled:fp8`   | Distilled | Fastest 19B path, recommended default        |
-| `ltx-2.3-22b-dev:fp8`       | Two-stage | Highest-quality 22B FP8 checkpoint           |
-| `ltx-2.3-22b-distilled:fp8` | Distilled | Fastest 22B path                             |
+| Model                        | Path      | Notes                                         |
+| ---------------------------- | --------- | --------------------------------------------- |
+| `ltx-2-19b-dev:fp8`          | Two-stage | Highest-quality published 19B FP8 checkpoint  |
+| `ltx-2-19b-distilled:fp8`    | Distilled | Fastest 19B path, recommended default         |
+| `ltx-2.3-22b-dev:fp8`        | Two-stage | High-quality 22B FP8 checkpoint               |
+| `ltx-2.3-22b-distilled:fp8`  | Distilled | Fastest 22B path                              |
+| `ltx-2.3-22b-dev:bf16`       | Two-stage | Full-quality, trainable 22B reference weights |
+| `ltx-2.3-22b-distilled:bf16` | Distilled | Full-precision eight-step 22B checkpoint      |
+
+Bare `ltx-2.3-22b-dev` and `ltx-2.3-22b-distilled` names continue to select
+FP8. Choose `:bf16` explicitly for the upstream reference precision used for
+training and quality evaluation. Each BF16 checkpoint is about 46.1 GB
+(43.0 GiB); a 48 GB+ CUDA card is the practical target for resident weights.
+On smaller CUDA cards, mold's native LTX-2 runtime adaptively streams
+transformer blocks from host memory, trading speed and substantial system RAM
+for lower VRAM use. The shared gated Gemma encoder and optional upscaler/LoRA
+assets add to download and disk requirements.
 
 ## Implemented Request Surface
 

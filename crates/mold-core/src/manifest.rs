@@ -3320,6 +3320,11 @@ pub fn resolve_model_name(input: &str) -> String {
     if input == "qwen-image-edit" {
         return "qwen-image-edit-2511:q8".to_string();
     }
+    // These high-memory BF16 variants are opt-in. Bare LTX-2.3 22B names
+    // continue to resolve to the smaller FP8 checkpoints.
+    if matches!(input, "ltx-2.3-22b-dev" | "ltx-2.3-22b-distilled") {
+        return format!("{input}:fp8");
+    }
     // Legacy format: flux-dev-q4 -> flux-dev:q4 and
     // ltx-2.3-22b-dev-fp8 -> ltx-2.3-22b-dev:fp8.
     if let Some((base, suffix)) = input.rsplit_once('-') {
@@ -4206,6 +4211,14 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
                 29_531_884_062,
                 "d9646b6f2d5c42d337b23671634c43bfeece6989644f51b4a3aa088465ccd3b2",
             ),
+            "ltx-2.3-22b-dev.safetensors" => (
+                46_149_344_974,
+                "7ab7225325bc403448ea84b6db2269811a880e5118cd2ee2b6282a93d585016f",
+            ),
+            "ltx-2.3-22b-distilled.safetensors" => (
+                46_149_345_038,
+                "14409a4d1337a8ded02fa87fb895b17a91ab2c6588f7cc3352e624ff18a689bf",
+            ),
             other => panic!("unexpected LTX-2 transformer file '{other}'"),
         };
         files.push(ModelFile {
@@ -4341,6 +4354,28 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
             "LTX-2.3 22B distilled FP8 — fastest joint audio-video pipeline",
             "Lightricks/LTX-2.3-fp8",
             "ltx-2.3-22b-distilled-fp8.safetensors",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
+            "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
+            None,
+        ),
+        make_manifest(
+            "ltx-2.3-22b-dev:bf16",
+            "LTX-2.3 22B dev BF16 — full-quality trainable joint audio-video model",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-22b-dev.safetensors",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
+            "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-22b-distilled-lora-384.safetensors"),
+        ),
+        make_manifest(
+            "ltx-2.3-22b-distilled:bf16",
+            "LTX-2.3 22B distilled BF16 — full-precision eight-step pipeline",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-22b-distilled.safetensors",
             "Lightricks/LTX-2.3",
             "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
             Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
@@ -5299,6 +5334,11 @@ mod tests {
         assert_eq!(resolve_model_name("sdxl-base"), "sdxl-base:fp16");
         assert_eq!(resolve_model_name("sdxl-turbo"), "sdxl-turbo:fp16");
         assert_eq!(resolve_model_name("dreamshaper-xl"), "dreamshaper-xl:fp16");
+        assert_eq!(resolve_model_name("ltx-2.3-22b-dev"), "ltx-2.3-22b-dev:fp8");
+        assert_eq!(
+            resolve_model_name("ltx-2.3-22b-distilled"),
+            "ltx-2.3-22b-distilled:fp8"
+        );
     }
 
     #[test]
@@ -5593,13 +5633,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 114
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 116
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 114);
+        assert_eq!(known_manifests().len(), 116);
     }
 
     #[test]
@@ -5642,6 +5682,8 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             "ltx-2.3-22b-dev:fp8",
             "ltx-2.3-22b-distilled:fp8",
+            "ltx-2.3-22b-dev:bf16",
+            "ltx-2.3-22b-distilled:bf16",
         ] {
             let manifest = find_manifest(model).expect("manifest should exist");
             let transformer = manifest
@@ -5680,8 +5722,43 @@ mod tests {
     }
 
     #[test]
+    fn ltx2_22b_bf16_manifests_use_upstream_reference_checkpoints() {
+        for (model, filename, size_bytes, sha256) in [
+            (
+                "ltx-2.3-22b-dev:bf16",
+                "ltx-2.3-22b-dev.safetensors",
+                46_149_344_974,
+                "7ab7225325bc403448ea84b6db2269811a880e5118cd2ee2b6282a93d585016f",
+            ),
+            (
+                "ltx-2.3-22b-distilled:bf16",
+                "ltx-2.3-22b-distilled.safetensors",
+                46_149_345_038,
+                "14409a4d1337a8ded02fa87fb895b17a91ab2c6588f7cc3352e624ff18a689bf",
+            ),
+        ] {
+            let manifest = find_manifest(model).expect("BF16 manifest should exist");
+            assert_eq!(manifest.family, "ltx2");
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Transformer)
+                .expect("transformer entry should exist");
+            assert_eq!(transformer.hf_repo, "Lightricks/LTX-2.3");
+            assert_eq!(transformer.hf_filename, filename);
+            assert_eq!(transformer.size_bytes, size_bytes);
+            assert_eq!(transformer.sha256, Some(sha256));
+        }
+    }
+
+    #[test]
     fn ltx2_22b_manifests_include_x1_5_spatial_upscaler_after_x2_default() {
-        for model in ["ltx-2.3-22b-dev:fp8", "ltx-2.3-22b-distilled:fp8"] {
+        for model in [
+            "ltx-2.3-22b-dev:fp8",
+            "ltx-2.3-22b-distilled:fp8",
+            "ltx-2.3-22b-dev:bf16",
+            "ltx-2.3-22b-distilled:bf16",
+        ] {
             let manifest = find_manifest(model).expect("manifest should exist");
             let spatial_files: Vec<&str> = manifest
                 .files
