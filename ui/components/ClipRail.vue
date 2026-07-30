@@ -293,6 +293,7 @@ const dragModel = computed({
   --filmstrip-footer-height: 36px;
   --filmstrip-scene-height: 140px;
   --filmstrip-seam-width: 46px;
+  --filmstrip-seam-rule-y: 17px;
   position: relative;
   height: 188px;
   min-width: 0;
@@ -341,7 +342,7 @@ const dragModel = computed({
 
 .ms-rail__item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   flex: 0 0 auto;
   scroll-snap-align: start;
@@ -473,6 +474,14 @@ const dragModel = computed({
   grid-template-rows: 32px 16px;
   place-items: center;
   width: var(--filmstrip-seam-width);
+  /*
+   * Keep the connector's rule centered on the picture, not the combined
+   * picture + metadata card. This also keeps every seam on one visual edit
+   * axis when the responsive rail changes scene and footer heights.
+   */
+  margin-top: calc(
+    var(--filmstrip-thumb-height) / 2 - var(--filmstrip-seam-rule-y)
+  );
   min-width: 44px;
   height: 54px;
   min-height: 44px;
@@ -490,7 +499,7 @@ const dragModel = computed({
   content: "";
   position: absolute;
   z-index: 0;
-  top: 17px;
+  top: var(--filmstrip-seam-rule-y);
   right: -10px;
   left: -10px;
   height: 1px;
@@ -544,6 +553,11 @@ const dragModel = computed({
   border: 0;
   background: transparent;
   box-shadow: none;
+}
+
+.ms-rail-frame :deep(.ms-seam__line-smooth) {
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .ms-rail-frame :deep(.ms-seam:hover:not(:disabled) .ms-seam__diagram) {
@@ -637,6 +651,7 @@ const dragModel = computed({
     --filmstrip-footer-height: 32px;
     --filmstrip-scene-height: 108px;
     --filmstrip-seam-width: 44px;
+    --filmstrip-seam-rule-y: 15px;
     height: 138px;
   }
 
@@ -655,10 +670,6 @@ const dragModel = computed({
   .ms-rail-frame :deep(.ms-seam__diagram) {
     width: 26px;
     height: 26px;
-  }
-
-  .ms-rail-frame :deep(.ms-seam::before) {
-    top: 15px;
   }
 
   .ms-rail-frame :deep(.ms-seam__caption) {
