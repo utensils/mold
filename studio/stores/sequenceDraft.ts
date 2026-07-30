@@ -283,6 +283,23 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     editing.value = null;
   }
 
+  /**
+   * Clear the whole sequence: back to two fresh clips, no audio, and no
+   * edit session. Stays in Sequence — clearing means "start this story
+   * over", not "leave sequence mode" (that's the Output control's job).
+   */
+  function clearSequence(defaultFrames: number) {
+    clips.splice(
+      0,
+      clips.length,
+      newSequenceClip(defaultFrames),
+      newSequenceClip(defaultFrames),
+    );
+    activeClipId.value = clips[0]?.id ?? null;
+    enableAudio.value = false;
+    editing.value = null;
+  }
+
   function reset() {
     clips.splice(0, clips.length);
     activeClipId.value = null;
@@ -317,6 +334,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     setOutput,
     loadFromJob,
     stopEditing,
+    clearSequence,
     reset,
   };
 });

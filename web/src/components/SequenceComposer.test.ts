@@ -6,6 +6,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { parseChainScript } from "@studio/lib/chainToml";
 import type { SequenceSharedParams } from "@studio/lib/sequenceForm";
 import * as api from "../api";
+import { settleConfirm } from "../lib/toasts";
 
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api")>()),
@@ -201,7 +202,11 @@ describe("SequenceComposer", () => {
     const store = useSequenceDraftStore();
     store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
     await wrapper.get("[data-test='sequence-file-tools']").trigger("click");
-    await wrapper.get("[data-test='sequence-copy-toml']").trigger("click");
+    // The file-tools menu lives in a popover teleported to <body>.
+    document
+      .querySelector<HTMLElement>("[data-test='sequence-copy-toml']")!
+      .click();
+    await flushPromises();
     const toml = writeText.mock.calls[0]?.[0] ?? "";
     expect(toml).toContain("width = 1216");
     expect(toml).toContain('model = "ltx-2-19b-distilled:fp8"');
@@ -296,5 +301,48 @@ describe("SequenceComposer", () => {
     expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(
       false,
     );
+  });
+});
+
+describe("clear sequence", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    pinia = createPinia();
+    setActivePinia(pinia);
+    fetchChainLimitsMock.mockReset();
+    fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
+  });
+
+  it("clears to two fresh clips after the app-frame confirm", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.output = "sequence";
+    store.addClip(97);
+    store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    // Still intact until the dialog is answered.
+    expect(store.clips).toHaveLength(3);
+    settleConfirm(true);
+    await flushPromises();
+
+    expect(store.clips).toHaveLength(2);
+    expect(store.clips.every((clip) => clip.prompt === "")).toBe(true);
+    expect(store.output).toBe("sequence");
+  });
+
+  it("a declined confirm keeps every clip", async () => {
+    fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    settleConfirm(false);
+    await flushPromises();
+
+    expect(store.clips.map((clip) => clip.prompt)).toEqual(["clip 1", "clip 2"]);
   });
 });

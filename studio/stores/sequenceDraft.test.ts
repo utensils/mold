@@ -227,6 +227,32 @@ describe("sequence draft store", () => {
     ]);
   });
 
+  it("clears the whole sequence back to two fresh clips, staying in Sequence", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.output = "sequence";
+    store.ensureClips(25);
+    store.addClip(25);
+    store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+    store.enableAudio = true;
+    store.loadFromJob(
+      { jobId: "job-1", hostId: "h1", baseline: [], completedStages: 1 },
+      store.clips.map((clip) => ({ ...clip })),
+      true,
+    );
+
+    store.clearSequence(25);
+
+    expect(store.clips).toHaveLength(2);
+    expect(store.clips.every((clip) => clip.prompt === "")).toBe(true);
+    expect(store.clips.every((clip) => clip.frames === 25)).toBe(true);
+    expect(store.activeClipId).toBe(store.clips[0]!.id);
+    expect(store.enableAudio).toBe(false);
+    expect(store.editing).toBeNull();
+    // Clearing starts the story over; it does not leave sequence mode.
+    expect(store.output).toBe("sequence");
+  });
+
   it("tracks an edit session without persisting it", () => {
     const store = freshStore();
     store.hydrate();

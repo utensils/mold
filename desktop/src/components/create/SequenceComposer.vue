@@ -11,6 +11,7 @@ import ClipRail from "@ui/components/ClipRail.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   defaultClipFrames,
@@ -229,6 +230,23 @@ function discardEdit() {
 function submit() {
   if (disabledReason.value || props.submitting) return;
   emit("submit");
+}
+
+// ── Clear sequence ───────────────────────────────────────────────────────────
+const clearConfirmOpen = ref(false);
+const clearMessage = computed(() => {
+  const edit = draft.editing
+    ? " Ends the edit session without changing the finished job."
+    : "";
+  return `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`;
+});
+
+function clearSequence() {
+  clearConfirmOpen.value = false;
+  openSeamId.value = null;
+  negativeOpen.value = false;
+  draft.clearSequence(newClipFrames.value);
+  toasts.push("Sequence cleared");
 }
 
 // ── File tools ───────────────────────────────────────────────────────────────
@@ -512,6 +530,15 @@ async function copyToml() {
         </div>
       </Popover>
 
+      <button
+        type="button"
+        data-test="sequence-clear"
+        class="ms-seqbench__tool ms-seqbench__tool--danger"
+        @click="clearConfirmOpen = true"
+      >
+        Clear sequence
+      </button>
+
       <label
         v-if="chainLimits?.supports_audio"
         class="ms-seqbench__audio"
@@ -546,6 +573,16 @@ async function copyToml() {
         {{ submitting ? "Starting…" : draft.editing ? "Update sequence" : "Generate sequence" }}
       </button>
     </div>
+
+    <ConfirmDialog
+      :open="clearConfirmOpen"
+      title="Clear sequence?"
+      :message="clearMessage"
+      confirm-label="Clear sequence"
+      danger
+      @confirm="clearSequence"
+      @cancel="clearConfirmOpen = false"
+    />
   </div>
 </template>
 

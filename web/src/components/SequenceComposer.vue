@@ -30,7 +30,7 @@ import {
 } from "@studio/lib/sequence";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import { fetchChainLimits, type ChainLimits, type StreamTarget } from "../api";
-import { toast } from "../lib/toasts";
+import { requestConfirm, toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import type { SourceImageState } from "../types";
 import type { ClipRailMedia } from "@ui/components/types";
@@ -76,6 +76,23 @@ const limits = ref<ChainLimits | null>(null);
 const limitsLoaded = ref(false);
 const openSeamId = ref<string | null>(null);
 const fileToolsOpen = ref(false);
+
+/** Confirmed full clear: back to two fresh clips, staying in Sequence. */
+async function clearSequence() {
+  const edit = draft.editing
+    ? " Ends the edit session without changing the finished job."
+    : "";
+  const accepted = await requestConfirm({
+    title: "Clear sequence?",
+    body: `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`,
+    confirmLabel: "Clear sequence",
+    danger: true,
+  });
+  if (!accepted) return;
+  openSeamId.value = null;
+  draft.clearSequence(defaultFrames.value);
+  toast("info", "Sequence cleared");
+}
 const pickerOpen = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 
@@ -300,7 +317,15 @@ defineExpose({ importTomlText });
           Tell the story one clip at a time.
         </p>
       </div>
-      <div class="ml-auto">
+      <div class="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          class="sq-tool"
+          data-test="sequence-clear"
+          @click="clearSequence"
+        >
+          Clear sequence
+        </button>
         <Popover
           :open="fileToolsOpen"
           placement="bottom-end"
