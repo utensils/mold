@@ -412,6 +412,10 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
 
 function pull(entry: CatalogEntry) {
   const candidates = actionHosts(entry);
+  if (entry.installed && candidates.length === 0) {
+    toasts.push("No online owning host is available to repair this model.", "error");
+    return;
+  }
   if (candidates.length > 1) {
     pendingEntry.value = entry;
     return;

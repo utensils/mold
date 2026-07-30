@@ -3557,9 +3557,6 @@ onBeforeUnmount(() => {
                       }"
                       data-test="mobile-sequence-error-disclosure"
                       :aria-expanded="expandedQueueFailures.has(row.key)"
-                      :aria-label="`${
-                        expandedQueueFailures.has(row.key) ? 'Collapse' : 'Expand'
-                      } failure details`"
                       @click.stop="toggleQueueFailure(row.key)"
                     >
                       <span>{{ row.sequence.error }}</span>

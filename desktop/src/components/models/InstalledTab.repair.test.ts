@@ -195,4 +195,31 @@ describe("InstalledTab model info drawer", () => {
     );
     wrapper.unmount();
   });
+
+  it("does not reroute repair when the only owning host is offline", async () => {
+    setActivePinia(createPinia());
+    useHostsStore().extras.push({
+      id: "offline-7680",
+      label: "Offline GPU",
+      url: "http://offline:7680",
+      apiKey: "offline-key",
+      status: "error",
+      error: "offline",
+      instanceId: null,
+    });
+    const wrapper = mount(InstalledTab, {
+      props: { entries: [{ ...model(), hostIds: ["offline-7680"] }] },
+    });
+    await wrapper.get("[data-test='row-title']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='drawer-repair']").trigger("click");
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(
+      useToastStore().items.some(
+        (toast) => toast.kind === "error" && toast.message.includes("online owning host"),
+      ),
+    ).toBe(true);
+  });
 });

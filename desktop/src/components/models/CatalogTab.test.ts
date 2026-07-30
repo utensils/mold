@@ -711,6 +711,59 @@ describe("CatalogTab installed repair routing", () => {
     );
     wrapper.unmount();
   });
+
+  it("does not reroute an offline owner's repair to the local primary", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    useHostsStore().extras.push({
+      id: "offline-7680",
+      label: "Offline GPU",
+      url: "http://offline:7680",
+      apiKey: "offline-key",
+      status: "error",
+      error: "offline",
+      instanceId: null,
+    });
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "flux-dev:q8",
+            family: "flux",
+            size_gb: 12,
+            is_loaded: false,
+            hf_repo: "org/flux-dev",
+            default_steps: 4,
+            default_guidance: 1,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            hostIds: ["offline-7680"],
+          },
+        ],
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='catalog-card']").trigger("click");
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>("[data-test='drawer-repair']")!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("Choose where to repair");
+    wrapper.unmount();
+  });
 });
 
 describe("CatalogTab Discover source chips", () => {

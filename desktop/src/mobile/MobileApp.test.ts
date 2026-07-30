@@ -708,6 +708,7 @@ describe("MobileApp Output field", () => {
     expect(row.text()).toContain("needs more GPU memory");
     const failure = row.get("[data-test='mobile-sequence-error-disclosure']");
     expect(failure.attributes("aria-expanded")).toBe("false");
+    expect(failure.attributes("aria-label")).toBeUndefined();
     await failure.trigger("click");
     expect(failure.attributes("aria-expanded")).toBe("true");
     expect(failure.classes()).toContain("mobile-sequence-row-error--expanded");

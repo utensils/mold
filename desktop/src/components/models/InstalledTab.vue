@@ -147,11 +147,15 @@ const drawerRepairing = ref(false);
 
 function requestRepair(m: LibraryModelEntry) {
   const candidates = repairHosts(m);
+  if (candidates.length === 0) {
+    toasts.push("No online owning host is available to repair this model.", "error");
+    return;
+  }
   if (candidates.length > 1) {
     pendingRepair.value = m;
     return;
   }
-  void repairOnHost(m, candidates[0] ?? targetHost(m));
+  void repairOnHost(m, candidates[0]!);
 }
 
 async function repairOnHost(m: LibraryModelEntry, host: HostView | null) {

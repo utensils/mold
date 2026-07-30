@@ -107,7 +107,6 @@ const errorExpanded = ref(false);
         type="button"
         data-test="seq-error-disclosure"
         :aria-expanded="errorExpanded"
-        :aria-label="`${errorExpanded ? 'Collapse' : 'Expand'} failure details`"
         :title="errorExpanded ? undefined : vm.error"
         @click.stop="errorExpanded = !errorExpanded"
       >

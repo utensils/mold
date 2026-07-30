@@ -757,6 +757,10 @@ async function cancelDownload(row: DownloadRow): Promise<void> {
 
 function requestPull(entry: MobileCatalogEntry): void {
   const candidates = entry.installed ? repairHosts(entry) : downloadHosts.value;
+  if (entry.installed && candidates.length === 0) {
+    announce("No online owning host is available to repair this model.", true);
+    return;
+  }
   if (candidates.length > 1) {
     targetRestoreFocus = document.activeElement as HTMLElement | null;
     targetEntry.value = entry;
@@ -767,7 +771,7 @@ function requestPull(entry: MobileCatalogEntry): void {
     });
     return;
   }
-  const host = candidates[0] ?? (entry.installed ? owningHost(entry) : selectedHost.value);
+  const host = candidates[0] ?? selectedHost.value;
   if (host) void pullTo(entry, host);
 }
 

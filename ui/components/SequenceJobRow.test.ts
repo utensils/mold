@@ -92,6 +92,7 @@ describe("SequenceJobRow", () => {
     const disclosure = wrapper.get("[data-test='seq-error-disclosure']");
 
     expect(disclosure.attributes("aria-expanded")).toBe("false");
+    expect(disclosure.attributes("aria-label")).toBeUndefined();
     expect(disclosure.text()).toContain(
       "plato ran out of memory. Try a smaller model, image size, or batch.",
     );
