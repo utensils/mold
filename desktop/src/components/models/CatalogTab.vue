@@ -254,6 +254,12 @@ const readyHosts = computed(() =>
   hosts.all.filter((host) => host.status === "ready" && host.baseUrl),
 );
 
+function actionHosts(entry: CatalogEntry & { hostIds?: string[] }): HostView[] {
+  if (!entry.installed) return readyHosts.value;
+  const ownerIds = new Set(entry.hostIds ?? []);
+  return readyHosts.value.filter((host) => ownerIds.has(host.id));
+}
+
 /**
  * Where catalog calls go: the local primary when it's ready (it reads its
  * own credentials), else the first ready host — with credentials forwarded
@@ -405,11 +411,16 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
 }
 
 function pull(entry: CatalogEntry) {
-  if (readyHosts.value.length > 1) {
+  const candidates = actionHosts(entry);
+  if (entry.installed && candidates.length === 0) {
+    toasts.push("No online owning host is available to repair this model.", "error");
+    return;
+  }
+  if (candidates.length > 1) {
     pendingEntry.value = entry;
     return;
   }
-  void pullTo(entry, readyHosts.value[0] ?? null);
+  void pullTo(entry, candidates[0] ?? null);
 }
 
 /** The detail drawer fetches on the same host the catalog list came from. */
@@ -618,7 +629,8 @@ onMounted(async () => {
     <DownloadTargetDialog
       v-if="pendingEntry"
       :model-name="pendingEntry.display_name ?? pendingEntry.name"
-      :hosts="readyHosts"
+      :hosts="actionHosts(pendingEntry)"
+      :action="pendingEntry.installed ? 'repair' : 'download'"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"
     />

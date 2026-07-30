@@ -83,6 +83,26 @@ describe("SequenceJobRow", () => {
     expect(wrapper.find("[data-test='seq-resume']").exists()).toBe(true);
   });
 
+  it("expands a failed job so its complete diagnostic can be inspected", async () => {
+    const diagnostic =
+      "CUDA allocation failed while reserving the transformer cache on device 1; requested 8.4 GiB with 3.1 GiB available";
+    const wrapper = mount(SequenceJobRow, {
+      props: { vm: vm({ state: "failed", error: diagnostic }) },
+    });
+    const disclosure = wrapper.get("[data-test='seq-error-disclosure']");
+
+    expect(disclosure.attributes("aria-expanded")).toBe("false");
+    expect(disclosure.attributes("aria-label")).toBeUndefined();
+    expect(disclosure.text()).toContain(
+      "plato ran out of memory. Try a smaller model, image size, or batch.",
+    );
+    await disclosure.trigger("click");
+
+    expect(disclosure.attributes("aria-expanded")).toBe("true");
+    expect(disclosure.classes()).toContain("ms-seqrow__error--expanded");
+    expect(wrapper.emitted("select")).toBeUndefined();
+  });
+
   it("drops the progress region in the dense variant", () => {
     expect(
       mount(SequenceJobRow, { props: { vm: vm() } })

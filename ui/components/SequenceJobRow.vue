@@ -5,7 +5,7 @@
  * history drawer. Presentational only — props in, `action` out; the caller
  * owns routing, confirmation, and the destructive half of every verb.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import ProgressBar from "./ProgressBar.vue";
 import {
   sequenceActionLabel,
@@ -68,6 +68,7 @@ const percent = computed(() => {
   return p && p.total > 0 ? Math.round((p.step / p.total) * 100) : 0;
 });
 const showProgress = computed(() => !props.dense && props.vm.progress !== null);
+const errorExpanded = ref(false);
 </script>
 
 <template>
@@ -99,12 +100,21 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
       >
         <ProgressBar :value="percent" :height="4" label="Sequence progress" />
       </span>
-      <span
+      <button
         v-if="showError && vm.error"
         class="ms-seqrow__error"
-        :title="vm.error"
-        >{{ vm.error }}</span
+        :class="{ 'ms-seqrow__error--expanded': errorExpanded }"
+        type="button"
+        data-test="seq-error-disclosure"
+        :aria-expanded="errorExpanded"
+        :title="errorExpanded ? undefined : vm.error"
+        @click.stop="errorExpanded = !errorExpanded"
       >
+        <span>{{ vm.error }}</span>
+        <span class="ms-seqrow__error-toggle" aria-hidden="true">
+          {{ errorExpanded ? "Less" : "Details" }}
+        </span>
+      </button>
     </div>
     <div class="ms-seqrow__actions" data-test="sequence-job-actions">
       <button
@@ -204,12 +214,47 @@ const showProgress = computed(() => !props.dense && props.vm.progress !== null);
 }
 
 .ms-seqrow__error {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
   font-size: 10.5px;
   color: var(--stop);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 320px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ms-seqrow__error > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ms-seqrow__error-toggle {
+  flex: 0 0 auto;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.ms-seqrow__error--expanded {
+  align-items: flex-start;
+  white-space: normal;
+  overflow: visible;
+}
+
+.ms-seqrow__error--expanded > span:first-child {
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
 }
 
 .ms-seqrow--dense {

@@ -706,6 +706,12 @@ describe("MobileApp Output field", () => {
 
     const row = wrapper.get("[data-test='mobile-sequence-job']");
     expect(row.text()).toContain("needs more GPU memory");
+    const failure = row.get("[data-test='mobile-sequence-error-disclosure']");
+    expect(failure.attributes("aria-expanded")).toBe("false");
+    expect(failure.attributes("aria-label")).toBeUndefined();
+    await failure.trigger("click");
+    expect(failure.attributes("aria-expanded")).toBe("true");
+    expect(failure.classes()).toContain("mobile-sequence-row-error--expanded");
     expect(row.find("[data-test='mobile-sequence-cancel']").exists()).toBe(false);
     expect(row.find("[data-test='mobile-sequence-dismiss']").exists()).toBe(true);
     // The row survives for its actions, but a settled job is not active work.

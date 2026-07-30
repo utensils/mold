@@ -71,4 +71,23 @@ describe("DownloadTargetDialog", () => {
     wrapper.unmount();
     expect(document.activeElement).toBe(opener);
   });
+
+  it("uses repair-specific confirmation copy", () => {
+    const wrapper = mount(DownloadTargetDialog, {
+      props: { modelName: "Flux Dev", hosts, action: "repair" },
+      attachTo: document.body,
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain("Choose where to repair Flux Dev");
+    expect(dialog.textContent).toContain(
+      "Only missing or damaged files will be fetched on the selected host.",
+    );
+    expect(
+      document.body
+        .querySelector<HTMLButtonElement>("[aria-label='Close repair target picker']")
+        ?.getAttribute("aria-label"),
+    ).toBe("Close repair target picker");
+    wrapper.unmount();
+  });
 });

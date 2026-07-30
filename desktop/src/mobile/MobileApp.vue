@@ -620,6 +620,14 @@ const activityRows = computed<ActivityRow[]>(() =>
     return print ? [{ key: vm.key, sequence: null, print }] : [];
   }),
 );
+const expandedQueueFailures = ref(new Set<string>());
+
+function toggleQueueFailure(key: string): void {
+  const next = new Set(expandedQueueFailures.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedQueueFailures.value = next;
+}
 
 async function selectMobilePrint(job: Job): Promise<void> {
   generation.select(job.clientId);
@@ -3540,9 +3548,22 @@ onBeforeUnmount(() => {
                         · {{ sequenceRowProgress }}%
                       </template>
                     </span>
-                    <span v-if="row.sequence.error" class="mobile-sequence-row-error" role="alert">
-                      {{ row.sequence.error }}
-                    </span>
+                    <button
+                      v-if="row.sequence.error"
+                      type="button"
+                      class="mobile-sequence-row-error"
+                      :class="{
+                        'mobile-sequence-row-error--expanded': expandedQueueFailures.has(row.key),
+                      }"
+                      data-test="mobile-sequence-error-disclosure"
+                      :aria-expanded="expandedQueueFailures.has(row.key)"
+                      @click.stop="toggleQueueFailure(row.key)"
+                    >
+                      <span>{{ row.sequence.error }}</span>
+                      <span aria-hidden="true">
+                        {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
+                      </span>
+                    </button>
                   </div>
                   <div class="mobile-generation-job-action">
                     <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>

@@ -24,6 +24,8 @@ vi.mock("../../lib/api/catalog", () => ({ startCatalogDownload, fetchCatalogDeta
 vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
 import InstalledTab from "./InstalledTab.vue";
+import { useConnectionStore } from "../../stores/connection";
+import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 
@@ -143,5 +145,81 @@ describe("InstalledTab model info drawer", () => {
     await flushPromises();
 
     expect(useToastStore().items.some((t) => t.kind === "error")).toBe(true);
+  });
+
+  it("confirms the owning host before repairing a model installed on multiple hosts", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "studio-7680",
+      label: "Studio GPU",
+      url: "http://studio:7680",
+      apiKey: "studio-key",
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+
+    const wrapper = mount(InstalledTab, {
+      attachTo: document.body,
+      props: { entries: [{ ...model(), hostIds: ["local", "studio-7680"] }] },
+    });
+    await wrapper.get("[data-test='row-title']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='drawer-repair']").trigger("click");
+    await flushPromises();
+
+    const dialog = document.body.querySelector<HTMLElement>(
+      "[data-test='download-target-dialog']",
+    )!;
+    expect(dialog.textContent).toContain("Choose where to repair");
+    expect(dialog.textContent).toContain("This device");
+    expect(dialog.textContent).toContain("Studio GPU");
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+
+    document.body
+      .querySelector<HTMLButtonElement>("[data-test='download-target-studio-7680']")!
+      .click();
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "sdxl-base:fp16",
+      { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it("does not reroute repair when the only owning host is offline", async () => {
+    setActivePinia(createPinia());
+    useHostsStore().extras.push({
+      id: "offline-7680",
+      label: "Offline GPU",
+      url: "http://offline:7680",
+      apiKey: "offline-key",
+      status: "error",
+      error: "offline",
+      instanceId: null,
+    });
+    const wrapper = mount(InstalledTab, {
+      props: { entries: [{ ...model(), hostIds: ["offline-7680"] }] },
+    });
+    await wrapper.get("[data-test='row-title']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='drawer-repair']").trigger("click");
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(
+      useToastStore().items.some(
+        (toast) => toast.kind === "error" && toast.message.includes("online owning host"),
+      ),
+    ).toBe(true);
   });
 });

@@ -168,6 +168,19 @@ const downloadHosts = computed(() =>
   props.hosts.filter((host) => host.online || host.id === props.selectedHostId),
 );
 
+/** Repair is meaningful only on a host that already owns the collapsed
+ * installed row. Keep unreachable owners out of the action list, while the
+ * currently selected host remains eligible during its reachability probe. */
+function repairHosts(entry: MobileCatalogEntry): MobileHost[] {
+  const ownerIds = new Set(entry.hostIds ?? []);
+  return downloadHosts.value.filter((host) => ownerIds.has(host.id));
+}
+
+const targetHosts = computed(() => {
+  const entry = targetEntry.value;
+  return entry?.installed ? repairHosts(entry) : downloadHosts.value;
+});
+
 const installedEntries = computed<MobileCatalogEntry[]>(() => {
   const byName = new Map<string, { model: ModelEntry; hostIds: string[]; hostLabels: string[] }>();
   for (const host of props.hosts) {
@@ -743,12 +756,12 @@ async function cancelDownload(row: DownloadRow): Promise<void> {
 }
 
 function requestPull(entry: MobileCatalogEntry): void {
-  if (entry.installed) {
-    const host = owningHost(entry);
-    if (host) void pullTo(entry, host);
+  const candidates = entry.installed ? repairHosts(entry) : downloadHosts.value;
+  if (entry.installed && candidates.length === 0) {
+    announce("No online owning host is available to repair this model.", true);
     return;
   }
-  if (downloadHosts.value.length > 1) {
+  if (candidates.length > 1) {
     targetRestoreFocus = document.activeElement as HTMLElement | null;
     targetEntry.value = entry;
     updateModalInert();
@@ -758,7 +771,7 @@ function requestPull(entry: MobileCatalogEntry): void {
     });
     return;
   }
-  const host = downloadHosts.value[0] ?? selectedHost.value;
+  const host = candidates[0] ?? selectedHost.value;
   if (host) void pullTo(entry, host);
 }
 
@@ -1639,10 +1652,18 @@ onBeforeUnmount(() => {
         <div class="mobile-catalog-target-panel">
           <header>
             <div>
-              <h2 id="mobile-catalog-target-title">Choose a host</h2>
+              <h2 id="mobile-catalog-target-title">
+                {{ targetEntry.installed ? "Choose where to repair" : "Choose where to download" }}
+              </h2>
               <p>
-                {{ catalogActionLabel(targetEntry) }}
-                {{ targetEntry.display_name ?? targetEntry.name }}
+                <template v-if="targetEntry.installed">
+                  Only missing or damaged files for
+                  {{ targetEntry.display_name ?? targetEntry.name }} will be fetched.
+                </template>
+                <template v-else>
+                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
+                  will be stored on the selected host.
+                </template>
               </p>
             </div>
             <button
@@ -1656,7 +1677,7 @@ onBeforeUnmount(() => {
           </header>
           <div class="mobile-catalog-target-list">
             <button
-              v-for="host in downloadHosts"
+              v-for="host in targetHosts"
               :key="host.id"
               type="button"
               :disabled="Boolean(pullStatus(targetEntry, host.id))"

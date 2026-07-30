@@ -4,16 +4,23 @@ import { createPinia, setActivePinia } from "pinia";
 import type { CatalogEntry } from "../../lib/api/types";
 import type { CatalogSearchParams } from "../../lib/api/catalog";
 
-const { searchCatalog, fetchCatalogFamilies, startCatalogDownload } = vi.hoisted(() => ({
-  searchCatalog: vi.fn(),
-  fetchCatalogFamilies: vi.fn(),
-  startCatalogDownload: vi.fn(),
+const { searchCatalog, fetchCatalogDetail, fetchCatalogFamilies, startCatalogDownload } =
+  vi.hoisted(() => ({
+    searchCatalog: vi.fn(),
+    fetchCatalogDetail: vi.fn(),
+    fetchCatalogFamilies: vi.fn(),
+    startCatalogDownload: vi.fn(),
+  }));
+const { fetchModelComponents } = vi.hoisted(() => ({
+  fetchModelComponents: vi.fn(),
 }));
 vi.mock("../../lib/api/catalog", () => ({
   searchCatalog,
+  fetchCatalogDetail,
   fetchCatalogFamilies,
   startCatalogDownload,
 }));
+vi.mock("../../lib/api/models", () => ({ fetchModelComponents }));
 vi.mock("../../lib/catalogSizes", () => ({
   resolveEntrySize: vi.fn().mockResolvedValue(null),
 }));
@@ -21,6 +28,7 @@ vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
 import CatalogTab from "./CatalogTab.vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 
@@ -94,6 +102,10 @@ beforeEach(() => {
   (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver =
     FakeIntersectionObserver;
   fetchCatalogFamilies.mockResolvedValue([]);
+  fetchModelComponents.mockResolvedValue({ model: "", components: [] });
+  fetchCatalogDetail.mockImplementation((id: string) =>
+    Promise.resolve({ ...entry(id, "flux"), id, name: id, installed: true }),
+  );
   searchCatalog.mockResolvedValue({ entries: [], page: 1, page_size: PAGE_SIZE, total: 0 });
 });
 
@@ -617,6 +629,139 @@ describe("CatalogTab host fallback when the local engine is down", () => {
     ];
     expect(forward).toBe(false);
     expect(target).toBeUndefined();
+    wrapper.unmount();
+  });
+});
+
+describe("CatalogTab installed repair routing", () => {
+  it("confirms repair against owning hosts only", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    useHostsStore().extras.push(
+      {
+        id: "studio-7680",
+        label: "Studio GPU",
+        url: "http://studio:7680",
+        apiKey: "studio-key",
+        status: "ready",
+        error: null,
+        instanceId: null,
+      },
+      {
+        id: "other-7680",
+        label: "Other GPU",
+        url: "http://other:7680",
+        apiKey: "other-key",
+        status: "ready",
+        error: null,
+        instanceId: null,
+      },
+    );
+    const installed = {
+      name: "flux-dev:q8",
+      family: "flux",
+      size_gb: 12,
+      is_loaded: false,
+      hf_repo: "org/flux-dev",
+      default_steps: 4,
+      default_guidance: 1,
+      default_width: 1024,
+      default_height: 1024,
+      description: "",
+      downloaded: true,
+      hostIds: ["local", "studio-7680"],
+    };
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [installed],
+      },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='catalog-card']").trigger("click");
+    await flushPromises();
+    await document.body.querySelector<HTMLButtonElement>("[data-test='drawer-repair']")!.click();
+    await flushPromises();
+
+    const dialog = document.body.querySelector<HTMLElement>(
+      "[data-test='download-target-dialog']",
+    )!;
+    expect(dialog.textContent).toContain("Choose where to repair");
+    expect(dialog.textContent).toContain("This device");
+    expect(dialog.textContent).toContain("Studio GPU");
+    expect(dialog.textContent).not.toContain("Other GPU");
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+
+    dialog.querySelector<HTMLButtonElement>("[data-test='download-target-studio-7680']")!.click();
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "flux-dev:q8",
+      { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+      true,
+    );
+    wrapper.unmount();
+  });
+
+  it("does not reroute an offline owner's repair to the local primary", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    useHostsStore().extras.push({
+      id: "offline-7680",
+      label: "Offline GPU",
+      url: "http://offline:7680",
+      apiKey: "offline-key",
+      status: "error",
+      error: "offline",
+      instanceId: null,
+    });
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "flux-dev:q8",
+            family: "flux",
+            size_gb: 12,
+            is_loaded: false,
+            hf_repo: "org/flux-dev",
+            default_steps: 4,
+            default_guidance: 1,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            hostIds: ["offline-7680"],
+          },
+        ],
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='catalog-card']").trigger("click");
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>("[data-test='drawer-repair']")!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("Choose where to repair");
     wrapper.unmount();
   });
 });

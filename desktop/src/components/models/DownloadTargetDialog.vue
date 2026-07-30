@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from "vue";
 import type { HostView } from "../../stores/hosts";
 
-defineProps<{ modelName: string; hosts: HostView[] }>();
+const props = withDefaults(
+  defineProps<{ modelName: string; hosts: HostView[]; action?: "download" | "repair" }>(),
+  { action: "download" },
+);
 const emit = defineEmits<{
   (e: "select", host: HostView): void;
   (e: "close"): void;
 }>();
 const closeBtn = ref<HTMLButtonElement | null>(null);
+const title = computed(() => `Choose where to ${props.action} ${props.modelName}`);
 let restoreFocusEl: HTMLElement | null = null;
 
 function onKeydown(event: KeyboardEvent) {
@@ -33,22 +37,28 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
         role="dialog"
         aria-modal="true"
         aria-labelledby="download-target-title"
+        data-test="download-target-dialog"
         class="border-edge z-50 w-full max-w-md rounded-chrome border bg-bench p-4 shadow-raised"
       >
         <div class="mb-3 flex items-start justify-between gap-4">
           <div>
             <h2 id="download-target-title" class="text-body-lg font-semibold text-ink">
-              Choose where to download {{ modelName }}
+              {{ title }}
             </h2>
             <p class="mt-1 text-caption text-ink-2">
-              The model and its required components will be stored on the selected host.
+              <template v-if="action === 'repair'">
+                Only missing or damaged files will be fetched on the selected host.
+              </template>
+              <template v-else>
+                The model and its required components will be stored on the selected host.
+              </template>
             </p>
           </div>
           <button
             ref="closeBtn"
             type="button"
             class="h-7 rounded-control px-2 text-ink-2 hover:bg-bath hover:text-ink"
-            aria-label="Close download target picker"
+            :aria-label="`Close ${action} target picker`"
             @click="emit('close')"
           >
             ✕
