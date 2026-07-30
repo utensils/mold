@@ -3046,7 +3046,9 @@ fn resolved_paths_model_fingerprint(model: &str, paths: ModelPaths) -> String {
     for (index, shard) in paths.transformer_shards.into_iter().enumerate() {
         artifacts.insert(ComponentRole::TransformerShard(index), shard);
     }
-    artifacts.insert(ComponentRole::Vae, paths.vae);
+    if !paths.vae.as_os_str().is_empty() {
+        artifacts.insert(ComponentRole::Vae, paths.vae);
+    }
     model_fingerprint(model, &artifacts, &BTreeMap::new())
 }
 
@@ -3063,10 +3065,10 @@ pub fn frozen_model_fingerprint(
             model: model.to_string(),
         }
     })?;
-    let mut files = vec![
-        ("transformer".to_string(), paths.transformer),
-        ("vae".to_string(), paths.vae),
-    ];
+    let mut files = vec![("transformer".to_string(), paths.transformer)];
+    if !paths.vae.as_os_str().is_empty() {
+        files.push(("vae".to_string(), paths.vae));
+    }
     files.extend(
         paths
             .transformer_shards
@@ -3160,7 +3162,9 @@ pub fn freeze_chain_model_with_paths(
                 .collect()
         })
         .transpose()?;
-    frozen.vae = Some(canonical(&paths.vae)?);
+    frozen.vae = (!paths.vae.as_os_str().is_empty())
+        .then(|| canonical(&paths.vae))
+        .transpose()?;
     frozen.spatial_upscaler = canonical_optional(paths.spatial_upscaler.as_ref())?;
     frozen.temporal_upscaler = canonical_optional(paths.temporal_upscaler.as_ref())?;
     frozen.distilled_lora = canonical_optional(paths.distilled_lora.as_ref())?;
@@ -4881,6 +4885,35 @@ mod tests {
             descriptor.fingerprint().as_str(),
             "8a7ad345c90e7dde228c90ee4a219986ad705a0958ead00d143ead84bef72be7"
         );
+    }
+
+    #[test]
+    fn frozen_ltx2_chain_model_preserves_absent_vae_through_exact_recovery() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("ltx2-transformer.safetensors");
+        std::fs::write(&transformer, b"ltx2").unwrap();
+        let model = "ltx-2-test:fp8";
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(String::new()),
+                family: Some("ltx2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut paths = indexed_paths(Vec::new(), Vec::new());
+        paths.transformer = transformer.canonicalize().unwrap();
+        paths.vae = PathBuf::new();
+
+        let frozen = freeze_chain_model_with_paths(&config, model, paths).unwrap();
+
+        assert_eq!(frozen.config.vae, None);
+        let recovered = ModelPaths::resolve_from_model_config_exact(&frozen.config)
+            .expect("LTX-2 frozen paths remain exactly resolvable without a standalone VAE");
+        assert_eq!(recovered.transformer, transformer.canonicalize().unwrap());
+        assert_eq!(recovered.vae, PathBuf::new());
     }
 
     #[test]

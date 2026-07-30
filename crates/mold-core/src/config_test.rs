@@ -444,6 +444,31 @@ is_schnell = false
     }
 
     #[test]
+    fn exact_ltx2_model_paths_allow_absent_standalone_vae() {
+        let config = ModelConfig {
+            transformer: Some("/frozen/ltx2-transformer".into()),
+            family: Some("ltx2".into()),
+            ..ModelConfig::default()
+        };
+
+        let paths = ModelPaths::resolve_from_model_config_exact(&config).unwrap();
+
+        assert_eq!(paths.transformer, PathBuf::from("/frozen/ltx2-transformer"));
+        assert_eq!(paths.vae, PathBuf::new());
+    }
+
+    #[test]
+    fn exact_diffusion_model_paths_still_require_vae() {
+        let config = ModelConfig {
+            transformer: Some("/frozen/flux-transformer".into()),
+            family: Some("flux".into()),
+            ..ModelConfig::default()
+        };
+
+        assert!(ModelPaths::resolve_from_model_config_exact(&config).is_none());
+    }
+
+    #[test]
     fn model_paths_resolve_manifest_from_models_dir_without_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("resolve-manifest");
