@@ -885,6 +885,48 @@ describe("removeMany", () => {
   });
 });
 
+describe("delete everywhere", () => {
+  it("deletes every matching device copy when one merged print is selected", async () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("shared.png", 20)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("shared.png", 19)]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }) as never);
+
+    const result = await gallery.removeEntriesEverywhere([gallery.merged[0]!]);
+
+    expect(result).toEqual({ deletedPrints: 1, failedPrints: 0, deletedCopies: 2 });
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+      "/api/gallery/image/shared.png",
+      { method: "DELETE" },
+    );
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+      "/api/gallery/image/shared.png",
+      { method: "DELETE" },
+    );
+    expect(gallery.merged).toHaveLength(0);
+  });
+
+  it("holds every matching copy during the single-print undo window", () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("shared.png", 20)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("shared.png", 19)]);
+
+    const locations = gallery.beginDeleteEverywhere(gallery.merged[0]!);
+    expect(locations).toEqual([
+      { sourceKey: "local", filename: "shared.png" },
+      { sourceKey: "hal9000-7680", filename: "shared.png" },
+    ]);
+    expect(gallery.merged).toHaveLength(0);
+
+    gallery.cancelDeleteEverywhere(locations);
+    expect(gallery.merged).toHaveLength(1);
+  });
+});
+
 describe("bucket sync", () => {
   it("drops buckets whose source disappeared and evicts their media", async () => {
     connectLocalPlusHal();

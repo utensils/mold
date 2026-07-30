@@ -474,7 +474,7 @@ describe("LibraryPage multi-host identity", () => {
     localStorage.clear();
   });
 
-  it("deletes the remote twin on its own host and keeps the local one", async () => {
+  it("deletes a selected remote twin from every host that contains the print", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
     await flushPromises();
@@ -486,10 +486,7 @@ describe("LibraryPage multi-host identity", () => {
     await wrapper.find("[data-test='lb-delete']").trigger("click");
     await flushPromises();
 
-    // The local twin survives the optimistic removal.
-    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
-      "origin|twin.png",
-    );
+    expect(wrapper.text()).toContain("No prints yet");
 
     vi.advanceTimersByTime(6000);
     await flushPromises();
@@ -497,10 +494,10 @@ describe("LibraryPage multi-host identity", () => {
       expect.objectContaining({ id: "studio-7680" }),
       "twin.png",
     );
-    expect(deleteMock).not.toHaveBeenCalled();
+    expect(deleteMock).toHaveBeenCalledWith("twin.png");
   });
 
-  it("deletes the local twin on the origin and keeps the remote one", async () => {
+  it("deletes a selected local twin from every host that contains the print", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
     await flushPromises();
@@ -510,14 +507,15 @@ describe("LibraryPage multi-host identity", () => {
     await wrapper.find("[data-test='lb-delete']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
-      "studio-7680|twin.png",
-    );
+    expect(wrapper.text()).toContain("No prints yet");
 
     vi.advanceTimersByTime(6000);
     await flushPromises();
     expect(deleteMock).toHaveBeenCalledWith("twin.png");
-    expect(hostDeleteMock).not.toHaveBeenCalled();
+    expect(hostDeleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680" }),
+      "twin.png",
+    );
   });
 
   it("bulk delete routes each selected twin to its own host", async () => {
@@ -598,9 +596,14 @@ describe("LibraryPage multi-host identity", () => {
     vi.advanceTimersByTime(6000);
     await flushPromises();
 
-    expect(deleteMock).not.toHaveBeenCalled();
+    // Delete-everywhere still removes the reachable origin copy, but it must
+    // not reroute the forgotten host's concrete copy to that origin.
+    expect(deleteMock).toHaveBeenCalledWith("twin.png");
     expect(hostDeleteMock).not.toHaveBeenCalled();
-    // The print comes back rather than vanishing on a delete that never ran.
-    expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
+    // Only the failed remote copy returns.
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("1");
+    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
+      "studio-7680|twin.png",
+    );
   });
 });

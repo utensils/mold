@@ -11,6 +11,11 @@ import { ipc } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
 import { useHostsStore, type HostView } from "./hosts";
 import type { GalleryImage, ServerEvent } from "../lib/api/types";
+import {
+  GALLERY_IDENTITY_WINDOW_SECS,
+  galleryPrintIdentity,
+  sameLogicalGalleryPrint,
+} from "@studio/lib/galleryPrintIdentity";
 
 /** Collapse a burst of row-less gallery_added events into one refetch. */
 const REFETCH_DEBOUNCE_MS = 500;
@@ -32,6 +37,11 @@ export interface GalleryBucket {
 export interface GallerySourceRef {
   key: string;
   label: string;
+}
+
+export interface GalleryLocation {
+  sourceKey: string;
+  filename: string;
 }
 
 /** One print in the merged, date-sorted grid. */
@@ -75,27 +85,6 @@ const emptyBucket = (): GalleryBucket => ({
  * (`mold-<model>-<seed>-<epochMs>[-role].<ext>`), so synthetic rows recover
  * it from the name. Non-synthetic rows trust their recorded metadata.
  */
-export function identitySeed(item: GalleryImage): number | null {
-  if (item.metadata_synthetic) {
-    // A synthesized row's recorded seed is a placeholder 0 ("unknown") — it
-    // must never act as a real seed. Only the auto-save filename pattern
-    // yields a trustworthy seed; otherwise the row opts out of identity.
-    const match = /-(\d+)-(\d+)(?:-(?:original|upscaled))?\.[a-z0-9]+$/i.exec(item.filename);
-    return match ? Number(match[1]) : null;
-  }
-  return item.metadata?.seed ?? null;
-}
-
-/** Filename-style slug of a model name — matches the auto-save filename
- *  vocabulary, so synthesized rows (model recovered from the name) compare
- *  equal to origin rows carrying the real `model:tag`. */
-function modelIdentitySlug(model: string | undefined): string {
-  return (model ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 /**
  * Cross-host identity beyond the filename: mirrored copies of one print are
  * byte-identical, so seed + exact byte size + model pins them together even
@@ -103,18 +92,13 @@ function modelIdentitySlug(model: string | undefined): string {
  * synthesized its metadata (seed and model survive in the filename either
  * way). Rows missing seed or size opt out of identity matching entirely.
  */
-export function printIdentity(item: GalleryImage): string | null {
-  const size = item.size_bytes;
-  const seed = identitySeed(item);
-  if (!size || seed == null) return null;
-  return `${seed}:${size}:${modelIdentitySlug(item.metadata?.model)}`;
-}
+export const printIdentity = galleryPrintIdentity;
 
 /** Identity matches only count as one print when the rows were written
  *  around the same time: mirrors land within seconds of their origin, while
  *  a genuine re-generation that happens to reuse a seed (and byte length)
  *  lands much later and must stay a separate print. */
-export const IDENTITY_WINDOW_SECS = 3600;
+export const IDENTITY_WINDOW_SECS = GALLERY_IDENTITY_WINDOW_SECS;
 
 export function withinIdentityWindow(a: GalleryImage, b: GalleryImage): boolean {
   return Math.abs(a.timestamp - b.timestamp) <= IDENTITY_WINDOW_SECS;
@@ -470,13 +454,42 @@ export const useGalleryStore = defineStore("gallery", {
       if (!bucket?.loaded || bucket.loading) return;
       await this.fetchBucket(hostId);
     },
+    /**
+     * Every currently loaded device copy of one logical print. Exact filenames
+     * cover modern mirrors; seed + byte-size + model covers legacy auto-saves
+     * that minted a different filename.
+     */
+    locationsOf(entry: MergedPrint): GalleryLocation[] {
+      const locations: GalleryLocation[] = [];
+      for (const [sourceKey, bucket] of Object.entries(this.buckets)) {
+        for (const item of bucket.items) {
+          if (sameLogicalGalleryPrint(entry.item, item)) {
+            locations.push({ sourceKey, filename: item.filename });
+          }
+        }
+      }
+      return locations;
+    },
     /** Optimistically hide a print from every view, pending commit or undo. */
     beginDelete(sourceKey: string, filename: string) {
       this.pendingDeletions.add(`${sourceKey}::${filename}`);
     },
+    /** Hide every known copy and return the concrete locations held for undo. */
+    beginDeleteEverywhere(entry: MergedPrint): GalleryLocation[] {
+      const locations = this.locationsOf(entry);
+      for (const location of locations) {
+        this.beginDelete(location.sourceKey, location.filename);
+      }
+      return locations;
+    },
     /** Undo an optimistic delete — no server call; the print returns to the grid. */
     cancelDelete(sourceKey: string, filename: string) {
       this.pendingDeletions.delete(`${sourceKey}::${filename}`);
+    },
+    cancelDeleteEverywhere(locations: GalleryLocation[]) {
+      for (const location of locations) {
+        this.cancelDelete(location.sourceKey, location.filename);
+      }
     },
     /**
      * Commit an optimistic delete: run the real DELETE, then drop the pending
@@ -491,6 +504,37 @@ export const useGalleryStore = defineStore("gallery", {
       } finally {
         this.pendingDeletions.delete(key);
       }
+    },
+    async commitDeleteEverywhere(
+      locations: GalleryLocation[],
+    ): Promise<{ deleted: number; failed: number; error: string | null }> {
+      const results = await Promise.allSettled(
+        locations.map(async (location) => {
+          try {
+            await this.remove(location.sourceKey, location.filename);
+          } finally {
+            this.pendingDeletions.delete(`${location.sourceKey}::${location.filename}`);
+          }
+        }),
+      );
+      const failedOrigins = new Set<string>();
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failedOrigins.add(locations[index]!.sourceKey);
+      });
+      await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      const failed = results.filter((result) => result.status === "rejected").length;
+      const rejection = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      return {
+        deleted: results.length - failed,
+        failed,
+        error: rejection
+          ? rejection.reason instanceof Error
+            ? rejection.reason.message
+            : String(rejection.reason)
+          : null,
+      };
     },
     /** Delete a print where it lives, evicting only that origin's media. */
     async remove(sourceKey: string, filename: string) {
@@ -530,6 +574,45 @@ export const useGalleryStore = defineStore("gallery", {
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
       return { deleted, failed: results.length - deleted };
+    },
+    /**
+     * Delete each selected logical print from every device bucket that
+     * currently contains a matching copy. Concrete locations are de-duplicated
+     * so selecting two visible twins never sends the same DELETE twice.
+     */
+    async removeEntriesEverywhere(
+      entries: MergedPrint[],
+    ): Promise<{ deletedPrints: number; failedPrints: number; deletedCopies: number }> {
+      const groups = entries.map((entry) => this.locationsOf(entry));
+      const unique = new Map<string, GalleryLocation>();
+      for (const group of groups) {
+        for (const location of group) {
+          unique.set(`${location.sourceKey}::${location.filename}`, location);
+        }
+      }
+      const locations = [...unique.values()];
+      const results = await Promise.allSettled(
+        locations.map((location) =>
+          this.remove(location.sourceKey, location.filename).then(() => location),
+        ),
+      );
+      const failedKeys = new Set<string>();
+      const failedOrigins = new Set<string>();
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") return;
+        const location = locations[index]!;
+        failedKeys.add(`${location.sourceKey}::${location.filename}`);
+        failedOrigins.add(location.sourceKey);
+      });
+      await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      const failedPrints = groups.filter((group) =>
+        group.some((location) => failedKeys.has(`${location.sourceKey}::${location.filename}`)),
+      ).length;
+      return {
+        deletedPrints: entries.length - failedPrints,
+        failedPrints,
+        deletedCopies: results.length - failedKeys.size,
+      };
     },
     evictItemMedia(sourceKey: string, filename: string) {
       const source = this.mediaSourceOf(sourceKey);

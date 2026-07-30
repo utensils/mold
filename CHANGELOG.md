@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Library selection and deletion now work as one multi-device action without replacing iOS image actions.** On iPhone, image long-press keeps the native Share / Save to Photos / Copy context menu, while the 44-point **Select** control enters multi-select for select all, clear, and bulk delete. iPhone, desktop, and web expand every delete to all matching copies on currently connected devices using the same filename or legacy seed/byte-size identity; partial host failures keep the surviving copy visible and say which cleanup could not finish.
+
 ### Fixed
 
 - **Large prepared batches no longer fail expansion or lock Create behind earlier work.** Prompt expansion now assembles exact, distinct results from bounded four-prompt completions, scales the output-token allowance per chunk, gives later chunks their logical position in the full batch, and retries only missing or duplicate positions before failing closed. Desktop, web, and iPhone accept directly entered batch counts beyond eight; large reviews render a first-eight summary with bounded paging instead of mounting every editor. Each reviewed set has a 10,000-variation memory-safety ceiling, while accepted sets have no cumulative queue limit. Once a prepared batch is accepted, Create immediately returns to authoring while its exact-host siblings continue through the shared per-host stream pool, so another batch can be prepared and queued without stale completion recovery overwriting newer work. Web prompt expansion likewise remains available while generation is active, owns each async submission to prevent duplicate fan-out, and CLI expansion rejects partial legacy-host responses instead of silently shrinking the batch.

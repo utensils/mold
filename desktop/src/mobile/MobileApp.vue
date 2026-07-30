@@ -17,6 +17,7 @@ import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
   modelsForOutput,
@@ -367,6 +368,10 @@ const galleryLoading = ref(false);
 const galleryLoadingMore = ref(false);
 const galleryError = ref("");
 const galleryRemaining = ref(0);
+const gallerySelectMode = ref(false);
+const gallerySelection = ref<Set<string>>(new Set());
+const galleryDeleteConfirming = ref(false);
+const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
 const generatedViewerOpen = ref(false);
 const reusingPrint = ref(false);
@@ -2558,6 +2563,7 @@ function enqueueGalleryOperation(operation: () => Promise<void>): Promise<void> 
 }
 
 async function performGalleryRefresh(): Promise<void> {
+  clearGallerySelection();
   galleryLoading.value = true;
   galleryError.value = "";
   const prior = gallery.value;
@@ -2708,6 +2714,106 @@ async function useSelectedPrintAsSource(): Promise<void> {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
+}
+
+const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
+  `${print.hostId}|${print.filename}`;
+
+function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
+  return [...gallery.value, ...pendingGallery];
+}
+
+function setGallerySelectMode(next: boolean): void {
+  gallerySelectMode.value = next;
+  galleryDeleteConfirming.value = false;
+  if (!next) gallerySelection.value = new Set();
+}
+
+function clearGallerySelection(): void {
+  setGallerySelectMode(false);
+}
+
+function clearSelectedGalleryPrints(): void {
+  gallerySelection.value = new Set();
+  galleryDeleteConfirming.value = false;
+}
+
+function toggleGallerySelection(print: GalleryPrint): void {
+  const key = galleryPrintKey(print);
+  const next = new Set(gallerySelection.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  gallerySelection.value = next;
+  galleryDeleteConfirming.value = false;
+}
+
+function selectAllGalleryPrints(): void {
+  gallerySelection.value = new Set(gallery.value.map(galleryPrintKey));
+  galleryDeleteConfirming.value = false;
+}
+
+function handleGalleryTileClick(print: GalleryPrint): void {
+  if (gallerySelectMode.value) toggleGallerySelection(print);
+  else openPrint(print);
+}
+
+async function deleteSelectedGalleryPrints(): Promise<void> {
+  if (galleryDeleting.value || gallerySelection.value.size === 0) return;
+  if (!galleryDeleteConfirming.value) {
+    galleryDeleteConfirming.value = true;
+    return;
+  }
+  galleryDeleteConfirming.value = false;
+  galleryDeleting.value = true;
+  galleryError.value = "";
+
+  const selected = allGalleryPrints().filter((print) =>
+    gallerySelection.value.has(galleryPrintKey(print)),
+  );
+  const all = allGalleryPrints();
+  const groups = selected.map((print) =>
+    all.filter((candidate) => sameLogicalGalleryPrint(print, candidate)),
+  );
+  const targets = new Map<string, GalleryPrint | PendingGalleryPrint>();
+  for (const group of groups) {
+    for (const print of group) targets.set(galleryPrintKey(print), print);
+  }
+  const targetList = [...targets.values()];
+  const results = await Promise.allSettled(
+    targetList.map((print) =>
+      apiFetchTo(print.target, `/api/gallery/image/${encodeURIComponent(print.filename)}`, {
+        method: "DELETE",
+      }),
+    ),
+  );
+  const deletedKeys = new Set<string>();
+  const failedKeys = new Set<string>();
+  results.forEach((result, index) => {
+    const key = galleryPrintKey(targetList[index]!);
+    if (result.status === "fulfilled") deletedKeys.add(key);
+    else failedKeys.add(key);
+  });
+  for (const print of gallery.value) {
+    if (deletedKeys.has(galleryPrintKey(print))) revokeObjectUrl(print.thumbnailUrl);
+  }
+  gallery.value = gallery.value.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
+  pendingGallery = pendingGallery.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
+  galleryRemaining.value = pendingGallery.length;
+
+  const failedPrints = groups.filter((group) =>
+    group.some((print) => failedKeys.has(galleryPrintKey(print))),
+  ).length;
+  const deletedPrints = selected.length - failedPrints;
+  if (failedPrints > 0) {
+    galleryError.value = `Deleted ${deletedPrints} of ${selected.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`;
+  }
+  gallerySelection.value = new Set(
+    [...gallerySelection.value].filter((key) =>
+      allGalleryPrints().some((print) => galleryPrintKey(print) === key),
+    ),
+  );
+  if (gallerySelection.value.size === 0) setGallerySelectMode(false);
+  galleryDeleting.value = false;
 }
 
 function isFreshMobilePrint(print: GalleryPrint): boolean {
@@ -3611,8 +3717,27 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="tab === 'gallery'">
-        <h1 class="section-title">Library</h1>
-        <p class="section-note">Prints from every saved host</p>
+        <div class="mobile-library-heading">
+          <div>
+            <h1 class="section-title">Library</h1>
+            <p class="section-note">
+              {{
+                gallerySelectMode
+                  ? `${gallerySelection.size} selected`
+                  : "Prints from every saved host · Tap Select for multiple"
+              }}
+            </p>
+          </div>
+          <button
+            class="secondary-button mobile-library-select"
+            type="button"
+            :aria-pressed="gallerySelectMode"
+            data-test="mobile-gallery-select"
+            @click="setGallerySelectMode(!gallerySelectMode)"
+          >
+            {{ gallerySelectMode ? "Done" : "Select" }}
+          </button>
+        </div>
         <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
         <div v-if="galleryLoading" class="empty-state">Loading prints…</div>
         <div v-else-if="gallery.length" class="gallery-grid">
@@ -3620,10 +3745,18 @@ onBeforeUnmount(() => {
             v-for="print in gallery"
             :key="`${print.hostId}:${print.filename}`"
             class="gallery-item"
+            :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
             type="button"
-            :aria-label="`Open ${print.filename} from ${print.hostName}`"
+            :aria-label="
+              gallerySelectMode
+                ? `${gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select'} ${print.filename} from ${print.hostName}`
+                : `Open ${print.filename} from ${print.hostName}`
+            "
+            :aria-pressed="
+              gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
+            "
             data-test="gallery-item"
-            @click="openPrint(print)"
+            @click="handleGalleryTileClick(print)"
           >
             <img
               :src="print.thumbnailUrl"
@@ -3631,7 +3764,11 @@ onBeforeUnmount(() => {
               loading="lazy"
             />
             <span v-if="isVideoItem(print)" class="gallery-video-badge" aria-hidden="true">▶</span>
-            <span v-if="isFreshMobilePrint(print)" class="gallery-new-badge" data-test="new-badge">
+            <span
+              v-if="!gallerySelectMode && isFreshMobilePrint(print)"
+              class="gallery-new-badge"
+              data-test="new-badge"
+            >
               New
             </span>
             <span
@@ -3640,6 +3777,14 @@ onBeforeUnmount(() => {
               data-test="upscaled-badge"
             >
               Upscaled
+            </span>
+            <span
+              v-if="gallerySelectMode"
+              class="gallery-selection-indicator"
+              data-test="mobile-gallery-selection-indicator"
+              aria-hidden="true"
+            >
+              {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
             </span>
           </button>
         </div>
@@ -3653,6 +3798,53 @@ onBeforeUnmount(() => {
         >
           {{ galleryLoadingMore ? "Loading…" : `Load older prints (${galleryRemaining})` }}
         </button>
+        <div
+          v-if="gallerySelectMode"
+          class="mobile-gallery-actions"
+          role="toolbar"
+          aria-label="Library selection actions"
+          data-test="mobile-gallery-actions"
+        >
+          <span>
+            {{
+              galleryDeleteConfirming
+                ? `Delete ${gallerySelection.size} everywhere?`
+                : `${gallerySelection.size} selected`
+            }}
+          </span>
+          <button
+            v-if="!galleryDeleteConfirming"
+            type="button"
+            :disabled="gallery.length === 0"
+            @click="selectAllGalleryPrints"
+          >
+            All
+          </button>
+          <button
+            v-if="!galleryDeleteConfirming"
+            type="button"
+            :disabled="gallerySelection.size === 0"
+            @click="clearSelectedGalleryPrints"
+          >
+            Clear
+          </button>
+          <button
+            v-if="galleryDeleteConfirming"
+            type="button"
+            :disabled="galleryDeleting"
+            @click="galleryDeleteConfirming = false"
+          >
+            Cancel
+          </button>
+          <button
+            class="danger"
+            type="button"
+            :disabled="gallerySelection.size === 0 || galleryDeleting"
+            @click="deleteSelectedGalleryPrints"
+          >
+            {{ galleryDeleting ? "Deleting…" : galleryDeleteConfirming ? "Confirm" : "Delete" }}
+          </button>
+        </div>
       </template>
 
       <template v-else-if="tab === 'hosts'">
