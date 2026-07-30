@@ -555,6 +555,11 @@ const dragModel = computed({
   box-shadow: none;
 }
 
+.ms-rail-frame :deep(.ms-seam__line-smooth) {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .ms-rail-frame :deep(.ms-seam:hover:not(:disabled) .ms-seam__diagram) {
   border-color: rgba(255, 255, 255, 0.7);
   transform: scale(1.04);

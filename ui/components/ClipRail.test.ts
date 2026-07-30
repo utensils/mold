@@ -282,6 +282,9 @@ describe("ClipRail", () => {
     expect(railSource).toMatch(
       /\.ms-rail-frame :deep\(\.ms-seam__diagram\)\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border-radius:\s*50%/s,
     );
+    expect(railSource).toMatch(
+      /\.ms-rail-frame :deep\(\.ms-seam__line-smooth\)\s*\{[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)/s,
+    );
     expect(railSource).toContain(
       ':deep(.ms-seam[data-transition="fade"] .ms-seam__diagram)',
     );
