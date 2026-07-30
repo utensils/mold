@@ -125,12 +125,43 @@ pub fn build_batch_messages(
     family_override: Option<&FamilyOverride>,
     style: Option<&str>,
 ) -> Vec<(String, String)> {
+    build_batch_messages_with_context(
+        prompt,
+        family,
+        variations,
+        None,
+        custom_template,
+        family_override,
+        style,
+    )
+}
+
+/// Build batch messages with the logical positions represented by this
+/// bounded completion. Position context prevents later chunks from simply
+/// repeating the first few concepts in a large logical batch.
+pub fn build_batch_messages_with_context(
+    prompt: &str,
+    family: &str,
+    variations: usize,
+    logical_range: Option<(usize, usize)>,
+    custom_template: Option<&str>,
+    family_override: Option<&FamilyOverride>,
+    style: Option<&str>,
+) -> Vec<(String, String)> {
     let (word_limit, model_notes) = resolve_family_config(family, family_override);
     let template = custom_template.unwrap_or(BATCH_SYSTEM_TEMPLATE);
     let mut system = template
         .replace("{N}", &variations.to_string())
         .replace("{WORD_LIMIT}", &word_limit.to_string())
         .replace("{MODEL_NOTES}", &model_notes);
+    if let Some((start, total)) = logical_range {
+        let end = start.saturating_add(variations).saturating_sub(1);
+        system.push_str(&format!(
+            "\n\nLARGE BATCH CONTEXT: Generate logical variations {start} through {end} \
+             of {total}. Make them distinct from concepts likely used for every earlier \
+             position in this batch; use the position numbers to drive new combinations."
+        ));
+    }
     apply_style_directive(&mut system, style);
 
     vec![
@@ -273,6 +304,22 @@ mod tests {
         let prompt = "a dragon in a crystal cave";
         let msgs = build_batch_messages(prompt, "sdxl", 4, None, None, None);
         assert_eq!(msgs[1].1, prompt);
+    }
+
+    #[test]
+    fn batch_messages_include_large_batch_position_context() {
+        let msgs =
+            build_batch_messages_with_context("sunset", "sdxl", 4, Some((5, 12)), None, None, None);
+        assert!(msgs[0].1.contains("variations 5 through 8 of 12"));
+        assert!(msgs[0].1.contains("distinct from concepts"));
+    }
+
+    #[test]
+    fn batch_messages_keep_position_context_for_single_missing_retry() {
+        let msgs =
+            build_batch_messages_with_context("sunset", "sdxl", 1, Some((4, 8)), None, None, None);
+        assert!(msgs[0].1.contains("Generate 1 distinct"));
+        assert!(msgs[0].1.contains("variations 4 through 4 of 8"));
     }
 
     // ── custom templates and family overrides ────────────────────────────

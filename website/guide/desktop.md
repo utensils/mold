@@ -64,10 +64,15 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate. Drop a PNG or JPEG from the file manager anywhere
   in Create to attach it as the current family's source; Mold images with
   embedded generation metadata also restore their complete saved settings.
-  Prompt expansion follows Batch: Batch 1 is a quick rewrite with undo, while
-  Batch N greater than 1 prepares exactly N editable variations for review
-  before generation. Mold shows and freezes the resolved host for expansion
-  and every sibling. When a Batch 1 rewrite becomes stale, Create immediately
+  Prompt expansion follows the directly editable Batch count: Batch 1 is a
+  quick rewrite with undo, while Batch N greater than 1 prepares exactly N
+  distinct editable variations before generation. Counts above eight start
+  with a compact first-eight review and bounded Review all pages. Mold shows
+  and freezes the resolved host for expansion and every sibling. One reviewed
+  set may contain up to 10,000 variations as a memory-safety boundary; the
+  number of sets you can queue is not limited. Once the host
+  accepts a batch, the composer is immediately available to queue another
+  while the earlier work continues in Activity. When a Batch 1 rewrite becomes stale, Create immediately
   offers to re-expand the original for the current model and generate, generate
   the visible rewrite anyway, or restore the original; generation errors use
   larger copy with a copy-to-clipboard control. Source, model, host, or count

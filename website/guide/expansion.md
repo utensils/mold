@@ -32,12 +32,14 @@ mold run "a cat" --no-expand
 
 ## Native prepared batches
 
-In the desktop and iPhone Create workspaces, the Batch control also sets the
-expansion count. Batch 1 keeps the quick **Expand** rewrite and undo, with the
-host route frozen through the next Generate or Develop. Batch 2 or greater
-uses **Prepare N variations** and opens an inline review workspace before any
-generation request is queued. Each prompt can be edited or removed; the whole
-set can be regenerated or discarded.
+In the desktop, web, and iPhone Create workspaces, the directly editable Batch
+control also sets the expansion count. Batch 1 keeps the quick **Expand**
+rewrite and undo, with the host route frozen through the next Generate or
+Develop. Batch 2 or greater uses **Prepare N variations** and opens an inline
+review workspace before any generation request is queued. Each prompt can be
+edited or removed; the whole set can be regenerated or discarded. Counts above
+eight start with eight editors and a compact remainder summary; **Review all**
+uses bounded pages so very large batches do not create an equally large screen.
 
 On desktop, a Batch 1 rewrite whose model, family, or host changed is never a
 dead Generate click: an immediate recovery notice can **Re-expand and
@@ -46,8 +48,11 @@ prompt anyway** as an explicit current-route override, or **Restore original**.
 The notice uses readable model names, larger error copy, and a copy button.
 
 Mold resolves the selected Create host before expansion and keeps that exact
-route for every sibling. It rejects responses that do not contain exactly N
-non-empty prompts. Changing the source prompt, model, host, or Batch count keeps
+route for every sibling. Large expansions are assembled from bounded
+four-prompt model calls with position-aware instructions and per-chunk token
+budgets. Missing or duplicate positions are retried, and Mold rejects any
+result that is not exactly N distinct, non-empty prompts. Changing the source
+prompt, model, host, or Batch count keeps
 the reviewed prompts visible but blocks generation until you refresh or discard
 them. A missing expansion model is pulled on the named host without falling
 back to another machine. Create keeps that recovery inline for both quick and
@@ -61,6 +66,12 @@ same immutable recovery record. Editing or removing reviewed prompts cancels a
 pending replacement instead of letting it overwrite the newer set.
 Each prepared sibling records a durable batch ID and its one-based position in
 the Library details panel, together with the source prompt when present.
+After the host accepts a batch, Create returns to authoring immediately while
+the siblings remain visible in Activity. Another batch can be prepared and
+queued without waiting for the earlier one to finish; held streams continue to
+share the per-host connection limit. Each reviewed set is limited to 10,000
+variations to keep prompt and job state bounded in memory; queueing additional
+sets has no cumulative limit.
 
 On iPhone, the concrete route includes the selected host ID, endpoint,
 Keychain-supplied API key, and server instance. The touch workspace uses 44pt

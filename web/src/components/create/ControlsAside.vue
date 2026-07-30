@@ -273,7 +273,8 @@ function lockLastSeed() {
         <Stepper
           :model-value="batchLocked ? 1 : modelValue.batchSize"
           :min="1"
-          :max="batchLocked ? 1 : 8"
+          :max="batchLocked ? 1 : 10_000"
+          editable
           label="Batch size"
           @update:model-value="patch({ batchSize: $event })"
         />

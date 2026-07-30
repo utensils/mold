@@ -1453,12 +1453,26 @@ textarea.control {
 .mobile-generate-stepper-value {
   display: grid;
   place-items: center;
+  width: 100%;
+  min-width: 0;
   border-right: 1px solid var(--edge);
   border-left: 1px solid var(--edge);
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--rebate);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   font-variant-numeric: tabular-nums;
+  text-align: center;
+  appearance: textfield;
+}
+
+.mobile-generate-stepper-value::-webkit-inner-spin-button,
+.mobile-generate-stepper-value::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 .mobile-generate-toggle-row {

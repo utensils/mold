@@ -37,6 +37,7 @@ pub async fn run(
     backend_override: Option<&str>,
     model_override: Option<&str>,
 ) -> Result<()> {
+    mold_core::expand::validate_expansion_variation_count(variations)?;
     let config = Config::load_or_default();
     let mut expand_settings = config.expand.clone().with_env_overrides();
 
@@ -81,6 +82,7 @@ pub async fn run(
     }
 
     let result = expander.expand(prompt, &expand_config)?;
+    mold_core::expand::validate_expanded_prompts(&result.expanded, variations)?;
 
     if json_output {
         let json =

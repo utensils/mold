@@ -36,6 +36,7 @@ const props = withDefaults(
   }>(),
   { upscalers: () => [], audioOutputSupported: true },
 );
+const MAX_BATCH_SIZE = 10_000;
 
 const emit = defineEmits<{
   "validity-change": [valid: boolean];
@@ -95,7 +96,9 @@ watch(valid, (next) => emit("validity-change", next), { immediate: true });
 watch(
   () => [caps.value.forcesBatchSizeOne, props.form.batchSize] as const,
   ([forced, batchSize]) => {
-    const normalized = forced ? 1 : Math.min(8, Math.max(1, Math.round(batchSize) || 1));
+    const normalized = forced
+      ? 1
+      : Math.min(MAX_BATCH_SIZE, Math.max(1, Math.round(batchSize) || 1));
     if (batchSize !== normalized) props.form.batchSize = normalized;
   },
   { immediate: true },
@@ -103,7 +106,15 @@ watch(
 
 function stepBatch(delta: -1 | 1): void {
   if (caps.value.forcesBatchSizeOne) return;
-  props.form.batchSize = Math.min(8, Math.max(1, props.form.batchSize + delta));
+  props.form.batchSize = Math.min(MAX_BATCH_SIZE, Math.max(1, props.form.batchSize + delta));
+}
+
+function setBatch(raw: string): void {
+  if (caps.value.forcesBatchSizeOne) return;
+  const value = Number(raw);
+  props.form.batchSize = Number.isFinite(value)
+    ? Math.min(MAX_BATCH_SIZE, Math.max(1, Math.round(value)))
+    : 1;
 }
 
 function snapFramesField(): void {
@@ -348,15 +359,24 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           >
             −
           </button>
-          <output class="mobile-generate-stepper-value" data-test="mobile-batch-value">
-            {{ form.batchSize }}
-          </output>
+          <input
+            class="mobile-generate-stepper-value"
+            data-test="mobile-batch-value"
+            type="number"
+            inputmode="numeric"
+            min="1"
+            step="1"
+            aria-label="Batch size"
+            :value="form.batchSize"
+            :disabled="caps.forcesBatchSizeOne"
+            @change="setBatch(($event.target as HTMLInputElement).value)"
+          />
           <button
             type="button"
             class="mobile-generate-stepper-button"
             data-test="mobile-batch-increment"
             aria-label="Increase batch size"
-            :disabled="caps.forcesBatchSizeOne || form.batchSize >= 8"
+            :disabled="caps.forcesBatchSizeOne || form.batchSize >= MAX_BATCH_SIZE"
             @click="stepBatch(1)"
           >
             +

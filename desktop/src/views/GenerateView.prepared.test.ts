@@ -5,6 +5,7 @@ import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
+import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { newJob, useGenerationStore } from "../stores/generation";
@@ -188,6 +189,32 @@ describe("GenerateView prepared expansion batches", () => {
     expect(prepared.props("batch").route.hostId).toBe("local");
   });
 
+  it("prepares and preserves exactly eight reviewed prompts", async () => {
+    const prompts = Array.from({ length: 8 }, (_, index) => `variation ${index + 1}`);
+    useGenerateFormStore().form.batchSize = prompts.length;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: prompts,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "a lighthouse at dusk",
+      { variations: 8, modelFamily: "flux" },
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+    );
+    expect(
+      wrapper
+        .findComponent(PreparedExpansionBatch)
+        .props("batch")
+        .prompts.map((prompt: { text: string }) => prompt.text),
+    ).toEqual(prompts);
+  });
+
   it("runs exactly one finalized placement preview before submitting edited prepared prompts", async () => {
     vi.mocked(expandPrompt).mockResolvedValue({
       original: "a lighthouse at dusk",
@@ -229,6 +256,104 @@ describe("GenerateView prepared expansion batches", () => {
       batchId: expect.any(String),
     });
     expect(document.activeElement).toBe(wrapper.get('textarea[aria-label="Prompt"]').element);
+  });
+
+  it("releases accepted work so another prepared batch can queue before the first settles", async () => {
+    vi.mocked(expandPrompt)
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["first one", "first two", "first three"],
+      })
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["second one", "second two", "second three"],
+      });
+    const first = deferred<never[]>();
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValueOnce({ jobs: [], settled: first.promise })
+      .mockReturnValueOnce({ jobs: [], settled: Promise.resolve([]) });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(false);
+    expect(wrapper.findComponent(ExpandControl).props("blocked")).toBe(false);
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(true);
+    wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(submit.mock.calls[0]![4]).toMatchObject({
+      prompts: ["first one", "first two", "first three"],
+      originalPrompt: "a lighthouse at dusk",
+    });
+    expect(submit.mock.calls[1]![4]).toMatchObject({
+      prompts: ["second one", "second two", "second three"],
+      originalPrompt: "a lighthouse at dusk",
+    });
+    first.resolve([]);
+    await flushPromises();
+  });
+
+  it("does not let an older out-of-order completion replace newer recovery authority", async () => {
+    const form = useGenerateFormStore().form;
+    form.model = "missing-old:q8";
+    vi.mocked(expandPrompt)
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["old one", "old two", "old three"],
+      })
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["new one", "new two", "new three"],
+      });
+    const older = deferred<ReturnType<typeof newJob>[]>();
+    const newer = deferred<ReturnType<typeof newJob>[]>();
+    vi.spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValueOnce({ jobs: [], settled: older.promise })
+      .mockReturnValueOnce({ jobs: [], settled: newer.promise });
+    const failedJob = (modelName: string) => {
+      const job = newJob({
+        prompt: "a lighthouse at dusk",
+        model: modelName,
+        width: 768,
+        height: 768,
+        steps: 20,
+      });
+      job.status = "error";
+      job.error = `model '${modelName}' not found`;
+      return job;
+    };
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+    await flushPromises();
+
+    form.model = "missing-new:q8";
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+    await flushPromises();
+
+    newer.resolve([failedJob("missing-new:q8")]);
+    await flushPromises();
+    expect(wrapper.findComponent(MissingModelDialog).props("model")).toBe("missing-new:q8");
+
+    older.resolve([failedJob("missing-old:q8")]);
+    await flushPromises();
+    expect(wrapper.findComponent(MissingModelDialog).props("model")).toBe("missing-new:q8");
   });
 
   it.each([

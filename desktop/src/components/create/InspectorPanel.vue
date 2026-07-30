@@ -224,7 +224,8 @@ function rerollSeed() {
   props.form.seed = String(randomSeed());
 }
 
-const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
+const MAX_BATCH_SIZE = 10_000;
+const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : MAX_BATCH_SIZE));
 
 // Same contract as the Advanced pane's Reset, surfaced without opening it:
 // the prompt, the model, and any prepared batch size survive.
@@ -422,6 +423,7 @@ function resetSettings() {
           :model-value="form.batchSize"
           :min="1"
           :max="batchMax"
+          :editable="!caps.forcesBatchSizeOne"
           label="Batch size"
           @update:model-value="form.batchSize = $event"
         />

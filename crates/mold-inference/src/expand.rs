@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
-use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
+use mold_core::expand_prompts::{
+    build_batch_messages_with_context, build_single_messages, format_chatml,
+};
 
 use crate::device::{
     discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
@@ -684,42 +686,48 @@ impl LocalExpander {
 
 impl PromptExpander for LocalExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
-        let family_override = config.family_overrides.get(&config.model_family);
-        let messages = if config.variations > 1 {
-            build_batch_messages(
-                prompt,
-                &config.model_family,
-                config.variations,
-                config.batch_prompt.as_deref(),
-                family_override,
-                config.style.as_deref(),
-            )
-        } else {
-            build_single_messages(
-                prompt,
-                &config.model_family,
-                config.system_prompt.as_deref(),
-                family_override,
-                config.style.as_deref(),
-            )
-        };
+        let expanded = mold_core::expand::expand_exact_with(config, |attempt_config, attempt| {
+            let family_override = attempt_config
+                .family_overrides
+                .get(&attempt_config.model_family);
+            let messages = if attempt.total > 1 {
+                build_batch_messages_with_context(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.variations,
+                    Some((attempt.start, attempt.total)),
+                    attempt_config.batch_prompt.as_deref(),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                )
+            } else {
+                build_single_messages(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.system_prompt.as_deref(),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                )
+            };
 
-        let prompt_text = format_chatml(&messages, config.thinking);
-        let output = self.generate_text(&prompt_text, config)?;
+            let prompt_text = format_chatml(&messages, attempt_config.thinking);
+            let output = self.generate_text(&prompt_text, attempt_config)?;
 
-        let expanded = if config.variations > 1 {
-            mold_core::expand::parse_variations_public(&output, config.variations)
-        } else {
-            vec![mold_core::expand::clean_expanded_prompt_public(&output)]
-        };
-
-        // Validate we got reasonable output
-        if expanded.is_empty() || expanded.iter().all(|s| s.is_empty()) {
-            bail!(
-                "expand model produced empty output. The model may need re-downloading: \
-                 mold pull qwen3-expand"
-            );
-        }
+            Ok(if attempt.total > 1 {
+                mold_core::expand::parse_variations_public(&output, attempt_config.variations)
+            } else {
+                vec![mold_core::expand::clean_expanded_prompt_public(&output)]
+            })
+        })
+        .map_err(|error| {
+            if error.to_string().contains("expected exactly") {
+                anyhow::anyhow!(
+                    "{error}. The model may need re-downloading: mold pull qwen3-expand"
+                )
+            } else {
+                error
+            }
+        })?;
 
         Ok(ExpandResult {
             original: prompt.to_string(),

@@ -1215,6 +1215,96 @@ describe("CreatePage layout and behavior", () => {
     expect(batchIds.size).toBe(1);
   });
 
+  it("opens prompt expansion while an earlier print is running", async () => {
+    streamJobsRef.value = [
+      {
+        id: "already-running",
+        request: {
+          model: "flux-dev:q4",
+          prompt: "earlier work",
+          width: 512,
+          height: 512,
+          steps: 20,
+          guidance: 3,
+          batch_size: 1,
+          output_format: "png",
+        },
+        startedAt: 0,
+        controller: new AbortController(),
+        progress: {
+          stage: "Queued",
+          step: null,
+          totalSteps: null,
+          weightBytesLoaded: null,
+          weightBytesTotal: null,
+          queuePosition: null,
+          gpu: null,
+          elapsedMs: null,
+        },
+        result: null,
+        error: null,
+        state: "running",
+        chain: null,
+        lastProgressAt: 0,
+        workStarted: false,
+        serverId: null,
+      } as Job,
+    ];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.prompt = "new work";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
+      true,
+    );
+  });
+
+  it("owns route revalidation so a prepared batch cannot be queued twice", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 3;
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    let release!: (
+      value: Awaited<ReturnType<typeof placementPreviewMock>>,
+    ) => void;
+    placementPreviewMock.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const callsBeforeQueue = placementPreviewMock.mock.calls.length;
+    await wrapper.get("[data-test='queue-variations']").trigger("click");
+    await wrapper.get("[data-test='queue-variations']").trigger("click");
+    expect(placementPreviewMock.mock.calls.length - callsBeforeQueue).toBe(1);
+    expect(submitMock).not.toHaveBeenCalled();
+
+    release({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(3);
+  });
+
   it("preserves reviewed variations as stale when the model changes", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
@@ -2611,7 +2701,6 @@ function pageStubs() {
         "prompt",
         "expand",
         "currentModel",
-        "queueBusy",
         "styleDirective",
         "target",
       ],

@@ -24,6 +24,26 @@ const confirmButton = ref<HTMLButtonElement | null>(null);
 const confirming = ref<{ batchId: string; promptId: string } | null>(null);
 const stale = computed(() => props.staleReasons.length > 0);
 const valid = computed(() => props.batch.prompts.every((prompt) => prompt.text.trim()));
+const REVIEW_PREVIEW_COUNT = 8;
+const REVIEW_PAGE_SIZE = 50;
+const reviewPage = ref<number | null>(null);
+const reviewStart = computed(() =>
+  reviewPage.value === null ? 0 : reviewPage.value * REVIEW_PAGE_SIZE,
+);
+const reviewEnd = computed(() =>
+  Math.min(
+    props.batch.prompts.length,
+    reviewStart.value + (reviewPage.value === null ? REVIEW_PREVIEW_COUNT : REVIEW_PAGE_SIZE),
+  ),
+);
+const visiblePrompts = computed(() =>
+  props.batch.prompts
+    .slice(reviewStart.value, reviewEnd.value)
+    .map((prompt, offset) => ({ prompt, index: reviewStart.value + offset })),
+);
+const hiddenPromptCount = computed(() =>
+  Math.max(0, props.batch.prompts.length - REVIEW_PREVIEW_COUNT),
+);
 
 function edit(id: string, event: Event): void {
   emit("edit", { id, text: (event.target as HTMLTextAreaElement).value });
@@ -70,6 +90,19 @@ watch(
   () => props.batch.batchId,
   () => {
     confirming.value = null;
+    reviewPage.value = null;
+  },
+  { flush: "sync" },
+);
+
+watch(
+  () => props.batch.prompts.length,
+  (count) => {
+    if (count <= REVIEW_PREVIEW_COUNT) {
+      reviewPage.value = null;
+    } else if (reviewPage.value !== null && reviewPage.value * REVIEW_PAGE_SIZE >= count) {
+      reviewPage.value = Math.max(0, Math.ceil(count / REVIEW_PAGE_SIZE) - 1);
+    }
   },
   { flush: "sync" },
 );
@@ -120,7 +153,7 @@ watch(
     <p v-if="error" class="error-text" role="alert">{{ error }}</p>
 
     <ol>
-      <li v-for="(prompt, index) in batch.prompts" :key="prompt.id">
+      <li v-for="{ prompt, index } in visiblePrompts" :key="prompt.id">
         <span aria-hidden="true">{{ index + 1 }}</span>
         <textarea
           class="control mobile-prepared-editor"
@@ -144,6 +177,56 @@ watch(
         </button>
       </li>
     </ol>
+    <div
+      v-if="hiddenPromptCount"
+      class="mobile-prepared-more"
+      data-test="mobile-prepared-compact-review"
+    >
+      <template v-if="reviewPage === null">
+        <p>{{ hiddenPromptCount }} more variations are ready to queue.</p>
+        <button
+          type="button"
+          class="secondary-button mobile-touch-action"
+          data-test="mobile-prepared-review-all"
+          @click="reviewPage = 0"
+        >
+          Review all {{ batch.prompts.length }}
+        </button>
+      </template>
+      <template v-else>
+        <p data-test="mobile-prepared-review-range">
+          Variations {{ reviewStart + 1 }}–{{ reviewEnd }} of {{ batch.prompts.length }}
+        </p>
+        <div class="mobile-prepared-paging">
+          <button
+            type="button"
+            class="secondary-button mobile-touch-action"
+            data-test="mobile-prepared-review-previous"
+            :disabled="reviewPage === 0"
+            @click="reviewPage = Math.max(0, reviewPage - 1)"
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            class="secondary-button mobile-touch-action"
+            data-test="mobile-prepared-review-next"
+            :disabled="reviewEnd >= batch.prompts.length"
+            @click="reviewPage += 1"
+          >
+            Next
+          </button>
+          <button
+            type="button"
+            class="secondary-button mobile-touch-action"
+            data-test="mobile-prepared-review-summary"
+            @click="reviewPage = null"
+          >
+            Show summary
+          </button>
+        </div>
+      </template>
+    </div>
 
     <div
       v-if="confirming"
@@ -263,6 +346,23 @@ watch(
   border: 1px solid var(--control-edge);
   border-radius: var(--radius-control);
   background: var(--bench);
+}
+.mobile-prepared-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-2);
+}
+.mobile-prepared-more p {
+  flex: 1 1 180px;
+}
+.mobile-prepared-paging {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .mobile-prepared-stale ul {
   margin: 0;
