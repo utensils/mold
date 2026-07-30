@@ -247,7 +247,7 @@ async function pickFromGallery(item: GalleryImage) {
             {{ error }}
           </p>
           <p v-else-if="!stillEntries.length" class="ip__status">
-            no prints in the gallery yet
+            no PNG or JPEG images available
           </p>
           <ul v-else class="ip__grid">
             <li v-for="item in stillEntries" :key="item.filename">

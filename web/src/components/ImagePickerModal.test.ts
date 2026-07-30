@@ -139,6 +139,31 @@ describe("ImagePickerModal", () => {
     ).toBe("still.png");
   });
 
+  it("explains when the gallery has no compatible still images", async () => {
+    vi.mocked(api.listGallery).mockResolvedValueOnce([
+      {
+        filename: "clip.mp4",
+        metadata: {} as never,
+        timestamp: 1,
+      },
+    ]);
+    const w = mount(ImagePickerModal, {
+      props: { open: true, multiple: false },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await w
+      .get("[aria-label='Image source']")
+      .findAll("button")[1]!
+      .trigger("click");
+    await flushPromises();
+
+    expect(document.body.textContent).toContain(
+      "no PNG or JPEG images available",
+    );
+  });
+
   it("is a labelled modal dialog", () => {
     mount(ImagePickerModal, {
       props: { open: true },
