@@ -329,7 +329,7 @@ fn shim_build_response_and_cleanup(
 
     let output_dir = {
         let config = state.config.blocking_read();
-        if config.is_output_disabled() {
+        if state.is_output_disabled(&config) {
             None
         } else {
             Some(config.effective_output_dir())
@@ -750,9 +750,11 @@ pub async fn generate_chain_stream(
         return Err(ApiError::generation_unavailable(reason));
     }
     let completion_payload = requested_sse_completion_payload(&headers)?;
-    if completion_payload == SseCompletionPayload::MetadataOnly
-        && state.config.read().await.is_output_disabled()
-    {
+    let output_disabled = {
+        let config = state.config.read().await;
+        state.is_output_disabled(&config)
+    };
+    if completion_payload == SseCompletionPayload::MetadataOnly && output_disabled {
         return Err(ApiError::validation(
             "metadata-only SSE completions require server gallery output to be enabled",
         ));

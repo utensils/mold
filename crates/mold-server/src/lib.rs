@@ -603,7 +603,7 @@ pub async fn run_server(
     // until every durable attempt is either rolled back or rolled forward.
     {
         let config = state.config.read().await;
-        if !config.is_output_disabled() {
+        if !state.is_output_disabled(&config) {
             let output_dir = config.effective_output_dir();
             drop(config);
             std::fs::create_dir_all(&output_dir)?;
@@ -687,7 +687,7 @@ pub async fn run_server(
         );
 
         let config_snapshot = state.config.read().await.clone();
-        let output_dir = if config_snapshot.is_output_disabled() {
+        let output_dir = if state.is_output_disabled(&config_snapshot) {
             None
         } else {
             Some(config_snapshot.effective_output_dir())
@@ -833,7 +833,7 @@ pub async fn run_server(
     // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
-        if config.is_output_disabled() {
+        if state.is_output_disabled(&config) {
             tracing::warn!(
                 "image output is disabled (output_dir is empty) — \
                  generated images will not be saved and the TUI gallery will be empty"
