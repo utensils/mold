@@ -2274,6 +2274,12 @@ function openItem(item: GalleryImage) {
 }
 
 function recreateFromGallery(item: GalleryImage) {
+  // The Create drawer can reuse a normal print without navigating, so retire
+  // Sequence explicitly before applying that print's one-shot settings.
+  setOutput("single");
+  draft.stopEditing();
+  editBaselineShared.value = null;
+  draft.lastSingleModel = null;
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,
