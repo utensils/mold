@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import Popover from "./Popover.vue";
@@ -39,33 +39,57 @@ function harness(open = false) {
   );
 }
 
+// The panel teleports to <body>, so it is queried on the document,
+// not through the wrapper's own subtree.
+const panel = () => document.querySelector<HTMLElement>(".ms-popover__panel");
+
+afterEach(() => {
+  document.body.innerHTML = "";
+});
+
 describe("Popover", () => {
   it("shows the panel only while open, as a labelled dialog", async () => {
     const wrapper = harness();
-    expect(wrapper.find(".content").exists()).toBe(false);
+    expect(panel()).toBeNull();
     await wrapper.find(".trigger").trigger("click");
-    expect(wrapper.find(".content").exists()).toBe(true);
-    expect(wrapper.find("[role=dialog]").attributes("aria-label")).toBe(
-      "Test menu",
-    );
+    expect(panel()?.querySelector(".content")).not.toBeNull();
+    expect(panel()?.getAttribute("role")).toBe("dialog");
+    expect(panel()?.getAttribute("aria-label")).toBe("Test menu");
     wrapper.unmount();
   });
 
-  it("dismisses on outside pointerdown but not inside", async () => {
+  it("teleports the panel to <body> so a scrollable ancestor never grows", async () => {
+    // Rendered in place, an open panel extended the Create bench's
+    // scrollable overflow and grew a scrollbar; fixed under <body> it
+    // contributes overflow to nothing.
     const wrapper = harness(true);
+    await wrapper.vm.$nextTick();
+    expect(panel()?.parentElement).toBe(document.body);
+    expect(wrapper.element.querySelector(".ms-popover__panel")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("dismisses on outside pointerdown but not inside the panel", async () => {
+    const wrapper = harness(true);
+    await wrapper.vm.$nextTick();
+    panel()?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(panel()).not.toBeNull();
+
     document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".content").exists()).toBe(false);
+    expect(panel()).toBeNull();
     wrapper.unmount();
   });
 
   it("dismisses on Escape", async () => {
     const wrapper = harness(true);
+    await wrapper.vm.$nextTick();
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".content").exists()).toBe(false);
+    expect(panel()).toBeNull();
     wrapper.unmount();
   });
 });

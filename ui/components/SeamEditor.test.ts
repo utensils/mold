@@ -26,9 +26,10 @@ describe("SeamEditor", () => {
     expect(text).toContain("Blend across the seam");
   });
 
-  it("relabels smooth as Join clips at zero motion tail", () => {
+  it("relabels smooth as Join at zero motion tail", () => {
     const wrapper = make({ motionTail: 0 });
-    expect(wrapper.text()).toContain("Join clips");
+    expect(wrapper.text()).toContain("Join");
+    expect(wrapper.text()).not.toContain("Join clips");
     expect(wrapper.text()).toContain("Clips join end to end");
   });
 
@@ -76,6 +77,19 @@ describe("SeamEditor", () => {
     );
     await increase.trigger("click");
     expect(wrapper.emitted("update:fadeFrames")).toBeUndefined();
+  });
+
+  it("teaches with the same circular glyph badges the seam pill shows", () => {
+    const wrapper = make();
+    const badges = wrapper.findAll(
+      ".ms-seam-editor__diagram .ms-seam-editor__glyph",
+    );
+    expect(badges).toHaveLength(3);
+    expect(badges.every((badge) => badge.find("rect").exists())).toBe(true);
+    // The legacy rectangle swatches are gone.
+    expect(wrapper.find(".ms-seam-editor__line-smooth").exists()).toBe(false);
+    expect(wrapper.find(".ms-seam-editor__line-cut").exists()).toBe(false);
+    expect(wrapper.find(".ms-seam-editor__line-fade").exists()).toBe(false);
   });
 
   it("shows the seam context and the apply-all hint when asked", () => {

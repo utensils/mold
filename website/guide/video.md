@@ -91,7 +91,7 @@ separate page. In Create, set **Output** (beside Model) to **Sequence** and the
 composer becomes a clip rail: clip pills carrying a prompt and frame count,
 joined by seam pills. Seams are named in words — **Smooth**, **Cut**, and
 **Fade 8f** — and a click opens the seam editor with its fade-length stepper.
-LTX-Video has no motion tail, so its seams read **Join clips**. New clips
+LTX-Video has no motion tail, so its seams read **Join**. New clips
 default to the selected model's advertised frame count. Frame choices and
 timeline metadata include their duration at the live model FPS, such as
 `97f · 4.0s`.

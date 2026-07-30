@@ -11,6 +11,7 @@ import ClipRail from "@ui/components/ClipRail.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   defaultClipFrames,
@@ -229,6 +230,21 @@ function discardEdit() {
 function submit() {
   if (disabledReason.value || props.submitting) return;
   emit("submit");
+}
+
+// ── Clear sequence ───────────────────────────────────────────────────────────
+const clearConfirmOpen = ref(false);
+const clearMessage = computed(() => {
+  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
+  return `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`;
+});
+
+function clearSequence() {
+  clearConfirmOpen.value = false;
+  openSeamId.value = null;
+  negativeOpen.value = false;
+  draft.clearSequence(newClipFrames.value);
+  toasts.push("Sequence cleared");
 }
 
 // ── File tools ───────────────────────────────────────────────────────────────
@@ -512,6 +528,15 @@ async function copyToml() {
         </div>
       </Popover>
 
+      <button
+        type="button"
+        data-test="sequence-clear"
+        class="ms-seqbench__tool ms-seqbench__tool--danger"
+        @click="clearConfirmOpen = true"
+      >
+        Clear sequence
+      </button>
+
       <label
         v-if="chainLimits?.supports_audio"
         class="ms-seqbench__audio"
@@ -546,6 +571,16 @@ async function copyToml() {
         {{ submitting ? "Starting…" : draft.editing ? "Update sequence" : "Generate sequence" }}
       </button>
     </div>
+
+    <ConfirmDialog
+      :open="clearConfirmOpen"
+      title="Clear sequence?"
+      :message="clearMessage"
+      confirm-label="Clear sequence"
+      danger
+      @confirm="clearSequence"
+      @cancel="clearConfirmOpen = false"
+    />
   </div>
 </template>
 
@@ -554,6 +589,17 @@ async function copyToml() {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /*
+   * The parent panel mounts this `flex: 1 1 0%`. Without an explicit
+   * min-height the bench is floored at its own min-content — which counts
+   * the rail's 204px preferred basis, not its 104px floor — so the panel
+   * grew a scrollbar before the filmstrip's shrink weight ever engaged.
+   * Zero lets the bench take exactly the panel's space and flex the rail
+   * down for real; the internal floors below keep content honest, and a
+   * genuinely impossible height overflows into the panel's scrollbar
+   * rather than clipping the Generate button invisibly.
+   */
+  min-height: 0;
   border-top: 1px solid var(--edge);
   background: var(--bench);
   padding: 12px 22px 14px;
@@ -562,6 +608,7 @@ async function copyToml() {
 .ms-seqbench__banner {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 10px;
   border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
   background: color-mix(in srgb, var(--safelight) 7%, transparent);
@@ -587,18 +634,33 @@ async function copyToml() {
   color: var(--rebate);
 }
 
+/*
+ * The filmstrip absorbs bench resizes first: an outsized shrink weight pulls
+ * the rail from its preferred 204px basis down to a hard floor before any
+ * other row gives, so a shorter bench compresses thumbnails (fluid cqh
+ * geometry inside ClipRail) instead of growing a scrollbar. The preferred
+ * height MUST be the flex basis, not a `height` — a specified height becomes
+ * the wrapper's min-content contribution, which propagates up as the
+ * column's minimum and re-creates the scrollbar this exists to prevent.
+ */
 .ms-seqbench__railwrap {
   display: flex;
   width: 100%;
+  flex: 0 999 204px;
+  min-height: 104px;
 }
 .ms-seqbench__railwrap :deep(.ms-popover__trigger) {
   display: flex;
   width: 100%;
   min-width: 0;
+  height: 100%;
 }
-.ms-seqbench__rail {
+/* Descendant selector outranks ClipRail's own `height: 188px` regardless of
+   stylesheet injection order. */
+.ms-seqbench .ms-seqbench__rail {
   flex: 1;
   min-width: 0;
+  height: 100%;
   padding: 2px 0;
 }
 
@@ -606,7 +668,9 @@ async function copyToml() {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 112px;
+  /* Head (28) + gaps (12) + tools (28) + the prompt's 48px floor: below
+     this the editor's own rows would start clipping. */
+  min-height: 116px;
   gap: 6px;
 }
 .ms-seqbench__cliphead {
@@ -665,7 +729,7 @@ async function copyToml() {
 }
 .ms-seqbench__prompt--main {
   flex: 1;
-  min-height: 64px;
+  min-height: 48px;
 }
 .ms-seqbench__prompt--negative {
   font-size: 12px;
@@ -695,6 +759,7 @@ async function copyToml() {
 .ms-seqbench__footer {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 12px;
   margin-top: auto;
   padding-top: 2px;

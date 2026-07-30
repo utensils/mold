@@ -1,18 +1,20 @@
 <script setup lang="ts">
 /*
  * Seam pill — the resting transition control between two clips on the rail
- * (spec §06, mockup 2a "text first"). Names the transition in words with a
- * mini diagram as reinforcement; fade length rides along in the pill.
- * `motionTail` is REQUIRED so the zero-tail "Join clips" label can never be
- * skipped (the old SpliceMark defaulted it and mislabeled LTX-Video seams).
+ * (spec §06, mockup `docs/design`… sequence-filmstrip): a circular glyph
+ * badge with the transition named in words beneath it; fade length rides
+ * along in the caption. `motionTail` is REQUIRED so the zero-tail
+ * "Join" label can never be skipped (the old SpliceMark defaulted it
+ * and mislabeled LTX-Video seams).
  */
 import { computed } from "vue";
+import SeamGlyph from "./SeamGlyph.vue";
 import { transitionLabel, type SequenceTransition } from "../lib/seam";
 
 const props = withDefaults(
   defineProps<{
     transition: SequenceTransition;
-    /** Motion-tail frames of the active model; 0 = LTX-Video "Join clips". */
+    /** Motion-tail frames of the active model; 0 = LTX-Video "Join". */
     motionTail: number;
     /** Shown as `· Nf` when the transition is fade. */
     fadeFrames?: number;
@@ -47,69 +49,47 @@ const fadeSuffix = computed(() =>
     :disabled="disabled"
     :aria-label="`Transition: ${label}${fadeSuffix ? ` ${fadeSuffix}` : ''}`"
     @click="emit('click', $event)"
+    @contextmenu.prevent="emit('click', $event)"
   >
     <span class="ms-seam__diagram" aria-hidden="true">
-      <span v-if="transition === 'smooth'" class="ms-seam__line-smooth" />
-      <span v-else-if="transition === 'cut'" class="ms-seam__line-cut" />
-      <span v-else class="ms-seam__line-fade" />
+      <SeamGlyph class="ms-seam__glyph" :transition="transition" />
     </span>
     <span class="ms-seam__caption">
       <span class="ms-seam__label">{{ label }}</span>
       <span v-if="fadeSuffix" class="ms-seam__frames">{{ fadeSuffix }}</span>
     </span>
-    <svg
-      class="ms-seam__chevron"
-      viewBox="0 0 24 24"
-      width="11"
-      height="11"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.7"
-      stroke-linecap="round"
-      aria-hidden="true"
-    >
-      <path d="M6 9l6 6 6-6" />
-    </svg>
   </button>
 </template>
 
 <style scoped>
 .ms-seam {
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 9px;
+  gap: 5px;
+  padding: 2px;
   flex: 0 0 auto;
-  white-space: nowrap;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
   color: var(--ink-2);
   font-family: var(--f-mono);
   font-size: 10px;
+  line-height: 1;
   cursor: pointer;
-  transition:
-    border-color var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+  transition: color var(--dur-quick) var(--ease);
 }
 
 .ms-seam--large {
+  min-width: 44px;
   min-height: 44px;
-  padding: 0 14px;
+  gap: 6px;
+  padding: 4px;
   font-size: 12px;
 }
 
 .ms-seam:hover:not(:disabled) {
   color: var(--rebate);
-  border-color: var(--ink-3);
-}
-
-.ms-seam[data-on="true"] {
-  border-color: var(--sel-border);
-  background: var(--sel-bg);
-  color: var(--sel-ink);
-  box-shadow: var(--sel-ring);
 }
 
 .ms-seam:disabled {
@@ -123,70 +103,72 @@ const fadeSuffix = computed(() =>
 }
 
 .ms-seam__diagram {
-  position: relative;
-  display: block;
-  width: 22px;
-  height: 12px;
-  border-radius: 2px;
-  background: var(--print);
-  overflow: hidden;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
+  border: 1px solid var(--ce);
+  border-radius: 50%;
+  background: var(--bench);
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    background var(--dur-quick) var(--ease),
+    transform var(--dur-quick) var(--ease);
 }
 
 .ms-seam--large .ms-seam__diagram {
-  width: 26px;
+  width: 38px;
+  height: 38px;
+}
+
+.ms-seam__glyph {
+  display: block;
+  width: 14px;
   height: 14px;
+  fill: currentColor;
 }
 
-.ms-seam__line-smooth {
-  position: absolute;
-  top: 5px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--halide);
+.ms-seam--large .ms-seam__glyph {
+  width: 16px;
+  height: 16px;
 }
 
-.ms-seam--large .ms-seam__line-smooth {
-  top: 6px;
+.ms-seam:hover:not(:disabled) .ms-seam__diagram {
+  border-color: var(--ink-3);
+  transform: scale(1.04);
 }
 
-.ms-seam__line-cut {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(50% - 1px);
-  width: 2px;
-  background: var(--stop);
+.ms-seam[data-on="true"],
+.ms-seam[data-transition="fade"] {
+  color: var(--safelight);
 }
 
-.ms-seam__line-fade {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 20%,
-    var(--safelight) 50%,
-    transparent 80%
-  );
+.ms-seam[data-on="true"] .ms-seam__diagram,
+.ms-seam[data-transition="fade"] .ms-seam__diagram {
+  border-color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 12%, transparent);
+}
+
+.ms-seam[data-on="true"] .ms-seam__diagram {
+  box-shadow: var(--sel-ring);
+}
+
+/* A label that outgrows the seam's narrow column wraps centered instead of
+   ellipsizing or spilling over the neighboring tiles. */
+.ms-seam__caption {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 1px 3px;
+  min-width: 0;
+  max-width: 64px;
+  text-align: center;
+  line-height: 1.2;
 }
 
 .ms-seam__frames {
-  color: var(--ink-3);
-}
-
-.ms-seam__caption {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-}
-
-.ms-seam[data-on="true"] .ms-seam__frames {
-  color: var(--sel-ink);
-}
-
-.ms-seam__chevron {
-  color: var(--ink-3);
+  flex: 0 0 auto;
 }
 </style>

@@ -93,7 +93,7 @@ describe("SequenceComposer — active clip editor", () => {
     const draft = seedDraft();
     draft.activeClipId = draft.clips[1]!.id;
     // A context-capable LTX-2 model: the seam reads "Smooth from clip 1"
-    // (LTX-Video's zero motion tail would label it "Join clips" instead).
+    // (LTX-Video's zero motion tail would label it "Join" instead).
     const wrapper = mountComposer({
       selectedModel: { name: "ltx-2-19b-distilled:fp8", family: "ltx2" } as ModelEntry,
     });
@@ -211,5 +211,62 @@ describe("SequenceComposer — edit sessions", () => {
     await wrapper.get("[data-test='edit-discard']").trigger("click");
     expect(draft.editing).toBeNull();
     expect(draft.clips[1]!.prompt).toBe("clip two");
+  });
+});
+
+describe("SequenceComposer — clear sequence", () => {
+  it("confirms, then resets to two fresh clips and stays in Sequence", async () => {
+    const draft = seedDraft(["clip one", "clip two"]);
+    draft.addClip(25);
+    draft.clips[2]!.prompt = "clip three";
+    draft.enableAudio = true;
+    const wrapper = mountComposer();
+
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    // The confirm dialog teleports to <body>; blunt copy names the count.
+    const dialog = document.querySelector("[data-test='confirm-dialog']");
+    expect(dialog?.textContent).toContain("Clear sequence?");
+    expect(dialog?.textContent).toContain("Removes all 3 clips");
+
+    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    await flushPromises();
+
+    expect(draft.clips).toHaveLength(2);
+    expect(draft.clips.every((clip) => clip.prompt === "")).toBe(true);
+    expect(draft.enableAudio).toBe(false);
+    expect(draft.output).toBe("sequence");
+    expect(document.querySelector("[data-test='confirm-dialog']")).toBeNull();
+  });
+
+  it("cancel keeps every clip", async () => {
+    const draft = seedDraft(["clip one", "clip two"]);
+    const wrapper = mountComposer();
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    (document.querySelector("[data-test='confirm-cancel']") as HTMLElement).click();
+    await flushPromises();
+    expect(draft.clips.map((clip) => clip.prompt)).toEqual(["clip one", "clip two"]);
+  });
+
+  it("clearing during an edit session ends the session without emitting", async () => {
+    const draft = seedDraft(["clip one", "clip two"]);
+    draft.loadFromJob(
+      {
+        jobId: "job-1",
+        hostId: "h1",
+        baseline: draft.clips.map((c) => ({ ...c })),
+        completedStages: 1,
+      },
+      draft.clips.map((c) => ({ ...c })),
+      false,
+    );
+    const wrapper = mountComposer();
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    const dialog = document.querySelector("[data-test='confirm-dialog']");
+    expect(dialog?.textContent).toContain("Ends the edit session");
+    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    await flushPromises();
+    expect(draft.editing).toBeNull();
+    expect(wrapper.emitted("submit")).toBeUndefined();
+    expect(wrapper.emitted("duplicate")).toBeUndefined();
   });
 });

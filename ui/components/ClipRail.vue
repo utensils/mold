@@ -27,7 +27,7 @@ const props = withDefaults(
   defineProps<{
     clips: C[];
     activeId: string | null;
-    /** Motion-tail frames of the active model (0 → "Join clips" seams). */
+    /** Motion-tail frames of the active model (0 → "Join" seams). */
     motionTail: number;
     maxStages?: number;
     /** Seam whose editor is currently open (clip id), for the active ring. */
@@ -288,12 +288,26 @@ const dragModel = computed({
 
 <style scoped>
 .ms-rail-frame {
-  --filmstrip-tile-max: 184px;
-  --filmstrip-thumb-height: 104px;
-  --filmstrip-footer-height: 36px;
-  --filmstrip-scene-height: 140px;
+  /*
+   * Fluid filmstrip geometry: the frame is its own size container, so every
+   * internal measure (paddings, scene, thumb, tile cap) derives from the
+   * frame's actual height. Surfaces only ever set the frame height — the
+   * desktop bench resizer shrinks it via flex — and the strip re-proportions
+   * continuously instead of stepping through fixed density tiers or growing
+   * scrollbars.
+   */
+  container-type: size;
+  --filmstrip-pad-top: clamp(12px, 10cqh, 19px);
+  --filmstrip-pad-bottom: clamp(14px, 12cqh, 23px);
+  --filmstrip-footer-height: clamp(26px, 20cqh, 36px);
+  --filmstrip-scene-height: calc(
+    100cqh - var(--filmstrip-pad-top) - var(--filmstrip-pad-bottom)
+  );
+  --filmstrip-thumb-height: calc(
+    var(--filmstrip-scene-height) - var(--filmstrip-footer-height)
+  );
+  --filmstrip-tile-max: calc(var(--filmstrip-thumb-height) * 16 / 9);
   --filmstrip-seam-width: 46px;
-  --filmstrip-seam-rule-y: 17px;
   position: relative;
   height: 188px;
   min-width: 0;
@@ -315,7 +329,7 @@ const dragModel = computed({
   align-items: stretch;
   gap: 10px;
   min-width: 0;
-  padding: 19px 0 23px 13px;
+  padding: var(--filmstrip-pad-top) 0 var(--filmstrip-pad-bottom) 13px;
   overflow-x: auto;
   overflow-y: hidden;
   scroll-padding-inline: 48px;
@@ -354,7 +368,7 @@ const dragModel = computed({
   z-index: 8;
   right: 8px;
   left: 8px;
-  height: 8px;
+  height: clamp(5px, 4cqh, 8px);
   pointer-events: none;
   background: repeating-linear-gradient(
     90deg,
@@ -366,11 +380,11 @@ const dragModel = computed({
 }
 
 .ms-rail__perfs--top {
-  top: 7px;
+  top: clamp(4px, 3.5cqh, 7px);
 }
 
 .ms-rail__perfs--bottom {
-  bottom: 7px;
+  bottom: clamp(4px, 3.5cqh, 7px);
 }
 
 .ms-rail__add {
@@ -468,218 +482,56 @@ const dragModel = computed({
   outline-offset: 2px;
 }
 
+/*
+ * Seams inside the filmstrip pick up the strip's light-on-dark ink and are
+ * centered on the picture, not the combined picture + metadata card, so every
+ * seam sits on one visual edit axis at any rail height.
+ */
 .ms-rail-frame :deep(.ms-seam) {
-  position: relative;
-  display: grid;
-  grid-template-rows: 32px 16px;
-  place-items: center;
   width: var(--filmstrip-seam-width);
-  /*
-   * Keep the connector's rule centered on the picture, not the combined
-   * picture + metadata card. This also keeps every seam on one visual edit
-   * axis when the responsive rail changes scene and footer heights.
-   */
-  margin-top: calc(
-    var(--filmstrip-thumb-height) / 2 - var(--filmstrip-seam-rule-y)
-  );
   min-width: 44px;
-  height: 54px;
-  min-height: 44px;
-  gap: 2px;
-  padding: 2px 0;
-  overflow: visible;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+  margin-top: calc(var(--filmstrip-thumb-height) / 2 - 16px);
   color: rgba(255, 255, 255, 0.72);
-  white-space: normal;
 }
 
-.ms-rail-frame :deep(.ms-seam::before) {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  top: var(--filmstrip-seam-rule-y);
-  right: -10px;
-  left: -10px;
-  height: 1px;
-  background: color-mix(in srgb, white 20%, transparent);
-  pointer-events: none;
+.ms-rail-frame :deep(.ms-seam:hover:not(:disabled)) {
+  color: white;
 }
 
 .ms-rail-frame :deep(.ms-seam__diagram) {
-  z-index: 1;
-  width: 30px;
-  height: 30px;
-  border: 1px solid color-mix(in srgb, white 34%, transparent);
-  border-radius: 50%;
+  border-color: color-mix(in srgb, white 34%, transparent);
   background: color-mix(in srgb, var(--print) 88%, white 12%);
   box-shadow: 0 2px 8px color-mix(in srgb, black 32%, transparent);
-  transition:
-    border-color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease),
-    transform var(--dur-quick) var(--ease);
-}
-
-.ms-rail-frame :deep(.ms-seam__caption) {
-  z-index: 1;
-  max-width: 54px;
-  gap: 2px;
-  padding-inline: 2px;
-  overflow: hidden;
-  color: rgba(255, 255, 255, 0.66);
-  font-size: 8.5px;
-  line-height: 1;
-}
-
-.ms-rail-frame :deep(.ms-seam__label) {
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ms-rail-frame :deep(.ms-seam__frames) {
-  flex: 0 0 auto;
-  color: var(--safelight);
-}
-
-.ms-rail-frame :deep(.ms-seam__chevron) {
-  display: none;
-}
-
-.ms-rail-frame :deep(.ms-seam:hover:not(:disabled)),
-.ms-rail-frame :deep(.ms-seam[data-on="true"]) {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.ms-rail-frame :deep(.ms-seam__line-smooth) {
-  top: 50%;
-  transform: translateY(-50%);
 }
 
 .ms-rail-frame :deep(.ms-seam:hover:not(:disabled) .ms-seam__diagram) {
   border-color: rgba(255, 255, 255, 0.7);
-  transform: scale(1.04);
+}
+
+.ms-rail-frame :deep(.ms-seam[data-on="true"]),
+.ms-rail-frame :deep(.ms-seam[data-transition="fade"]) {
+  color: var(--safelight);
 }
 
 .ms-rail-frame :deep(.ms-seam[data-on="true"] .ms-seam__diagram),
 .ms-rail-frame :deep(.ms-seam[data-transition="fade"] .ms-seam__diagram) {
   border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 10%, transparent);
+  background: color-mix(in srgb, var(--safelight) 14%, var(--print));
 }
 
-.ms-rail-frame :deep(.ms-seam[data-on="true"] .ms-seam__caption),
-.ms-rail-frame :deep(.ms-seam[data-transition="fade"] .ms-seam__caption) {
-  color: var(--safelight);
+.ms-rail-frame :deep(.ms-seam__caption) {
+  max-width: 100%;
+  font-size: 8.5px;
 }
 
 @media (max-width: 639px) {
   .ms-rail-frame {
-    --filmstrip-tile-max: 156px;
-    --filmstrip-thumb-height: 88px;
-    --filmstrip-footer-height: 34px;
-    --filmstrip-scene-height: 122px;
     --filmstrip-seam-width: 44px;
     height: 160px;
   }
 
   .ms-rail {
     padding-left: 10px;
-  }
-}
-
-/*
- * Desktop's bottom editor is a named size container. All filmstrip geometry
- * steps down together as the user drags that panel shorter, so the rail never
- * consumes the prompt's space or clips a 16:9 scene vertically.
- */
-@container create-bench (min-height: 620px) {
-  .ms-rail-frame {
-    --filmstrip-tile-max: 208px;
-    --filmstrip-thumb-height: 117px;
-    --filmstrip-scene-height: 153px;
-    height: 204px;
-  }
-
-  .ms-rail {
-    padding-top: 20px;
-    padding-bottom: 24px;
-  }
-}
-
-@container create-bench (max-height: 430px) {
-  .ms-rail-frame {
-    --filmstrip-tile-max: 156px;
-    --filmstrip-thumb-height: 88px;
-    --filmstrip-footer-height: 34px;
-    --filmstrip-scene-height: 122px;
-    --filmstrip-seam-width: 44px;
-    height: 160px;
-  }
-
-  .ms-rail {
-    padding-top: 14px;
-    padding-bottom: 18px;
-  }
-
-  .ms-rail__perfs {
-    height: 6px;
-  }
-
-  .ms-rail__perfs--top {
-    top: 5px;
-  }
-
-  .ms-rail__perfs--bottom {
-    bottom: 5px;
-  }
-
-  .ms-rail__add {
-    width: 66px;
-    flex-basis: 66px;
-    gap: 6px;
-  }
-}
-
-@container create-bench (max-height: 340px) {
-  .ms-rail-frame {
-    --filmstrip-tile-max: 134px;
-    --filmstrip-thumb-height: 76px;
-    --filmstrip-footer-height: 32px;
-    --filmstrip-scene-height: 108px;
-    --filmstrip-seam-width: 44px;
-    --filmstrip-seam-rule-y: 15px;
-    height: 138px;
-  }
-
-  .ms-rail {
-    padding-top: 10px;
-    padding-bottom: 14px;
-  }
-
-  .ms-rail-frame :deep(.ms-seam) {
-    grid-template-rows: 28px 14px;
-    height: 46px;
-    gap: 0;
-    padding-inline: 2px;
-  }
-
-  .ms-rail-frame :deep(.ms-seam__diagram) {
-    width: 26px;
-    height: 26px;
-  }
-
-  .ms-rail-frame :deep(.ms-seam__caption) {
-    font-size: 8px;
-  }
-
-  .ms-rail__add {
-    width: 58px;
-    flex-basis: 58px;
-    font-size: 10px;
   }
 }
 </style>
