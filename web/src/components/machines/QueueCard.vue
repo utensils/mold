@@ -13,7 +13,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { QueueEntry } from "../../types";
 import type { ModelInfoExtended } from "../../types";
-import { modelDisplayNameForId } from "../../lib/modelName";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 const props = withDefaults(
   defineProps<{

@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import type { GenerateFormState } from "../types";
 import type { ModelInfoExtended } from "../types";
-import { modelDisplayNameForId } from "../lib/modelName";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { requestText } from "../lib/toasts";
 import {
   deleteGenerationTemplate,

@@ -20,7 +20,7 @@ import { printKey } from "../../lib/multiHostGallery";
 import type { GalleryImage } from "../../types";
 import type { ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
-import { modelDisplayNameForId } from "../../lib/modelName";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 const props = withDefaults(
   defineProps<{

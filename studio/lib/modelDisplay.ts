@@ -4,6 +4,11 @@ export interface DisplayableModel {
   description?: string | null;
 }
 
+/** True for opaque catalog-install identifiers (`cv:<id>` / `hf:<repo>`). */
+export function isCatalogModelId(name: string): boolean {
+  return name.startsWith("cv:") || name.startsWith("hf:");
+}
+
 /**
  * Catalog models use an opaque id as their runnable `name`. Keep that id in
  * form values and requests, but prefer the catalog-provided description in UI
@@ -12,7 +17,7 @@ export interface DisplayableModel {
 export function modelDisplayName(model: DisplayableModel): string {
   const displayName = model.display_name?.trim();
   if (displayName) return displayName;
-  if (model.name.startsWith("cv:") || model.name.startsWith("hf:")) {
+  if (isCatalogModelId(model.name)) {
     const description = model.description?.trim();
     if (description) return description;
   }

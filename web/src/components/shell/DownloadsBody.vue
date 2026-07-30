@@ -10,7 +10,7 @@
 import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import type { DownloadJobWire, ModelInfoExtended } from "../../types";
-import { modelDisplayNameForId } from "../../lib/modelName";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   active: DownloadJobWire[];

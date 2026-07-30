@@ -5,16 +5,18 @@
  */
 import type { ModelEntry } from "./api/types";
 import { formatGB } from "./format";
+import {
+  isCatalogModelId,
+  modelDisplayName,
+  modelDisplayNameForId,
+  type DisplayableModel,
+} from "@studio/lib/modelDisplay";
+
+export { isCatalogModelId, modelDisplayName, modelDisplayNameForId, type DisplayableModel };
 
 /** Families that aren't image/video generators — grouped separately at the
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */
 export const UTILITY_FAMILIES = new Set(["real-esrgan", "upscaler", "qwen3-expand", "controlnet"]);
-
-export interface DisplayableModel {
-  name: string;
-  display_name?: string | null;
-  description?: string | null;
-}
 
 function hasText(value: string | null | undefined): value is string {
   return Boolean(value?.trim());
@@ -76,11 +78,6 @@ export function isUtilityModel(m: ModelEntry): boolean {
   return UTILITY_FAMILIES.has(m.family);
 }
 
-/** True for opaque catalog-install identifiers (`cv:<id>` / `hf:<repo>`). */
-export function isCatalogModelId(name: string): boolean {
-  return name.startsWith("cv:") || name.startsWith("hf:");
-}
-
 /** Quant tag = the part after the first colon (`flux-dev:q8` → `q8`).
  * Catalog ids (`cv:252914`) carry no quant variant — their colon is part
  * of the identifier, not a `base:tag` split. */
@@ -88,29 +85,6 @@ export function quantTag(name: string): string | null {
   if (isCatalogModelId(name)) return null;
   const i = name.indexOf(":");
   return i >= 0 ? name.slice(i + 1) : null;
-}
-
-/**
- * Human-readable label for a model row. Catalog installs are identified by
- * opaque `cv:`/`hf:` ids; the server sends the upstream title as an additive
- * `display_name`, and older servers still embed it in `description`. Display
- * only — selection, keys, and API calls must keep using `name`.
- */
-export function modelDisplayName(m: DisplayableModel): string {
-  const displayName = m.display_name?.trim();
-  if (displayName) return displayName;
-  const description = m.description?.trim();
-  if (isCatalogModelId(m.name) && description) return description;
-  if (m.name.startsWith("cv:")) return `Civitai model #${m.name.slice(3)}`;
-  if (m.name.startsWith("hf:")) {
-    const repo = m.name.slice(3).split("/").pop() ?? m.name.slice(3);
-    return repo.replaceAll("-", " ").replaceAll("_", " ");
-  }
-  return m.name;
-}
-
-export function modelDisplayNameForId(name: string, models: readonly DisplayableModel[]): string {
-  return modelDisplayName(models.find((model) => model.name === name) ?? { name });
 }
 
 export function modelDiskBytes(m: ModelEntry): number {

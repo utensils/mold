@@ -118,7 +118,10 @@ import {
   type FeasibilityResult,
 } from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
-import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
+import {
+  modelDisplayName,
+  modelDisplayNameForId,
+} from "@studio/lib/modelDisplay";
 import { sameHostRoute, type HostRoute } from "../lib/hostRouting";
 import type {
   ExpandFormState,

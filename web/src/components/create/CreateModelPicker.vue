@@ -11,7 +11,7 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
-import { modelDisplayName } from "../../lib/modelName";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 
 const props = defineProps<{
   models: ModelInfoExtended[];
