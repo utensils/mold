@@ -118,10 +118,15 @@ describe("ImagePickerModal", () => {
     Object.defineProperty(input, "files", {
       value: [new File(["x"], "clip.webp", { type: "image/webp" })],
     });
+    Object.defineProperty(input, "value", {
+      value: "C:\\fakepath\\clip.webp",
+      writable: true,
+    });
     input.dispatchEvent(new Event("change", { bubbles: true }));
     await flushPromises();
     expect(w.emitted("pick")).toBeUndefined();
     expect(document.body.textContent).toContain("Only PNG or JPEG");
+    expect(input.value).toBe("");
 
     await w
       .get("[aria-label='Image source']")

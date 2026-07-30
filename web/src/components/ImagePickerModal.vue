@@ -116,7 +116,13 @@ async function emitFiles(files: File[]) {
 
 async function onFiles(event: Event) {
   const input = event.target as HTMLInputElement;
-  await emitFiles(Array.from(input.files ?? []));
+  try {
+    await emitFiles(Array.from(input.files ?? []));
+  } finally {
+    // Let selecting the same file fire `change` again, including after a
+    // validation error where the picker remains open.
+    input.value = "";
+  }
 }
 
 async function onDrop(event: DragEvent) {
