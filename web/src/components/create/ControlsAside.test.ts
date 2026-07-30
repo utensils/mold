@@ -110,6 +110,13 @@ describe("ControlsAside", () => {
     expect(next.height).toBe(1328);
   });
 
+  it("labels a model's only runnable bucket as Native", () => {
+    const wrapper = factory({ width: 1024, height: 1024 }, "wuerstchen");
+    expect(wrapper.getComponent(ResolutionSelector).props("options")).toEqual([
+      expect.objectContaining({ sub: "Native" }),
+    ]);
+  });
+
   function seedButton(wrapper: ReturnType<typeof factory>, label: string) {
     return wrapper
       .findAll("[data-test='seed-seg'] button")

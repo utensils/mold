@@ -248,7 +248,14 @@ const resolutionOptions = computed(() =>
   resolutionPresets.value.map((preset, index, all) => ({
     mp: (preset.width * preset.height) / 1_000_000,
     label: megapixelLabel(preset.width, preset.height),
-    sub: index === 0 ? "Small" : index === all.length - 1 ? "Native" : "Standard",
+    sub:
+      all.length === 1
+        ? "Native"
+        : index === 0
+          ? "Small"
+          : index === all.length - 1
+            ? "Native"
+            : "Standard",
     width: preset.width,
     height: preset.height,
   })),

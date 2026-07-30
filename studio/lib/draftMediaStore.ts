@@ -18,6 +18,26 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function recordsMatch(
+  left: DraftMediaRecord,
+  right: DraftMediaRecord,
+): boolean {
+  if (left.base64 !== right.base64) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = new Set([
+    ...Object.keys(leftRecord),
+    ...Object.keys(rightRecord),
+  ]);
+  for (const key of keys) {
+    if (key === "base64") continue;
+    if (JSON.stringify(leftRecord[key]) !== JSON.stringify(rightRecord[key])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -52,6 +72,8 @@ export async function putDraftMedia<T extends DraftMediaRecord>(
   media: T,
 ): Promise<void> {
   if (!media.draftId || !media.base64) return;
+  const existing = memory.get(media.draftId);
+  if (existing && recordsMatch(existing, media)) return;
   const saved = clone(media);
   memory.set(media.draftId, saved);
   await withStore("readwrite", (store) => store.put(saved));
@@ -61,7 +83,10 @@ export async function getDraftMedia<T extends DraftMediaRecord>(
   draftId: string,
 ): Promise<T | null> {
   const fromDb = await withStore<T>("readonly", (store) => store.get(draftId));
-  if (fromDb) return fromDb;
+  if (fromDb) {
+    memory.set(draftId, clone(fromDb));
+    return fromDb;
+  }
   const fromMemory = memory.get(draftId);
   return fromMemory ? (clone(fromMemory) as T) : null;
 }

@@ -95,6 +95,15 @@ describe("InspectorPanel — shape + resolution projection", () => {
     expect(form.width * form.height).toBeLessThan(1024 * 1024);
     expect(form.width).toBe(form.height); // square ratio preserved
   });
+
+  it("labels a model's only runnable bucket as Native", () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("wuerstchen") },
+    });
+    expect(wrapper.findComponent(ResolutionSelector).props("options")).toEqual([
+      expect.objectContaining({ sub: "Native" }),
+    ]);
+  });
 });
 
 describe("InspectorPanel — batch", () => {
