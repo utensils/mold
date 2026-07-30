@@ -103,11 +103,7 @@ describe("Ltx2VideoControls", () => {
     expect(lastPatch(wrapper).pipeline).toBe("ic-lora");
     expect(lastPatch(wrapper).icLoraControl).toBe("motion-track");
     await wrapper.setProps({
-      modelValue: {
-        ...wrapper.props("modelValue"),
-        pipeline: "ic-lora",
-        icLoraControl: "motion-track",
-      },
+      modelValue: lastPatch(wrapper),
     });
     expect(wrapper.get("[data-test='ltx2-reference-guide']").text()).toContain(
       "trajectory-overlay",
