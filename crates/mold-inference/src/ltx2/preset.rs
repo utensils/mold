@@ -302,6 +302,14 @@ mod tests {
         assert_eq!(preset_19b.connectors.positional_embedding_max_pos, &[4096]);
 
         let preset_22b = preset_for_model("ltx-2.3-22b-dev:fp8").unwrap();
+        assert_eq!(
+            preset_for_model("ltx-2.3-22b-dev:bf16").unwrap(),
+            preset_22b
+        );
+        assert_eq!(
+            preset_for_model("ltx-2.3-22b-distilled:bf16").unwrap(),
+            preset_22b
+        );
         assert_eq!(preset_22b.name, "ltx-2.3-22b");
         assert_eq!(
             preset_22b.caption_projection,

@@ -236,6 +236,14 @@ fn known_transformer_repositories_are_offered_as_builtin_downloads() {
     assert!(super::entry_download_supported(&entry));
 }
 
+#[test]
+fn named_ltx23_bf16_manifests_remain_downloadable() {
+    for model in ["ltx-2.3-22b-dev:bf16", "ltx-2.3-22b-distilled:bf16"] {
+        let entry = hf_checkpoint(model);
+        assert!(super::entry_download_supported(&entry), "{model}");
+    }
+}
+
 #[tokio::test]
 async fn live_search_returns_normalized_civitai_rows() {
     let (state, _server, _tmp) = build_state().await;
