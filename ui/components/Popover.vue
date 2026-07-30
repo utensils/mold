@@ -103,7 +103,10 @@ watch(
       // while any ancestor (bench, filmstrip) scrolls or resizes.
       window.addEventListener("scroll", reposition, true);
       window.addEventListener("resize", reposition);
-      void nextTick(reposition);
+      // Position synchronously from the trigger rect so the panel's first
+      // paint is already anchored (a deferred pass rendered one unstyled
+      // frame); reposition() itself defers only the size-aware clamp.
+      reposition();
     } else {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeydown, true);
@@ -159,6 +162,11 @@ onBeforeUnmount(() => {
   position: fixed;
   z-index: 30;
   min-width: 240px;
+  /* A panel taller/wider than the viewport scrolls internally instead of
+     leaving content stranded past the edge the shift-clamp cannot reach. */
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
   padding: 8px;
   background: var(--bench);
   border: 1px solid var(--ce);
