@@ -404,7 +404,7 @@ mod tests {
             stages: vec![route_chain_stage("first shot", TransitionMode::Smooth)],
             motion_tail_frames: 1,
             width: 64,
-            height: 48,
+            height: 64,
             fps: 8,
             seed: Some(42),
             steps: 2,
