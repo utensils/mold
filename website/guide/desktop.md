@@ -139,7 +139,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   rail. Clip pills carry per-clip prompts and frame counts (validated `8n+1`,
   defaulted from the selected model), and the seam pills between them name
   each transition in words — **Smooth**, **Cut**, or **Fade 8f** (zero-tail
-  joins say **Join clips**) — with a click opening the seam editor's teaching
+  joins say **Join**) — with a click opening the seam editor's teaching
   rows and fade-length stepper. A live fits/duration forecast runs against
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
   and running sequence jobs appear in the same activity strip as prints with

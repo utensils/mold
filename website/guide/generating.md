@@ -113,7 +113,7 @@ Create settings column — from **One shot** to **Sequence**. Multi-clip video i
 a setting, not a separate page: the composer becomes a clip rail. Mold starts
 with two clips, requires a description for each, and joins them with seam pills
 that name each transition in words — **Smooth**, **Cut**, or **Fade 8f**, with
-LTX-Video's zero-overlap joins reading **Join clips**. Clicking a seam pill
+LTX-Video's zero-overlap joins reading **Join**. Clicking a seam pill
 opens the seam editor with its three teaching rows and the fade-length stepper.
 New clips take their frame count from the selected model's own advertised
 default rather than a fixed constant, and the summary shows the stitched

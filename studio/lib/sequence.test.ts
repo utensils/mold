@@ -131,9 +131,9 @@ describe("sequence authoring", () => {
   it("uses the seam-pill transition vocabulary", () => {
     // Mold Studio spec §11: the seam control names transitions Smooth /
     // Cut / Fade; the zero-motion-tail fallback (LTX-Video) stays honest
-    // as "Join clips" because no motion carries through.
+    // as "Join" because no motion carries through.
     expect(transitionLabel("smooth")).toBe("Smooth");
-    expect(transitionLabel("smooth", 0)).toBe("Join clips");
+    expect(transitionLabel("smooth", 0)).toBe("Join");
     expect(transitionLabel("cut")).toBe("Cut");
     expect(transitionLabel("fade")).toBe("Fade");
   });

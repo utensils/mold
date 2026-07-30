@@ -10,14 +10,15 @@ describe("SeamPill", () => {
     expect(wrapper.text()).toContain("Smooth");
   });
 
-  it("renders Join clips when the motion tail is zero (LTX-Video)", () => {
+  it("renders Join when the motion tail is zero (LTX-Video)", () => {
     // The SpliceMark regression: it defaulted motionTail and always said
     // "Continue motion". motionTail is a REQUIRED prop here, and zero must
     // relabel the seam honestly.
     const wrapper = mount(SeamPill, {
       props: { transition: "smooth", motionTail: 0 },
     });
-    expect(wrapper.text()).toContain("Join clips");
+    expect(wrapper.text()).toContain("Join");
+    expect(wrapper.text()).not.toContain("Join clips");
     expect(wrapper.text()).not.toContain("Smooth");
   });
 

@@ -90,6 +90,10 @@ describe("GenerateView layout", () => {
     expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), height\)/);
     // Switching Output re-clamps the persisted height against the new floor.
     expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,400}?clampBenchToViewport\(\)/);
+    // The bench root must opt out of min-content flooring: floored at auto,
+    // it counts the rail's 204px basis (not its 104px floor) and the panel
+    // scrolls before the filmstrip's shrink weight ever engages.
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench\s*\{[^}]*min-height:\s*0/s);
     // The preferred rail height must be the flex BASIS, never a `height`: a
     // specified height becomes the wrapper's min-content contribution and
     // resurrects the scrollbar the shrink weight exists to prevent.

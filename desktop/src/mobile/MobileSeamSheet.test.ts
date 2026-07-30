@@ -34,7 +34,8 @@ describe("MobileSeamSheet", () => {
     expect(wrapper.get("[data-test='mobile-seam-sheet-head']").text()).toBe(
       "Join · clip 2 → clip 3",
     );
-    expect(wrapper.text()).toContain("Join clips");
+    expect(wrapper.text()).toContain("Join");
+    expect(wrapper.text()).not.toContain("Join clips");
     expect(wrapper.text()).not.toContain("Smooth");
   });
 

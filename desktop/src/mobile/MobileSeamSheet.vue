@@ -19,7 +19,7 @@ const props = withDefaults(
     open: boolean;
     transition: SequenceTransition;
     fadeFrames: number;
-    /** Motion-tail frames of the active model; 0 relabels smooth "Join clips". */
+    /** Motion-tail frames of the active model; 0 relabels smooth "Join". */
     motionTail: number;
     fps: number;
     /** `chain-limits.fade_frames_max`; 32 when the server hasn't said. */

@@ -174,7 +174,7 @@ Clips are full-width cards with a 44pt **seam pill** between consecutive
 cards. Tapping a seam opens a bottom sheet hosting the shared `SeamEditor` at
 touch size — the iPhone's only fade-length control, clamped to the host's
 `fade_frames_max` (32 when unknown). Seam wording always comes from
-`transitionLabel()`, so LTX-Video's zero motion tail reads **Join clips**
+`transitionLabel()`, so LTX-Video's zero motion tail reads **Join**
 rather than Smooth. New clip durations come from the model's own
 server-advertised default, and duration choices stay strictly longer than the
 active motion tail. Size, frame rate, steps, guidance, and seed are the SAME

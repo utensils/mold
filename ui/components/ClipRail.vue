@@ -27,7 +27,7 @@ const props = withDefaults(
   defineProps<{
     clips: C[];
     activeId: string | null;
-    /** Motion-tail frames of the active model (0 → "Join clips" seams). */
+    /** Motion-tail frames of the active model (0 → "Join" seams). */
     motionTail: number;
     maxStages?: number;
     /** Seam whose editor is currently open (clip id), for the active ring. */

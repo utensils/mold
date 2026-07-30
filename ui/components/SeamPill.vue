@@ -4,7 +4,7 @@
  * (spec §06, mockup `docs/design`… sequence-filmstrip): a circular glyph
  * badge with the transition named in words beneath it; fade length rides
  * along in the caption. `motionTail` is REQUIRED so the zero-tail
- * "Join clips" label can never be skipped (the old SpliceMark defaulted it
+ * "Join" label can never be skipped (the old SpliceMark defaulted it
  * and mislabeled LTX-Video seams).
  */
 import { computed } from "vue";
@@ -14,7 +14,7 @@ import { transitionLabel, type SequenceTransition } from "../lib/seam";
 const props = withDefaults(
   defineProps<{
     transition: SequenceTransition;
-    /** Motion-tail frames of the active model; 0 = LTX-Video "Join clips". */
+    /** Motion-tail frames of the active model; 0 = LTX-Video "Join". */
     motionTail: number;
     /** Shown as `· Nf` when the transition is fade. */
     fadeFrames?: number;
@@ -154,8 +154,8 @@ const fadeSuffix = computed(() =>
   box-shadow: var(--sel-ring);
 }
 
-/* Long labels ("Join clips") wrap centered inside the seam's narrow column
-   instead of ellipsizing or spilling over the neighboring tiles. */
+/* A label that outgrows the seam's narrow column wraps centered instead of
+   ellipsizing or spilling over the neighboring tiles. */
 .ms-seam__caption {
   display: inline-flex;
   flex-wrap: wrap;

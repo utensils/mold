@@ -18,7 +18,7 @@ const props = withDefaults(
   defineProps<{
     transition: SequenceTransition;
     fadeFrames: number;
-    /** Motion-tail frames of the active model; 0 relabels smooth "Join clips". */
+    /** Motion-tail frames of the active model; 0 relabels smooth "Join". */
     motionTail: number;
     fps: number;
     /** Server cap (`chain-limits.fade_frames_max`); 32 when unknown. */

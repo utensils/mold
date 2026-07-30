@@ -554,6 +554,17 @@ async function copyToml() {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /*
+   * The parent panel mounts this `flex: 1 1 0%`. Without an explicit
+   * min-height the bench is floored at its own min-content — which counts
+   * the rail's 204px preferred basis, not its 104px floor — so the panel
+   * grew a scrollbar before the filmstrip's shrink weight ever engaged.
+   * Zero lets the bench take exactly the panel's space and flex the rail
+   * down for real; the internal floors below keep content honest, and a
+   * genuinely impossible height overflows into the panel's scrollbar
+   * rather than clipping the Generate button invisibly.
+   */
+  min-height: 0;
   border-top: 1px solid var(--edge);
   background: var(--bench);
   padding: 12px 22px 14px;
@@ -562,6 +573,7 @@ async function copyToml() {
 .ms-seqbench__banner {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 10px;
   border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
   background: color-mix(in srgb, var(--safelight) 7%, transparent);
@@ -621,7 +633,9 @@ async function copyToml() {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 112px;
+  /* Head (28) + gaps (12) + tools (28) + the prompt's 48px floor: below
+     this the editor's own rows would start clipping. */
+  min-height: 116px;
   gap: 6px;
 }
 .ms-seqbench__cliphead {
@@ -710,6 +724,7 @@ async function copyToml() {
 .ms-seqbench__footer {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 12px;
   margin-top: auto;
   padding-top: 2px;

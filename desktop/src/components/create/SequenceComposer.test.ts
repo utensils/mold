@@ -93,7 +93,7 @@ describe("SequenceComposer — active clip editor", () => {
     const draft = seedDraft();
     draft.activeClipId = draft.clips[1]!.id;
     // A context-capable LTX-2 model: the seam reads "Smooth from clip 1"
-    // (LTX-Video's zero motion tail would label it "Join clips" instead).
+    // (LTX-Video's zero motion tail would label it "Join" instead).
     const wrapper = mountComposer({
       selectedModel: { name: "ltx-2-19b-distilled:fp8", family: "ltx2" } as ModelEntry,
     });

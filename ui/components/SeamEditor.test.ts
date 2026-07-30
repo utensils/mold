@@ -26,9 +26,10 @@ describe("SeamEditor", () => {
     expect(text).toContain("Blend across the seam");
   });
 
-  it("relabels smooth as Join clips at zero motion tail", () => {
+  it("relabels smooth as Join at zero motion tail", () => {
     const wrapper = make({ motionTail: 0 });
-    expect(wrapper.text()).toContain("Join clips");
+    expect(wrapper.text()).toContain("Join");
+    expect(wrapper.text()).not.toContain("Join clips");
     expect(wrapper.text()).toContain("Clips join end to end");
   });
 
