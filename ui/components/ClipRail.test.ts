@@ -214,7 +214,9 @@ describe("ClipRail", () => {
     // cap all follow the frame height continuously, so a surface (desktop's
     // resizable bench) only ever changes the frame height and the strip
     // re-proportions instead of stepping through fixed tiers or scrolling.
-    expect(railSource).toMatch(/\.ms-rail-frame\s*\{[^}]*container-type:\s*size/s);
+    expect(railSource).toMatch(
+      /\.ms-rail-frame\s*\{[^}]*container-type:\s*size/s,
+    );
     expect(railSource).toMatch(
       /--filmstrip-scene-height:\s*calc\(\s*100cqh - var\(--filmstrip-pad-top\) - var\(--filmstrip-pad-bottom\)\s*\)/,
     );

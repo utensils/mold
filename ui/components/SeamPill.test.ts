@@ -46,7 +46,9 @@ describe("SeamPill", () => {
       const wrapper = mount(SeamPill, {
         props: { transition, motionTail: 17 },
       });
-      expect(wrapper.find(".ms-seam__diagram .ms-seam__glyph rect").exists()).toBe(true);
+      expect(
+        wrapper.find(".ms-seam__diagram .ms-seam__glyph rect").exists(),
+      ).toBe(true);
       expect(wrapper.find(".ms-seam__chevron").exists()).toBe(false);
       expect(wrapper.attributes("data-transition")).toBe(transition);
     }

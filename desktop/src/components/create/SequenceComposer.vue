@@ -235,9 +235,7 @@ function submit() {
 // ── Clear sequence ───────────────────────────────────────────────────────────
 const clearConfirmOpen = ref(false);
 const clearMessage = computed(() => {
-  const edit = draft.editing
-    ? " Ends the edit session without changing the finished job."
-    : "";
+  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
   return `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`;
 });
 

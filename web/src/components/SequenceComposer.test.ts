@@ -343,6 +343,9 @@ describe("clear sequence", () => {
     settleConfirm(false);
     await flushPromises();
 
-    expect(store.clips.map((clip) => clip.prompt)).toEqual(["clip 1", "clip 2"]);
+    expect(store.clips.map((clip) => clip.prompt)).toEqual([
+      "clip 1",
+      "clip 2",
+    ]);
   });
 });

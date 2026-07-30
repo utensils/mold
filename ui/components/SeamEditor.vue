@@ -103,10 +103,7 @@ function onOptionKeydown(event: KeyboardEvent) {
         @keydown="onOptionKeydown"
       >
         <span class="ms-seam-editor__diagram" aria-hidden="true">
-          <SeamGlyph
-            class="ms-seam-editor__glyph"
-            :transition="option"
-          />
+          <SeamGlyph class="ms-seam-editor__glyph" :transition="option" />
         </span>
         <span class="ms-seam-editor__text">
           <span class="ms-seam-editor__label">{{

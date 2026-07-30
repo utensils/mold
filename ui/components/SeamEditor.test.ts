@@ -81,7 +81,9 @@ describe("SeamEditor", () => {
 
   it("teaches with the same circular glyph badges the seam pill shows", () => {
     const wrapper = make();
-    const badges = wrapper.findAll(".ms-seam-editor__diagram .ms-seam-editor__glyph");
+    const badges = wrapper.findAll(
+      ".ms-seam-editor__diagram .ms-seam-editor__glyph",
+    );
     expect(badges).toHaveLength(3);
     expect(badges.every((badge) => badge.find("rect").exists())).toBe(true);
     // The legacy rectangle swatches are gone.

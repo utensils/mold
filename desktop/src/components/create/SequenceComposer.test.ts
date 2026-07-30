@@ -250,7 +250,12 @@ describe("SequenceComposer — clear sequence", () => {
   it("clearing during an edit session ends the session without emitting", async () => {
     const draft = seedDraft(["clip one", "clip two"]);
     draft.loadFromJob(
-      { jobId: "job-1", hostId: "h1", baseline: draft.clips.map((c) => ({ ...c })), completedStages: 1 },
+      {
+        jobId: "job-1",
+        hostId: "h1",
+        baseline: draft.clips.map((c) => ({ ...c })),
+        completedStages: 1,
+      },
       draft.clips.map((c) => ({ ...c })),
       false,
     );

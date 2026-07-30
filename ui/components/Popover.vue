@@ -55,8 +55,10 @@ function reposition() {
     const box = panel.getBoundingClientRect();
     const overRight = box.right - (window.innerWidth - VIEWPORT_INSET);
     const overBottom = box.bottom - (window.innerHeight - VIEWPORT_INSET);
-    const shiftX = Math.max(0, overRight) || Math.min(0, box.left - VIEWPORT_INSET);
-    const shiftY = Math.max(0, overBottom) || Math.min(0, box.top - VIEWPORT_INSET);
+    const shiftX =
+      Math.max(0, overRight) || Math.min(0, box.left - VIEWPORT_INSET);
+    const shiftY =
+      Math.max(0, overBottom) || Math.min(0, box.top - VIEWPORT_INSET);
     if (shiftX || shiftY) {
       panelStyle.value = {
         ...panelStyle.value,
