@@ -88,7 +88,9 @@ describe("InspectorPanel — shape + resolution projection", () => {
     form.width = 1024;
     form.height = 1024;
     const wrapper = mount(InspectorPanel, { props: { form } });
-    wrapper.findComponent(ResolutionSelector).vm.$emit("update:modelValue", 0.5);
+    wrapper
+      .findComponent(ResolutionSelector)
+      .vm.$emit("update:modelValue", (768 * 768) / 1_000_000);
     await flushPromises();
     expect(form.width * form.height).toBeLessThan(1024 * 1024);
     expect(form.width).toBe(form.height); // square ratio preserved
@@ -195,6 +197,39 @@ describe("InspectorPanel — advanced", () => {
 
     await wrapper.get('[data-test="open-advanced"]').trigger("click");
     expect(wrapper.get('[data-test="open-advanced"]').attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
+  });
+
+  it("shows only sequence-specific Advanced controls in Sequence output", async () => {
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    const form = formFor("ltx2");
+    form.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mount(InspectorPanel, {
+      props: {
+        form,
+        chainLimits: {
+          model: form.model,
+          supports_sequence: true,
+          supports_audio: true,
+          max_stages: 16,
+          max_total_frames: 1552,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          fade_frames_max: 24,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "fp8",
+        },
+      },
+    });
+
+    await wrapper.get('[data-test="open-advanced"]').trigger("click");
+
+    expect(wrapper.find('[data-test="sequence-section-opening-image"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="sequence-section-negative"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="sequence-section-audio"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
   });
 });

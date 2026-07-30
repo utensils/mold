@@ -710,7 +710,9 @@ const chainLevelDirty = computed(
   () =>
     draft.editing !== null &&
     editSharedBaseline.value !== null &&
-    editSharedBaseline.value !== sharedSnapshot(),
+    (editSharedBaseline.value !== sharedSnapshot() ||
+      JSON.stringify(draft.editing.baselineOpeningImage ?? null) !==
+        JSON.stringify(draft.openingImage)),
 );
 
 /** `?output=sequence` deep-links (palette, menu, legacy /chains) are consumed
@@ -1121,6 +1123,7 @@ async function generateSequence() {
     const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
       motionTailFrames: sequenceMotionTail.value,
       enableAudio: draft.enableAudio,
+      openingImage: draft.openingImage,
     });
     if (draft.editing) {
       const editing = draft.editing;
@@ -1224,6 +1227,7 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
         },
         loaded.clips,
         loaded.enableAudio,
+        loaded.openingImage,
       );
       editSharedBaseline.value = sharedSnapshot();
     } else {
@@ -1233,6 +1237,7 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
       draft.clips.splice(0, draft.clips.length, ...loaded.clips);
       draft.activeClipId = loaded.clips[0]?.id ?? null;
       draft.enableAudio = loaded.enableAudio;
+      draft.openingImage = loaded.openingImage;
     }
     sequenceStageClipIdsByJob.set(
       `${payload.hostId}:${payload.jobId}`,

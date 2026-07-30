@@ -705,9 +705,11 @@ const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
 /// Recommended dimensions for LTX Video models (native 768x512).
 /// LTX Video requires dimensions divisible by 32 (patchification).
 const LTX_VIDEO_DIMS: &[(u32, u32)] = &[
+    (704, 480),  // 22:15 (compact sample bucket)
     (768, 512),  // 3:2 (native)
     (512, 512),  // 1:1
     (1024, 576), // 16:9
+    (1216, 704), // 16:9 (LTX-2 19B/22B default)
     (576, 1024), // 9:16
     (768, 768),  // 1:1
     (512, 768),  // 2:3
@@ -728,7 +730,7 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "qwen-image" => QWEN_IMAGE_DIMS,
         "qwen-image-edit" => QWEN_IMAGE_DIMS,
         "wuerstchen" => WUERSTCHEN_DIMS,
-        "ltx-video" => LTX_VIDEO_DIMS,
+        "ltx-video" | "ltx2" => LTX_VIDEO_DIMS,
         _ => &[],
     }
 }

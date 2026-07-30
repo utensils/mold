@@ -6,6 +6,8 @@ import {
   __testing__,
 } from "../../composables/useGenerateForm";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
+import { createPinia, setActivePinia } from "pinia";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
 const UPSCALERS: ModelInfoExtended[] = [
@@ -47,9 +49,13 @@ function factory(
   overrides: Partial<GenerateFormState> = {},
   extra: Record<string, unknown> = {},
 ) {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  if (extra.output === "sequence") useSequenceDraftStore().ensureClips(97);
   return mount(AdvancedDrawer, {
     props: { open: true, modelValue: baseForm(overrides), family, ...extra },
     global: {
+      plugins: [pinia],
       stubs: {
         LoraPicker: { template: "<div data-test='lora-picker-stub' />" },
         RouterLink: { template: "<a><slot /></a>" },
@@ -57,6 +63,29 @@ function factory(
     },
   });
 }
+
+describe("AdvancedDrawer sequence contract", () => {
+  it("shows only sequence-owned controls", () => {
+    const wrapper = factory(
+      "ltx2",
+      {},
+      { output: "sequence", sequenceSupportsAudio: true },
+    );
+    expect(
+      wrapper.find("[data-test='sequence-section-opening-image']").exists(),
+    ).toBe(true);
+    expect(
+      wrapper.find("[data-test='sequence-section-negative']").exists(),
+    ).toBe(true);
+    expect(wrapper.find("[data-test='sequence-section-audio']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-lora']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-output']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-video']").exists()).toBe(false);
+  });
+});
 
 function sections(family: string, extra: Record<string, unknown> = {}) {
   const wrapper = factory(family, {}, extra);

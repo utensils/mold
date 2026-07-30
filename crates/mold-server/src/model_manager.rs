@@ -5,7 +5,7 @@ use std::sync::Arc;
 use mold_core::{
     build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentOption,
     ModelComponentStatus, ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended,
-    ModelPaths,
+    ModelPaths, RecommendedDimensions,
 };
 #[cfg(test)]
 use mold_inference::device::ActivationFamily;
@@ -600,6 +600,20 @@ fn installed_catalog_models(
                 default_fps: fps,
                 max_frames: mold_core::validation::max_frames_for_family(&sidecar.family),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
+                max_pixels: Some(mold_core::validation::MAX_PIXELS),
+                recommended_dimensions: mold_core::validation::recommended_dimensions(
+                    &sidecar.family,
+                )
+                .iter()
+                .map(|&(width, height)| RecommendedDimensions { width, height })
+                .collect(),
+                dimension_alignment: Some(
+                    if matches!(sidecar.family.as_str(), "ltx-video" | "ltx2") {
+                        32
+                    } else {
+                        16
+                    },
+                ),
                 description,
             },
             info: ModelInfo {

@@ -8,6 +8,7 @@ import {
   setSequenceDraftStorage,
   useSequenceDraftStore,
 } from "./sequenceDraft";
+import { clearMemoryDraftsForTest } from "../lib/draftMediaStore";
 
 function memoryStorage() {
   const values = new Map<string, string>();
@@ -29,6 +30,7 @@ describe("sequence draft store", () => {
   beforeEach(() => {
     localStorage = memoryStorage();
     setSequenceDraftStorage(localStorage);
+    clearMemoryDraftsForTest();
     vi.useFakeTimers();
   });
   afterEach(() => {
@@ -59,19 +61,22 @@ describe("sequence draft store", () => {
     expect(next.clips[0]?.prompt).toBe("a kingfisher waits");
   });
 
-  it("strips source-image payloads from persistence but keeps filenames", () => {
+  it("restores the sequence-level opening image from quota-safe media storage", async () => {
     const store = freshStore();
     store.hydrate();
     store.ensureClips(97);
-    const first = store.clips[0];
-    if (first) first.sourceImage = { filename: "open.png", base64: "QUJD" };
+    store.openingImage = { filename: "open.png", base64: "QUJD" };
     vi.advanceTimersByTime(1000);
 
     const saved = JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!);
-    expect(saved.clips[0].sourceImage.filename).toBe("open.png");
-    expect(saved.clips[0].sourceImage.base64).toBeNull();
+    expect(saved.openingImage.filename).toBe("open.png");
+    expect(saved.openingImage.base64).toBeNull();
     // In-memory payload stays intact.
-    expect(store.clips[0]?.sourceImage?.base64).toBe("QUJD");
+    expect(store.openingImage?.base64).toBe("QUJD");
+
+    const reloaded = freshStore();
+    reloaded.hydrate();
+    await vi.waitFor(() => expect(reloaded.openingImage?.base64).toBe("QUJD"));
   });
 
   it("parks clips while keeping one-shot and sequence prompts independent", () => {
@@ -104,6 +109,7 @@ describe("sequence draft store", () => {
     const store = freshStore();
     store.hydrate();
     store.ensureClips(97);
+    store.openingImage = { filename: "opening.png", base64: "AAAA" };
     const [a, b] = store.clips;
     store.removeClip(a!.id);
     expect(store.clips).toHaveLength(2);
@@ -114,6 +120,33 @@ describe("sequence draft store", () => {
     expect(store.clips[0]?.id).toBe(c!.id);
     expect(store.clips[1]?.id).toBe(a!.id);
     expect(store.clips[2]?.id).toBe(b!.id);
+    expect(store.openingImage).toEqual({
+      filename: "opening.png",
+      base64: "AAAA",
+    });
+  });
+
+  it("snapshots the opening image and audio with an edit session", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.loadFromJob(
+      {
+        jobId: "job-1",
+        hostId: "host-1",
+        baseline: store.clips.map((clip) => ({ ...clip })),
+        completedStages: 2,
+      },
+      store.clips,
+      true,
+      { filename: "original.png", base64: "ORIGINAL" },
+    );
+
+    expect(store.editing?.baselineOpeningImage).toEqual({
+      filename: "original.png",
+      base64: "ORIGINAL",
+    });
+    expect(store.editing?.baselineEnableAudio).toBe(true);
   });
 
   it("applies a transition to one seam or every seam", () => {

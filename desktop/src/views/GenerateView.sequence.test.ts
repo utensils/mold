@@ -423,6 +423,7 @@ describe("GenerateView — sequence output", () => {
     draft.ensureClips(25);
     draft.clips[0]!.prompt = "opening";
     draft.clips[1]!.prompt = "landing";
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
     draft.enableAudio = false; // user turned audio OFF during the edit
     draft.loadFromJob(
       {
@@ -433,6 +434,7 @@ describe("GenerateView — sequence output", () => {
       },
       draft.clips.map((c) => ({ ...c })),
       false,
+      draft.openingImage,
     );
 
     const amendCalls: unknown[] = [];
@@ -463,6 +465,8 @@ describe("GenerateView — sequence output", () => {
     expect(amendCalls.length).toBe(1);
     const body = JSON.parse((amendCalls[0] as { body: string }).body);
     expect(body.enable_audio).toBe(false);
+    expect(body.stages[0].source_image).toBe("QUJD");
+    expect(body.stages[1].source_image).toBeUndefined();
   });
 
   it("guides to Discover when no chain-capable video model is installed", async () => {

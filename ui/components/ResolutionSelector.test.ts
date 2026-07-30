@@ -21,9 +21,9 @@ describe("ResolutionSelector", () => {
   });
 
   it("marks the active megapixel step checked", () => {
-    const wrapper = make(2);
+    const wrapper = make(1.8);
     const radios = wrapper.findAll("[role=radio]");
-    const index = RESOLUTIONS.findIndex((r) => r.mp === 2);
+    const index = RESOLUTIONS.findIndex((r) => r.mp === 1.8);
     expect(radios[index]!.attributes("aria-checked")).toBe("true");
     expect(radios[0]!.attributes("aria-checked")).toBe("false");
   });

@@ -9,12 +9,14 @@
 import { computed } from "vue";
 import { fpsValidationError } from "../lib/generateValidation";
 import type { GenerateForm } from "../lib/generateForm";
+import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    model?: ModelEntry | null;
     lastSeed: number | null;
     disabled?: boolean;
     /** Sequence output surfaces frame rate outside the Advanced sheet. */
@@ -22,7 +24,7 @@ const props = withDefaults(
     stepsError?: string | null;
     guidanceError?: string | null;
   }>(),
-  { disabled: false, showFps: false, stepsError: null, guidanceError: null },
+  { disabled: false, showFps: false, stepsError: null, guidanceError: null, model: null },
 );
 
 const emit = defineEmits<{
@@ -38,6 +40,7 @@ const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.f
     v-model:width="form.width"
     v-model:height="form.height"
     :family="form.family"
+    :model="model"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
   />

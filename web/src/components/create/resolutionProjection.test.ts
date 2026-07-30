@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dimsForMp } from "@ui/lib/resolution";
+import { dimsForMp, RESOLUTIONS } from "@ui/lib/resolution";
 import { aspectIdForDims, projectResolution } from "./resolutionProjection";
 
 describe("aspectIdForDims", () => {
@@ -22,7 +22,7 @@ describe("aspectIdForDims", () => {
 
 describe("projectResolution", () => {
   it("round-trips the canonical grid without flagging custom", () => {
-    for (const mp of [0.5, 1, 2]) {
+    for (const { mp } of RESOLUTIONS) {
       const { width, height } = dimsForMp(mp, 1);
       const proj = projectResolution(width, height);
       expect(proj.aspectId).toBe("square");

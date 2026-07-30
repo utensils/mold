@@ -118,7 +118,7 @@ describe("MP / aspect projection (Mold Studio inspector)", () => {
     expect(aspectIdFor(form.width, form.height)).toBe("wide");
     expect(form.width % 16).toBe(0);
     expect(form.height % 16).toBe(0);
-    expect(form.width * form.height).toBeGreaterThan(0.7e6);
+    expect(form.width * form.height).toBeGreaterThan(0.5e6);
     expect(form.width * form.height).toBeLessThan(1.3e6);
     applyAspectId(form, "unknown-shape"); // no-op for an id outside ASPECTS
     expect(aspectIdFor(form.width, form.height)).toBe("wide");

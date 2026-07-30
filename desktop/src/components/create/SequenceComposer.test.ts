@@ -120,32 +120,20 @@ describe("SequenceComposer — active clip editor", () => {
     expect(wrapper.emitted("submit")).toHaveLength(1);
   });
 
-  it("offers the opening-image attach only on clip 1", async () => {
+  it("keeps opening-image controls out of the clip editor", async () => {
     const draft = seedDraft();
     draft.activeClipId = draft.clips[0]!.id;
     const wrapper = mountComposer();
-    expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(false);
     draft.activeClipId = draft.clips[1]!.id;
     await flushPromises();
     expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(false);
   });
 
-  it("uses the shared file-or-gallery picker for the opening image", async () => {
-    const draft = seedDraft();
+  it("does not mount a duplicate opening-image picker", async () => {
+    seedDraft();
     const wrapper = mountComposer();
-
-    await wrapper.get("[data-test='opening-image-attach']").trigger("click");
-    const picker = wrapper.getComponent(ImagePickerModal);
-    expect(picker.props("open")).toBe(true);
-    expect(picker.props("multiple")).toBe(false);
-
-    picker.vm.$emit("pick", [{ filename: "gallery-still.jpg", base64: "picked-bytes" }]);
-    await flushPromises();
-    expect(draft.clips[0]!.sourceImage).toEqual({
-      filename: "gallery-still.jpg",
-      base64: "picked-bytes",
-    });
-    expect(picker.props("open")).toBe(false);
+    expect(wrapper.findComponent(ImagePickerModal).exists()).toBe(false);
   });
 });
 
@@ -179,12 +167,12 @@ describe("SequenceComposer — footer", () => {
     expect(wrapper.text()).toContain("Two-stage checkpoint");
   });
 
-  it("gates the audio toggle on chain-limits support", () => {
+  it("keeps audio out of the composer footer", () => {
     seedDraft();
     expect(mountComposer().find("[data-test='sequence-audio']").exists()).toBe(false);
     document.body.innerHTML = "";
     const withAudio = mountComposer({ chainLimits: { ...limits, supports_audio: true } });
-    expect(withAudio.find("[data-test='sequence-audio']").exists()).toBe(true);
+    expect(withAudio.find("[data-test='sequence-audio']").exists()).toBe(false);
   });
 });
 
@@ -222,14 +210,31 @@ describe("SequenceComposer — edit sessions", () => {
 
   it("Duplicate as new emits duplicate; Discard restores the baseline and stops editing", async () => {
     const draft = startEditing();
+    draft.openingImage = { filename: "original.png", base64: "ORIGINAL" };
+    draft.enableAudio = true;
+    draft.loadFromJob(
+      {
+        jobId: "abcdef1234567890",
+        hostId: "local",
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 2,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      true,
+      draft.openingImage,
+    );
     const wrapper = mountComposer();
     await wrapper.get("[data-test='edit-duplicate']").trigger("click");
     expect(wrapper.emitted("duplicate")).toHaveLength(1);
 
     draft.clips[1]!.prompt = "changed beat";
+    draft.openingImage = { filename: "replacement.png", base64: "REPLACEMENT" };
+    draft.enableAudio = false;
     await wrapper.get("[data-test='edit-discard']").trigger("click");
     expect(draft.editing).toBeNull();
     expect(draft.clips[1]!.prompt).toBe("clip two");
+    expect(draft.openingImage?.filename).toBe("original.png");
+    expect(draft.enableAudio).toBe(true);
   });
 });
 

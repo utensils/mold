@@ -16,6 +16,7 @@ import {
   buildChainRequest,
   chainScriptToClips,
   clipsToChainScript,
+  sequenceOpeningImageError,
   stageInvalidation,
   type SequenceSharedParams,
 } from "@studio/lib/sequenceForm";
@@ -38,8 +39,6 @@ import {
   type StreamTarget,
 } from "../api";
 import { requestConfirm, toast } from "../lib/toasts";
-import ImagePickerModal from "./ImagePickerModal.vue";
-import type { SourceImageState } from "../types";
 import type { ClipRailMedia } from "@ui/components/types";
 
 const props = withDefaults(
@@ -103,7 +102,6 @@ async function clearSequence() {
   draft.clearSequence(defaultFrames.value);
   toast("info", "Sequence cleared");
 }
-const pickerOpen = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 
 const motionTail = computed(() =>
@@ -231,6 +229,8 @@ const canGenerate = computed(
   () =>
     limits.value !== null &&
     !sequenceUnsupported.value &&
+    sequenceOpeningImageError(draft.openingImage, draft.mediaRestoring) ===
+      null &&
     validationErrors.value.length === 0,
 );
 
@@ -239,7 +239,10 @@ const canGenerate = computed(
 // payload references, so ordinary clip edits leave it dormant.
 const validationSourceRevision = ref(0);
 watch(
-  () => draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+  () => [
+    draft.openingImage?.base64 ?? null,
+    ...draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+  ],
   () => {
     validationSourceRevision.value += 1;
   },
@@ -253,6 +256,7 @@ const validationInputSignature = computed(() =>
     motionTail: motionTail.value,
     enableAudio: draft.enableAudio,
     sourceRevision: validationSourceRevision.value,
+    openingSourceFilename: draft.openingImage?.filename ?? null,
     clips: draft.clips.map((clip) => ({
       id: clip.id,
       prompt: clip.prompt,
@@ -281,6 +285,7 @@ async function validatePlan() {
     const request = buildChainRequest(props.shared, draft.clips, {
       motionTailFrames: motionTail.value,
       enableAudio: draft.enableAudio,
+      openingImage: draft.openingImage,
     });
     const plan = await validateChain(request, props.target);
     if (validationInputSignature.value === inputSignature) {
@@ -316,27 +321,13 @@ function onPromptKeydown(event: KeyboardEvent) {
   }
 }
 
-// ── Opening image (clip 1 only — later clips condition on the prior
-//    clip's motion tail) ───────────────────────────────────────────────
-function onPickImage(images: SourceImageState[]) {
-  const first = images[0];
-  const clip = draft.clips[0];
-  pickerOpen.value = false;
-  if (!first || !clip) return;
-  clip.sourceImage = { filename: first.filename, base64: first.base64 };
-}
-
-function clearOpeningImage() {
-  const clip = draft.clips[0];
-  if (clip) clip.sourceImage = null;
-}
-
 // ── File tools ────────────────────────────────────────────────────────
 function exportScript(): string {
   return serializeChainScript(
     clipsToChainScript(props.shared, draft.clips, {
       motionTailFrames: motionTail.value,
       enableAudio: draft.enableAudio,
+      openingImage: draft.openingImage,
     }),
   );
 }
@@ -362,6 +353,7 @@ function importTomlText(text: string) {
     const script = parseChainScript(text);
     const loaded = chainScriptToClips(script);
     draft.clips.splice(0, draft.clips.length, ...loaded.clips);
+    draft.openingImage = loaded.openingImage;
     draft.enableAudio = loaded.enableAudio;
     draft.activeClipId = draft.clips[0]?.id ?? null;
     emit("import-shared", loaded.shared);
@@ -521,8 +513,10 @@ defineExpose({ importTomlText });
           >
             <template #thumb="{ clip }">
               <img
-                v-if="clip.sourceImage?.base64"
-                :src="`data:image/png;base64,${clip.sourceImage.base64}`"
+                v-if="
+                  clip.id === draft.clips[0]?.id && draft.openingImage?.base64
+                "
+                :src="`data:image/png;base64,${draft.openingImage.base64}`"
                 alt=""
                 class="h-full w-full rounded object-cover"
               />
@@ -609,65 +603,8 @@ defineExpose({ importTomlText });
           <Icon name="star" :size="13" />
           Expand
         </button>
-        <template v-if="activeIndex === 0">
-          <button
-            type="button"
-            class="sq-tool"
-            data-test="opening-image-attach"
-            @click="pickerOpen = true"
-          >
-            <Icon name="image" :size="13" />
-            {{ activeClip.sourceImage?.filename ?? "Opening image" }}
-          </button>
-          <button
-            v-if="activeClip.sourceImage"
-            type="button"
-            class="sq-tool"
-            data-test="opening-image-clear"
-            aria-label="Clear opening image"
-            @click="clearOpeningImage"
-          >
-            <Icon name="close" :size="13" />
-          </button>
-        </template>
       </div>
-      <details class="text-xs text-ink-3">
-        <summary class="cursor-pointer select-none">
-          Negative prompt<span v-if="activeClip.negativePrompt.trim()">
-            · set</span
-          >
-        </summary>
-        <textarea
-          :value="activeClip.negativePrompt"
-          data-test="clip-negative"
-          rows="2"
-          class="mt-2 w-full resize-y rounded-control border border-ce bg-bath px-3 py-2 text-sm text-rebate outline-none focus:border-safelight"
-          placeholder="What to avoid in this clip"
-          @input="
-            activeClip.negativePrompt = (
-              $event.target as HTMLTextAreaElement
-            ).value
-          "
-        />
-      </details>
     </div>
-
-    <label
-      v-if="limits?.supports_audio"
-      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-ink-2"
-      title="Generate per-stage audio and mux it into the stitched MP4."
-    >
-      <input
-        type="checkbox"
-        data-test="sequence-enable-audio"
-        class="h-4 w-4 rounded border-ce bg-bench text-safelight focus:ring-safelight"
-        :checked="draft.enableAudio"
-        @change="
-          draft.enableAudio = ($event.target as HTMLInputElement).checked
-        "
-      />
-      Generate audio
-    </label>
 
     <p
       v-if="validationErrors.length"
@@ -782,13 +719,6 @@ defineExpose({ importTomlText });
         {{ draft.editing ? "Update sequence" : "Generate sequence" }}
       </button>
     </div>
-
-    <ImagePickerModal
-      :open="pickerOpen"
-      title="Opening image"
-      @pick="onPickImage"
-      @close="pickerOpen = false"
-    />
   </section>
 </template>
 

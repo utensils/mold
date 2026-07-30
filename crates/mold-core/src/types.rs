@@ -910,6 +910,12 @@ pub struct ModelInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RecommendedDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelDefaults {
     #[schema(example = 4)]
     pub default_steps: u32,
@@ -941,6 +947,17 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 8)]
     pub frame_step: Option<u32>,
+    /// Server-authoritative total-pixel ceiling for generation requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1800000)]
+    pub max_pixels: Option<u64>,
+    /// Runnable, family-appropriate buckets used by every Studio surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended_dimensions: Vec<RecommendedDimensions>,
+    /// Required dimension grid for this family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 16)]
+    pub dimension_alignment: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1078,12 +1095,18 @@ mod model_defaults_frame_tests {
         assert_eq!(parsed.default_fps, None);
         assert_eq!(parsed.max_frames, None);
         assert_eq!(parsed.frame_step, None);
+        assert_eq!(parsed.max_pixels, None);
+        assert!(parsed.recommended_dimensions.is_empty());
+        assert_eq!(parsed.dimension_alignment, None);
 
         let out = serde_json::to_value(&parsed).unwrap();
         assert!(out.get("default_frames").is_none());
         assert!(out.get("default_fps").is_none());
         assert!(out.get("max_frames").is_none());
         assert!(out.get("frame_step").is_none());
+        assert!(out.get("max_pixels").is_none());
+        assert!(out.get("recommended_dimensions").is_none());
+        assert!(out.get("dimension_alignment").is_none());
 
         let video = ModelDefaults {
             default_frames: Some(97),

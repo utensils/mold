@@ -696,6 +696,7 @@ function selectCurrentMobileSequence(): void {
     draft.clips.splice(0, draft.clips.length, ...loaded.clips);
     draft.activeClipId = loaded.clips[0]?.id ?? null;
     draft.enableAudio = loaded.enableAudio;
+    draft.openingImage = loaded.openingImage;
   }
   tab.value = "generate";
 }
@@ -1251,6 +1252,7 @@ async function submitMobileSequence(): Promise<void> {
     const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
       motionTailFrames: sequenceMotionTail.value,
       enableAudio: draft.enableAudio,
+      openingImage: draft.openingImage,
     });
     let preview: GenerationPlacementPreview | null = null;
     let legacyUnsupported = false;
@@ -3260,6 +3262,7 @@ onBeforeUnmount(() => {
               <template #settings>
                 <MobileSharedParams
                   :form="form"
+                  :model="selectedGenerationModel"
                   :last-seed="generation.lastSeedUsed"
                   :disabled="loadingModels"
                   show-fps
@@ -3285,6 +3288,7 @@ onBeforeUnmount(() => {
             <MobilePromptTools
               v-if="selectedTarget"
               :form="form"
+              :model="selectedGenerationModel"
               :target="selectedTarget"
               :running="expansionRunning"
               :can-undo="quickExpansionOriginal !== null"

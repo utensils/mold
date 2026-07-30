@@ -12,6 +12,8 @@ export interface ResolutionOption {
   mp: number;
   label: string;
   sub?: string;
+  width?: number;
+  height?: number;
 }
 
 const props = withDefaults(
@@ -34,9 +36,14 @@ const segments = computed(() =>
   props.options.map((o) => ({ value: o.mp, label: o.label, sub: o.sub })),
 );
 
-const resolved = computed(
-  () => `${dimsLabel(props.modelValue, props.ratio)} px`,
-);
+const resolved = computed(() => {
+  const selected = props.options.find(
+    (option) => option.mp === props.modelValue,
+  );
+  return selected?.width && selected.height
+    ? `${selected.width}×${selected.height} px`
+    : `${dimsLabel(props.modelValue, props.ratio)} px`;
+});
 </script>
 
 <template>

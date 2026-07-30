@@ -299,26 +299,28 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    warnings = lib.optionals (
-      cfg.cudaArch != null
-      && packageCudaComputeCapability
-      != expectedCudaComputeCapability.${cfg.cudaArch}
-    ) [
-      (
-        ''
-          services.mold.cudaArch is "${cfg.cudaArch}" (sm_${expectedCudaComputeCapability.${cfg.cudaArch}})
-          but services.mold.package declares ${
-            if packageCudaComputeCapability == null then
-              "no Mold CUDA capability metadata"
-            else
-              "sm_${packageCudaComputeCapability}"
-          }. Set package to the matching Mold flake output.
-        ''
-        + lib.optionalString (cfg.cudaArch == "blackwell-datacenter") ''
-          B200/B300 support is simulated, not hardware-qualified.
-        ''
-      )
-    ];
+    warnings =
+      lib.optionals
+        (
+          cfg.cudaArch != null
+          && packageCudaComputeCapability != expectedCudaComputeCapability.${cfg.cudaArch}
+        )
+        [
+          (
+            ''
+              services.mold.cudaArch is "${cfg.cudaArch}" (sm_${expectedCudaComputeCapability.${cfg.cudaArch}})
+              but services.mold.package declares ${
+                if packageCudaComputeCapability == null then
+                  "no Mold CUDA capability metadata"
+                else
+                  "sm_${packageCudaComputeCapability}"
+              }. Set package to the matching Mold flake output.
+            ''
+            + lib.optionalString (cfg.cudaArch == "blackwell-datacenter") ''
+              B200/B300 support is simulated, not hardware-qualified.
+            ''
+          )
+        ];
 
     services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";
 

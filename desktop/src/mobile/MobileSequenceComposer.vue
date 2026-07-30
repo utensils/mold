@@ -25,11 +25,13 @@ import {
   type SequenceTransition,
 } from "@studio/lib/sequence";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { sequenceOpeningImageError } from "@studio/lib/sequenceForm";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import { base64ToDataUrl } from "../lib/image";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
+import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
 
 const props = withDefaults(
@@ -62,6 +64,19 @@ const newClipFrames = computed(() =>
 );
 const locked = computed(() => props.submitting || props.busy);
 const imagePickerOpen = ref(false);
+const advancedOpen = ref(false);
+const activeClip = computed(
+  () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
+);
+const activeIndex = computed(() =>
+  activeClip.value ? draft.clips.findIndex((clip) => clip.id === activeClip.value?.id) : -1,
+);
+const advancedCount = computed(
+  () =>
+    Number(Boolean(draft.openingImage)) +
+    Number(Boolean(activeClip.value?.negativePrompt.trim())) +
+    Number(draft.enableAudio),
+);
 
 /** Durations are the 8n+1 grid up to the cap, strictly above the motion tail;
  *  an off-grid loaded value stays visible rather than silently re-snapping. */
@@ -97,7 +112,13 @@ const unsupportedReason = computed(() =>
     ? (props.chainLimits.sequence_unsupported_reason ?? "This model can't render a clip sequence.")
     : null,
 );
-const blockingReason = computed(() => unsupportedReason.value ?? validation.value[0] ?? null);
+const blockingReason = computed(
+  () =>
+    unsupportedReason.value ??
+    sequenceOpeningImageError(draft.openingImage, draft.mediaRestoring) ??
+    validation.value[0] ??
+    null,
+);
 const submitError = computed(() => (props.error ? friendlySequenceError(props.error) : ""));
 
 const clipLabel = (index: number) => (index === 0 ? "opening" : `clip ${index + 1}`);
@@ -136,9 +157,7 @@ function submit(): void {
 }
 
 function setOpeningImage(image: MobilePickedImage): void {
-  const opening = draft.clips[0];
-  if (!opening) return;
-  opening.sourceImage = { filename: image.filename, base64: image.base64 };
+  draft.openingImage = { filename: image.filename, base64: image.base64 };
   imagePickerOpen.value = false;
 }
 
@@ -185,38 +204,6 @@ function sourceImageMime(filename: string): string {
             :placeholder="index === 0 ? 'How does the sequence begin?' : 'What happens next?'"
             :disabled="locked"
           />
-          <div v-if="index === 0" class="mobile-sequence-source">
-            <img
-              v-if="clip.sourceImage?.base64"
-              :src="
-                base64ToDataUrl(
-                  clip.sourceImage.base64 ?? '',
-                  sourceImageMime(clip.sourceImage.filename),
-                )
-              "
-              :alt="clip.sourceImage.filename"
-              data-test="mobile-sequence-source-preview"
-            />
-            <button
-              type="button"
-              class="secondary-button"
-              data-test="mobile-sequence-source-pick"
-              :disabled="locked || !target"
-              @click="imagePickerOpen = true"
-            >
-              {{ clip.sourceImage ? "Replace opening image" : "Attach opening image" }}
-            </button>
-            <button
-              v-if="clip.sourceImage"
-              type="button"
-              class="secondary-button"
-              data-test="mobile-sequence-source-clear"
-              :disabled="locked"
-              @click="clip.sourceImage = null"
-            >
-              Remove
-            </button>
-          </div>
           <details class="mobile-native-disclosure">
             <summary>
               <span>Clip tools</span>
@@ -273,14 +260,15 @@ function sourceImageMime(filename: string): string {
       <slot name="settings" />
     </details>
 
-    <label
-      v-if="chainLimits?.supports_audio"
-      class="mobile-sequence-check"
-      data-test="mobile-sequence-audio"
+    <button
+      type="button"
+      class="secondary-button"
+      data-test="mobile-sequence-open-advanced"
+      @click="advancedOpen = true"
     >
-      <input v-model="draft.enableAudio" type="checkbox" :disabled="locked" />
-      Generate audio
-    </label>
+      Advanced sequence controls
+      <span v-if="advancedCount > 0">· {{ advancedCount }} on</span>
+    </button>
 
     <p
       v-if="blockingReason"
@@ -322,6 +310,65 @@ function sourceImageMime(filename: string): string {
       @update:fade-frames="setSeamFade"
       @close="openSeamId = null"
     />
+    <MobileAdvancedSheet
+      :open="advancedOpen"
+      :count="advancedCount"
+      @close="advancedOpen = false"
+      @reset="
+        draft.openingImage = null;
+        draft.enableAudio = false;
+        draft.clips.forEach((clip) => (clip.negativePrompt = ''));
+      "
+    >
+      <details class="mobile-native-disclosure" open data-test="mobile-sequence-advanced-opening">
+        <summary>
+          <span>Opening sequence image</span>
+          <small>{{ draft.openingImage?.filename ?? "Original starting frame" }}</small>
+        </summary>
+        <img
+          v-if="draft.openingImage?.base64"
+          :src="
+            base64ToDataUrl(
+              draft.openingImage.base64 ?? '',
+              sourceImageMime(draft.openingImage.filename),
+            )
+          "
+          :alt="draft.openingImage.filename"
+          data-test="mobile-sequence-source-preview"
+        />
+        <button
+          type="button"
+          class="secondary-button"
+          data-test="mobile-sequence-source-pick"
+          :disabled="locked || !target"
+          @click="imagePickerOpen = true"
+        >
+          {{ draft.openingImage ? "Replace opening image" : "Attach opening image" }}
+        </button>
+        <button
+          v-if="draft.openingImage"
+          type="button"
+          class="secondary-button"
+          data-test="mobile-sequence-source-clear"
+          :disabled="locked"
+          @click="draft.openingImage = null"
+        >
+          Remove
+        </button>
+      </details>
+      <label v-if="activeClip" class="field" data-test="mobile-sequence-advanced-negative">
+        <span>Clip {{ activeIndex + 1 }} negative prompt</span>
+        <input v-model="activeClip.negativePrompt" class="control" placeholder="Optional" />
+      </label>
+      <label
+        v-if="chainLimits?.supports_audio"
+        class="mobile-sequence-check"
+        data-test="mobile-sequence-audio"
+      >
+        <input v-model="draft.enableAudio" type="checkbox" :disabled="locked" />
+        Generate audio
+      </label>
+    </MobileAdvancedSheet>
     <MobileImagePickerSheet
       :open="imagePickerOpen"
       :target="target"

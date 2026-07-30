@@ -31,6 +31,7 @@ import { blobToBase64 } from "../lib/base64";
 import Icon from "@ui/components/Icon.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
+import { MAX_GENERATION_PIXELS } from "@studio/lib/resolutions";
 import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
@@ -1084,7 +1085,9 @@ const sequenceReuseNotice = ref<string | null>(null);
 const chainLevelDirty = computed(
   () =>
     editBaselineShared.value !== null &&
-    editBaselineShared.value !== JSON.stringify(sharedParams.value),
+    (editBaselineShared.value !== JSON.stringify(sharedParams.value) ||
+      JSON.stringify(draft.editing?.baselineOpeningImage ?? null) !==
+        JSON.stringify(draft.openingImage)),
 );
 
 /** Apply a script's chain-level params onto the LIVE form (edit + import). */
@@ -1130,6 +1133,7 @@ async function onSubmitSequence() {
   const req = buildChainRequest(sharedParams.value, draft.clips, {
     motionTailFrames: sequenceMotionTail.value,
     enableAudio: draft.enableAudio,
+    openingImage: draft.openingImage,
   });
 
   const editing = draft.editing;
@@ -1222,6 +1226,7 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
         },
         loaded.clips,
         loaded.enableAudio,
+        loaded.openingImage,
       );
       editBaselineShared.value = JSON.stringify(
         sequenceSharedParams(form.state.value, currentFamily.value),
@@ -1233,6 +1238,7 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
       draft.clips.splice(0, draft.clips.length, ...loaded.clips);
       draft.activeClipId = loaded.clips[0]?.id ?? null;
       draft.enableAudio = loaded.enableAudio;
+      draft.openingImage = loaded.openingImage;
     }
     sequenceStageClipIdsByJob.set(
       `${hostId}:${jobId}`,
@@ -1251,12 +1257,20 @@ function onDuplicateAsNew() {
 }
 
 function onDiscardEdit() {
+  const editing = draft.editing;
+  if (!editing) return;
+  draft.clips.splice(
+    0,
+    draft.clips.length,
+    ...editing.baseline.map((clip) => ({ ...clip })),
+  );
+  draft.openingImage = editing.baselineOpeningImage
+    ? { ...editing.baselineOpeningImage }
+    : null;
+  draft.enableAudio = editing.baselineEnableAudio ?? false;
   draft.stopEditing();
   editBaselineShared.value = null;
-  draft.clips.splice(0, draft.clips.length);
-  draft.activeClipId = null;
-  draft.enableAudio = false;
-  draft.ensureClips(sequenceDefaultFrames.value);
+  draft.activeClipId = draft.clips[0]?.id ?? null;
 }
 
 function onImportShared(shared: Partial<SequenceSharedParams>) {
@@ -1405,39 +1419,43 @@ const aspectLabel = computed(
 );
 
 const advCount = computed(() =>
-  advancedActiveCount({
-    negativePrompt: capabilities.value.supportsNegativePrompt
-      ? form.state.value.negativePrompt
-      : "",
-    hasSource: form.state.value.imageAttachments.length > 0,
-    loraCount: form.state.value.loras.length,
-    upscaleOn: form.state.value.upscaleModel.trim() !== "",
-    scheduler: capabilities.value.supportsScheduler
-      ? form.state.value.scheduler
-      : null,
-    customSize: projection.value.isCustom,
-    videoNonDefault:
-      capabilities.value.supportsVideo &&
-      form.state.value.frames != null &&
-      form.state.value.frames !== 25,
-    controlNet:
-      capabilities.value.supportsControlNet &&
-      form.state.value.controlImage != null,
-    videoSuite:
-      capabilities.value.supportsVideo &&
-      (form.state.value.gifPreview ||
-        form.state.value.enableAudio === false ||
-        form.state.value.pipeline != null ||
-        form.state.value.icLoraControl != null ||
-        form.state.value.audioFile != null ||
-        form.state.value.audioFilePath.trim() !== "" ||
-        form.state.value.sourceVideo != null ||
-        form.state.value.sourceVideoPath.trim() !== "" ||
-        form.state.value.keyframes.length > 0 ||
-        form.state.value.retakeRange != null ||
-        form.state.value.spatialUpscale != null ||
-        form.state.value.temporalUpscale != null),
-  }),
+  sequenceMode.value
+    ? Number(Boolean(draft.openingImage)) +
+      Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(draft.enableAudio)
+    : advancedActiveCount({
+        negativePrompt: capabilities.value.supportsNegativePrompt
+          ? form.state.value.negativePrompt
+          : "",
+        hasSource: form.state.value.imageAttachments.length > 0,
+        loraCount: form.state.value.loras.length,
+        upscaleOn: form.state.value.upscaleModel.trim() !== "",
+        scheduler: capabilities.value.supportsScheduler
+          ? form.state.value.scheduler
+          : null,
+        customSize: projection.value.isCustom,
+        videoNonDefault:
+          capabilities.value.supportsVideo &&
+          form.state.value.frames != null &&
+          form.state.value.frames !== 25,
+        controlNet:
+          capabilities.value.supportsControlNet &&
+          form.state.value.controlImage != null,
+        videoSuite:
+          capabilities.value.supportsVideo &&
+          (form.state.value.gifPreview ||
+            form.state.value.enableAudio === false ||
+            form.state.value.pipeline != null ||
+            form.state.value.icLoraControl != null ||
+            form.state.value.audioFile != null ||
+            form.state.value.audioFilePath.trim() !== "" ||
+            form.state.value.sourceVideo != null ||
+            form.state.value.sourceVideoPath.trim() !== "" ||
+            form.state.value.keyframes.length > 0 ||
+            form.state.value.retakeRange != null ||
+            form.state.value.spatialUpscale != null ||
+            form.state.value.temporalUpscale != null),
+      }),
 );
 
 // ── Canvas state ──────────────────────────────────────────────────────
@@ -1713,6 +1731,14 @@ function validateSubmit(): boolean {
   if (!form.state.value.model) {
     showAdvanced.value = false;
     composerError.value = "Pick a model to start.";
+    return false;
+  }
+  const pixels = form.state.value.width * form.state.value.height;
+  const maxPixels = currentModel.value?.max_pixels ?? MAX_GENERATION_PIXELS;
+  if (pixels > maxPixels) {
+    composerError.value = `${form.state.value.width} × ${form.state.value.height} exceeds this model's ${(
+      maxPixels / 1_000_000
+    ).toFixed(1)} MP limit.`;
     return false;
   }
   const qwenImageEdit =
@@ -2267,6 +2293,18 @@ async function onClearSource() {
 }
 
 async function onPickSource(v: SourceImageState[]) {
+  if (sequenceMode.value) {
+    const first = v[0];
+    if (first) {
+      draft.openingImage = {
+        filename: first.filename,
+        base64: first.base64,
+        draftId: first.draftId,
+      };
+    }
+    composerError.value = null;
+    return;
+  }
   const qwenEdit =
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
@@ -2631,6 +2669,7 @@ onBeforeUnmount(() => {
             <ControlsAside
               v-model="form.state.value"
               :family="currentFamily"
+              :model="currentModel"
               :adv-count="advCount"
               :mobile="true"
               :last-seed="lastSeedUsed"
@@ -2820,6 +2859,7 @@ onBeforeUnmount(() => {
                 <ControlsAside
                   v-model="form.state.value"
                   :family="currentFamily"
+                  :model="currentModel"
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
@@ -2971,6 +3011,7 @@ onBeforeUnmount(() => {
         <ControlsAside
           v-model="form.state.value"
           :family="currentFamily"
+          :model="currentModel"
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
@@ -2989,6 +3030,10 @@ onBeforeUnmount(() => {
           :placement-gpus="gpuListForPlacement"
           :models="models"
           :audio-output-supported="currentModel?.supports_audio !== false"
+          :output="sequenceMode ? 'sequence' : 'single'"
+          :sequence-supports-audio="
+            currentFamily === 'ltx2' && currentModel?.supports_audio !== false
+          "
           @open-picker="showPicker = true"
           @clear-source="onClearSource"
           @open-mask="showMask = true"
@@ -3010,6 +3055,10 @@ onBeforeUnmount(() => {
         :placement-gpus="gpuListForPlacement"
         :models="models"
         :audio-output-supported="currentModel?.supports_audio !== false"
+        :output="sequenceMode ? 'sequence' : 'single'"
+        :sequence-supports-audio="
+          currentFamily === 'ltx2' && currentModel?.supports_audio !== false
+        "
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @clear-source="onClearSource"
@@ -3038,9 +3087,13 @@ onBeforeUnmount(() => {
     <ImagePickerModal
       :open="showPicker"
       :title="
-        currentFamily === 'qwen-image-edit' ? 'Edit images' : 'Source image'
+        sequenceMode
+          ? 'Opening sequence image'
+          : currentFamily === 'qwen-image-edit'
+            ? 'Edit images'
+            : 'Source image'
       "
-      :multiple="currentFamily === 'qwen-image-edit'"
+      :multiple="!sequenceMode && currentFamily === 'qwen-image-edit'"
       @pick="onPickSource"
       @close="showPicker = false"
     />
