@@ -316,7 +316,7 @@ describe("ControlsAside", () => {
       },
     });
     expect(wrapper.get("[data-test='output-caption']").text()).toBe(
-      "3 clips on the composer rail · switching back keeps clip 1 and parks the rest.",
+      "3 clips on the composer rail · one-shot and sequence prompts stay separate.",
     );
   });
 

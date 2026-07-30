@@ -34,8 +34,14 @@ const emit = defineEmits<{
 
 const tab = ref<"upload" | "gallery">("upload");
 const entries = ref<GalleryImage[]>([]);
+const stillEntries = computed(() =>
+  entries.value.filter((entry) =>
+    /\.(png|jpe?g)$/i.test(entry.filename.trim()),
+  ),
+);
 const loading = ref(false);
 const error = ref<string | null>(null);
+const uploadError = ref<string | null>(null);
 const dragging = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 
@@ -84,8 +90,19 @@ onMounted(async () => {
 onBeforeUnmount(() => mq?.removeEventListener?.("change", onMediaChange));
 
 async function emitFiles(files: File[]) {
-  const selected = props.multiple ? files : files.slice(0, 1);
   if (!files.length) return;
+  const images = files.filter(
+    (file) =>
+      file.type === "image/png" ||
+      file.type === "image/jpeg" ||
+      (!file.type && /\.(png|jpe?g)$/i.test(file.name.trim())),
+  );
+  if (!images.length) {
+    uploadError.value = "Only PNG or JPEG images can be used here.";
+    return;
+  }
+  uploadError.value = null;
+  const selected = props.multiple ? images : images.slice(0, 1);
   const picked = await Promise.all(
     selected.map(async (file) => ({
       kind: "upload" as const,
@@ -205,7 +222,7 @@ async function pickFromGallery(item: GalleryImage) {
             <input
               ref="fileInput"
               type="file"
-              accept="image/*"
+              accept="image/png,image/jpeg"
               :multiple="multiple"
               class="ip__file"
               tabindex="-1"
@@ -213,6 +230,9 @@ async function pickFromGallery(item: GalleryImage) {
               @change="onFiles"
             />
           </div>
+          <p v-if="uploadError" class="ip__status ip__status--error">
+            {{ uploadError }}
+          </p>
         </div>
 
         <div v-else class="ip__body">
@@ -220,11 +240,11 @@ async function pickFromGallery(item: GalleryImage) {
           <p v-else-if="error" class="ip__status ip__status--error">
             {{ error }}
           </p>
-          <p v-else-if="!entries.length" class="ip__status">
+          <p v-else-if="!stillEntries.length" class="ip__status">
             no prints in the gallery yet
           </p>
           <ul v-else class="ip__grid">
-            <li v-for="item in entries" :key="item.filename">
+            <li v-for="item in stillEntries" :key="item.filename">
               <button
                 type="button"
                 class="ip__tile"

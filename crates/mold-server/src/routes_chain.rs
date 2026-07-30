@@ -39,7 +39,11 @@ pub(crate) async fn resolve_chain_model_authority(
     state: &AppState,
     model: &str,
 ) -> Result<ExistingModelAuthority, ApiError> {
-    let config = state.config.read().await.clone();
+    // Inventory/component endpoints reload bootstrap configuration before
+    // reporting a model as installed. Freeze against that same fresh
+    // authority so a long-lived server cannot advertise a model whose paths
+    // durable chain admission then fails to see.
+    let config = crate::model_manager::refresh_config(state).await;
     crate::model_manager::resolve_existing_model_authority(model, &config)
         .map_err(|error| chain_freeze_error(model, error.error))?
         .ok_or_else(|| {

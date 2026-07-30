@@ -41,6 +41,7 @@ export function applyMobileGalleryMetadata(
   models: ModelEntry[],
 ): MobileGalleryReuseResult {
   const plan = planSequenceReuse(metadata);
+  const oneShotPrompt = form.prompt;
   const originalModelInstalled = models.some((model) => model.name === metadata.model);
   // A sequence must fall back to a SEQUENCE-capable model; the first installed
   // model could be an image model the clip rail can never render.
@@ -77,9 +78,8 @@ export function applyMobileGalleryMetadata(
     const tail = sequenceMotionTailFrames({ name: form.model, family: form.family });
     const { clips, raised } = clampClipsToMotionTail(plan.clips, tail, 9);
     sequence = { clips, lossy: plan.lossy, raised };
-    // `metadata.prompt` for a sequence is every clip newline-joined; clip 1's
-    // prompt is the honest single-shot value to leave behind.
-    form.prompt = clips[0]?.prompt ?? "";
+    // Reusing a sequence must not overwrite the parked one-shot prompt.
+    form.prompt = oneShotPrompt;
   }
 
   return {

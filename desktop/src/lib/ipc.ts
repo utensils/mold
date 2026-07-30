@@ -296,6 +296,25 @@ export const ipc = {
     if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
     return invoke<string>("save_output_bytes", { filename, dataB64, metadata: metadata ?? null });
   },
+  /** Ask for a destination and save one rendered still outside Mold's gallery. */
+  saveImageAs(filename: string, dataB64: string): Promise<string | null> {
+    if (!inTauri()) {
+      const bytes = Uint8Array.from(atob(dataB64), (character) => character.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes]));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      return Promise.resolve(filename);
+    }
+    return invoke<string | null>("save_image_as", { filename, dataB64 });
+  },
+  /** Exact path only when that gallery identity exists on this Mac. */
+  localOutputFilePath(filename: string): Promise<string | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<string | null>("local_output_file_path", { filename });
+  },
   /** Stash the exact img2img source bytes under their sha256 (fire-and-forget
    * at submit) so Reuse settings can restore uploads that live nowhere else. */
   sourceStashPut(sha256: string, dataB64: string): Promise<void> {

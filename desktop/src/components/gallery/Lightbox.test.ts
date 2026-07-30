@@ -221,7 +221,10 @@ describe("Lightbox a11y", () => {
     const menu = useContextMenuStore();
     expect(menu.visible).toBe(true);
     expect(menu.entries).toEqual(
-      expect.arrayContaining([expect.objectContaining({ label: "Copy image", disabled: false })]),
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Copy image", disabled: false }),
+        expect.objectContaining({ label: "Copy file path" }),
+      ]),
     );
     wrapper.unmount();
   });

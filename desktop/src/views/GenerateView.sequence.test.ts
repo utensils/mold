@@ -43,6 +43,8 @@ import { useAppPrefsStore } from "../stores/appPrefs";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
+import { useContextMenuStore } from "../stores/contextMenu";
+import { newJob, useGenerationStore } from "../stores/generation";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import type { ChainJobDetail } from "@studio/lib/api/chainTypes";
 
@@ -107,6 +109,44 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
+  it("offers Save image and Copy file path on a completed still", async () => {
+    readyLocal();
+    installedPayload = [imageModel];
+    useModelStore().all = [imageModel];
+    const job = newJob({
+      prompt: "moonlit alley",
+      model: imageModel.name,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+    });
+    job.clientId = 1;
+    job.status = "complete";
+    job.resultUrl = "blob:result";
+    job.result = {
+      image: "aW1hZ2U=",
+      format: "png",
+      width: 1024,
+      height: 1024,
+      seed_used: 9,
+      generation_time_ms: 10,
+      model: imageModel.name,
+      filename: "remote-print.png",
+    };
+    const generation = useGenerationStore();
+    generation.jobs = [job];
+    generation.selectedClientId = 1;
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
+    const labels = useContextMenuStore().entries.flatMap((entry) =>
+      "separator" in entry ? [] : [entry.label],
+    );
+    expect(labels).toContain("Save image…");
+    expect(labels).toContain("Copy file path");
+  });
+
   it.each([
     {
       kind: "image",
@@ -178,7 +218,7 @@ describe("GenerateView — sequence output", () => {
     },
   );
 
-  it("consumes ?output=sequence once, then strips the query", async () => {
+  it("consumes ?output=sequence without leaking the one-shot prompt, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];
     useModelStore().all = [videoModel];
@@ -190,7 +230,8 @@ describe("GenerateView — sequence output", () => {
     const draft = useSequenceDraftStore();
     expect(draft.output).toBe("sequence");
     expect(draft.clips.length).toBeGreaterThanOrEqual(2);
-    expect(draft.clips[0]!.prompt).toBe("a storm rolls in");
+    expect(draft.clips[0]!.prompt).toBe("");
+    expect(useGenerateFormStore().form.prompt).toBe("a storm rolls in");
     expect(routerReplace).toHaveBeenCalledWith({ path: "/create" });
   });
 
@@ -682,6 +723,7 @@ describe("GenerateView — sequence reuse handoff", () => {
     readyLocal();
     installedPayload = [model];
     useModelStore().all = [model];
+    useGenerateFormStore().form.prompt = "parked one shot";
     const draft = useSequenceDraftStore();
     draft.hydrate();
     useComposerStore().setSequence({ kind: "reuse", metadata });
@@ -698,8 +740,7 @@ describe("GenerateView — sequence reuse handoff", () => {
     expect(draft.clips.map((c) => c.frames)).toEqual([97, 65, 33]);
     expect(draft.editing).toBeNull();
     expect(useGenerateFormStore().form.seed).toBe("4242");
-    // Never the newline join — that is the wart this path exists to avoid.
-    expect(useGenerateFormStore().form.prompt).toBe("clip 1");
+    expect(useGenerateFormStore().form.prompt).toBe("parked one shot");
     expect(useComposerStore().pendingSequence).toBeNull();
     // The confirmation line is always there; it just has nothing to disclaim.
     expect(wrapper.get("[data-test='sequence-reuse-note']").text()).toBe("reused 3 clips");

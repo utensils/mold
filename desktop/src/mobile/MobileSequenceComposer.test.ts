@@ -48,6 +48,7 @@ function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
     props: {
       selectedModel: ltx2,
       chainLimits: limits,
+      target: { baseUrl: "http://studio:7680", apiKey: "secret" },
       fps: 24,
       submitting: false,
       error: "",
@@ -290,6 +291,7 @@ describe("MobileSequenceComposer guardrails", () => {
       props: {
         selectedModel: ltx2,
         chainLimits: limits,
+        target: { baseUrl: "http://studio:7680", apiKey: "secret" },
         fps: 24,
         submitting: false,
         error: "",
@@ -305,6 +307,27 @@ describe("MobileSequenceComposer guardrails", () => {
   it("omits the settings disclosure when the host supplies no params", () => {
     mountComposer();
     expect(wrapper!.find("[data-test='mobile-sequence-settings']").exists()).toBe(false);
+  });
+
+  it("attaches a local-or-gallery image only to the opening clip", async () => {
+    const draft = useSequenceDraftStore();
+    mountComposer();
+    expect(wrapper!.findAll("[data-test='mobile-sequence-source-pick']")).toHaveLength(1);
+
+    await wrapper!.get("[data-test='mobile-sequence-source-pick']").trigger("click");
+    const picker = wrapper!.getComponent({ name: "MobileImagePickerSheet" });
+    expect(picker.props("open")).toBe(true);
+    picker.vm.$emit("pick", { filename: "opening.jpg", base64: "wire-bytes" });
+    await wrapper!.vm.$nextTick();
+
+    expect(draft.clips[0]!.sourceImage).toEqual({
+      filename: "opening.jpg",
+      base64: "wire-bytes",
+    });
+    expect(draft.clips[1]!.sourceImage).toBeNull();
+    expect(
+      wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src"),
+    ).toContain("wire-bytes");
   });
 
   it("summarizes the timeline at the form's own frame rate", () => {

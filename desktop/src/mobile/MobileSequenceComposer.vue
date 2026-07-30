@@ -26,13 +26,17 @@ import {
 } from "@studio/lib/sequence";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
+import type { ApiTarget } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
+import { base64ToDataUrl } from "../lib/image";
+import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
 
 const props = withDefaults(
   defineProps<{
     selectedModel: ModelEntry | null;
     chainLimits: ChainLimits | null;
+    target: ApiTarget | null;
     /** The generate form's frame rate — shown, never stored here. */
     fps: number;
     submitting?: boolean;
@@ -43,7 +47,7 @@ const props = withDefaults(
     /** Collapsed caption for the shared-parameter disclosure. */
     settingsSummary?: string;
   }>(),
-  { submitting: false, error: "", busy: false, settingsSummary: "" },
+  { target: null, submitting: false, error: "", busy: false, settingsSummary: "" },
 );
 
 const emit = defineEmits<{ submit: [] }>();
@@ -57,6 +61,7 @@ const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
 );
 const locked = computed(() => props.submitting || props.busy);
+const imagePickerOpen = ref(false);
 
 /** Durations are the 8n+1 grid up to the cap, strictly above the motion tail;
  *  an off-grid loaded value stays visible rather than silently re-snapping. */
@@ -129,6 +134,13 @@ function submit(): void {
   if (locked.value || blockingReason.value) return;
   emit("submit");
 }
+
+function setOpeningImage(image: MobilePickedImage): void {
+  const opening = draft.clips[0];
+  if (!opening) return;
+  opening.sourceImage = { filename: image.filename, base64: image.base64 };
+  imagePickerOpen.value = false;
+}
 </script>
 
 <template>
@@ -169,6 +181,33 @@ function submit(): void {
             :placeholder="index === 0 ? 'How does the sequence begin?' : 'What happens next?'"
             :disabled="locked"
           />
+          <div v-if="index === 0" class="mobile-sequence-source">
+            <img
+              v-if="clip.sourceImage?.base64"
+              :src="base64ToDataUrl(clip.sourceImage.base64 ?? '')"
+              :alt="clip.sourceImage.filename"
+              data-test="mobile-sequence-source-preview"
+            />
+            <button
+              type="button"
+              class="secondary-button"
+              data-test="mobile-sequence-source-pick"
+              :disabled="locked || !target"
+              @click="imagePickerOpen = true"
+            >
+              {{ clip.sourceImage ? "Replace opening image" : "Attach opening image" }}
+            </button>
+            <button
+              v-if="clip.sourceImage"
+              type="button"
+              class="secondary-button"
+              data-test="mobile-sequence-source-clear"
+              :disabled="locked"
+              @click="clip.sourceImage = null"
+            >
+              Remove
+            </button>
+          </div>
           <details class="mobile-native-disclosure">
             <summary>
               <span>Clip tools</span>
@@ -274,6 +313,12 @@ function submit(): void {
       @update:fade-frames="setSeamFade"
       @close="openSeamId = null"
     />
+    <MobileImagePickerSheet
+      :open="imagePickerOpen"
+      :target="target"
+      @pick="setOpeningImage"
+      @close="imagePickerOpen = false"
+    />
   </section>
 </template>
 
@@ -313,6 +358,21 @@ function submit(): void {
   min-height: 92px;
   resize: vertical;
   font-size: 16px;
+}
+
+.mobile-sequence-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-sequence-source img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
 }
 
 /* The seam owns the vertical run between two cards: short connector lines

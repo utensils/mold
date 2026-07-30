@@ -74,7 +74,7 @@ describe("sequence draft store", () => {
     expect(store.clips[0]?.sourceImage?.base64).toBe("QUJD");
   });
 
-  it("parks clips when switching output and bridges the prompt both ways", () => {
+  it("parks clips while keeping one-shot and sequence prompts independent", () => {
     const store = freshStore();
     store.hydrate();
     let singlePrompt = "a lone lighthouse";
@@ -87,10 +87,11 @@ describe("sequence draft store", () => {
 
     store.setOutput("sequence", bridge, 97);
     expect(store.output).toBe("sequence");
-    expect(store.clips[0]?.prompt).toBe("a lone lighthouse");
+    expect(store.clips[0]?.prompt).toBe("");
     expect(store.activeClipId).toBe(store.clips[0]?.id);
 
     const second = store.clips[1];
+    if (store.clips[0]) store.clips[0].prompt = "the sequence opening";
     if (second) second.prompt = "waves crash closer";
     store.setOutput("single", bridge, 97);
     expect(singlePrompt).toBe("a lone lighthouse");

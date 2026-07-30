@@ -1294,12 +1294,12 @@ function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
 function applySequenceReuse(metadata: OutputMetadata) {
   const plan = planSequenceReuse(metadata);
   if (!plan) return;
+  const oneShotPrompt = form.state.value.prompt;
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
-  // Clip 1's prompt, never `metadata.prompt` — for a sequence that field is
-  // every clip newline-joined, the wart this path exists to avoid.
-  form.state.value.prompt = plan.clips[0]?.prompt ?? "";
+  // Reusing a sequence must not overwrite the parked one-shot prompt.
+  form.state.value.prompt = oneShotPrompt;
 
   // The live tail belongs to the model selected NOW, not the recorded one.
   const { clips, raised } = clampClipsToMotionTail(

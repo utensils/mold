@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, nextTick, ref } from "vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
+import * as api from "../api";
 
 vi.mock("../api", () => ({
   listGallery: vi.fn(async () => []),
@@ -84,6 +85,53 @@ describe("ImagePickerModal", () => {
         base64: "b64:mask-base.png",
       },
     ]);
+  });
+
+  it("filters local files and gallery rows to PNG and JPEG", async () => {
+    vi.mocked(api.listGallery).mockResolvedValueOnce([
+      {
+        filename: "still.png",
+        metadata: {} as never,
+        timestamp: 3,
+      },
+      {
+        filename: "clip.mp4",
+        metadata: {} as never,
+        timestamp: 2,
+      },
+      {
+        filename: "loop.webp",
+        metadata: {} as never,
+        timestamp: 1,
+      },
+    ]);
+    const w = mount(ImagePickerModal, {
+      props: { open: true, multiple: false },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const input = document.body.querySelector(
+      "input[type='file']",
+    ) as HTMLInputElement;
+    expect(input.accept).toBe("image/png,image/jpeg");
+    Object.defineProperty(input, "files", {
+      value: [new File(["x"], "clip.webp", { type: "image/webp" })],
+    });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushPromises();
+    expect(w.emitted("pick")).toBeUndefined();
+    expect(document.body.textContent).toContain("Only PNG or JPEG");
+
+    await w
+      .get("[aria-label='Image source']")
+      .findAll("button")[1]!
+      .trigger("click");
+    await flushPromises();
+    expect(document.body.querySelectorAll(".ip__tile")).toHaveLength(1);
+    expect(
+      document.body.querySelector(".ip__tile")?.getAttribute("title"),
+    ).toBe("still.png");
   });
 
   it("is a labelled modal dialog", () => {

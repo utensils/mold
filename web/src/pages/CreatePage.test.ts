@@ -927,6 +927,7 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("reuses a Library sequence print as a NEW draft with no edit session", async () => {
+    useGenerateForm().state.value.prompt = "parked one shot";
     hostModelsMock.mockResolvedValue([
       {
         name: "ltx-2.3-22b-distilled:fp8",
@@ -982,7 +983,7 @@ describe("CreatePage layout and behavior", () => {
     // raised, and the surface says so instead of silently resizing.
     expect(draft.clips[1]!.frames).toBeGreaterThan(17);
     expect(draft.editing).toBeNull();
-    expect(useGenerateForm().state.value.prompt).toBe("a harbour at dawn");
+    expect(useGenerateForm().state.value.prompt).toBe("parked one shot");
     const note = wrapper.get("[data-test='sequence-reuse-note']").text();
     expect(note).toContain("reused 2 clips");
     expect(note).toContain("Clip durations raised to fit");

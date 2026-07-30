@@ -371,26 +371,56 @@ struct GalleryImportResponse {
     filename: String,
 }
 
-async fn save_output_bytes_server(
-    info: LocalServerInfo,
+fn gallery_import_metadata(
     filename: String,
-    bytes: Vec<u8>,
+    bytes: &[u8],
     metadata: Option<Box<mold_core::OutputMetadata>>,
-) -> Result<String, String> {
-    let synthetic;
-    let (metadata, metadata_synthetic) = match metadata.as_deref() {
+) -> (mold_core::OutputMetadata, bool) {
+    // Match the offline authority: provenance embedded in the exact bytes
+    // wins over separately transported event/DB metadata. Sending a
+    // descriptor that differs even slightly from an embedded record is
+    // correctly rejected by the server as an immutable import conflict.
+    let format = mold_db::metadata_io::format_from_path(std::path::Path::new(&filename));
+    let embedded = format
+        .filter(|format| {
+            matches!(
+                format,
+                mold_core::OutputFormat::Png
+                    | mold_core::OutputFormat::Jpeg
+                    | mold_core::OutputFormat::Gif
+                    | mold_core::OutputFormat::Apng
+            )
+        })
+        .and_then(|format| {
+            let mut temp = tempfile::NamedTempFile::new().ok()?;
+            std::io::Write::write_all(&mut temp, bytes).ok()?;
+            mold_db::metadata_io::read_embedded(temp.path(), format)
+        });
+    match embedded.or(metadata.map(|metadata| *metadata)) {
         Some(metadata) => (metadata, false),
         None => {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            synthetic = mold_db::metadata_io::synthesize_from_filename(&filename, timestamp);
-            (&synthetic, true)
+            (
+                mold_db::metadata_io::synthesize_from_filename(&filename, timestamp),
+                true,
+            )
         }
-    };
+    }
+}
+
+async fn save_output_bytes_server(
+    info: LocalServerInfo,
+    filename: String,
+    bytes: Vec<u8>,
+    metadata: Option<Box<mold_core::OutputMetadata>>,
+) -> Result<String, String> {
+    let (metadata, metadata_synthetic) =
+        gallery_import_metadata(filename.clone(), &bytes, metadata);
     let descriptor = serde_json::to_vec(&GalleryImportDescriptor {
-        metadata,
+        metadata: &metadata,
         metadata_synthetic,
     })
     .map_err(|error| format!("Couldn't encode gallery metadata: {error}"))?;
@@ -446,6 +476,103 @@ pub async fn save_output_bytes(
         }
         LocalGalleryAuthority::Offline(_guard) => {
             save_output_bytes_offline(filename, bytes, metadata)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn save_image_as(
+    app: tauri::AppHandle,
+    filename: String,
+    data_b64: String,
+) -> Result<Option<String>, String> {
+    use base64::Engine;
+    use tauri_plugin_dialog::DialogExt;
+
+    if !valid_filename(&filename) {
+        return Err("Invalid filename.".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|error| format!("Invalid image data: {error}"))?;
+    let extension = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let filter_name = match extension.as_str() {
+        "jpg" | "jpeg" => "JPEG image",
+        "webp" => "WebP image",
+        "gif" => "GIF image",
+        "apng" => "Animated PNG",
+        _ => "PNG image",
+    };
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Save image")
+        .set_file_name(&filename)
+        .add_filter(filter_name, &[extension.as_str()])
+        .blocking_save_file();
+    let Some(path) = selected else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|error| format!("Invalid save location: {error}"))?;
+    std::fs::write(&path, bytes).map_err(|error| format!("Couldn't save image: {error}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn local_output_file_path(
+    state: tauri::State<'_, AppState>,
+    filename: String,
+) -> Result<Option<String>, String> {
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    let Some(dir) = output_dir() else {
+        return Ok(None);
+    };
+    match local_gallery_authority(&state).await {
+        LocalGalleryAuthority::Server(info) => {
+            let response = reqwest::Client::new()
+                .get(server_url(&info, "/api/gallery"))
+                .header("X-Api-Key", api_key(&info)?)
+                .send()
+                .await
+                .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+            if !response.status().is_success() {
+                return Err(response_error(response).await);
+            }
+            let entries = response
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .map_err(|error| format!("Invalid local gallery response: {error}"))?;
+            let exists = entries.iter().any(|entry| {
+                entry.get("filename").and_then(|value| value.as_str()) == Some(&filename)
+            });
+            Ok(exists.then(|| dir.join(filename).display().to_string()))
+        }
+        LocalGalleryAuthority::Offline(_guard) => {
+            // The guard proves no local server is starting or running, so
+            // direct filesystem inspection is safe under the singular
+            // desktop gallery authority.
+            let root = match dir.canonicalize() {
+                Ok(root) => root,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            let candidate = match dir.join(filename).canonicalize() {
+                Ok(candidate) => candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+            if !candidate.starts_with(root) || !candidate.is_file() {
+                return Ok(None);
+            }
+            Ok(Some(candidate.display().to_string()))
         }
     }
 }
@@ -727,6 +854,25 @@ mod tests {
         assert!(!valid_filename("../secrets.json"));
         assert!(!valid_filename("nested/image.png"));
         assert!(valid_filename("mold-flux-1.png"));
+    }
+
+    #[test]
+    fn server_import_descriptor_prefers_metadata_embedded_in_exact_bytes() {
+        let embedded = r#"{"prompt":"embedded owl","model":"ltx-video","seed":7,"steps":30,"guidance":3.0,"width":64,"height":64,"version":"test"}"#;
+        let mut bytes = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x21\xFE".to_vec();
+        let comment = format!("mold:parameters {embedded}");
+        bytes.push(comment.len() as u8);
+        bytes.extend_from_slice(comment.as_bytes());
+        bytes.extend_from_slice(&[0, 0x3B]);
+        let mut transported =
+            mold_db::metadata_io::synthesize_from_filename("clip.gif", 1_700_000_000);
+        transported.prompt = "stale transported prompt".into();
+
+        let (resolved, synthetic) =
+            gallery_import_metadata("clip.gif".into(), &bytes, Some(Box::new(transported)));
+
+        assert_eq!(resolved.prompt, "embedded owl");
+        assert!(!synthetic);
     }
 
     #[test]

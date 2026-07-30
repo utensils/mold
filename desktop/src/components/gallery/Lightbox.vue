@@ -10,6 +10,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { copyImageBytesToClipboard } from "../../lib/clipboard";
+import { copyLocalOutputPath } from "../../lib/localOutputPath";
 import { formatBytes, formatScheduler } from "../../lib/format";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -157,6 +158,15 @@ async function copyImage() {
 function imageMenu(): MenuEntry[] {
   return [
     { label: "Copy image", disabled: props.video, action: () => void copyImage() },
+    {
+      label: "Copy file path",
+      action: () =>
+        void copyLocalOutputPath(props.item.filename)
+          .then(() => toasts.push("File path copied"))
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          ),
+    },
     { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
     { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
     { separator: true },

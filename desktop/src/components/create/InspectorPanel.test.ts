@@ -279,7 +279,7 @@ describe("InspectorPanel — output", () => {
     expect(html.indexOf("output-card")).toBeLessThan(html.indexOf(">Shape<"));
   });
 
-  it("switching to Sequence seeds clips, remembers + swaps the model, and locks batch", async () => {
+  it("switching to Sequence keeps prompts separate, remembers + swaps the model, and locks batch", async () => {
     useModelStore().all = [stillModel, videoModel];
     const form = useGenerateFormStore().form;
     form.model = stillModel.name;
@@ -293,20 +293,21 @@ describe("InspectorPanel — output", () => {
     const draft = useSequenceDraftStore();
     expect(draft.output).toBe("sequence");
     expect(draft.clips).toHaveLength(2);
-    expect(draft.clips[0]!.prompt).toBe("a cat at dusk");
+    expect(draft.clips[0]!.prompt).toBe("");
     // A non-capable model is remembered and swapped for the first capable one.
     expect(draft.lastSingleModel).toBe("flux-dev:q8");
     expect(form.model).toBe("ltx-video");
     // Batch locks to one timeline; the switch-back caption appears.
     expect(wrapper.text()).toContain("a sequence renders one timeline");
-    expect(wrapper.text()).toContain("switching back keeps clip 1 and parks the rest");
+    expect(wrapper.text()).toContain("one-shot and sequence prompts stay separate");
   });
 
-  it("switching back restores the remembered single model and clip 1's prompt", async () => {
+  it("switching back restores the remembered single model without leaking clip 1's prompt", async () => {
     useModelStore().all = [stillModel, videoModel];
     const form = useGenerateFormStore().form;
     form.model = videoModel.name;
     form.family = videoModel.family;
+    form.prompt = "the one-shot prompt";
     const draft = useSequenceDraftStore();
     draft.output = "sequence";
     draft.ensureClips(25);
@@ -319,7 +320,7 @@ describe("InspectorPanel — output", () => {
 
     expect(draft.output).toBe("single");
     expect(form.model).toBe("flux-dev:q8");
-    expect(form.prompt).toBe("the opening clip");
+    expect(form.prompt).toBe("the one-shot prompt");
     expect(draft.lastSingleModel).toBeNull();
     // Clips are parked, never erased.
     expect(draft.clips).toHaveLength(2);

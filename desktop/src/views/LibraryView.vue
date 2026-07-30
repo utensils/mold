@@ -42,6 +42,7 @@ import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
+import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
@@ -311,6 +312,15 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       label: "Copy image",
       disabled: isVideo(item),
       action: () => void copyImage(entry),
+    },
+    {
+      label: "Copy file path",
+      action: () =>
+        void copyLocalOutputPath(item.filename)
+          .then(() => toasts.push("File path copied"))
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          ),
     },
     { separator: true },
     {

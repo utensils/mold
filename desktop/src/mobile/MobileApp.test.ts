@@ -472,7 +472,7 @@ describe("MobileApp Output field", () => {
     expect(localStorage.getItem("mold.mobile.create-mode.v1")).toBeNull();
   });
 
-  it("carries the prompt between One shot and Sequence instead of losing it", async () => {
+  it("keeps One shot and Sequence prompts isolated while switching", async () => {
     installModels([model, sequenceModel]);
     wrapper = mountMobileApp();
     await flushPromises();
@@ -482,16 +482,23 @@ describe("MobileApp Output field", () => {
     await flushPromises();
 
     const clipPrompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    expect((clipPrompts[0]!.element as HTMLTextAreaElement).value).toBe(
-      "a paper boat crosses a moonlit pond",
-    );
+    expect((clipPrompts[0]!.element as HTMLTextAreaElement).value).toBe("");
 
     await clipPrompts[0]!.setValue("a paper boat under fireflies");
     await outputSegment("One shot").trigger("click");
     await flushPromises();
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
-      "a paper boat under fireflies",
+      "a paper boat crosses a moonlit pond",
     );
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+    expect(
+      (
+        wrapper.findAll("[data-test='mobile-sequence-clip'] textarea")[0]!
+          .element as HTMLTextAreaElement
+      ).value,
+    ).toBe("a paper boat under fireflies");
   });
 
   it("narrows the picker to chain-capable models and restores the single pick on the way back", async () => {

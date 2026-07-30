@@ -156,6 +156,8 @@ pub fn run() {
             gallery::local_gallery_delete,
             gallery::import_source_image,
             gallery::save_output_bytes,
+            gallery::save_image_as,
+            gallery::local_output_file_path,
             source_stash::source_stash_put,
             source_stash::source_stash_get,
             clipboard::clipboard_write_image,

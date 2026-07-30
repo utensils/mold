@@ -157,15 +157,15 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     } as OutputMetadata;
   }
 
-  it("returns the clip rail with clip 1's prompt on the form", () => {
+  it("returns the clip rail without overwriting the one-shot prompt", () => {
     const form = newGenerateForm();
+    form.prompt = "parked one shot";
     const result = applyMobileGalleryMetadata(form, chainPrint([25, 33]), [sequenceModel]);
 
     expect(result.sequence?.clips.map((c) => c.prompt)).toEqual(["clip 1", "clip 2"]);
     expect(result.sequence?.clips.map((c) => c.frames)).toEqual([25, 33]);
     expect(result.sequence?.raised).toBe(0);
-    // Never the newline join — the whole point of a sequence-aware reuse.
-    expect(form.prompt).toBe("clip 1");
+    expect(form.prompt).toBe("parked one shot");
   });
 
   it("raises clips that no longer clear the model's motion tail", () => {
