@@ -318,7 +318,7 @@ fn resolve_ic_lora_pipeline(
     match pipeline {
         None | Some(Ltx2PipelineMode::IcLora) => Ok(Some(Ltx2PipelineMode::IcLora)),
         Some(other) => anyhow::bail!(
-            "--ic-lora-control conflicts with --pipeline {other:?}; use --pipeline ic-lora"
+            "--ic-lora-control conflicts with --pipeline {other}; use --pipeline ic-lora"
         ),
     }
 }

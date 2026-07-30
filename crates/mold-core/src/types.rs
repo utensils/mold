@@ -480,6 +480,27 @@ pub enum Ltx2PipelineMode {
     Retake,
 }
 
+impl Ltx2PipelineMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OneStage => "one-stage",
+            Self::TwoStage => "two-stage",
+            Self::TwoStageHq => "two-stage-hq",
+            Self::Distilled => "distilled",
+            Self::IcLora => "ic-lora",
+            Self::Keyframe => "keyframe",
+            Self::A2Vid => "a2-vid",
+            Self::Retake => "retake",
+        }
+    }
+}
+
+impl std::fmt::Display for Ltx2PipelineMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Ltx2SpatialUpscale {
@@ -3081,6 +3102,23 @@ mod tests {
             control_metadata.ic_lora_control.as_deref(),
             Some("motion-track")
         );
+    }
+
+    #[test]
+    fn ltx2_pipeline_display_matches_the_wire_contract() {
+        for (mode, expected) in [
+            (Ltx2PipelineMode::OneStage, "one-stage"),
+            (Ltx2PipelineMode::TwoStage, "two-stage"),
+            (Ltx2PipelineMode::TwoStageHq, "two-stage-hq"),
+            (Ltx2PipelineMode::Distilled, "distilled"),
+            (Ltx2PipelineMode::IcLora, "ic-lora"),
+            (Ltx2PipelineMode::Keyframe, "keyframe"),
+            (Ltx2PipelineMode::A2Vid, "a2-vid"),
+            (Ltx2PipelineMode::Retake, "retake"),
+        ] {
+            assert_eq!(mode.to_string(), expected);
+            assert_eq!(serde_json::to_value(mode).unwrap(), expected);
+        }
     }
 
     // ── SSE type tests ──────────────────────────────────────────────────────

@@ -691,7 +691,7 @@ async fn plan_builtin_ltx2_control(
         }
         Some(other) => {
             return Err(ApiError::validation(format!(
-                "ic_lora_control conflicts with pipeline={other:?}; use pipeline=ic-lora"
+                "ic_lora_control conflicts with pipeline={other}; use pipeline=ic-lora"
             )));
         }
     }
