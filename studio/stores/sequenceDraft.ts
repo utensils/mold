@@ -247,6 +247,9 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
    */
   function setOutput(
     mode: OutputMode,
+    // Retained while every surface shares the existing output-switch callback
+    // shape. Deliberately unused: prompts have separate authorities and must
+    // never be bridged during an output switch.
     _bridge: { getPrompt: () => string; setPrompt: (value: string) => void },
     defaultFrames: number,
   ) {
