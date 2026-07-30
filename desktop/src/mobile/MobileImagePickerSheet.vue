@@ -35,17 +35,29 @@ const stillEntries = computed(() =>
 
 watch(
   () => [props.open, props.target?.baseUrl ?? "", props.target?.apiKey ?? ""] as const,
-  async ([open]) => {
-    if (!open || !props.target) return;
+  async ([open], _previous, onCleanup) => {
+    let active = true;
+    onCleanup(() => {
+      active = false;
+    });
+    if (!open || !props.target) {
+      entries.value = [];
+      loading.value = false;
+      return;
+    }
+    const target = props.target;
     error.value = "";
     loading.value = true;
     try {
-      entries.value = await apiJsonTo<GalleryImage[]>(props.target, "/api/gallery");
+      const gallery = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
+      if (!active) return;
+      entries.value = gallery;
     } catch (cause) {
+      if (!active) return;
       entries.value = [];
       error.value = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      loading.value = false;
+      if (active) loading.value = false;
     }
   },
   { immediate: true },

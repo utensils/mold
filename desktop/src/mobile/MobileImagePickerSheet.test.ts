@@ -63,4 +63,43 @@ describe("MobileImagePickerSheet", () => {
       base64: "Ynl0ZXM=",
     });
   });
+
+  it("ignores a stale gallery response after the target host changes", async () => {
+    let resolveFirst!: (
+      entries: Array<{ filename: string; metadata: typeof metadata; timestamp: number }>,
+    ) => void;
+    let resolveSecond!: (
+      entries: Array<{ filename: string; metadata: typeof metadata; timestamp: number }>,
+    ) => void;
+    apiJsonTo
+      .mockReset()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: { open: true, target },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    const nextTarget = { baseUrl: "http://next-host:7680", apiKey: "next-secret" };
+    await wrapper.setProps({ target: nextTarget });
+    resolveSecond([{ filename: "next.png", metadata, timestamp: 2 }]);
+    await flushPromises();
+    resolveFirst([{ filename: "stale.png", metadata, timestamp: 1 }]);
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+    const items = wrapper.findAll("[data-test='mobile-image-picker-gallery-item']");
+    expect(items).toHaveLength(1);
+    expect(items[0]!.attributes("aria-label")).toBe("Use next.png");
+    expect(apiJsonTo).toHaveBeenNthCalledWith(2, nextTarget, "/api/gallery");
+  });
 });
