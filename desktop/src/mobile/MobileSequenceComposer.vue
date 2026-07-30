@@ -141,6 +141,10 @@ function setOpeningImage(image: MobilePickedImage): void {
   opening.sourceImage = { filename: image.filename, base64: image.base64 };
   imagePickerOpen.value = false;
 }
+
+function sourceImageMime(filename: string): string {
+  return /\.jpe?g$/i.test(filename.trim()) ? "image/jpeg" : "image/png";
+}
 </script>
 
 <template>
@@ -184,7 +188,12 @@ function setOpeningImage(image: MobilePickedImage): void {
           <div v-if="index === 0" class="mobile-sequence-source">
             <img
               v-if="clip.sourceImage?.base64"
-              :src="base64ToDataUrl(clip.sourceImage.base64 ?? '')"
+              :src="
+                base64ToDataUrl(
+                  clip.sourceImage.base64 ?? '',
+                  sourceImageMime(clip.sourceImage.filename),
+                )
+              "
               :alt="clip.sourceImage.filename"
               data-test="mobile-sequence-source-preview"
             />

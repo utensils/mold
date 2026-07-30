@@ -537,23 +537,24 @@ pub async fn local_output_file_path(
     };
     match local_gallery_authority(&state).await {
         LocalGalleryAuthority::Server(info) => {
+            let encoded = percent_encoding::utf8_percent_encode(
+                &filename,
+                percent_encoding::NON_ALPHANUMERIC,
+            );
             let response = reqwest::Client::new()
-                .get(server_url(&info, "/api/gallery"))
+                .get(server_url(&info, &format!("/api/gallery/image/{encoded}")))
                 .header("X-Api-Key", api_key(&info)?)
+                .header(reqwest::header::RANGE, "bytes=0-0")
                 .send()
                 .await
                 .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
             if !response.status().is_success() {
                 return Err(response_error(response).await);
             }
-            let entries = response
-                .json::<Vec<serde_json::Value>>()
-                .await
-                .map_err(|error| format!("Invalid local gallery response: {error}"))?;
-            let exists = entries.iter().any(|entry| {
-                entry.get("filename").and_then(|value| value.as_str()) == Some(&filename)
-            });
-            Ok(exists.then(|| dir.join(filename).display().to_string()))
+            Ok(Some(dir.join(filename).display().to_string()))
         }
         LocalGalleryAuthority::Offline(_guard) => {
             // The guard proves no local server is starting or running, so

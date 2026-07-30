@@ -57,3 +57,39 @@ describe("ipc.pickSourceImages", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+describe("ipc.saveImageAs browser fallback", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:rendered-image"),
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("rejects malformed base64 instead of throwing before returning a promise", async () => {
+    const result = ipc.saveImageAs("broken.png", "%%%");
+    expect(result).toBeInstanceOf(Promise);
+    await expect(result).rejects.toThrow();
+  });
+
+  it("defers object URL cleanup until after the download click", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    await expect(ipc.saveImageAs("render.png", "aA==")).resolves.toBe("render.png");
+    expect(click).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+    vi.runAllTimers();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:rendered-image");
+  });
+});

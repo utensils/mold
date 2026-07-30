@@ -299,14 +299,18 @@ export const ipc = {
   /** Ask for a destination and save one rendered still outside Mold's gallery. */
   saveImageAs(filename: string, dataB64: string): Promise<string | null> {
     if (!inTauri()) {
-      const bytes = Uint8Array.from(atob(dataB64), (character) => character.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes]));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = filename;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      return Promise.resolve(filename);
+      try {
+        const bytes = Uint8Array.from(atob(dataB64), (character) => character.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes]));
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+        return Promise.resolve(filename);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     return invoke<string | null>("save_image_as", { filename, dataB64 });
   },

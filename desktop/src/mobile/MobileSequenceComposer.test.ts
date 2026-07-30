@@ -325,9 +325,9 @@ describe("MobileSequenceComposer guardrails", () => {
       base64: "wire-bytes",
     });
     expect(draft.clips[1]!.sourceImage).toBeNull();
-    expect(
-      wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src"),
-    ).toContain("wire-bytes");
+    expect(wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src")).toBe(
+      "data:image/jpeg;base64,wire-bytes",
+    );
   });
 
   it("summarizes the timeline at the form's own frame rate", () => {
