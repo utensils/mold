@@ -1806,7 +1806,7 @@ fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
     successful
 }
 
-/// Evict parked engines on the worker thread that owns their device context.
+/// Evict stale engines on the worker thread that owns their device context.
 ///
 /// Engine destruction may call into CUDA while releasing tensors and library
 /// workspaces, so returning the boxes to an async maintenance task is not safe.
@@ -1829,15 +1829,28 @@ fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         return;
     }
-    let evicted = {
+    let (evicted, active_evicted) = {
         let mut cache = worker
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.evict_idle(ttl)
+        let active = cache.active_model().map(str::to_owned);
+        let evicted = cache.evict_idle_on_owner(ttl);
+        let active_evicted = active.is_some_and(|active| {
+            evicted
+                .iter()
+                .any(|(evicted_name, _)| evicted_name == &active)
+        });
+        (evicted, active_evicted)
     };
     if evicted.is_empty() {
         return;
+    }
+    if active_evicted {
+        // Publish the cold residency before teardown. The owner cannot accept
+        // another lease until this function returns, while scheduler snapshots
+        // must stop treating the stale model as a warm candidate immediately.
+        worker.set_resident_model(None);
     }
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         contain_poisoned_cuda(evicted);
@@ -2735,7 +2748,28 @@ fn process_job_with_sink(
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.restore(cached_engine);
+        let restore = cache.restore(cached_engine);
+        drop(cache);
+        if let Some(superseded) = restore.superseded {
+            if let Err(error) = teardown_inference_engines_safely(
+                worker,
+                std::iter::once(superseded.engine),
+                "superseded generation cache restore",
+            ) {
+                clear_active_generation(worker);
+                let error = error.to_string();
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: error.clone(),
+                    }));
+                }
+                let _ = job.result_tx.send(Err(error));
+                return false;
+            }
+        }
+        if restore.reclassified_to_parked {
+            worker.set_resident_model(None);
+        }
     }
 
     // Clear active generation.
@@ -3060,6 +3094,7 @@ fn select_load_strategy_for_worker(
     model_name: &str,
     paths: &ModelPaths,
     hint: Option<crate::model_manager::ActivationHint>,
+    request_has_lora: bool,
 ) -> anyhow::Result<mold_inference::LoadStrategy> {
     let active_vram = worker
         .model_cache
@@ -3069,11 +3104,16 @@ fn select_load_strategy_for_worker(
     let available =
         crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal)
             .map_err(|error| anyhow::anyhow!(error.error))?;
-    let strategy = crate::model_manager::select_server_load_strategy_for_device(
+    let strategy = crate::memory_preflight::request_aware_load_strategy(
+        crate::model_manager::select_server_load_strategy_for_device(
+            paths,
+            available,
+            Some(worker.gpu.total_vram_bytes),
+            hint,
+        ),
         paths,
-        available,
-        Some(worker.gpu.total_vram_bytes),
         hint,
+        request_has_lora,
     );
     if strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(
@@ -3154,9 +3194,9 @@ fn ensure_model_ready_sync_inner(
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
-    let cache = worker.model_cache.lock().unwrap();
+    let mut cache = worker.model_cache.lock().unwrap();
 
-    let cached_requires_reconstruction = cache.get(model_name).is_some_and(|entry| {
+    let cached_requires_reconstruction = cache.get(cache_key).is_some_and(|entry| {
         cached_engine_requires_reconstruction(
             entry.engine.as_ref(),
             planned_mode,
@@ -3174,6 +3214,7 @@ fn ensure_model_ready_sync_inner(
     // Already loaded?
     if let Some(entry) = cache.get(cache_key) {
         if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
+            cache.touch(cache_key);
             return Ok(ModelLoadDisposition::Unchanged);
         }
     }
@@ -3237,7 +3278,13 @@ fn ensure_model_ready_sync_inner(
             mode.load_strategy
         } else {
             match cached_paths.as_ref() {
-                Some(paths) => select_load_strategy_for_worker(worker, model_name, paths, hint)?,
+                Some(paths) => select_load_strategy_for_worker(
+                    worker,
+                    model_name,
+                    paths,
+                    hint,
+                    request_has_lora,
+                )?,
                 None => mold_inference::LoadStrategy::Eager,
             }
         };
@@ -3449,7 +3496,7 @@ fn ensure_model_ready_sync_inner(
     let load_strategy = if let Some(mode) = planned_mode {
         mode.load_strategy
     } else {
-        select_load_strategy_for_worker(worker, model_name, &paths, hint)?
+        select_load_strategy_for_worker(worker, model_name, &paths, hint, request_has_lora)?
     };
 
     let offload = planned_mode.map_or_else(
@@ -3858,7 +3905,18 @@ fn run_chain_blocking_with_identity<T, E: std::fmt::Display + std::fmt::Debug>(
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.restore(cached);
+        let restore = cache.restore(cached);
+        drop(cache);
+        if let Some(superseded) = restore.superseded {
+            teardown_inference_engines_safely(
+                worker,
+                std::iter::once(superseded.engine),
+                "superseded chain cache restore",
+            )?;
+        }
+        if restore.reclassified_to_parked {
+            worker.set_resident_model(None);
+        }
     }
 
     match result {
@@ -5126,6 +5184,60 @@ mod tests {
         assert_eq!(
             dropped_on.lock().unwrap().as_deref(),
             Some("gpu-worker-test")
+        );
+    }
+
+    #[test]
+    fn idle_eviction_reclaims_final_resident_engine_and_publishes_cold_state() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let worker = single_worker_pool_with_parked("stale-parked", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert(
+                Box::new(LifecycleRecordingEngine {
+                    name: "gpu-resident".to_string(),
+                    loaded: true,
+                    operations: operations.clone(),
+                }),
+                8 << 30,
+            );
+        }
+        worker.set_resident_model(Some("gpu-resident"));
+        worker.set_resident_execution_fingerprint(Some("stale-fingerprint"));
+
+        let worker_for_thread = worker.clone();
+        std::thread::Builder::new()
+            .name("gpu-worker-final-resident-evict".to_string())
+            .spawn(move || {
+                worker_for_thread
+                    .owner_thread_id
+                    .set(std::thread::current().id())
+                    .expect("test owner initialized once");
+                evict_idle_on_worker(&worker_for_thread, Duration::ZERO);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert!(worker.model_cache.lock().unwrap().is_empty());
+        assert!(worker.resident_model.read().unwrap().is_none());
+        assert!(worker
+            .resident_execution_fingerprint
+            .read()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            operations.lock().unwrap().as_slice(),
+            &[
+                (
+                    "unload".to_string(),
+                    "gpu-worker-final-resident-evict".to_string()
+                ),
+                (
+                    "drop".to_string(),
+                    "gpu-worker-final-resident-evict".to_string()
+                )
+            ]
         );
     }
 

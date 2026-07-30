@@ -1432,9 +1432,15 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     // legitimately re-load the engine on the next request.
     let result = match join_result {
         Ok((cached_engine, panic_or_result)) => {
-            {
+            let superseded = {
                 let mut cache = state.model_cache.lock().await;
-                cache.restore(cached_engine);
+                cache.restore(cached_engine).superseded
+            };
+            if let Some(superseded) = superseded {
+                // The legacy dispatcher has no scheduler owner thread. Keep
+                // stale teardown outside the async cache mutex; authoritative
+                // CUDA dispatch uses the owner-safe gpu_worker path above.
+                drop(superseded);
             }
             clear_active_generation(state);
             Ok(panic_or_result)

@@ -27,6 +27,16 @@ pub struct CachedEngine {
     pub vram_bytes: u64,
 }
 
+/// Result of returning a checked-out cache entry.
+pub struct RestoreOutcome {
+    /// The restored entry changed from GPU-resident to parked while checked out.
+    pub reclassified_to_parked: bool,
+    /// A newer same-name insertion superseded this take window. The stale
+    /// engine is returned so its caller can tear it down outside the cache lock
+    /// and, for GPU workers, on the bound owner thread.
+    pub superseded: Option<CachedEngine>,
+}
+
 /// Multi-model cache with LRU eviction under VRAM pressure.
 ///
 /// Invariants:
@@ -116,19 +126,32 @@ impl ModelCache {
         evicted
     }
 
-    /// Get a reference to a cached engine entry (does not update LRU order).
+    /// Get a reference to a cached engine entry (does not update LRU or idle time).
+    ///
+    /// Readiness paths that retain an entry without a take/restore round trip
+    /// must call [`Self::touch`] before returning it as ready.
     pub fn get(&self, model_name: &str) -> Option<&CachedEngine> {
         self.entries.get(model_name)
     }
 
+    /// Refresh an entry's LRU position and idle TTL without borrowing its engine.
+    pub fn touch(&mut self, model_name: &str) -> bool {
+        if !self.entries.contains_key(model_name) {
+            return false;
+        }
+        self.touch_order(model_name);
+        self.entries
+            .get_mut(model_name)
+            .expect("contains_key was checked above")
+            .last_used = Instant::now();
+        true
+    }
+
     /// Get a mutable reference to the engine for a model, if cached.
     pub fn get_mut(&mut self, model_name: &str) -> Option<&mut CachedEngine> {
-        if self.entries.contains_key(model_name) {
-            self.touch_order(model_name);
-            self.entries.get_mut(model_name)
-        } else {
-            None
-        }
+        self.touch(model_name)
+            .then(|| self.entries.get_mut(model_name))
+            .flatten()
     }
 
     /// Remove an engine from the cache, returning the full entry.
@@ -152,17 +175,50 @@ impl ModelCache {
     }
 
     /// Re-insert a taken engine after inference completes.
-    pub fn restore(&mut self, cached: CachedEngine) {
+    /// The outcome reports when an entry that entered the take window as
+    /// GPU-resident released its eager components and was reclassified as
+    /// parked. It also returns a stale engine when a newer same-name insertion
+    /// superseded this take window.
+    pub fn restore(&mut self, mut cached: CachedEngine) -> RestoreOutcome {
         let name = cached.model_name.clone();
-        self.in_flight.remove(&name);
+        // Fresh insertions clear the in-flight marker. If that happened while
+        // this engine was checked out, the newer entry owns the cache identity;
+        // never overwrite it with stale configuration or implicitly drop it
+        // under the cache mutex.
+        if !self.in_flight.remove(&name) {
+            return RestoreOutcome {
+                reclassified_to_parked: false,
+                superseded: Some(cached),
+            };
+        }
+        // An engine may deliberately release its eager components while it is
+        // checked out (for example, a Flux.2 LoRA request switches to staged
+        // loading). Reconcile the cache's logical residency with the engine's
+        // actual state before publishing it again; otherwise the next request
+        // fast-paths through a stale GPU entry and active VRAM is overcounted.
+        let reclassified_to_parked =
+            cached.residency == ModelResidency::Gpu && !cached.engine.is_loaded();
+        if reclassified_to_parked {
+            cached.residency = ModelResidency::Parked;
+            cached.vram_bytes = 0;
+        }
+        // A restore closes an inference take-window, so it is the authoritative
+        // moment at which the engine was most recently used. Without this, the
+        // idle TTL measures from initial load and can reap a model immediately
+        // after a long-running generation.
+        cached.last_used = Instant::now();
         if self.in_flight_active.as_deref() == Some(name.as_str()) {
             self.in_flight_active = None;
             self.in_flight_active_vram_bytes = 0;
         }
-        self.lru_order.push(name.clone());
-        self.entries.insert(name, cached);
+        self.entries.insert(name.clone(), cached);
+        self.touch_order(&name);
         self.report_size();
         self.debug_check_invariants();
+        RestoreOutcome {
+            reclassified_to_parked,
+            superseded: None,
+        }
     }
 
     /// Clear an in-flight marker without restoring an engine. Called when the
@@ -379,30 +435,45 @@ impl ModelCache {
         evicted
     }
 
-    /// Reclaim cache entries whose `last_used` is older than `ttl`. Only
-    /// entries that are not GPU-resident are eligible — the active model is
-    /// always preserved. Skipped entirely when the cache holds at most one
-    /// entry (so we never tear down the only warm engine after a quiet
-    /// period).
+    /// Reclaim parked cache entries whose `last_used` is older than `ttl`.
+    /// GPU-resident entries remain ineligible because the legacy async
+    /// sweeper cannot safely destroy CUDA-backed engines off their owner
+    /// thread. Unlike the old warm-cache policy, a stale final parked entry is
+    /// reclaimed too: retaining its CPU-side tensors indefinitely defeats the
+    /// TTL and can leave tens of GB of host memory resident.
     ///
     /// Returns evicted `(name, engine)` pairs so callers can drop the
     /// engines outside any cache mutex — `cuMemFree` and safetensor unmap on
     /// drop can block other cache users for non-trivial time.
     pub fn evict_idle(&mut self, ttl: Duration) -> Vec<(String, Box<dyn InferenceEngine>)> {
-        if self.entries.len() <= 1 {
-            return Vec::new();
-        }
+        self.evict_idle_inner(ttl, false)
+    }
+
+    /// Reclaim every stale cache entry, including the GPU-resident one.
+    ///
+    /// This may only be called by the OS thread that owns the device context
+    /// while holding that worker's model-load lock. The returned engines still
+    /// own their resources until the caller tears them down on that same owner
+    /// thread.
+    pub fn evict_idle_on_owner(
+        &mut self,
+        ttl: Duration,
+    ) -> Vec<(String, Box<dyn InferenceEngine>)> {
+        self.evict_idle_inner(ttl, true)
+    }
+
+    fn evict_idle_inner(
+        &mut self,
+        ttl: Duration,
+        include_gpu_resident: bool,
+    ) -> Vec<(String, Box<dyn InferenceEngine>)> {
         let now = Instant::now();
-        // Collect (name, last_used) for every stale, non-GPU entry. Sort by
-        // `last_used` ascending (oldest first) so that when the "keep ≥1
-        // warm engine" guard fires mid-loop we evict the LRU and the MRU
-        // survives — without the sort, HashMap iteration order would pick
-        // the survivor at random.
+        // Sort oldest-first for deterministic teardown and diagnostics.
         let mut stale: Vec<(String, Instant)> = self
             .entries
             .iter()
             .filter_map(|(name, entry)| {
-                if entry.residency == ModelResidency::Gpu {
+                if entry.residency == ModelResidency::Gpu && !include_gpu_resident {
                     return None;
                 }
                 let age = now.saturating_duration_since(entry.last_used);
@@ -417,9 +488,6 @@ impl ModelCache {
 
         let mut out = Vec::with_capacity(stale.len());
         for (name, _) in stale {
-            if self.entries.len() <= 1 {
-                break;
-            }
             self.lru_order.retain(|n| n != &name);
             if let Some(entry) = self.entries.remove(&name) {
                 let last_used_secs = entry.last_used.elapsed().as_secs();
@@ -818,6 +886,102 @@ mod tests {
         assert_eq!(cache.active_vram_bytes(), 16 << 30);
     }
 
+    #[test]
+    fn restore_refreshes_idle_ttl_after_inference_take_window() {
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        age_entry(&mut cache, "model-a", Duration::from_secs(3600));
+
+        let engine = cache.take("model-a").expect("loaded engine");
+        cache.restore(engine);
+
+        assert!(
+            cache
+                .get("model-a")
+                .expect("restored engine")
+                .last_used
+                .elapsed()
+                < Duration::from_secs(1)
+        );
+        assert!(
+            cache
+                .evict_idle_on_owner(Duration::from_secs(60))
+                .is_empty(),
+            "a just-completed generation must receive a fresh idle TTL"
+        );
+    }
+
+    #[test]
+    fn restore_reclassifies_an_eager_engine_that_unloaded_during_inference() {
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("model-a")), 16 << 30);
+
+        let mut cached = cache.take("model-a").expect("loaded engine");
+        cached.engine.unload();
+        let restore = cache.restore(cached);
+        assert!(
+            restore.reclassified_to_parked,
+            "unloaded eager engine must report a real GPU-to-parked transition"
+        );
+        assert!(restore.superseded.is_none());
+
+        let restored = cache.get("model-a").expect("restored engine");
+        assert_eq!(restored.residency, ModelResidency::Parked);
+        assert_eq!(restored.vram_bytes, 0);
+        assert_eq!(cache.active_model(), None);
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    #[test]
+    fn restore_deduplicates_a_superseding_same_name_entry() {
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::parked("model-a")), 0);
+
+        let taken = cache.take("model-a").expect("original entry");
+        cache.insert(Box::new(MockEngine::parked("model-a")), 0);
+        let restore = cache.restore(taken);
+
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.lru_order, vec!["model-a"]);
+        assert_eq!(
+            cache
+                .get("model-a")
+                .expect("newer entry survives")
+                .residency,
+            ModelResidency::Parked
+        );
+        assert!(
+            restore.superseded.is_some(),
+            "stale checked-out engine must be returned to the caller"
+        );
+    }
+
+    #[test]
+    fn restore_does_not_report_an_already_parked_entry_as_a_transition() {
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::parked("model-a")), 0);
+
+        let cached = cache.take("model-a").expect("parked entry");
+        let restore = cache.restore(cached);
+        assert!(!restore.reclassified_to_parked);
+        assert!(restore.superseded.is_none());
+    }
+
+    #[test]
+    fn touch_refreshes_idle_ttl_without_borrowing_the_engine() {
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        age_entry(&mut cache, "model-a", Duration::from_secs(3600));
+
+        assert!(cache.touch("model-a"));
+        assert!(
+            cache
+                .evict_idle_on_owner(Duration::from_secs(60))
+                .is_empty(),
+            "a readiness fast-path must refresh the idle TTL"
+        );
+    }
+
     /// `clear_in_flight` on a name that was never in flight is a no-op.
     /// This matters because the abnormal-exit cleanup paths run
     /// unconditionally (in the `Err(JoinError)` arm of a match), even
@@ -871,18 +1035,15 @@ mod tests {
     }
 
     #[test]
-    fn evict_idle_skips_when_only_one_entry() {
+    fn evict_idle_reclaims_stale_final_parked_entry() {
         let mut cache = ModelCache::new(3);
         cache.insert(Box::new(MockEngine::new("solo")), 100);
         cache.unload_all();
         age_entry(&mut cache, "solo", Duration::from_secs(3600));
 
         let evicted = cache.evict_idle(Duration::from_secs(60));
-        assert!(
-            evicted.is_empty(),
-            "must keep at least one warm engine even past the TTL"
-        );
-        assert!(cache.contains("solo"));
+        assert_eq!(evicted.len(), 1);
+        assert!(!cache.contains("solo"));
     }
 
     #[test]
@@ -907,32 +1068,36 @@ mod tests {
     }
 
     #[test]
-    fn evict_idle_returns_engines_for_caller_drop() {
+    fn owner_idle_eviction_reclaims_gpu_resident_entry() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::new("gpu-active")), 100);
+        age_entry(&mut cache, "gpu-active", Duration::from_secs(3600));
+
+        let evicted = cache.evict_idle_on_owner(Duration::from_secs(60));
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].0, "gpu-active");
+        assert!(cache.is_empty());
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    #[test]
+    fn evict_idle_returns_all_stale_parked_engines_for_caller_drop() {
         let mut cache = ModelCache::new(3);
         cache.insert(Box::new(MockEngine::parked("a")), 100);
         cache.insert(Box::new(MockEngine::new("b")), 100);
         cache.unload_all();
-        // `a` is older than `b` — eviction-oldest-first should drop `a` and
-        // leave the MRU (`b`) as the surviving warm engine when the
-        // "≥ 1 warm entry" guard fires.
         age_entry(&mut cache, "a", Duration::from_secs(180));
         age_entry(&mut cache, "b", Duration::from_secs(120));
 
         let evicted = cache.evict_idle(Duration::from_secs(60));
-        // Only one of the two is evicted — the "≥ 1 warm entry" guard kicks
-        // in once the cache shrinks to a single entry. Determinism: the LRU
-        // is dropped, the MRU survives.
-        assert_eq!(evicted.len(), 1);
-        let (evicted_name, engine) = evicted.into_iter().next().unwrap();
-        assert_eq!(
-            evicted_name, "a",
-            "oldest-first sort must pick the LRU (`a`) for eviction"
-        );
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains("b"), "MRU (`b`) must survive the guard");
-        assert!(!cache.contains("a"), "LRU (`a`) must be gone");
-        // Caller receives the engine box so it can drop outside the cache lock.
-        drop(engine);
+        let names = evicted
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(cache.is_empty());
+        // Caller receives the boxes so it can drop outside the cache lock.
+        drop(evicted);
     }
 
     /// `evict_lru_parked_except` returns the LRU parked entry. With three
