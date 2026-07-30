@@ -2,6 +2,7 @@
 import { computed, ref, useId, watch } from "vue";
 import type {
   Ltx2PipelineMode,
+  Ltx2ControlAdapterInfo,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
   ModelEntry,
@@ -33,8 +34,9 @@ const props = withDefaults(
     form: GenerateForm;
     upscalers?: ModelEntry[];
     audioOutputSupported?: boolean;
+    controlAdapters?: Ltx2ControlAdapterInfo[];
   }>(),
-  { upscalers: () => [], audioOutputSupported: true },
+  { upscalers: () => [], audioOutputSupported: true, controlAdapters: () => [] },
 );
 const MAX_BATCH_SIZE = 10_000;
 
@@ -63,6 +65,7 @@ const AUTO_CHAIN_FIELD_LABELS: Record<AutoChainUnsupportedField, string> = {
   source_video: "source video",
   keyframes: "keyframes",
   pipeline: "pipeline",
+  ic_lora_control: "reference control",
   retake_range: "retake range",
   spatial_upscale: "spatial upscale",
   temporal_upscale: "temporal upscale",
@@ -192,7 +195,12 @@ const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 
 function setPipeline(value: string): void {
   props.form.pipeline = (value || null) as Ltx2PipelineMode | null;
+  if (props.form.pipeline !== "ic-lora") props.form.icLoraControl = null;
   if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+}
+function setControlAdapter(value: string): void {
+  props.form.icLoraControl = value || null;
+  if (value) props.form.pipeline = "ic-lora";
 }
 
 function setSpatial(value: string): void {
@@ -437,6 +445,27 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             :aria-describedby="frameError ? frameErrorId : undefined"
             @change="snapFramesField"
           />
+        </label>
+
+        <label class="field mobile-generate-field">
+          <span>Reference control</span>
+          <select
+            class="control"
+            data-test="mobile-ltx2-reference-control"
+            :value="form.icLoraControl ?? ''"
+            @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">Custom / none</option>
+            <option v-for="adapter in controlAdapters" :key="adapter.id" :value="adapter.id">
+              {{ adapter.label }}{{ adapter.installed ? "" : " · download" }}
+            </option>
+          </select>
+          <small v-if="form.icLoraControl" data-test="mobile-ltx2-reference-guide">
+            {{
+              controlAdapters.find((adapter) => adapter.id === form.icLoraControl)?.guide ??
+              "Choose the frame-aligned guide video this control expects."
+            }}
+          </small>
         </label>
         <label class="field mobile-generate-field">
           <span>FPS</span>

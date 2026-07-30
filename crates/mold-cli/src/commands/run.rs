@@ -304,6 +304,25 @@ fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
     })
 }
 
+fn resolve_ic_lora_pipeline(
+    pipeline: Option<Ltx2PipelineMode>,
+    control: Option<&str>,
+    has_video: bool,
+) -> anyhow::Result<Option<Ltx2PipelineMode>> {
+    let Some(_) = control else {
+        return Ok(pipeline);
+    };
+    if !has_video {
+        anyhow::bail!("--ic-lora-control requires --video");
+    }
+    match pipeline {
+        None | Some(Ltx2PipelineMode::IcLora) => Ok(Some(Ltx2PipelineMode::IcLora)),
+        Some(other) => anyhow::bail!(
+            "--ic-lora-control conflicts with --pipeline {other}; use --pipeline ic-lora"
+        ),
+    }
+}
+
 fn resolve_effective_loras_for_family(
     family: &str,
     lora: &[String],
@@ -513,6 +532,7 @@ pub async fn run(
     video: Option<String>,
     keyframe: Vec<String>,
     pipeline: Option<Ltx2PipelineArg>,
+    ic_lora_control: Option<String>,
     retake: Option<String>,
     spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
     temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
@@ -631,7 +651,11 @@ pub async fn run(
     let audio_file_bytes = audio_file.as_deref().map(std::fs::read).transpose()?;
     let source_video_bytes = video.as_deref().map(std::fs::read).transpose()?;
     let keyframes = parse_keyframes(&keyframe)?;
-    let pipeline = parse_pipeline(pipeline);
+    let pipeline = resolve_ic_lora_pipeline(
+        parse_pipeline(pipeline),
+        ic_lora_control.as_deref(),
+        video.is_some(),
+    )?;
     let retake_range = parse_retake_range(retake)?;
     let spatial_upscale = parse_spatial_upscale(spatial_upscale);
     let temporal_upscale = parse_temporal_upscale(temporal_upscale);
@@ -898,6 +922,7 @@ pub async fn run(
             source_video: source_video_bytes,
             keyframes,
             pipeline,
+            ic_lora_control,
             loras,
             retake_range,
             spatial_upscale,
@@ -1103,6 +1128,30 @@ mod placement_flag_tests {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[test]
+    fn official_control_selects_ic_lora_for_every_canonical_id() {
+        for id in ["union", "motion-track", "pose", "detailer"] {
+            assert_eq!(
+                resolve_ic_lora_pipeline(None, Some(id), true).unwrap(),
+                Some(Ltx2PipelineMode::IcLora)
+            );
+        }
+    }
+
+    #[test]
+    fn official_control_requires_video_and_rejects_conflicting_pipeline() {
+        assert!(resolve_ic_lora_pipeline(None, Some("union"), false)
+            .unwrap_err()
+            .to_string()
+            .contains("--video"));
+        assert!(
+            resolve_ic_lora_pipeline(Some(Ltx2PipelineMode::Retake), Some("union"), true)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts")
+        );
+    }
 
     /// Fully explicit config — does NOT use `..Config::default()` which
     /// triggers `default_models_dir()` → reads `MOLD_HOME` env var and

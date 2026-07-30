@@ -106,6 +106,7 @@ function defaultForm(): GenerateFormState {
     sourceVideoPath: "",
     keyframes: [],
     pipeline: null,
+    icLoraControl: null,
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
@@ -167,6 +168,7 @@ function modelDefaultsPatch(
     steps: model.default_steps,
     guidance: model.default_guidance,
     loras: [],
+    icLoraControl: null,
   };
   const capabilities = generationCapabilitiesForFamily(model.family);
   if (capabilities.supportsVideo) {
@@ -199,6 +201,7 @@ function modelDefaultsPatch(
     next.sourceVideoPath = "";
     next.keyframes = [];
     next.pipeline = null;
+    next.icLoraControl = null;
     next.retakeRange = null;
     next.spatialUpscale = null;
     next.temporalUpscale = null;
@@ -311,6 +314,7 @@ export function applyMetadataToForm(
     audioFilePath: metadata.audio_file_path ?? "",
     sourceVideoPath: metadata.source_video_path ?? "",
     pipeline: metadata.pipeline ?? null,
+    icLoraControl: metadata.ic_lora_control ?? null,
     retakeRange: metadata.retake_range ?? null,
     spatialUpscale: metadata.spatial_upscale ?? null,
     temporalUpscale: metadata.temporal_upscale ?? null,
@@ -660,7 +664,8 @@ export function useGenerateForm(): UseGenerateForm {
                     image: k.image.base64,
                   }))
                 : undefined,
-              pipeline: s.pipeline ?? undefined,
+              pipeline: s.icLoraControl ? "ic-lora" : (s.pipeline ?? undefined),
+              ic_lora_control: s.icLoraControl ?? undefined,
               retake_range: s.retakeRange ?? undefined,
               spatial_upscale: s.spatialUpscale ?? undefined,
               temporal_upscale: s.temporalUpscale ?? undefined,

@@ -18,6 +18,7 @@ export function advancedActiveCount(form: GenerateForm): number {
   if (caps.supportsLora && form.loras.length > 0) count += 1;
   if (!caps.supportsVideo && form.upscaleModel) count += 1;
   if (caps.supportsVideo && form.cameraControl) count += 1;
+  if (caps.supportsAdvancedVideo && form.icLoraControl) count += 1;
   if (
     caps.supportsAdvancedVideo &&
     (form.pipeline ||

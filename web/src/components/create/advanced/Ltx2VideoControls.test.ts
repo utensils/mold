@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Ltx2VideoControls from "./Ltx2VideoControls.vue";
 import {
   useGenerateForm,
@@ -32,7 +32,19 @@ function lastPatch(wrapper: ReturnType<typeof factory>): GenerateFormState {
 }
 
 describe("Ltx2VideoControls", () => {
-  afterEach(() => __testing__.resetForTest());
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      }),
+    );
+  });
+  afterEach(() => {
+    __testing__.resetForTest();
+    vi.unstubAllGlobals();
+  });
 
   it("reads a null enableAudio as on and writes false when toggled", async () => {
     const wrapper = factory({ enableAudio: null });
@@ -60,6 +72,42 @@ describe("Ltx2VideoControls", () => {
     (select.element as HTMLSelectElement).value = "";
     await select.trigger("change");
     expect(lastPatch(wrapper).pipeline).toBe(null);
+  });
+
+  it("renders host-provided controls and their guide copy", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "motion-track",
+          label: "Motion track",
+          guide: "A trajectory-overlay guide video.",
+          size_bytes: 327_309_314,
+          installed: false,
+          download_model: "ltx2-control-motion-track-23",
+          download_repo: "Lightricks/control",
+          download_filename: "control.safetensors",
+          download_sha256: "a".repeat(64),
+        },
+      ],
+    } as Response);
+    const wrapper = factory({ model: "ltx-2.3-22b-distilled:fp8" });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='ltx2-reference-control']").findAll("option"),
+      ).toHaveLength(2),
+    );
+    await wrapper
+      .get("[data-test='ltx2-reference-control']")
+      .setValue("motion-track");
+    expect(lastPatch(wrapper).pipeline).toBe("ic-lora");
+    expect(lastPatch(wrapper).icLoraControl).toBe("motion-track");
+    await wrapper.setProps({
+      modelValue: lastPatch(wrapper),
+    });
+    expect(wrapper.get("[data-test='ltx2-reference-guide']").text()).toContain(
+      "trajectory-overlay",
+    );
   });
 
   it("offers the seven LTX-2 camera presets and writes the selected motion", async () => {

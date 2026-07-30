@@ -50,6 +50,7 @@ import type {
   ExpandCapabilities,
   GalleryImage,
   GenerateRequest,
+  Ltx2ControlAdapterInfo,
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
@@ -468,6 +469,34 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
 });
+const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+let controlAdaptersEpoch = 0;
+watch(
+  [selectedHostId, () => form.model, () => selectedHost.value?.online],
+  async () => {
+    const epoch = ++controlAdaptersEpoch;
+    controlAdapters.value = [];
+    const target = selectedTarget.value;
+    if (!target || !selectedHost.value?.online || form.family !== "ltx2" || !form.model) {
+      form.icLoraControl = null;
+      return;
+    }
+    try {
+      const options = await apiJsonTo<Ltx2ControlAdapterInfo[]>(
+        target,
+        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(form.model)}`,
+      );
+      if (epoch !== controlAdaptersEpoch) return;
+      controlAdapters.value = options;
+      if (form.icLoraControl && !options.some((adapter) => adapter.id === form.icLoraControl)) {
+        form.icLoraControl = null;
+      }
+    } catch {
+      if (epoch === controlAdaptersEpoch) form.icLoraControl = null;
+    }
+  },
+  { immediate: true },
+);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
 const effectiveBatchSize = computed(() =>
   caps.value.forcesBatchSizeOne ? 1 : Math.max(1, Math.floor(form.batchSize)),
@@ -1410,6 +1439,7 @@ function clearHostScopedGenerationSelections(): void {
   form.upscaleModel = "";
   form.controlModel = "";
   form.cameraControl = null;
+  form.icLoraControl = null;
   if (form.sourceFit.mode === "upscale-then-fit") {
     form.sourceFit = { ...form.sourceFit, upscalerModel: "" };
   }
@@ -3438,6 +3468,7 @@ onBeforeUnmount(() => {
                 :form="form"
                 :upscalers="upscalers"
                 :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
+                :control-adapters="controlAdapters"
                 @validity-change="parameterValid = $event"
               />
               <label v-if="form.model && caps.supportsNegativePrompt" class="field">

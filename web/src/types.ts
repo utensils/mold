@@ -72,6 +72,7 @@ export interface OutputMetadata {
   audio_file_path?: string | null;
   source_video_path?: string | null;
   pipeline?: Ltx2PipelineMode | null;
+  ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
@@ -230,6 +231,7 @@ export interface GenerateRequestWire {
   source_video_path?: string | null;
   keyframes?: KeyframeConditionWire[] | null;
   pipeline?: Ltx2PipelineMode | null;
+  ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
@@ -711,6 +713,8 @@ export interface GenerateFormState {
   sourceVideoPath: string;
   keyframes: KeyframeConditionState[];
   pipeline: Ltx2PipelineMode | null;
+  /** Official host-provided IC-LoRA control adapter ID. */
+  icLoraControl?: string | null;
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
@@ -727,6 +731,18 @@ export interface GenerateFormState {
    * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
    * forced to `null` so the wire stays clean. */
   enableAudio: boolean | null;
+}
+
+export interface Ltx2ControlAdapterInfo {
+  id: string;
+  label: string;
+  guide: string;
+  size_bytes: number;
+  installed: boolean;
+  download_model: string;
+  download_repo: string;
+  download_filename: string;
+  download_sha256: string;
 }
 
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────

@@ -54,6 +54,7 @@ export type AutoChainUnsupportedField =
   | "source_video"
   | "keyframes"
   | "pipeline"
+  | "ic_lora_control"
   | "retake_range"
   | "spatial_upscale"
   | "temporal_upscale";
@@ -71,6 +72,7 @@ export function unsupportedAutoChainFields(req: GenerateRequest): AutoChainUnsup
   if (req.source_video) unsupported.push("source_video");
   if ((req.keyframes?.length ?? 0) > 0) unsupported.push("keyframes");
   if (req.pipeline) unsupported.push("pipeline");
+  if (req.ic_lora_control) unsupported.push("ic_lora_control");
   if (req.retake_range) unsupported.push("retake_range");
   if (req.spatial_upscale) unsupported.push("spatial_upscale");
   if (req.temporal_upscale) unsupported.push("temporal_upscale");
@@ -181,6 +183,7 @@ export function buildGenerationEstimateRequest(
   delete estimate.source_video;
   delete estimate.keyframes;
   delete estimate.audio_file;
+  delete estimate.ic_lora_control;
   return {
     ...estimate,
     batch_size: 1,

@@ -707,6 +707,10 @@ Examples:
         #[arg(long, help_heading = "Video", value_enum)]
         pipeline: Option<Ltx2PipelineArg>,
 
+        /// Official LTX-2 IC-LoRA reference control.
+        #[arg(long, value_name = "ID", help_heading = "Video", requires = "video")]
+        ic_lora_control: Option<String>,
+
         /// Retake time range in the form <start:end> seconds.
         #[arg(long, help_heading = "Video")]
         retake: Option<String>,
@@ -1553,6 +1557,7 @@ async fn run() -> anyhow::Result<()> {
             video,
             keyframe,
             pipeline,
+            ic_lora_control,
             retake,
             spatial_upscale,
             temporal_upscale,
@@ -1690,6 +1695,7 @@ async fn run() -> anyhow::Result<()> {
                 video,
                 keyframe,
                 pipeline,
+                ic_lora_control,
                 retake,
                 spatial_upscale,
                 temporal_upscale,

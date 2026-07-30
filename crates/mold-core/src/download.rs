@@ -1557,8 +1557,10 @@ pub async fn pull_and_configure(
         model: model.to_string(),
     })?;
 
-    // Utility models (e.g., qwen3-expand) have no VAE and don't need config entries.
-    if manifest.is_utility() {
+    // Utility models and hidden LTX-2 control adapters have no standalone
+    // runtime config entry. The selected control is frozen onto the request
+    // as a concrete LoRA path after this download completes.
+    if manifest.is_utility() || manifest.family == "ltx2-control" {
         pull_model_files_only(manifest, opts).await?;
         let config = Config::load_or_default();
         return Ok((config, None));
@@ -1638,8 +1640,10 @@ pub async fn pull_and_configure_with_callback_and_hf_token(
         model: model.to_string(),
     })?;
 
-    // Utility models (e.g., qwen3-expand) have no VAE and don't need config entries.
-    if manifest.is_utility() {
+    // Utility models and hidden LTX-2 control adapters have no standalone
+    // runtime config entry. The selected control is frozen onto the request
+    // as a concrete LoRA path after this download completes.
+    if manifest.is_utility() || manifest.family == "ltx2-control" {
         pull_model_files_only_with_callback_and_hf_token(manifest, callback, opts, hf_token)
             .await?;
         let config = Config::load_or_default();

@@ -6,7 +6,7 @@ import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
-import type { ModelEntry } from "../../lib/api/types";
+import type { Ltx2ControlAdapterInfo, ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
@@ -221,6 +221,29 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     await wrapper.get("[data-test='ltx2-pipeline']").setValue("retake");
     expect(form.pipeline).toBe("retake");
     expect(wrapper.find("[data-test='ltx2-retake-start']").exists()).toBe(true);
+  });
+
+  it("renders host-provided reference controls and guide copy", async () => {
+    const form = formFor("ltx2");
+    const controlAdapters: Ltx2ControlAdapterInfo[] = [
+      {
+        id: "pose",
+        label: "Pose control",
+        guide: "A frame-aligned pose guide video.",
+        size_bytes: 654_465_256,
+        installed: true,
+        download_model: "ltx2-control-pose-19b",
+        download_repo: "Lightricks/control",
+        download_filename: "control.safetensors",
+        download_sha256: "a".repeat(64),
+      },
+    ];
+    const wrapper = mountSettings(form, { controlAdapters });
+    await openSection(wrapper, "Video");
+    await wrapper.get("[data-test='ltx2-reference-control']").setValue("pose");
+    expect(form.icLoraControl).toBe("pose");
+    expect(form.pipeline).toBe("ic-lora");
+    expect(wrapper.get("[data-test='ltx2-reference-guide']").text()).toContain("pose guide video");
   });
 
   it("shows the a2vid conditioning-audio input only for that pipeline", async () => {

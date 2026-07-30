@@ -215,6 +215,7 @@ pub struct Ltx2Options {
     pub source_video: Option<Vec<u8>>,
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub pipeline: Option<Ltx2PipelineMode>,
+    pub ic_lora_control: Option<String>,
     pub loras: Option<Vec<LoraWeight>>,
     pub retake_range: Option<TimeRange>,
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
@@ -271,6 +272,7 @@ pub async fn run(
         source_video,
         keyframes,
         pipeline,
+        ic_lora_control,
         loras,
         retake_range,
         spatial_upscale,
@@ -450,7 +452,7 @@ pub async fn run(
         negative_prompt.clone(),
     );
 
-    let req = GenerateRequest {
+    let mut req = GenerateRequest {
         prompt: prompt.to_string(),
         negative_prompt: effective_negative_prompt.clone(),
         model: model.to_string(),
@@ -489,12 +491,16 @@ pub async fn run(
         source_video_path: None,
         keyframes,
         pipeline,
+        ic_lora_control,
         loras,
         retake_range,
         spatial_upscale,
         temporal_upscale,
         placement,
     };
+    if local {
+        materialize_local_builtin_control(&mut req, &config).await?;
+    }
 
     // Warn if user-provided dimensions don't match model recommendations.
     // Only warn locally — in remote mode the server sends the warning via SSE/header.
@@ -822,6 +828,72 @@ pub async fn run(
     Ok(())
 }
 
+async fn materialize_local_builtin_control(
+    request: &mut GenerateRequest,
+    config: &Config,
+) -> Result<()> {
+    let Some(control) = request.ic_lora_control.as_deref() else {
+        return Ok(());
+    };
+    let model_config = config.resolved_model_config(&request.model);
+    mold_core::validate_generate_request_with_family(request, model_config.family.as_deref())
+        .map_err(anyhow::Error::msg)?;
+    let profile = mold_core::ltx2_control::control_profile_for_model(&request.model, &model_config)
+        .map_err(anyhow::Error::msg)?;
+    let adapter = mold_core::ltx2_control::resolve_control_adapter(profile, control)
+        .map_err(anyhow::Error::msg)?;
+    let manifest = mold_core::manifest::find_manifest(adapter.download_model)
+        .expect("control registry and hidden manifests must stay in sync");
+    let file = manifest
+        .files
+        .first()
+        .expect("control manifests contain one adapter file");
+    let path = config
+        .resolved_models_dir()
+        .join(mold_core::manifest::storage_path(manifest, file));
+    if !local_control_artifact_is_complete(adapter, &path) {
+        mold_core::download::pull_and_configure(
+            adapter.download_model,
+            &mold_core::download::PullOptions::default(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to download IC-LoRA control '{}': {error}",
+                adapter.id
+            )
+        })?;
+    }
+    if !local_control_artifact_is_complete(adapter, &path) {
+        anyhow::bail!(
+            "IC-LoRA control '{}' download completed without a verified {}",
+            adapter.id,
+            path.display()
+        );
+    }
+
+    let mut ordered = vec![LoraWeight {
+        path: path.to_string_lossy().into_owned(),
+        scale: 1.0,
+    }];
+    if let Some(legacy) = request.lora.take() {
+        ordered.push(legacy);
+    }
+    ordered.extend(request.loras.take().unwrap_or_default());
+    request.loras = Some(ordered);
+    Ok(())
+}
+
+fn local_control_artifact_is_complete(
+    adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
+    path: &std::path::Path,
+) -> bool {
+    mold_core::download::has_sha256_marker(path)
+        || path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == adapter.size_bytes)
+}
+
 /// Remote generation: try SSE streaming first, fall back to blocking API.
 #[allow(clippy::too_many_arguments)]
 async fn generate_remote(
@@ -915,8 +987,10 @@ async fn generate_remote(
                 }
                 GenerateServerAction::FallbackLocal => {
                     print_using_local_inference();
+                    let mut local_request = req.clone();
+                    materialize_local_builtin_control(&mut local_request, config).await?;
                     generate_local(
-                        req,
+                        &local_request,
                         config,
                         gpus,
                         t5_variant,
@@ -997,8 +1071,10 @@ async fn generate_remote_blocking(
                 }
                 GenerateServerAction::FallbackLocal => {
                     print_using_local_inference();
+                    let mut local_request = req.clone();
+                    materialize_local_builtin_control(&mut local_request, config).await?;
                     generate_local(
-                        req,
+                        &local_request,
                         config,
                         gpus,
                         t5_variant,
@@ -2065,6 +2141,55 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
+
+    #[tokio::test]
+    async fn local_control_materialization_preserves_built_in_first_ordering() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            models_dir: temp.path().display().to_string(),
+            ..Config::default()
+        };
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+        let manifest = mold_core::manifest::find_manifest(adapter.download_model).unwrap();
+        let adapter_path = temp.path().join(mold_core::manifest::storage_path(
+            manifest,
+            &manifest.files[0],
+        ));
+        std::fs::create_dir_all(adapter_path.parent().unwrap()).unwrap();
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "source_video_path": "/guide.mp4",
+            "pipeline": "ic-lora",
+            "ic_lora_control": "union",
+            "lora": { "path": "/loras/legacy.safetensors", "scale": 0.6 },
+            "loras": [{ "path": "/loras/style.safetensors", "scale": 0.8 }]
+        }))
+        .unwrap();
+
+        materialize_local_builtin_control(&mut request, &config)
+            .await
+            .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[0].scale, 1.0);
+        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
+        assert_eq!(loras[2].path, "/loras/style.safetensors");
+    }
 
     #[test]
     fn filename_sanitizes_colon() {

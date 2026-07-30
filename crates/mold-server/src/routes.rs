@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Extension, Path, Request, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -223,6 +223,7 @@ use crate::queue::clean_error_message;
         health,
         discovery_peers,
         capabilities_chain_limits,
+        capabilities_ltx2_control_adapters,
         stream_events,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
@@ -243,6 +244,7 @@ use crate::queue::clean_error_message;
     ),
     components(schemas(
         mold_core::GenerateRequest,
+        mold_core::Ltx2ControlAdapterInfo,
         mold_core::GenerateResponse,
         mold_core::GenerationPlacementPreviewRequest,
         mold_core::GenerationPlacementPreview,
@@ -481,6 +483,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/capabilities/chain-limits",
             get(capabilities_chain_limits),
         )
+        .route(
+            "/api/capabilities/ltx2-control-adapters",
+            get(capabilities_ltx2_control_adapters),
+        )
         .route("/api/shutdown", post(shutdown_server))
         // ─── /api/config — HTTP counterpart of the `mold config` verbs ────
         .route("/api/config", get(crate::routes_config::list_config))
@@ -626,6 +632,8 @@ async fn prepare_generation(
     // format and can gate on it correctly.
     request.normalise_output_format(resolved_family.as_deref());
 
+    let planned_control = plan_builtin_ltx2_control(state, request).await?;
+
     let mut singleton_validation;
     let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
         singleton_validation = request.clone();
@@ -639,6 +647,9 @@ async fn prepare_generation(
     }
 
     resolve_server_local_media_paths(state, request).await?;
+    if let Some((adapter, path)) = planned_control {
+        materialize_builtin_ltx2_control(state, request, adapter, path).await?;
+    }
 
     let _ = model_manager::check_model_available(state, &request.model).await?;
 
@@ -657,6 +668,124 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning, preferred_gpu))
+}
+
+async fn plan_builtin_ltx2_control(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Result<
+    Option<(
+        &'static mold_core::ltx2_control::Ltx2ControlAdapter,
+        std::path::PathBuf,
+    )>,
+    ApiError,
+> {
+    let Some(control) = request.ic_lora_control.as_deref() else {
+        return Ok(None);
+    };
+    let control = mold_core::ltx2_control::normalize_control_id(control);
+    request.ic_lora_control = Some(control.clone());
+    match request.pipeline {
+        None | Some(mold_core::Ltx2PipelineMode::IcLora) => {
+            request.pipeline = Some(mold_core::Ltx2PipelineMode::IcLora);
+        }
+        Some(other) => {
+            return Err(ApiError::validation(format!(
+                "ic_lora_control conflicts with pipeline={other}; use pipeline=ic-lora"
+            )));
+        }
+    }
+
+    let config = state.config.read().await;
+    let effective_config =
+        crate::model_manager::resolve_existing_model_authority(&request.model, &config)?
+            .map_or_else(|| config.clone(), |authority| authority.config);
+    let effective = effective_config.resolved_model_config(&request.model);
+    let profile = mold_core::ltx2_control::control_profile_for_model(&request.model, &effective)
+        .map_err(ApiError::validation)?;
+    let adapter = mold_core::ltx2_control::resolve_control_adapter(profile, &control)
+        .map_err(ApiError::validation)?;
+    let manifest = mold_core::manifest::find_manifest(adapter.download_model)
+        .expect("control registry and hidden manifests must stay in sync");
+    let file = manifest
+        .files
+        .first()
+        .expect("control manifests contain one adapter file");
+    let path = config
+        .resolved_models_dir()
+        .join(mold_core::manifest::storage_path(manifest, file));
+    Ok(Some((adapter, path)))
+}
+
+async fn materialize_builtin_ltx2_control(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+    adapter: &'static mold_core::ltx2_control::Ltx2ControlAdapter,
+    path: std::path::PathBuf,
+) -> Result<(), ApiError> {
+    if !control_artifact_is_complete(adapter, &path) {
+        let mut events = state.downloads.subscribe();
+        let (job_id, _, _) = state
+            .downloads
+            .enqueue(adapter.download_model.to_string())
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("cannot queue control adapter: {error}"))
+            })?;
+        loop {
+            match events.recv().await {
+                Ok(mold_core::DownloadEvent::JobDone { id, .. }) if id == job_id => break,
+                Ok(mold_core::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "failed to download IC-LoRA control '{}': {error}",
+                        adapter.id
+                    )));
+                }
+                Ok(mold_core::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "IC-LoRA control '{}' download was cancelled",
+                        adapter.id
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ApiError::internal(format!(
+                        "lost IC-LoRA control download status: {error}"
+                    )));
+                }
+            }
+        }
+    }
+    if !control_artifact_is_complete(adapter, &path) {
+        return Err(ApiError::internal(format!(
+            "IC-LoRA control '{}' download completed without a verified {}",
+            adapter.id,
+            path.display()
+        )));
+    }
+
+    let mut ordered = vec![mold_core::LoraWeight {
+        path: path.to_string_lossy().into_owned(),
+        scale: 1.0,
+    }];
+    if let Some(lora) = request.lora.take() {
+        ordered.push(lora);
+    }
+    if let Some(loras) = request.loras.take() {
+        ordered.extend(loras);
+    }
+    request.loras = Some(ordered);
+    Ok(())
+}
+
+fn control_artifact_is_complete(
+    adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
+    path: &std::path::Path,
+) -> bool {
+    mold_core::download::has_sha256_marker(path)
+        || path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == adapter.size_bytes)
 }
 
 async fn normalize_generation_placement(
@@ -1914,7 +2043,7 @@ async fn generate_placement_preview(
 
 pub(crate) async fn placement_preview_for_request(
     state: &AppState,
-    request: GenerateRequest,
+    mut request: GenerateRequest,
     copies: u32,
 ) -> mold_core::GenerationPlacementPreview {
     let plan = state.scheduled_work.latest_plan();
@@ -1934,6 +2063,22 @@ pub(crate) async fn placement_preview_for_request(
         let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
         response.authoritative = true;
         return response;
+    }
+    let planned_control = match plan_builtin_ltx2_control(state, &mut request).await {
+        Ok(control) => control,
+        Err(error) => {
+            let mut response = unavailable("infeasible", error.error);
+            response.authoritative = true;
+            return response;
+        }
+    };
+    if planned_control.is_some() {
+        if let Err(error) = mold_core::validate_generate_request_with_family(&request, Some("ltx2"))
+        {
+            let mut response = unavailable("infeasible", error);
+            response.authoritative = true;
+            return response;
+        }
     }
     let has_post_upscale = request
         .upscale_model
@@ -1979,7 +2124,42 @@ pub(crate) async fn placement_preview_for_request(
         .preview_placement(request, copies, prepared)
         .await
     {
-        Ok(response) => response,
+        Ok(mut response) => {
+            if let Some((adapter, path)) = planned_control {
+                if !control_artifact_is_complete(adapter, &path) {
+                    response
+                        .pending_downloads
+                        .push(mold_core::PendingModelDownload {
+                            kind: "ic-lora-control".to_string(),
+                            name: adapter.hf_filename.to_string(),
+                            repo: adapter.hf_repo.to_string(),
+                            bytes: adapter.size_bytes,
+                        });
+                }
+                let artifact_fingerprint = format!(":ic-lora:{}", adapter.sha256);
+                if let Some(candidate) = response.candidate.as_mut() {
+                    candidate
+                        .execution_fingerprint
+                        .push_str(&artifact_fingerprint);
+                    if let Some(equivalence) = candidate.execution_equivalence_fingerprint.as_mut()
+                    {
+                        equivalence.push_str(&artifact_fingerprint);
+                    }
+                }
+                for stage in &mut response.stage_candidates {
+                    stage
+                        .candidate
+                        .execution_fingerprint
+                        .push_str(&artifact_fingerprint);
+                    if let Some(equivalence) =
+                        stage.candidate.execution_equivalence_fingerprint.as_mut()
+                    {
+                        equivalence.push_str(&artifact_fingerprint);
+                    }
+                }
+            }
+            response
+        }
         Err(error) => unavailable("temporarily_unavailable", error),
     }
 }
@@ -3504,6 +3684,57 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct Ltx2ControlAdaptersQuery {
+    model: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/capabilities/ltx2-control-adapters",
+    tag = "generation",
+    params(("model" = String, Query, description = "Installed LTX-2 model ID")),
+    responses(
+        (status = 200, description = "Compatible built-in IC-LoRA controls", body = Vec<mold_core::Ltx2ControlAdapterInfo>),
+        (status = 422, description = "Model is not a supported distilled LTX-2 profile")
+    )
+)]
+async fn capabilities_ltx2_control_adapters(
+    State(state): State<AppState>,
+    Query(query): Query<Ltx2ControlAdaptersQuery>,
+) -> Result<Json<Vec<mold_core::Ltx2ControlAdapterInfo>>, ApiError> {
+    let config = state.config.read().await;
+    let effective_config =
+        crate::model_manager::resolve_existing_model_authority(&query.model, &config)?
+            .map_or_else(|| config.clone(), |authority| authority.config);
+    let model_config = effective_config.resolved_model_config(&query.model);
+    let profile = mold_core::ltx2_control::control_profile_for_model(&query.model, &model_config)
+        .map_err(ApiError::validation)?;
+    let models_dir = config.resolved_models_dir();
+    let adapters = mold_core::ltx2_control::adapters_for_profile(profile)
+        .map(|adapter| {
+            let manifest = mold_core::manifest::find_manifest(adapter.download_model)
+                .expect("control registry and hidden manifests must stay in sync");
+            let installed = manifest.files.iter().all(|file| {
+                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+                control_artifact_is_complete(adapter, &path)
+            });
+            mold_core::Ltx2ControlAdapterInfo {
+                id: adapter.id.to_string(),
+                label: adapter.label.to_string(),
+                guide: adapter.guide.to_string(),
+                size_bytes: adapter.size_bytes,
+                installed,
+                download_model: adapter.download_model.to_string(),
+                download_repo: adapter.hf_repo.to_string(),
+                download_filename: adapter.hf_filename.to_string(),
+                download_sha256: adapter.sha256.to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(adapters))
 }
 
 fn device_capabilities(
@@ -5468,6 +5699,84 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn control_planning_is_read_only_and_freezes_the_exact_artifact_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = temp.path().display().to_string();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "source_video_path": "/guide.mp4",
+            "ic_lora_control": "MOTION_TRACK"
+        }))
+        .unwrap();
+        assert!(state.downloads.listing().await.active_jobs.is_empty());
+
+        let (adapter, path) = plan_builtin_ltx2_control(&state, &mut request)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(adapter.id, "motion-track");
+        assert_eq!(request.ic_lora_control.as_deref(), Some("motion-track"));
+        assert_eq!(request.pipeline, Some(mold_core::Ltx2PipelineMode::IcLora));
+        let manifest = mold_core::manifest::find_manifest(adapter.download_model).unwrap();
+        assert_eq!(
+            path,
+            temp.path().join(mold_core::manifest::storage_path(
+                manifest,
+                &manifest.files[0]
+            ))
+        );
+        let listing = state.downloads.listing().await;
+        assert!(listing.active_jobs.is_empty());
+        assert!(listing.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn built_in_control_is_the_first_concrete_lora_at_unit_scale() {
+        let state = AppState::for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let adapter_path = temp.path().join("control.safetensors");
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "lora": { "path": "/loras/legacy.safetensors", "scale": 0.6 },
+            "loras": [{ "path": "/loras/style.safetensors", "scale": 0.8 }]
+        }))
+        .unwrap();
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+
+        materialize_builtin_ltx2_control(&state, &mut request, adapter, adapter_path.clone())
+            .await
+            .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras.len(), 3);
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[0].scale, 1.0);
+        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
+        assert_eq!(loras[2].path, "/loras/style.safetensors");
+    }
 
     struct TrackingUpscaler {
         unloaded: std::sync::Arc<std::sync::atomic::AtomicBool>,

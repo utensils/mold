@@ -13,7 +13,8 @@ import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@s
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
-import type { ModelEntry } from "../../lib/api/types";
+import type { Ltx2ControlAdapterInfo, ModelEntry } from "../../lib/api/types";
+import { apiJsonTo } from "../../lib/api/client";
 import {
   filterModelsForTarget,
   findInstalledModel,
@@ -56,6 +57,46 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
+const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+let controlAdaptersEpoch = 0;
+watch(
+  [
+    () => props.form.model,
+    () => normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
+    () => hosts.all.map((host) => `${host.id}:${host.status}:${host.baseUrl}`).join("|"),
+  ],
+  async () => {
+    const epoch = ++controlAdaptersEpoch;
+    controlAdapters.value = [];
+    if (props.form.family !== "ltx2" || !props.form.model) return;
+    const route = hosts.resolveRoute(
+      normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
+      props.form.model,
+    );
+    if (!route) return;
+    try {
+      const options = await apiJsonTo<Ltx2ControlAdapterInfo[]>(
+        route.target,
+        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(props.form.model)}`,
+      );
+      if (epoch === controlAdaptersEpoch) {
+        controlAdapters.value = options;
+        if (
+          props.form.icLoraControl &&
+          !options.some((adapter) => adapter.id === props.form.icLoraControl)
+        ) {
+          props.form.icLoraControl = null;
+        }
+      }
+    } catch {
+      if (epoch === controlAdaptersEpoch) {
+        controlAdapters.value = [];
+        props.form.icLoraControl = null;
+      }
+    }
+  },
+  { immediate: true },
+);
 
 // The inspector is docked to the window's right edge, so dragging its left
 // handle left grows it. Keep pointer moves local and persist only on commit.
@@ -460,6 +501,7 @@ function resetSettings() {
         :form="form"
         :selected-model="selectedModel"
         :upscalers="models.upscalers"
+        :control-adapters="controlAdapters"
         @append-word="emit('append-word', $event)"
       />
     </div>

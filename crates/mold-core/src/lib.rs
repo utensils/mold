@@ -16,6 +16,8 @@ pub mod expand_prompts;
 pub mod format;
 pub mod install_error;
 pub mod lambda;
+pub mod ltx2_control;
+pub use ltx2_control::Ltx2ControlAdapterInfo;
 pub mod manifest;
 pub mod media_paths;
 pub mod removal;

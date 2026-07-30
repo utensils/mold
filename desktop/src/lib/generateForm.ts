@@ -103,6 +103,8 @@ export interface GenerateForm {
   sourceVideo: PickedImage | null;
   keyframes: FormKeyframe[];
   pipeline: Ltx2PipelineMode | null;
+  /** Official host-provided IC-LoRA control adapter ID. */
+  icLoraControl?: string | null;
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
@@ -152,6 +154,7 @@ export function newGenerateForm(): GenerateForm {
     sourceVideo: null,
     keyframes: [],
     pipeline: null,
+    icLoraControl: null,
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
@@ -203,6 +206,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   // absent-server/absent-field that leaves the current value in place.
   form.fps = defaultVideoFps(m, form.fps);
   form.loras = [];
+  form.icLoraControl = null;
   reconcileModelCapabilities(form, m);
 }
 
@@ -262,6 +266,7 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.sourceVideo = null;
     form.keyframes = [];
     form.pipeline = null;
+    form.icLoraControl = null;
     form.retakeRange = null;
     form.spatialUpscale = null;
     form.temporalUpscale = null;
@@ -398,7 +403,10 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
         image: k.image.base64,
       }));
     }
-    if (form.pipeline) req.pipeline = form.pipeline;
+    if (form.icLoraControl) {
+      req.ic_lora_control = form.icLoraControl;
+      req.pipeline = "ic-lora";
+    } else if (form.pipeline) req.pipeline = form.pipeline;
     if (form.retakeRange) req.retake_range = form.retakeRange;
     if (form.spatialUpscale) req.spatial_upscale = form.spatialUpscale;
     if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
@@ -494,6 +502,7 @@ export function applyMetadataToForm(
   if (fps != null) form.fps = fps;
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
   form.pipeline = metadata.pipeline ?? null;
+  form.icLoraControl = metadata.ic_lora_control ?? null;
   form.retakeRange = metadata.retake_range ?? null;
   form.spatialUpscale = metadata.spatial_upscale ?? null;
   form.temporalUpscale = metadata.temporal_upscale ?? null;
@@ -586,6 +595,7 @@ export function applyRequestToForm(
     image: { filename: `Keyframe ${keyframe.frame}`, base64: keyframe.image },
   }));
   form.pipeline = request.pipeline ?? null;
+  form.icLoraControl = request.ic_lora_control ?? null;
   form.retakeRange = request.retake_range ?? null;
   form.spatialUpscale = request.spatial_upscale ?? null;
   form.temporalUpscale = request.temporal_upscale ?? null;

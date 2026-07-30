@@ -292,6 +292,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -434,6 +435,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(scale, 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reference_video_downscale_factor_defaults_to_one() {
+        let path = temp_file("ref-scale-default");
+        let data = vec![0u8; 4 * std::mem::size_of::<f32>()];
+        let tensors = HashMap::from([(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 4], &data).unwrap(),
+        )]);
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let scale = reference_video_downscale_factor(&[LoraWeight {
+            path: path.to_string_lossy().to_string(),
+            scale: 1.0,
+        }])
+        .unwrap();
+
+        assert_eq!(scale, 1);
         let _ = std::fs::remove_file(path);
     }
 

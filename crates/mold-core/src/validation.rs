@@ -525,6 +525,24 @@ pub fn validate_generate_request_with_family(
     if req.pipeline.is_some() {
         require_ltx2_family(family, "pipeline")?;
     }
+    if let Some(control) = req.ic_lora_control.as_deref() {
+        require_ltx2_family(family, "ic_lora_control")?;
+        if control.trim().is_empty() {
+            return Err("ic_lora_control must not be empty".to_string());
+        }
+        if req.pipeline != Some(Ltx2PipelineMode::IcLora) {
+            return Err("ic_lora_control requires pipeline=ic-lora".to_string());
+        }
+        if req.source_video.is_none() && req.source_video_path.is_none() {
+            return Err("ic_lora_control requires source_video".to_string());
+        }
+        let user_loras = usize::from(req.lora.is_some()) + req.loras.as_ref().map_or(0, Vec::len);
+        if user_loras + 1 > 4 {
+            return Err(
+                "ic_lora_control plus custom LoRAs exceeds the four-LoRA stack limit".to_string(),
+            );
+        }
+    }
 
     if family == Some("ltx2") {
         match req.resolved_output_format() {
@@ -582,7 +600,10 @@ pub fn validate_generate_request_with_family(
                     if req.source_video.is_none() && req.source_video_path.is_none() {
                         return Err("pipeline=ic-lora requires source_video".to_string());
                     }
-                    if req.lora.is_none() && req.loras.as_ref().is_none_or(Vec::is_empty) {
+                    if req.ic_lora_control.is_none()
+                        && req.lora.is_none()
+                        && req.loras.as_ref().is_none_or(Vec::is_empty)
+                    {
                         return Err("pipeline=ic-lora requires at least one LoRA".to_string());
                     }
                 }
@@ -788,6 +809,7 @@ mod tests {
             source_video_path: None,
             keyframes: None,
             pipeline: None,
+            ic_lora_control: None,
             loras: None,
             retake_range: None,
             spatial_upscale: None,
@@ -2513,5 +2535,36 @@ mod tests {
     fn upscale_tile_size_none_accepted() {
         let req = valid_upscale_req();
         assert!(validate_upscale_request(&req).is_ok());
+    }
+
+    #[test]
+    fn built_in_ic_lora_control_requires_video_pipeline_and_reserves_a_stack_slot() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(crate::OutputFormat::Mp4);
+        req.frames = Some(97);
+        req.ic_lora_control = Some("union".to_string());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("pipeline=ic-lora"));
+
+        req.pipeline = Some(crate::Ltx2PipelineMode::IcLora);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("source_video"));
+        req.source_video_path = Some("/guides/canny.mp4".to_string());
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.loras = Some(
+            (0..4)
+                .map(|index| crate::LoraWeight {
+                    path: format!("/loras/{index}.safetensors"),
+                    scale: 1.0,
+                })
+                .collect(),
+        );
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("four-LoRA"));
     }
 }

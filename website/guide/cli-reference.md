@@ -35,6 +35,7 @@ come from stdin.
 | `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                         |
 | `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                  |
 | `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                   |
+| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora`              |
 | `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning                                                             |
 | `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, or `retake` |
 | `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                      |

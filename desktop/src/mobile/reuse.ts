@@ -63,6 +63,7 @@ export function applyMobileGalleryMetadata(
     form.upscaleModel = "";
     form.controlModel = "";
     form.cameraControl = null;
+    form.icLoraControl = null;
   }
 
   // A substituted model can belong to a different family. Keep the original

@@ -15,7 +15,7 @@ pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
 
 /// Model families that are auxiliary (not standalone generators).
 /// ControlNet models are used via `--control-model`, not as the primary model.
-pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet"];
+pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet", "ltx2-control"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
@@ -1215,6 +1215,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(wuerstchen_manifests());
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
+    manifests.extend(ltx2_control_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
@@ -4215,9 +4216,9 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
                 46_149_344_974,
                 "7ab7225325bc403448ea84b6db2269811a880e5118cd2ee2b6282a93d585016f",
             ),
-            "ltx-2.3-22b-distilled.safetensors" => (
-                46_149_345_038,
-                "14409a4d1337a8ded02fa87fb895b17a91ab2c6588f7cc3352e624ff18a689bf",
+            "ltx-2.3-22b-distilled-1.1.safetensors" => (
+                46_149_345_334,
+                "b33b7fe4bbfe084f484be4aaf90b0f1d95dca20d403ac4c0e037eb8c4f0af7cc",
             ),
             other => panic!("unexpected LTX-2 transformer file '{other}'"),
         };
@@ -4237,6 +4238,10 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
             "ltx-2.3-spatial-upscaler-x2-1.0.safetensors" => (
                 995_743_504,
                 "93800de87dbc448b5b31f3c5c3a1579ba6335151de061a564f6f026b0fc770ad",
+            ),
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors" => (
+                995_743_560,
+                "5f416311fa8172b65af67530758964708d29a317b830d689a51143b7f91913ed",
             ),
             other => panic!("unexpected LTX-2 spatial upscaler file '{other}'"),
         };
@@ -4293,6 +4298,10 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
                 "ltx-2.3-22b-distilled-lora-384.safetensors" => (
                     7_605_507_256,
                     "2943ab994f3c9d88052e5a2a34cca14e4a2dfc36b1d8c407931d52d5c25dd72b",
+                ),
+                "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" => (
+                    7_605_507_256,
+                    "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a",
                 ),
                 other => panic!("unexpected LTX-2 distilled LoRA file '{other}'"),
             };
@@ -4366,23 +4375,54 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
             "Lightricks/LTX-2.3",
             "ltx-2.3-22b-dev.safetensors",
             "Lightricks/LTX-2.3",
-            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
             Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
             "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
-            Some("ltx-2.3-22b-distilled-lora-384.safetensors"),
+            Some("ltx-2.3-22b-distilled-lora-384-1.1.safetensors"),
         ),
         make_manifest(
             "ltx-2.3-22b-distilled:bf16",
             "LTX-2.3 22B distilled BF16 — full-precision eight-step pipeline",
             "Lightricks/LTX-2.3",
-            "ltx-2.3-22b-distilled.safetensors",
+            "ltx-2.3-22b-distilled-1.1.safetensors",
             "Lightricks/LTX-2.3",
-            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
             Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
             "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
             None,
         ),
     ]
+}
+
+fn ltx2_control_manifests() -> Vec<ModelManifest> {
+    crate::ltx2_control::LTX2_CONTROL_ADAPTERS
+        .iter()
+        .map(|adapter| ModelManifest {
+            name: adapter.download_model.to_string(),
+            family: "ltx2-control".to_string(),
+            description: format!("{} — {}", adapter.label, adapter.profile.label()),
+            files: vec![ModelFile {
+                hf_repo: adapter.hf_repo.to_string(),
+                hf_filename: adapter.hf_filename.to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: adapter.size_bytes,
+                gated: false,
+                sha256: Some(adapter.sha256),
+            }],
+            defaults: ManifestDefaults {
+                steps: 1,
+                guidance: 0.0,
+                width: 16,
+                height: 16,
+                is_schnell: true,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: true,
+        })
+        .collect()
 }
 
 fn controlnet_manifests() -> Vec<ModelManifest> {
@@ -5633,13 +5673,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 116
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 121
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 116);
+        assert_eq!(known_manifests().len(), 121);
     }
 
     #[test]
@@ -5732,9 +5772,9 @@ mod tests {
             ),
             (
                 "ltx-2.3-22b-distilled:bf16",
-                "ltx-2.3-22b-distilled.safetensors",
-                46_149_345_038,
-                "14409a4d1337a8ded02fa87fb895b17a91ab2c6588f7cc3352e624ff18a689bf",
+                "ltx-2.3-22b-distilled-1.1.safetensors",
+                46_149_345_334,
+                "b33b7fe4bbfe084f484be4aaf90b0f1d95dca20d403ac4c0e037eb8c4f0af7cc",
             ),
         ] {
             let manifest = find_manifest(model).expect("BF16 manifest should exist");
@@ -5766,12 +5806,14 @@ mod tests {
                 .filter(|file| file.component == ModelComponent::SpatialUpscaler)
                 .map(|file| file.hf_filename.as_str())
                 .collect();
+            let x2 = if model.ends_with(":bf16") {
+                "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+            } else {
+                "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+            };
             assert_eq!(
                 spatial_files,
-                vec![
-                    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
-                    "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
-                ]
+                vec![x2, "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"]
             );
         }
     }

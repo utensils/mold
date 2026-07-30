@@ -256,6 +256,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         source_video_path: None,
         keyframes: None,
         pipeline: if is_ltx2 { params.pipeline } else { None },
+        ic_lora_control: None,
         loras: None,
         retake_range: None,
         spatial_upscale: None,

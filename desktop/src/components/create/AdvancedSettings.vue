@@ -16,6 +16,7 @@ import type {
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
   ModelEntry,
+  Ltx2ControlAdapterInfo,
   OutputFormat,
 } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
@@ -44,8 +45,9 @@ const props = withDefaults(
     /** The picked model, used by Reset to restore its defaults. */
     selectedModel?: ModelEntry | null;
     upscalers?: ModelEntry[];
+    controlAdapters?: Ltx2ControlAdapterInfo[];
   }>(),
-  { selectedModel: null, upscalers: () => [] },
+  { selectedModel: null, upscalers: () => [], controlAdapters: () => [] },
 );
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
@@ -151,7 +153,12 @@ const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 function setPipeline(v: string) {
   props.form.pipeline = (v || null) as Ltx2PipelineMode | null;
+  if (props.form.pipeline !== "ic-lora") props.form.icLoraControl = null;
   if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+}
+function setControlAdapter(value: string) {
+  props.form.icLoraControl = value || null;
+  if (value) props.form.pipeline = "ic-lora";
 }
 function setSpatial(v: string) {
   props.form.spatialUpscale = (v || null) as Ltx2SpatialUpscale | null;
@@ -525,6 +532,26 @@ function reset() {
               <option value="">Auto</option>
               <option v-for="opt in pipelineOptions" :key="opt" :value="opt">{{ opt }}</option>
             </select>
+
+            <label class="ms-label ms-label--mt">Reference control</label>
+            <select
+              :value="form.icLoraControl ?? ''"
+              aria-label="Reference control"
+              class="ms-select"
+              data-test="ltx2-reference-control"
+              @change="setControlAdapter(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Custom / none</option>
+              <option v-for="adapter in controlAdapters" :key="adapter.id" :value="adapter.id">
+                {{ adapter.label }}{{ adapter.installed ? "" : " · download" }}
+              </option>
+            </select>
+            <p v-if="form.icLoraControl" class="ms-hint" data-test="ltx2-reference-guide">
+              {{
+                controlAdapters.find((adapter) => adapter.id === form.icLoraControl)?.guide ??
+                "Choose the frame-aligned guide video this control expects."
+              }}
+            </p>
 
             <div class="ms-grid2 ms-label--mt">
               <div>

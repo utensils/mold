@@ -76,6 +76,7 @@ describe("newGenerateForm advanced-video defaults", () => {
     expect(form.sourceVideo).toBeNull();
     expect(form.keyframes).toEqual([]);
     expect(form.pipeline).toBeNull();
+    expect(form.icLoraControl).toBeNull();
     expect(form.retakeRange).toBeNull();
     expect(form.spatialUpscale).toBeNull();
     expect(form.temporalUpscale).toBeNull();
@@ -114,6 +115,23 @@ describe("cloneGenerateForm", () => {
 });
 
 describe("buildRequest — LTX-2 advanced video", () => {
+  it("round-trips a built-in reference control beside custom LoRAs", () => {
+    const form = ltx2Form();
+    form.prompt = "a guided dancer";
+    form.sourceVideo = { filename: "pose.mp4", base64: "POSE" };
+    form.icLoraControl = "pose";
+    form.loras = [
+      { path: "/loras/style.safetensors", name: "Style", scale: 0.7, trainedWords: [] },
+    ];
+    const req = buildRequest(form);
+    expect(req).toMatchObject({
+      pipeline: "ic-lora",
+      ic_lora_control: "pose",
+      source_video: "POSE",
+      loras: [{ path: "/loras/style.safetensors", scale: 0.7 }],
+    });
+  });
+
   it("maps advanced fields to their kebab-case wire values", () => {
     const form = ltx2Form();
     form.prompt = "a river";

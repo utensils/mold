@@ -302,10 +302,23 @@ export interface GenerateRequest {
   source_video?: string;
   keyframes?: KeyframeConditionWire[];
   pipeline?: Ltx2PipelineMode;
+  ic_lora_control?: string;
   retake_range?: TimeRange;
   spatial_upscale?: Ltx2SpatialUpscale;
   temporal_upscale?: Ltx2TemporalUpscale;
   placement?: DevicePlacement | null;
+}
+
+export interface Ltx2ControlAdapterInfo {
+  id: string;
+  label: string;
+  guide: string;
+  size_bytes: number;
+  installed: boolean;
+  download_model: string;
+  download_repo: string;
+  download_filename: string;
+  download_sha256: string;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
@@ -430,6 +443,7 @@ export interface OutputMetadata {
   audio_file_path?: string | null;
   source_video_path?: string | null;
   pipeline?: Ltx2PipelineMode | null;
+  ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
