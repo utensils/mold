@@ -403,6 +403,25 @@ fn process_cpu_utility_work(work: OwnerWork) -> bool {
     }
 }
 
+/// Reassert the canonical GPU binding at the start of every owner iteration.
+///
+/// The OS thread identity remains the worker's durable authority; the
+/// thread-local ordinal is the inference-side projection of that authority.
+/// Restoring it here makes an accidental scope leak visible and self-healing
+/// before the owner advertises readiness for another grant.
+fn reaffirm_owner_gpu_binding(worker: &GpuWorker) {
+    let expected = worker.gpu.ordinal;
+    let actual = mold_inference::device::thread_gpu_ordinal();
+    if actual != Some(expected) {
+        tracing::error!(
+            gpu = expected,
+            ?actual,
+            "GPU owner thread lost its scheduler device binding; restoring canonical binding"
+        );
+        mold_inference::device::init_thread_gpu_ordinal(expected);
+    }
+}
+
 /// Spawn a replacement owner without waiting for its context probe. The
 /// epoch-qualified first Ready or StartFailed event settles Starting.
 pub fn spawn_gpu_thread_async(
@@ -559,6 +578,7 @@ fn run_gpu_owner_loop(
     let device_id = crate::scheduler::worker_device_id(worker);
     let mut generation = 1_u64;
     'owner: loop {
+        reaffirm_owner_gpu_binding(worker);
         if worker.shutdown_requested.load(Ordering::SeqCst)
             || worker.poisoned.load(Ordering::SeqCst)
             || worker.fatal_cuda_error.load(Ordering::SeqCst)
@@ -816,6 +836,7 @@ fn run_legacy_gpu_owner_loop(
         "legacy GPU worker thread started"
     );
     loop {
+        reaffirm_owner_gpu_binding(worker);
         let command = match job_rx.recv_timeout(idle_poll) {
             Ok(command) => command,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1785,7 +1806,7 @@ fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
     successful
 }
 
-/// Evict parked engines on the worker thread that owns their device context.
+/// Evict stale engines on the worker thread that owns their device context.
 ///
 /// Engine destruction may call into CUDA while releasing tensors and library
 /// workspaces, so returning the boxes to an async maintenance task is not safe.
@@ -1808,15 +1829,28 @@ fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         return;
     }
-    let evicted = {
+    let (evicted, active_evicted) = {
         let mut cache = worker
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.evict_idle(ttl)
+        let active = cache.active_model().map(str::to_owned);
+        let evicted = cache.evict_idle_on_owner(ttl);
+        let active_evicted = active.is_some_and(|active| {
+            evicted
+                .iter()
+                .any(|(evicted_name, _)| evicted_name == &active)
+        });
+        (evicted, active_evicted)
     };
     if evicted.is_empty() {
         return;
+    }
+    if active_evicted {
+        // Publish the cold residency before teardown. The owner cannot accept
+        // another lease until this function returns, while scheduler snapshots
+        // must stop treating the stale model as a warm candidate immediately.
+        worker.set_resident_model(None);
     }
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         contain_poisoned_cuda(evicted);
@@ -2714,7 +2748,28 @@ fn process_job_with_sink(
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.restore(cached_engine);
+        let restore = cache.restore(cached_engine);
+        drop(cache);
+        if let Some(superseded) = restore.superseded {
+            if let Err(error) = teardown_inference_engines_safely(
+                worker,
+                std::iter::once(superseded.engine),
+                "superseded generation cache restore",
+            ) {
+                clear_active_generation(worker);
+                let error = error.to_string();
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: error.clone(),
+                    }));
+                }
+                let _ = job.result_tx.send(Err(error));
+                return false;
+            }
+        }
+        if restore.reclassified_to_parked {
+            worker.set_resident_model(None);
+        }
     }
 
     // Clear active generation.
@@ -3039,6 +3094,7 @@ fn select_load_strategy_for_worker(
     model_name: &str,
     paths: &ModelPaths,
     hint: Option<crate::model_manager::ActivationHint>,
+    request_has_lora: bool,
 ) -> anyhow::Result<mold_inference::LoadStrategy> {
     let active_vram = worker
         .model_cache
@@ -3048,11 +3104,16 @@ fn select_load_strategy_for_worker(
     let available =
         crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal)
             .map_err(|error| anyhow::anyhow!(error.error))?;
-    let strategy = crate::model_manager::select_server_load_strategy_for_device(
+    let strategy = crate::memory_preflight::request_aware_load_strategy(
+        crate::model_manager::select_server_load_strategy_for_device(
+            paths,
+            available,
+            Some(worker.gpu.total_vram_bytes),
+            hint,
+        ),
         paths,
-        available,
-        Some(worker.gpu.total_vram_bytes),
         hint,
+        request_has_lora,
     );
     if strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(
@@ -3133,9 +3194,9 @@ fn ensure_model_ready_sync_inner(
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
-    let cache = worker.model_cache.lock().unwrap();
+    let mut cache = worker.model_cache.lock().unwrap();
 
-    let cached_requires_reconstruction = cache.get(model_name).is_some_and(|entry| {
+    let cached_requires_reconstruction = cache.get(cache_key).is_some_and(|entry| {
         cached_engine_requires_reconstruction(
             entry.engine.as_ref(),
             planned_mode,
@@ -3153,6 +3214,7 @@ fn ensure_model_ready_sync_inner(
     // Already loaded?
     if let Some(entry) = cache.get(cache_key) {
         if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
+            cache.touch(cache_key);
             return Ok(ModelLoadDisposition::Unchanged);
         }
     }
@@ -3216,7 +3278,13 @@ fn ensure_model_ready_sync_inner(
             mode.load_strategy
         } else {
             match cached_paths.as_ref() {
-                Some(paths) => select_load_strategy_for_worker(worker, model_name, paths, hint)?,
+                Some(paths) => select_load_strategy_for_worker(
+                    worker,
+                    model_name,
+                    paths,
+                    hint,
+                    request_has_lora,
+                )?,
                 None => mold_inference::LoadStrategy::Eager,
             }
         };
@@ -3428,7 +3496,7 @@ fn ensure_model_ready_sync_inner(
     let load_strategy = if let Some(mode) = planned_mode {
         mode.load_strategy
     } else {
-        select_load_strategy_for_worker(worker, model_name, &paths, hint)?
+        select_load_strategy_for_worker(worker, model_name, &paths, hint, request_has_lora)?
     };
 
     let offload = planned_mode.map_or_else(
@@ -3665,6 +3733,46 @@ fn clear_active_generation(worker: &GpuWorker) {
 /// (StageFailed, Invalid) from prep failures (ensure/cache).
 pub type ChainPrep<T, E> = Result<Result<T, E>, anyhow::Error>;
 
+/// Temporarily bind a thread to one GPU without erasing an existing owner
+/// binding when the scope ends.
+///
+/// Legacy chain execution can enter from an unbound blocking-pool thread,
+/// while Scheduler V2 enters on the permanently bound GPU owner thread. A
+/// scoped binding therefore has to restore the exact prior state rather than
+/// unconditionally clearing it.
+struct ScopedThreadGpuBinding {
+    previous: Option<usize>,
+}
+
+impl ScopedThreadGpuBinding {
+    fn enter(ordinal: usize) -> anyhow::Result<Self> {
+        let previous = mold_inference::device::thread_gpu_ordinal();
+        if let Some(bound) = previous {
+            if bound != ordinal {
+                tracing::error!(
+                    bound_gpu = bound,
+                    requested_gpu = ordinal,
+                    "refusing to borrow a different GPU from a bound owner thread"
+                );
+                anyhow::bail!(
+                    "thread is already bound to GPU {bound}, cannot borrow GPU {ordinal}"
+                );
+            }
+        }
+        mold_inference::device::init_thread_gpu_ordinal(ordinal);
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for ScopedThreadGpuBinding {
+    fn drop(&mut self) {
+        match self.previous {
+            Some(ordinal) => mold_inference::device::init_thread_gpu_ordinal(ordinal),
+            None => mold_inference::device::clear_thread_gpu_ordinal(),
+        }
+    }
+}
+
 /// Run a blocking chain operation on a specific GPU worker.
 ///
 /// Acquires `worker.model_load_lock` for the full duration, binds the current
@@ -3673,8 +3781,9 @@ pub type ChainPrep<T, E> = Result<Result<T, E>, anyhow::Error>;
 /// the worker's cache, passes it to `with_engine`, and restores the engine
 /// unconditionally on both success and closure failure.
 ///
-/// Safe to call from inside `tokio::task::spawn_blocking`. The calling thread
-/// can be any thread — the `ThreadGpuGuard` clears the thread-local on return.
+/// Safe to call from inside `tokio::task::spawn_blocking`. An unbound calling
+/// thread is cleared on return; an already-bound matching owner thread keeps
+/// its permanent binding.
 ///
 /// # Errors
 ///
@@ -3724,14 +3833,9 @@ fn run_chain_blocking_with_identity<T, E: std::fmt::Display + std::fmt::Debug>(
 ) -> ChainPrep<T, E> {
     // Bind the thread to this worker's ordinal for the duration of the call so
     // synchronization and memory sampling cannot target a sibling context.
-    struct ThreadGpuGuard;
-    impl Drop for ThreadGpuGuard {
-        fn drop(&mut self) {
-            mold_inference::device::clear_thread_gpu_ordinal();
-        }
-    }
-    mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
-    let _thread_gpu = ThreadGpuGuard;
+    // Scheduled chain stages already run on the permanently bound owner
+    // thread, so the guard must restore that binding instead of clearing it.
+    let _thread_gpu = ScopedThreadGpuBinding::enter(worker.gpu.ordinal)?;
 
     if worker.poisoned.load(Ordering::SeqCst) {
         anyhow::bail!(fatal_cuda_user_message(model_name));
@@ -3801,7 +3905,18 @@ fn run_chain_blocking_with_identity<T, E: std::fmt::Display + std::fmt::Debug>(
             .model_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.restore(cached);
+        let restore = cache.restore(cached);
+        drop(cache);
+        if let Some(superseded) = restore.superseded {
+            teardown_inference_engines_safely(
+                worker,
+                std::iter::once(superseded.engine),
+                "superseded chain cache restore",
+            )?;
+        }
+        if restore.reclassified_to_parked {
+            worker.set_resident_model(None);
+        }
     }
 
     match result {
@@ -5069,6 +5184,60 @@ mod tests {
         assert_eq!(
             dropped_on.lock().unwrap().as_deref(),
             Some("gpu-worker-test")
+        );
+    }
+
+    #[test]
+    fn idle_eviction_reclaims_final_resident_engine_and_publishes_cold_state() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let worker = single_worker_pool_with_parked("stale-parked", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert(
+                Box::new(LifecycleRecordingEngine {
+                    name: "gpu-resident".to_string(),
+                    loaded: true,
+                    operations: operations.clone(),
+                }),
+                8 << 30,
+            );
+        }
+        worker.set_resident_model(Some("gpu-resident"));
+        worker.set_resident_execution_fingerprint(Some("stale-fingerprint"));
+
+        let worker_for_thread = worker.clone();
+        std::thread::Builder::new()
+            .name("gpu-worker-final-resident-evict".to_string())
+            .spawn(move || {
+                worker_for_thread
+                    .owner_thread_id
+                    .set(std::thread::current().id())
+                    .expect("test owner initialized once");
+                evict_idle_on_worker(&worker_for_thread, Duration::ZERO);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert!(worker.model_cache.lock().unwrap().is_empty());
+        assert!(worker.resident_model.read().unwrap().is_none());
+        assert!(worker
+            .resident_execution_fingerprint
+            .read()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            operations.lock().unwrap().as_slice(),
+            &[
+                (
+                    "unload".to_string(),
+                    "gpu-worker-final-resident-evict".to_string()
+                ),
+                (
+                    "drop".to_string(),
+                    "gpu-worker-final-resident-evict".to_string()
+                )
+            ]
         );
     }
 
@@ -7471,6 +7640,212 @@ mod tests {
         assert!(chain_error.to_string().contains("worker was quarantined"));
         assert!(!closure_ran.load(Ordering::SeqCst));
         assert!(worker.model_cache.lock().unwrap().contains("fake-model"));
+    }
+
+    #[test]
+    fn chain_scope_preserves_scheduler_owner_binding_and_clears_legacy_binding() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        let config = Config::default();
+        let ordinal = worker.gpu.ordinal;
+
+        mold_inference::device::clear_thread_gpu_ordinal();
+        run_chain_blocking(
+            &worker,
+            "fake-model",
+            &config,
+            None,
+            |_engine| -> anyhow::Result<()> {
+                assert_eq!(mold_inference::device::thread_gpu_ordinal(), Some(ordinal));
+                Ok(())
+            },
+        )
+        .expect("legacy chain preparation should succeed")
+        .expect("legacy chain closure should succeed");
+        assert_eq!(
+            mold_inference::device::thread_gpu_ordinal(),
+            None,
+            "an unbound legacy caller must not retain a borrowed GPU binding"
+        );
+
+        mold_inference::device::init_thread_gpu_ordinal(ordinal);
+        run_chain_blocking(
+            &worker,
+            "fake-model",
+            &config,
+            None,
+            |_engine| -> anyhow::Result<()> {
+                assert_eq!(mold_inference::device::thread_gpu_ordinal(), Some(ordinal));
+                Ok(())
+            },
+        )
+        .expect("scheduled chain preparation should succeed")
+        .expect("scheduled chain closure should succeed");
+        assert_eq!(
+            mold_inference::device::thread_gpu_ordinal(),
+            Some(ordinal),
+            "a scheduled chain stage must preserve the permanent owner binding"
+        );
+        mold_inference::device::clear_thread_gpu_ordinal();
+    }
+
+    #[test]
+    fn chain_scope_rejects_a_different_gpu_owner_without_rebinding_it() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        let other_ordinal = worker.gpu.ordinal.saturating_add(1);
+        mold_inference::device::init_thread_gpu_ordinal(other_ordinal);
+
+        let error = run_chain_blocking(
+            &worker,
+            "fake-model",
+            &Config::default(),
+            None,
+            |_engine| -> anyhow::Result<()> {
+                panic!("a mismatched GPU owner must be rejected before engine access")
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("thread is already bound"));
+        assert_eq!(
+            mold_inference::device::thread_gpu_ordinal(),
+            Some(other_ordinal),
+            "rejecting the chain must not mutate the caller's owner binding"
+        );
+        mold_inference::device::clear_thread_gpu_ordinal();
+    }
+
+    #[test]
+    fn scheduled_owner_keeps_stable_device_binding_after_chain_scope() {
+        let model = "fake-model";
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .insert(FakeSlowEngine::boxed(model, Duration::ZERO), 0);
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+
+        let expect_ready =
+            |event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent>,
+             expected_generation| {
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Ready {
+                        worker_generation,
+                        ..
+                    }) if worker_generation == expected_generation
+                ));
+            };
+        let expect_completed =
+            |event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent>,
+             expected_id: &str| {
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Accepted { work_id, .. })
+                        if work_id == expected_id
+                ));
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. })
+                        if work_id == expected_id
+                ));
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Completed {
+                        successful: true,
+                        ..
+                    })
+                ));
+            };
+        let fence = |work_id: &str, generation| crate::scheduler::LeaseFence {
+            work_id: work_id.to_string(),
+            device_id: device_id.clone(),
+            owner_epoch: worker.owner_epoch,
+            state_version: generation,
+            plan_version: generation,
+            worker_generation: generation,
+            memory_sample_generation: generation,
+            memory_ledger_sequence: generation,
+        };
+
+        expect_ready(&mut event_rx, 1);
+        let chain_worker = worker.clone();
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("chain-scope", 1),
+                work: OwnerWork::Probe {
+                    id: "chain-scope".to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(move || {
+                        run_chain_blocking(
+                            &chain_worker,
+                            model,
+                            &Config::default(),
+                            None,
+                            |_engine| -> anyhow::Result<()> { Ok(()) },
+                        )
+                        .expect("owner chain preparation should succeed")
+                        .expect("owner chain closure should succeed");
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        expect_completed(&mut event_rx, "chain-scope");
+
+        expect_ready(&mut event_rx, 2);
+        let (binding_tx, binding_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("next-image-load", 2),
+                work: OwnerWork::Probe {
+                    id: "next-image-load".to_string(),
+                    kind: mold_scheduler::WorkKind::Generation,
+                    run: Box::new(move || {
+                        binding_tx
+                            .send(mold_inference::device::thread_gpu_ordinal())
+                            .unwrap();
+                        mold_inference::device::clear_thread_gpu_ordinal();
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        expect_completed(&mut event_rx, "next-image-load");
+        assert_eq!(
+            binding_rx.recv().unwrap(),
+            Some(worker.gpu.ordinal),
+            "the grant after a chain scope must retain stable-device owner authority"
+        );
+
+        expect_ready(&mut event_rx, 3);
+        let (recovered_tx, recovered_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("binding-recovery", 3),
+                work: OwnerWork::Probe {
+                    id: "binding-recovery".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(move || {
+                        recovered_tx
+                            .send(mold_inference::device::thread_gpu_ordinal())
+                            .unwrap();
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        expect_completed(&mut event_rx, "binding-recovery");
+        assert_eq!(
+            recovered_rx.recv().unwrap(),
+            Some(worker.gpu.ordinal),
+            "the owner loop must restore a lost binding before advertising readiness"
+        );
+
+        worker.request_shutdown();
+        handle.join().expect("owner should shut down cleanly");
     }
 
     #[test]

@@ -714,6 +714,37 @@ pub(crate) fn select_server_load_strategy_for_device(
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
 
+/// Apply request-specific engine constraints after the general memory policy.
+///
+/// Flux.2 and Z-Image merge LoRAs while constructing the transformer and use
+/// their load-use-drop generation paths for adapted requests. Eagerly loading
+/// an unadapted transformer first leaves it resident when `generate()` begins,
+/// so the subsequent LoRA transformer build either doubles the peak or fails
+/// immediately on 24 GB cards. The execution plan must therefore make
+/// sequential loading authoritative for these requests.
+pub(crate) fn request_aware_load_strategy(
+    strategy: mold_inference::LoadStrategy,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> mold_inference::LoadStrategy {
+    let transformer_path = transformer_path_lower(paths);
+    if request_has_lora
+        && (transformer_path_looks_flux2(&transformer_path)
+            || transformer_path_looks_zimage(&transformer_path)
+            || hint.is_some_and(|hint| {
+                matches!(
+                    hint.family,
+                    ActivationFamily::Flux2Dit | ActivationFamily::ZImageDit
+                )
+            }))
+    {
+        mold_inference::LoadStrategy::Sequential
+    } else {
+        strategy
+    }
+}
+
 pub(crate) fn server_offload_enabled_for_paths_with_request(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -853,7 +884,12 @@ pub(crate) fn estimate_generation_memory_for_request(
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
-    let load_strategy = select_server_load_strategy_for_budget(paths, available_memory_bytes, hint);
+    let load_strategy = request_aware_load_strategy(
+        select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
+        paths,
+        hint,
+        request_has_lora,
+    );
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
             .saturating_add(activation);
@@ -939,6 +975,88 @@ fn request_sensitive_activation_memory(
 #[cfg(test)]
 mod fail_closed_tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn hint(family: ActivationFamily) -> ActivationHint {
+        ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family,
+        }
+    }
+
+    fn paths(transformer: &str) -> ModelPaths {
+        ModelPaths {
+            transformer: PathBuf::from(transformer),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/models/vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
+    #[test]
+    fn flux2_and_zimage_loras_force_sequential_engine_plans() {
+        for family in [ActivationFamily::Flux2Dit, ActivationFamily::ZImageDit] {
+            assert_eq!(
+                request_aware_load_strategy(
+                    mold_inference::LoadStrategy::Eager,
+                    &paths("/models/opaque/model.safetensors"),
+                    Some(hint(family)),
+                    true,
+                ),
+                mold_inference::LoadStrategy::Sequential
+            );
+        }
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/opaque/model.safetensors"),
+                Some(hint(ActivationFamily::Flux2Dit)),
+                false,
+            ),
+            mold_inference::LoadStrategy::Eager
+        );
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/opaque/model.safetensors"),
+                Some(hint(ActivationFamily::FluxDit)),
+                true,
+            ),
+            mold_inference::LoadStrategy::Eager
+        );
+    }
+
+    #[test]
+    fn flux2_and_zimage_lora_paths_force_sequential_without_family_hint() {
+        for transformer in [
+            "/models/cv-opaque/flux2-klein.safetensors",
+            "/models/cv-opaque/z-image/model.safetensors",
+        ] {
+            assert_eq!(
+                request_aware_load_strategy(
+                    mold_inference::LoadStrategy::Eager,
+                    &paths(transformer),
+                    None,
+                    true,
+                ),
+                mold_inference::LoadStrategy::Sequential
+            );
+        }
+    }
 
     #[test]
     fn explicit_gemma_gpu_policy_tracks_the_assigned_worker_ordinal() {

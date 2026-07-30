@@ -1300,10 +1300,15 @@ pub(crate) async fn ensure_model_ready(
                     .map_err(|error| ApiError::insufficient_memory(error.to_string()))?;
             }
             let load_strategy = match cached_paths.as_ref() {
-                Some(paths) => select_server_load_strategy_for_budget(
+                Some(paths) => crate::memory_preflight::request_aware_load_strategy(
+                    select_server_load_strategy_for_budget(
+                        paths,
+                        effective_load_available_bytes(0, 0)?,
+                        hint,
+                    ),
                     paths,
-                    effective_load_available_bytes(0, 0)?,
                     hint,
+                    request_has_lora,
                 ),
                 None => mold_inference::LoadStrategy::Eager,
             };
@@ -1456,7 +1461,9 @@ pub(crate) async fn ensure_model_ready(
 
     // Not in cache — check if model is available on disk.
     match check_model_available(state, model_name).await? {
-        Some(paths) => create_and_load_engine(state, model_name, paths, progress, hint).await,
+        Some(paths) => {
+            create_and_load_engine(state, model_name, paths, progress, hint, request_has_lora).await
+        }
         None => Ok(()),
     }
 }
@@ -1544,6 +1551,7 @@ async fn create_and_load_engine(
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
     hint: Option<ActivationHint>,
+    request_has_lora: bool,
 ) -> Result<(), ApiError> {
     // MPS memory guard: reject before unloading current model so it stays operational.
     // Include the active model's footprint as reclaimable memory.
@@ -1567,11 +1575,16 @@ async fn create_and_load_engine(
         }
     }
     preflight_memory_guard_after_drop(model_name, &paths, 0, hint)?;
-    let load_strategy = select_server_load_strategy_for_device(
+    let load_strategy = crate::memory_preflight::request_aware_load_strategy(
+        select_server_load_strategy_for_device(
+            &paths,
+            effective_load_available_bytes(0, 0)?,
+            mold_inference::device::total_vram_bytes(0),
+            hint,
+        ),
         &paths,
-        effective_load_available_bytes(0, 0)?,
-        mold_inference::device::total_vram_bytes(0),
         hint,
+        request_has_lora,
     );
     if load_strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(
@@ -1581,7 +1594,7 @@ async fn create_and_load_engine(
     }
 
     let config = state.config.read().await;
-    let offload = server_offload_enabled_for_paths(&paths, hint, false);
+    let offload = server_offload_enabled_for_paths(&paths, hint, request_has_lora);
     let mut new_engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,

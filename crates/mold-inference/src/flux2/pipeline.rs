@@ -1383,6 +1383,12 @@ impl Flux2Engine {
         }
         // Sequential mode: load-use-drop each component
         if self.uses_sequential_generate_path() {
+            // A stale/mismatched eager plan must not leave its transformer,
+            // VAE, or text encoder resident while the LoRA path constructs
+            // staged replacements. Production planning selects Sequential for
+            // Flux.2 LoRA requests, but this defensive release keeps direct
+            // callers and pre-existing cached engines from doubling the peak.
+            self.base.unload();
             return self.generate_sequential(req);
         }
 
@@ -1393,6 +1399,9 @@ impl Flux2Engine {
         // (transformer + Qwen3) and can OOM on 24 GB cards when queued
         // requests arrive back-to-back. Encode/drop Qwen3 first, then reload
         // the transformer for denoising.
+        if self.base.loaded.is_none() {
+            self.load()?;
+        }
         let delay_transformer_reload = self.base.loaded.as_ref().is_some_and(|loaded| {
             Self::should_delay_transformer_reload_for_prompt_encode(
                 self.base.load_strategy,
@@ -1716,8 +1725,19 @@ impl InferenceEngine for Flux2Engine {
 
     fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
         self.pending_placement = req.placement.clone();
-        let result = Flux2Engine::load(self);
+        self.pending_loras = effective_flux2_loras(req);
+        let result = if !self.pending_loras.is_empty()
+            && self.base.load_strategy != LoadStrategy::Sequential
+        {
+            Err(anyhow::anyhow!(
+                "Flux.2 LoRA requests require a sequential engine load plan; \
+                 refusing to preload an unadapted transformer"
+            ))
+        } else {
+            Flux2Engine::load(self)
+        };
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 
@@ -1781,6 +1801,50 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, b"test").unwrap();
         path
+    }
+
+    #[test]
+    fn lora_request_refuses_eager_preload_before_touching_model_files() {
+        let dir = temp_test_dir("mold-flux2-lora-eager-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux2-klein:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1,
+            "loras": [{
+                "path": dir.join("adapter.safetensors"),
+                "scale": 1.0
+            }]
+        }))
+        .unwrap();
+
+        let error = engine.load_for_request(&request).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("LoRA requests require a sequential engine load plan"),
+            "got: {error:#}"
+        );
+        assert!(engine.pending_loras.is_empty());
+        assert!(engine.pending_placement.is_none());
+        assert!(
+            !engine.is_loaded(),
+            "fail-closed request loading must not retain partial eager components"
+        );
+
+        fs::remove_dir_all(dir).ok();
     }
 
     fn flux2_model_paths(

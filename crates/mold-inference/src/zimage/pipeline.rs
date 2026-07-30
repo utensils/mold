@@ -1981,8 +1981,19 @@ impl InferenceEngine for ZImageEngine {
 
     fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
         self.pending_placement = req.placement.clone();
-        let result = ZImageEngine::load(self);
+        self.pending_loras = effective_zimage_loras(req);
+        let result = if !self.pending_loras.is_empty()
+            && self.base.load_strategy != LoadStrategy::Sequential
+        {
+            Err(anyhow::anyhow!(
+                "Z-Image LoRA requests require a sequential engine load plan; \
+                 refusing to preload an unadapted transformer"
+            ))
+        } else {
+            ZImageEngine::load(self)
+        };
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 

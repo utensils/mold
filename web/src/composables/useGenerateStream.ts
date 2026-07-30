@@ -105,6 +105,26 @@ export function activeCanvasJob(jobs: readonly Job[]): Job | undefined {
   return earliest;
 }
 
+/**
+ * Resolve the failure that should own the Create canvas.
+ *
+ * Failed rows remain in persisted Activity history so users can inspect or
+ * dismiss them. They must not regain canvas authority after a newer print
+ * succeeds and its short-lived completion card auto-removes from `jobs`.
+ * An explicitly selected failure still wins because opening that row is a
+ * deliberate request to inspect it.
+ */
+export function latestUnresolvedError(
+  jobs: readonly Job[],
+  canvasErrorJobId: string | null,
+  selected: Job | null = null,
+): Job | undefined {
+  if (selected) return selected.state === "error" ? selected : undefined;
+  if (canvasErrorJobId === null) return undefined;
+  const job = jobs.find((candidate) => candidate.id === canvasErrorJobId);
+  return job?.state === "error" ? job : undefined;
+}
+
 function seedVisualFor(req: GenerateRequestWire | ChainRequestWire): string {
   return req.seed != null
     ? String(req.seed)
@@ -372,12 +392,19 @@ export function resolveChainRequest(
 export interface UseGenerateStream {
   jobs: Ref<Job[]>;
   selectedJob: Ref<Job | null>;
+  /** Exact terminal failure that currently owns the canvas. Historical
+   * failures remain Activity rows unless explicitly opened. */
+  canvasErrorJobId: Ref<string | null>;
   submit: (
     req: GenerateRequestWire | ChainRequestWire,
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
   ) => string;
   cancel: (id: string) => Promise<void>;
+  /** Settle a still-running job as failed. Used by external liveness
+   * authorities such as queue reconciliation so every failure updates the
+   * canvas owner and terminal metadata through the same path. */
+  failRunning: (id: string, error: string) => void;
   clearDone: () => void;
   /** Remove a specific job from the list (used to dismiss persisted cards). */
   remove: (id: string) => void;
@@ -464,14 +491,32 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
  * the singleton `jobs` ref is preserved and the SSE callback closures
  * keep mutating it. So this dead-letter does not interfere with the
  * route-change-during-generation flow. */
-function loadPersistedJobs(raw: string | null): Job[] {
+interface LoadedJobsState {
+  jobs: Job[];
+  /** A row that was still running when this browser session ended is a
+   * failure discovered by the current boot, not settled history. */
+  canvasErrorJobId: string | null;
+}
+
+function loadPersistedState(raw: string | null): LoadedJobsState {
   try {
-    if (!raw) return [];
+    if (!raw) return { jobs: [], canvasErrorJobId: null };
     const parsed = JSON.parse(raw) as PersistedJobs;
     if (parsed.version !== JOB_STORAGE_VERSION || !Array.isArray(parsed.jobs)) {
-      return [];
+      return { jobs: [], canvasErrorJobId: null };
     }
-    return parsed.jobs.map((p) => {
+    let newestZombie: PersistedJob | null = null;
+    for (const persisted of parsed.jobs) {
+      if (
+        persisted.state === "running" &&
+        (!newestZombie || persisted.startedAt > newestZombie.startedAt)
+      ) {
+        newestZombie = persisted;
+      }
+    }
+    const canvasErrorJobId = newestZombie?.id ?? null;
+    const loadedAt = Date.now();
+    const loadedJobs = parsed.jobs.map((p) => {
       const wasZombie = p.state === "running";
       const state: Job["state"] = wasZombie ? "error" : p.state;
       const error = wasZombie
@@ -493,13 +538,12 @@ function loadPersistedJobs(raw: string | null): Job[] {
         result: p.result as SseCompleteEvent | null,
         error,
         state,
-        // Rows persisted before this field existed fall back to the last
-        // thing that actually happened — never `null`, which would read as
-        // "just now" and resurrect a three-day-old failure in the strip.
-        settledAt:
-          state === "running"
-            ? null
-            : (p.settledAt ?? p.lastProgressAt ?? p.startedAt),
+        // This boot just discovered that a formerly-running row lost its
+        // stream, so keep its recovery row present and dismissible from now.
+        // Genuinely settled history retains its original age.
+        settledAt: wasZombie
+          ? loadedAt
+          : (p.settledAt ?? p.lastProgressAt ?? p.startedAt),
         chain: p.chain,
         lastProgressAt: p.lastProgressAt,
         workStarted: p.workStarted,
@@ -512,9 +556,23 @@ function loadPersistedJobs(raw: string | null): Job[] {
         seedVisual: seedVisualFor(p.request),
       };
     });
+    return { jobs: loadedJobs, canvasErrorJobId };
   } catch {
-    return [];
+    return { jobs: [], canvasErrorJobId: null };
   }
+}
+
+function loadPersistedJobs(raw: string | null): Job[] {
+  return loadPersistedState(raw).jobs;
+}
+
+function initializePersistedState(raw: string | null): LoadedJobsState {
+  const loaded = loadPersistedState(raw);
+  // The deep watcher is intentionally not immediate. Write a boot-created
+  // dead letter through synchronously so a second refresh cannot rediscover
+  // the same formerly-running row as a new current failure.
+  if (loaded.canvasErrorJobId !== null) persistJobs(loaded.jobs);
+  return loaded;
 }
 
 function persistJobs(jobs: Job[]) {
@@ -569,12 +627,19 @@ function persistJobs(jobs: Job[]) {
 // register/unregister, so a stale toast handler from an unmounted component
 // doesn't keep firing.
 
-const jobs = ref<Job[]>(
-  loadPersistedJobs(
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem(STORAGE_KEY)
-      : null,
-  ),
+const initialPersistedState = initializePersistedState(
+  typeof localStorage !== "undefined"
+    ? localStorage.getItem(STORAGE_KEY)
+    : null,
+);
+const jobs = ref<Job[]>(initialPersistedState.jobs);
+// A fresh SPA boot treats rehydrated failures as Activity history instead of
+// restoring one as the main canvas. A formerly-running row is different: this
+// boot just discovered that its live progress was lost, so its recovery error
+// owns the canvas. Live terminal events then update this explicit authority in
+// callback order, without wall-clock ambiguity.
+const canvasErrorJobId = ref<string | null>(
+  initialPersistedState.canvasErrorJobId,
 );
 const selectedJobId = ref<string | null>(null);
 const selectedJob = computed(
@@ -605,6 +670,27 @@ function fireComplete(job: Job) {
       console.error("generate onComplete listener threw", e);
     }
   }
+}
+
+function recordSuccessfulSettlement(job: Job) {
+  job.settledAt = Date.now();
+  canvasErrorJobId.value = null;
+}
+
+function recordFailedSettlement(job: Job) {
+  job.state = "error";
+  job.settledAt = Date.now();
+  job.previewUrl = null;
+  canvasErrorJobId.value = job.id;
+}
+
+function failRunningJob(id: string, error: string) {
+  const job = jobs.value.find((candidate) => candidate.id === id);
+  // Queue reconciliation is asynchronous. A completion or cancellation may
+  // land while its GET /api/queue request is in flight; terminal state wins.
+  if (!job || job.state !== "running") return;
+  job.error = error;
+  recordFailedSettlement(job);
 }
 
 /// Grace period before a successfully-completed job's running-strip card
@@ -646,6 +732,9 @@ export const __testing__ = {
   AUTO_REMOVE_DONE_MS,
   STALE_THRESHOLD_MS,
   loadPersistedJobs,
+  loadPersistedState,
+  initializePersistedState,
+  persistJobs,
   STORAGE_KEY,
 };
 
@@ -655,6 +744,7 @@ function submitJob(
   route: HostRoute | null = null,
 ): string {
   selectedJobId.value = null;
+  canvasErrorJobId.value = null;
   const id = createUuid();
   const controller = new AbortController();
   const isChain = decision.kind === "chain";
@@ -711,9 +801,7 @@ function submitJob(
     } else {
       job.error = err.message ?? "network error";
     }
-    job.state = "error";
-    job.settledAt = Date.now();
-    job.previewUrl = null;
+    recordFailedSettlement(job);
   };
 
   const startStream = () => {
@@ -726,7 +814,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = chainCompleteToSingle(req, evt);
             job.state = "done";
-            job.settledAt = Date.now();
+            recordSuccessfulSettlement(job);
             job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
@@ -745,8 +833,7 @@ function submitJob(
       // instead of producing an opaque 422/500.
       job.error =
         "internal: ChainRequestWire submitted with non-chain routing decision";
-      job.state = "error";
-      job.settledAt = Date.now();
+      recordFailedSettlement(job);
     } else {
       return generateStream(
         req,
@@ -755,7 +842,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = evt;
             job.state = "done";
-            job.settledAt = Date.now();
+            recordSuccessfulSettlement(job);
             job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
@@ -788,23 +875,25 @@ async function cancelJob(id: string): Promise<void> {
   job.state = "canceled";
   job.settledAt = Date.now();
   job.previewUrl = null;
+  if (selectedJobId.value === id) selectedJobId.value = null;
   if (!job.serverId) return;
   try {
     await cancelQueueJob(job.serverId, job.target ?? undefined);
   } catch (error) {
-    job.state = "error";
-    job.settledAt = Date.now();
     job.error = error instanceof Error ? error.message : String(error);
+    recordFailedSettlement(job);
   }
 }
 
 function clearDoneJobs() {
   jobs.value = jobs.value.filter((j) => j.state === "running");
+  canvasErrorJobId.value = null;
 }
 
 function removeJob(id: string) {
   jobs.value = jobs.value.filter((j) => j.id !== id);
   if (selectedJobId.value === id) selectedJobId.value = null;
+  if (canvasErrorJobId.value === id) canvasErrorJobId.value = null;
 }
 
 function selectJob(id: string | null) {
@@ -830,8 +919,10 @@ export function useGenerateStream(
   return {
     jobs,
     selectedJob,
+    canvasErrorJobId,
     submit: submitJob,
     cancel: cancelJob,
+    failRunning: failRunningJob,
     clearDone: clearDoneJobs,
     remove: removeJob,
     select: selectJob,
