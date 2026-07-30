@@ -1380,6 +1380,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chain_model_freeze_reloads_paths_added_after_server_start() {
+        let home = tempfile::tempdir().unwrap();
+        let transformer = home.path().join("transformer.safetensors");
+        let vae = home.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+
+        let state = state_with(
+            Arc::new(Some(MetadataDb::open_in_memory().unwrap())),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        assert!(!state
+            .config
+            .read()
+            .await
+            .models
+            .contains_key("late-installed-chain"));
+
+        let authority = with_mold_home(home.path(), || {
+            let mut disk_config = mold_core::Config::default();
+            disk_config.models.insert(
+                "late-installed-chain".into(),
+                mold_core::ModelConfig {
+                    transformer: Some(transformer.display().to_string()),
+                    vae: Some(vae.display().to_string()),
+                    family: Some("ltx2".into()),
+                    ..mold_core::ModelConfig::default()
+                },
+            );
+            disk_config.save().unwrap();
+            futures::executor::block_on(crate::routes_chain::resolve_chain_model_authority(
+                &state,
+                "late-installed-chain",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(authority.paths.transformer, transformer);
+        assert_eq!(authority.paths.vae, vae);
+    }
+
+    #[tokio::test]
     async fn create_chain_job_rejects_non_mp4_public_jobs() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));

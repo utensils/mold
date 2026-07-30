@@ -60,6 +60,7 @@ import {
   jobPhase,
   jobProgress,
   needsHostRoute,
+  suggestOutputFilename,
   type BatchRequestOptions,
   type Job,
 } from "../stores/generation";
@@ -68,6 +69,7 @@ import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
 import { copyBase64ImageToClipboard } from "../lib/clipboard";
+import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
@@ -1344,6 +1346,41 @@ function canvasMenu(): MenuEntry[] {
           );
       },
     },
+    {
+      label: "Save image…",
+      disabled: !j.result || !!j.result.video_frames || !j.result.image,
+      action: () => {
+        if (!j.result?.image) return;
+        const filename =
+          j.result.filename ??
+          suggestOutputFilename(
+            j.result.model,
+            j.result.seed_used,
+            j.result.format,
+            j.submittedAtUnixMs,
+          );
+        void ipc
+          .saveImageAs(filename, j.result.image)
+          .then((path) => {
+            if (path) toasts.push(`Saved ${path}`);
+          })
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
+      },
+    },
+    {
+      label: "Copy file path",
+      disabled: !j.result?.filename,
+      action: () => {
+        if (!j.result?.filename) return;
+        void copyLocalOutputPath(j.result.filename)
+          .then(() => toasts.push("File path copied"))
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
+      },
+    },
     { separator: true },
     {
       label: "Show in Gallery",
@@ -2233,11 +2270,10 @@ watch(() => composer.prefill, applyPrefill, { immediate: true });
 function applySequenceReuse(metadata: OutputMetadata) {
   const plan = planSequenceReuse(metadata);
   if (!plan) return;
+  const oneShotPrompt = form.prompt;
   applyPrefillToForm(form, { metadata }, installedModels.value);
-  // Clip 1's prompt is the honest single-shot prompt; `metadata.prompt` for a
-  // sequence is every clip newline-joined, which is exactly the wart
-  // sequence-aware reuse exists to avoid.
-  form.prompt = plan.clips[0]?.prompt ?? "";
+  // Reusing a sequence must not overwrite the parked one-shot prompt.
+  form.prompt = oneShotPrompt;
 
   // The live tail belongs to the model that is selected NOW, not the one the
   // print recorded — raise anything that no longer clears it, and say so.

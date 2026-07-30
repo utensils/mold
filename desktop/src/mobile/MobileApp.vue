@@ -3220,6 +3220,7 @@ onBeforeUnmount(() => {
               v-else
               :selected-model="selectedGenerationModel"
               :chain-limits="chainLimits"
+              :target="selectedTarget"
               :fps="form.fps"
               :submitting="sequenceStarting"
               :error="sequenceError"

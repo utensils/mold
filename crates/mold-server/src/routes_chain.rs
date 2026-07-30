@@ -39,7 +39,24 @@ pub(crate) async fn resolve_chain_model_authority(
     state: &AppState,
     model: &str,
 ) -> Result<ExistingModelAuthority, ApiError> {
-    let config = state.config.read().await.clone();
+    // Preserve the request-local snapshot when it already resolves. Tests,
+    // embedded callers, and catalog overlays may intentionally carry
+    // authority that is newer than (or absent from) bootstrap storage.
+    {
+        let config = state.config.read().await;
+        if let Some(authority) =
+            crate::model_manager::resolve_existing_model_authority(model, &config)
+                .map_err(|error| chain_freeze_error(model, error.error))?
+        {
+            return Ok(authority);
+        }
+    }
+
+    // Inventory/component endpoints reload bootstrap configuration before
+    // reporting a model as installed. Retry from that same fresh authority
+    // only when the in-memory snapshot has no concrete paths, so a long-lived
+    // server can self-heal without replacing valid request-local authority.
+    let config = crate::model_manager::refresh_config(state).await;
     crate::model_manager::resolve_existing_model_authority(model, &config)
         .map_err(|error| chain_freeze_error(model, error.error))?
         .ok_or_else(|| {

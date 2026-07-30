@@ -289,8 +289,8 @@ function resetSettings() {
             @update:model-value="setOutputMode"
           />
           <p v-if="isSequence" class="ms-field__hint">
-            {{ draft.clips.length }} clips on the composer rail · switching back keeps clip 1 and
-            parks the rest.
+            {{ draft.clips.length }} clips on the composer rail · one-shot and sequence prompts stay
+            separate.
           </p>
         </div>
       </div>

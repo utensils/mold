@@ -31,11 +31,12 @@ import {
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
-import type { GenerateForm } from "../../lib/generateForm";
+import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import type { ClipRailMedia } from "@ui/components/types";
+import ImagePickerModal from "../generate/ImagePickerModal.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -150,21 +151,14 @@ function applySeamToAll(transition: "smooth" | "cut" | "fade") {
 }
 
 // ── Opening image (clip 1) ───────────────────────────────────────────────────
-const imageInput = ref<HTMLInputElement | null>(null);
+const imagePickerOpen = ref(false);
 
-async function onImageFile(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
+function onPickImage(images: PickedImage[]) {
+  const image = images[0];
   const clip = draft.clips[0];
-  if (!file || !clip) return;
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error(`Couldn't read ${file.name}`));
-    reader.readAsDataURL(file);
-  });
-  clip.sourceImage = { filename: file.name, base64: dataUrl.replace(/^data:[^,]*,/, "") };
+  imagePickerOpen.value = false;
+  if (!image || !clip) return;
+  clip.sourceImage = { filename: image.filename, base64: image.base64 };
 }
 
 // ── Validation, duration, fit ────────────────────────────────────────────────
@@ -421,18 +415,11 @@ async function copyToml() {
       />
       <div class="ms-seqbench__cliptools">
         <template v-if="activeIndex === 0">
-          <input
-            ref="imageInput"
-            type="file"
-            accept="image/png,image/jpeg"
-            class="hidden"
-            @change="onImageFile"
-          />
           <button
             type="button"
             data-test="opening-image-attach"
             class="ms-seqbench__tool"
-            @click="imageInput?.click()"
+            @click="imagePickerOpen = true"
           >
             {{
               activeClip.sourceImage
@@ -472,6 +459,14 @@ async function copyToml() {
         aria-label="Clip negative prompt"
       />
     </div>
+
+    <ImagePickerModal
+      :open="imagePickerOpen"
+      title="Opening image"
+      :multiple="false"
+      @pick="onPickImage"
+      @close="imagePickerOpen = false"
+    />
 
     <!-- Footer: file tools · audio · validation/fit · primary action -->
     <div class="ms-seqbench__footer" data-test="sequence-composer-footer">

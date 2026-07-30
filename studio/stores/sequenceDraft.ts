@@ -241,27 +241,22 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /**
-   * Output is a setting, not a place. Switching to Sequence seeds clip 1
-   * from the single prompt (when clip 1 is blank); switching back hands
-   * clip 1's prompt to the single form. Clips are PARKED in both
-   * directions — never erased (mockup: "switching back keeps clip 1 and
-   * parks the rest").
+   * Output is a setting, not a place. One-shot and sequence prompts are
+   * independent authorities: switching modes parks both without copying
+   * either prompt into the other mode.
    */
   function setOutput(
     mode: OutputMode,
-    bridge: { getPrompt: () => string; setPrompt: (value: string) => void },
+    // Retained while every surface shares the existing output-switch callback
+    // shape. Deliberately unused: prompts have separate authorities and must
+    // never be bridged during an output switch.
+    _bridge: { getPrompt: () => string; setPrompt: (value: string) => void },
     defaultFrames: number,
   ) {
     if (mode === output.value) return;
     if (mode === "sequence") {
       ensureClips(defaultFrames);
-      const first = clips[0];
-      const prompt = bridge.getPrompt().trim();
-      if (first && !first.prompt.trim() && prompt) first.prompt = prompt;
       activeClipId.value = clips[0]?.id ?? null;
-    } else {
-      const first = clips[0];
-      if (first?.prompt.trim()) bridge.setPrompt(first.prompt);
     }
     output.value = mode;
   }

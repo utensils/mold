@@ -12,6 +12,7 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 import SequenceComposer from "./SequenceComposer.vue";
+import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
@@ -127,6 +128,24 @@ describe("SequenceComposer — active clip editor", () => {
     draft.activeClipId = draft.clips[1]!.id;
     await flushPromises();
     expect(wrapper.find("[data-test='opening-image-attach']").exists()).toBe(false);
+  });
+
+  it("uses the shared file-or-gallery picker for the opening image", async () => {
+    const draft = seedDraft();
+    const wrapper = mountComposer();
+
+    await wrapper.get("[data-test='opening-image-attach']").trigger("click");
+    const picker = wrapper.getComponent(ImagePickerModal);
+    expect(picker.props("open")).toBe(true);
+    expect(picker.props("multiple")).toBe(false);
+
+    picker.vm.$emit("pick", [{ filename: "gallery-still.jpg", base64: "picked-bytes" }]);
+    await flushPromises();
+    expect(draft.clips[0]!.sourceImage).toEqual({
+      filename: "gallery-still.jpg",
+      base64: "picked-bytes",
+    });
+    expect(picker.props("open")).toBe(false);
   });
 });
 

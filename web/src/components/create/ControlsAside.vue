@@ -175,8 +175,8 @@ function lockLastSeed() {
         @update:model-value="emit('update:output', $event as OutputMode)"
       />
       <p v-if="sequenceMode" class="controls__hint" data-test="output-caption">
-        {{ clipCount }} clips on the composer rail · switching back keeps clip 1
-        and parks the rest.
+        {{ clipCount }} clips on the composer rail · one-shot and sequence
+        prompts stay separate.
       </p>
     </div>
 

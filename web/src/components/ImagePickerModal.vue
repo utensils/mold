@@ -10,7 +10,7 @@
  * `useOverlayFocus` for the Tab trap and opener restoration the kit leaves to
  * the host.
  */
-import { computed, markRaw, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, markRaw, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -34,14 +34,30 @@ const emit = defineEmits<{
 
 const tab = ref<"upload" | "gallery">("upload");
 const entries = ref<GalleryImage[]>([]);
+const stillEntries = computed(() =>
+  entries.value.filter((entry) =>
+    /\.(png|jpe?g)$/i.test(entry.filename.trim()),
+  ),
+);
 const loading = ref(false);
 const error = ref<string | null>(null);
+const uploadError = ref<string | null>(null);
 const dragging = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 
 const host = ref<HTMLElement | null>(null);
 const isOpen = computed(() => props.open);
 const { onKeydown } = useOverlayFocus(isOpen, host, () => emit("close"));
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) return;
+    uploadError.value = null;
+    dragging.value = false;
+    if (fileInput.value) fileInput.value.value = "";
+  },
+);
 
 const tabOptions = [
   { value: "upload" as const, label: "Upload" },
@@ -84,8 +100,19 @@ onMounted(async () => {
 onBeforeUnmount(() => mq?.removeEventListener?.("change", onMediaChange));
 
 async function emitFiles(files: File[]) {
-  const selected = props.multiple ? files : files.slice(0, 1);
   if (!files.length) return;
+  const images = files.filter(
+    (file) =>
+      file.type === "image/png" ||
+      file.type === "image/jpeg" ||
+      (!file.type && /\.(png|jpe?g)$/i.test(file.name.trim())),
+  );
+  if (!images.length) {
+    uploadError.value = "Only PNG or JPEG images can be used here.";
+    return;
+  }
+  uploadError.value = null;
+  const selected = props.multiple ? images : images.slice(0, 1);
   const picked = await Promise.all(
     selected.map(async (file) => ({
       kind: "upload" as const,
@@ -99,7 +126,13 @@ async function emitFiles(files: File[]) {
 
 async function onFiles(event: Event) {
   const input = event.target as HTMLInputElement;
-  await emitFiles(Array.from(input.files ?? []));
+  try {
+    await emitFiles(Array.from(input.files ?? []));
+  } finally {
+    // Let selecting the same file fire `change` again, including after a
+    // validation error where the picker remains open.
+    input.value = "";
+  }
 }
 
 async function onDrop(event: DragEvent) {
@@ -205,7 +238,7 @@ async function pickFromGallery(item: GalleryImage) {
             <input
               ref="fileInput"
               type="file"
-              accept="image/*"
+              accept="image/png,image/jpeg"
               :multiple="multiple"
               class="ip__file"
               tabindex="-1"
@@ -213,6 +246,9 @@ async function pickFromGallery(item: GalleryImage) {
               @change="onFiles"
             />
           </div>
+          <p v-if="uploadError" class="ip__status ip__status--error">
+            {{ uploadError }}
+          </p>
         </div>
 
         <div v-else class="ip__body">
@@ -220,11 +256,11 @@ async function pickFromGallery(item: GalleryImage) {
           <p v-else-if="error" class="ip__status ip__status--error">
             {{ error }}
           </p>
-          <p v-else-if="!entries.length" class="ip__status">
-            no prints in the gallery yet
+          <p v-else-if="!stillEntries.length" class="ip__status">
+            no PNG or JPEG images available
           </p>
           <ul v-else class="ip__grid">
-            <li v-for="item in entries" :key="item.filename">
+            <li v-for="item in stillEntries" :key="item.filename">
               <button
                 type="button"
                 class="ip__tile"

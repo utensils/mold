@@ -48,6 +48,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
+import { copyLocalOutputPath } from "../../lib/localOutputPath";
 import { applyModelDefaults, newGenerateForm } from "../../lib/generateForm";
 import type { MergedPrint } from "../../stores/gallery";
 import type { GalleryImage } from "../../lib/api/types";
@@ -184,6 +185,15 @@ function runMenu(img: GalleryImage): MenuEntry[] {
           .writeText(String(img.metadata.seed))
           .then(() => toasts.push("Copied seed"));
       },
+    },
+    {
+      label: "Copy file path",
+      action: () =>
+        void copyLocalOutputPath(img.filename)
+          .then(() => toasts.push("File path copied"))
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          ),
     },
     { label: "Show in library", action: () => emit("close") },
   ];
