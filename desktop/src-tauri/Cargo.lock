@@ -716,9 +716,9 @@ dependencies = [
 
 [[package]]
 name = "candle-core-mold"
-version = "0.9.12"
+version = "0.9.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48586739054543b6a1e9f9c0cb99b95966f663365df9dbf0871c9354e7c05237"
+checksum = "7c8fb900f10525efe6d276d4834095100dbc9e4898f5f8a9849d27fcfef82618"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -770,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "candle-nn-mold"
-version = "0.9.12"
+version = "0.9.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "444ec65690c63c933550c0c20119ee51737bf735cb68abc9944b181fb28c1c70"
+checksum = "e97b9062d469eab7d82978ee62ff91aea853051b7739d5f16b1c5e5cd9e8b450"
 dependencies = [
  "candle-core-mold",
  "candle-metal-kernels-mold",
@@ -788,9 +788,9 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers-mold"
-version = "0.9.12"
+version = "0.9.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589960fc3a18e813f3d12446351db1fb973f4b405b47baf1e40b9b7c92e915e5"
+checksum = "f4bf49698799015758a3a5e1db1d928edeb76e3104dce2e4bfff286a9def247c"
 dependencies = [
  "byteorder",
  "candle-core-mold",

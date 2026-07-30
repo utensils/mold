@@ -85,6 +85,7 @@ jobs:
               - 'crates/mold-core/src/cuda_distribution.rs'
               - 'crates/mold-server/Cargo.toml'
               - 'desktop/src-tauri/Cargo.toml'
+              - 'desktop/src-tauri/Cargo.lock'
               - 'desktop/src-tauri/src/runpod.rs'
               - 'release-plz.toml'
               - 'website/deployment/docker.md'
@@ -108,6 +109,7 @@ jobs:
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
+              - 'scripts/tests/desktop-candle-lock-sync.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - '.github/workflows/release-plz.yml'
               - '.github/workflows/ci.yml'
@@ -124,6 +126,8 @@ jobs:
         run: bash scripts/tests/ci-coverage-disk-guard.sh
       - name: Test Docker web build context
         run: bash scripts/tests/docker-web-context.sh
+      - name: Test desktop Candle lock synchronization
+        run: bash scripts/tests/desktop-candle-lock-sync.sh
       - name: Test CUDA distribution contract
         run: bash scripts/tests/cuda-distribution-contract.sh
       - name: Test embedded PTX parser contract
