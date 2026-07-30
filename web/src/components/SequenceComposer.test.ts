@@ -339,7 +339,7 @@ describe("SequenceComposer", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
-  it("discards an in-flight validation result when the sequence changes", async () => {
+  it("discards an in-flight result when a same-sized source payload changes", async () => {
     let resolveValidation!: (value: api.ChainValidationResponse) => void;
     validateChainMock.mockReturnValue(
       new Promise((resolve) => {
@@ -350,12 +350,18 @@ describe("SequenceComposer", () => {
     await flushPromises();
     const store = useSequenceDraftStore();
     store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
+    store.clips[0]!.sourceImage = {
+      filename: "opening.png",
+      base64: "AAAA",
+    };
     await flushPromises();
 
     await wrapper.get("[data-test='sequence-validate']").trigger("click");
-    await wrapper
-      .get("[data-test='clip-prompt']")
-      .setValue("changed while validating");
+    store.clips[0]!.sourceImage = {
+      filename: "opening.png",
+      base64: "BBBB",
+    };
+    await flushPromises();
     resolveValidation({
       model: "ltx-2-19b-distilled:fp8",
       width: 1216,

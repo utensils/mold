@@ -678,7 +678,6 @@ pub async fn validate_chain(
     let requested_motion_tail = req.motion_tail_frames;
     let mut warnings = Vec::new();
 
-    validate_chain_build_features(&req)?;
     {
         let config = state.config.read().await;
         validate_and_normalize_chain_family(&config, &mut req)?;

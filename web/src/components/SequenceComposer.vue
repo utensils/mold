@@ -234,6 +234,17 @@ const canGenerate = computed(
     validationErrors.value.length === 0,
 );
 
+// Track source payload replacement separately so prompt edits do not repeatedly
+// stringify multi-megabyte base64 values. This watcher depends only on the
+// payload references, so ordinary clip edits leave it dormant.
+const validationSourceRevision = ref(0);
+watch(
+  () => draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+  () => {
+    validationSourceRevision.value += 1;
+  },
+);
+
 const validationInputSignature = computed(() =>
   JSON.stringify({
     model: props.model,
@@ -241,7 +252,16 @@ const validationInputSignature = computed(() =>
     shared: props.shared,
     motionTail: motionTail.value,
     enableAudio: draft.enableAudio,
-    clips: draft.clips,
+    sourceRevision: validationSourceRevision.value,
+    clips: draft.clips.map((clip) => ({
+      id: clip.id,
+      prompt: clip.prompt,
+      frames: clip.frames,
+      transition: clip.transition,
+      fadeFrames: clip.fadeFrames,
+      negativePrompt: clip.negativePrompt,
+      sourceFilename: clip.sourceImage?.filename ?? null,
+    })),
     target: props.target,
   }),
 );
