@@ -5,6 +5,7 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
+import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import ModelTableRow from "./ModelTableRow.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
@@ -25,6 +26,7 @@ import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
 import { type MediaType } from "../../lib/modelAvailability";
 import type { ModelEntry } from "../../lib/api/types";
+import type { HostView } from "../../stores/hosts";
 
 type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
 
@@ -67,6 +69,7 @@ const sections = computed<[string, ModelEntry[]][]>(() => [
 
 // Info opens the shared model detail drawer (same layout as the catalog).
 const detailModel = ref<LibraryModelEntry | null>(null);
+const pendingRepair = ref<LibraryModelEntry | null>(null);
 const busy = ref<string | null>(null);
 const confirmingRemove = ref<string | null>(null);
 
@@ -78,9 +81,20 @@ function targetHost(m: LibraryModelEntry) {
 
 function targetFor(m: LibraryModelEntry) {
   const target = targetHost(m);
+  return targetForHost(target);
+}
+
+function targetForHost(target: HostView | null) {
   return target && !target.primary && target.baseUrl
     ? { baseUrl: target.baseUrl, apiKey: target.apiKey }
     : undefined;
+}
+
+function repairHosts(m: LibraryModelEntry): HostView[] {
+  const ownerIds = new Set(m.hostIds ?? ["local"]);
+  return hosts.all.filter(
+    (host) => ownerIds.has(host.id) && host.status === "ready" && Boolean(host.baseUrl),
+  );
 }
 
 function hostLabels(m: LibraryModelEntry): string[] {
@@ -131,11 +145,22 @@ async function remove(m: LibraryModelEntry) {
 /** Whole-model repair from the drawer: re-fetches only missing files. */
 const drawerRepairing = ref(false);
 
-async function repairFromDrawer(m: LibraryModelEntry) {
+function requestRepair(m: LibraryModelEntry) {
+  const candidates = repairHosts(m);
+  if (candidates.length > 1) {
+    pendingRepair.value = m;
+    return;
+  }
+  void repairOnHost(m, candidates[0] ?? targetHost(m));
+}
+
+async function repairOnHost(m: LibraryModelEntry, host: HostView | null) {
+  pendingRepair.value = null;
   drawerRepairing.value = true;
   try {
-    await startCatalogDownload(m.name, targetFor(m), !!targetFor(m));
-    toasts.push(`Repairing ${modelDisplayName(m)}`);
+    const target = targetForHost(host);
+    await startCatalogDownload(m.name, target, !!target);
+    toasts.push(`Repairing ${modelDisplayName(m)}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     toasts.push(
       err instanceof ApiError && err.status === 409
@@ -279,6 +304,15 @@ async function unload(m: LibraryModelEntry) {
     :target="targetFor(detailModel)"
     :forward-credentials="!!targetFor(detailModel)"
     @close="detailModel = null"
-    @pull="detailModel && repairFromDrawer(detailModel)"
+    @pull="detailModel && requestRepair(detailModel)"
+  />
+
+  <DownloadTargetDialog
+    v-if="pendingRepair"
+    action="repair"
+    :model-name="modelDisplayName(pendingRepair)"
+    :hosts="repairHosts(pendingRepair)"
+    @close="pendingRepair = null"
+    @select="(host) => pendingRepair && void repairOnHost(pendingRepair, host)"
   />
 </template>

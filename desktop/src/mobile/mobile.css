@@ -240,7 +240,40 @@ button {
 }
 
 .mobile-sequence-row-error {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  padding: 4px 0;
+  background: transparent;
   color: var(--stop);
+  font: inherit;
+  text-align: left;
+}
+
+.mobile-sequence-row-error > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-sequence-row-error > span:last-child {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-transform: uppercase;
+}
+
+.mobile-sequence-row-error--expanded > span:first-child {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .mobile-sequence-resume {

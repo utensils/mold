@@ -1037,7 +1037,7 @@ describe("MobileCatalogView", () => {
         { name: "text_encoder", kind: "companion", present: false },
       ],
     });
-    wrapper = mountCatalog();
+    wrapper = mountCatalog(studio.id, [studio]);
     await flushPromises();
 
     const installedCard = wrapper
@@ -1057,6 +1057,36 @@ describe("MobileCatalogView", () => {
 
     expect(document.querySelector("[data-test='mobile-catalog-target-sheet']")).toBeNull();
     expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.studio, false);
+  });
+
+  it("asks which owning host to repair when an installed model exists on multiple hosts", async () => {
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const installedCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+    expect(installedCard.text()).toContain("Studio");
+    expect(installedCard.text()).toContain("Render Box");
+
+    await installedCard.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    document.querySelector<HTMLButtonElement>(".mobile-catalog-detail-action button")!.click();
+    await flushPromises();
+
+    const picker = document.querySelector<HTMLElement>(
+      "[data-test='mobile-catalog-target-sheet']",
+    )!;
+    expect(picker).not.toBeNull();
+    expect(picker.textContent).toContain("Choose where to repair");
+    expect(picker.textContent).toContain("Studio");
+    expect(picker.textContent).toContain("Render Box");
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+
+    picker.querySelectorAll<HTMLButtonElement>(".mobile-catalog-target-list button")[1]!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.render, false);
   });
 
   it("segmented control swaps shelves and remembers the Discover sub-source", async () => {
