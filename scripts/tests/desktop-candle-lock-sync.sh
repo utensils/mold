@@ -40,7 +40,7 @@ for dependency in candle-core candle-nn candle-transformers; do
   test -n "$required" || fail "could not read $dependency requirement from mold-inference"
   test -n "$locked" || fail "desktop lockfile is missing ${dependency}-mold"
   test "$locked" = "$required" ||
-    fail "desktop lockfile has ${dependency}-mold $locked, but mold-inference requires $required; run: cargo update --manifest-path desktop/src-tauri/Cargo.toml -p candle-core-mold --precise $required"
+    fail "desktop lockfile has ${dependency}-mold $locked, but mold-inference requires $required; run: cargo update --manifest-path desktop/src-tauri/Cargo.toml -p ${dependency}-mold --precise $required"
 done
 
 echo "PASS: desktop Candle lockfile matches mold-inference"
