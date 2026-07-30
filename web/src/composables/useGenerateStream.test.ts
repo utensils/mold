@@ -3,6 +3,7 @@ import {
   __testing__,
   activeCanvasJob,
   isPrebuiltChainRequest,
+  latestUnresolvedError,
   resolveChainRequest,
   useGenerateStream,
   type Job,
@@ -180,6 +181,50 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     expect(jobs[0].progress.step).toBe(5);
   });
 
+  it("gives a failure discovered from a running row current canvas authority", () => {
+    const raw = persistedPayload([
+      persisted({ id: "older-zombie", startedAt: 100 }),
+      persisted({ id: "newer-zombie", startedAt: 200 }),
+      persisted({ id: "old-error", state: "error", error: "old failure" }),
+    ]);
+
+    const loaded = __testing__.loadPersistedState(raw);
+
+    expect(loaded.canvasErrorJobId).toBe("newer-zombie");
+    expect(loaded.jobs.map((job) => job.state)).toEqual([
+      "error",
+      "error",
+      "error",
+    ]);
+    expect(loaded.jobs[0].settledAt).toBeGreaterThan(1_010_000);
+    expect(loaded.jobs[1].settledAt).toBe(loaded.jobs[0].settledAt);
+  });
+
+  it("writes a boot-discovered failure through so the next boot sees history", () => {
+    const raw = persistedPayload([persisted({ id: "one-time-zombie" })]);
+    localStorage.setItem(__testing__.STORAGE_KEY, raw);
+    const firstBoot = __testing__.initializePersistedState(raw);
+    expect(firstBoot.canvasErrorJobId).toBe("one-time-zombie");
+
+    const stored = localStorage.getItem(__testing__.STORAGE_KEY);
+    const secondBoot = __testing__.loadPersistedState(stored);
+
+    expect(secondBoot.canvasErrorJobId).toBeNull();
+    expect(secondBoot.jobs[0]).toMatchObject({
+      id: "one-time-zombie",
+      state: "error",
+      error: "page reloaded — server progress lost",
+    });
+    localStorage.removeItem(__testing__.STORAGE_KEY);
+  });
+
+  it("does not give settled persisted failures canvas authority", () => {
+    const raw = persistedPayload([
+      persisted({ id: "old-error", state: "error", error: "old failure" }),
+    ]);
+    expect(__testing__.loadPersistedState(raw).canvasErrorJobId).toBeNull();
+  });
+
   it("passes through done jobs unchanged", () => {
     const raw = persistedPayload([persisted({ id: "x", state: "done" })]);
     const jobs = __testing__.loadPersistedJobs(raw);
@@ -312,6 +357,7 @@ describe("workStarted tracking", () => {
       /* ignore — happy-dom should have it */
     }
     const stream = useGenerateStream();
+    stream.canvasErrorJobId.value = null;
     for (const j of stream.jobs.value) {
       if (j.state === "running") stream.cancel(j.id);
     }
@@ -345,10 +391,45 @@ describe("workStarted tracking", () => {
       kind: "single",
     });
     stream.select(inspected);
+    stream.canvasErrorJobId.value = "historical-failure";
     expect(stream.selectedJob.value?.id).toBe(inspected);
 
     stream.submit(singleGen({ prompt: "new work" }), { kind: "single" });
     expect(stream.selectedJob.value).toBeNull();
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("settles a reconciled missing job through the canvas error authority", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "lost stream" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    job.previewUrl = "data:image/png;base64,preview";
+
+    stream.failRunning(id, "job not found on server — connection lost");
+
+    expect(job.state).toBe("error");
+    expect(job.error).toBe("job not found on server — connection lost");
+    expect(job.settledAt).not.toBeNull();
+    expect(job.previewUrl).toBeNull();
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
+
+  it("does not let a late reconciliation response overwrite terminal state", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ prompt: "already complete" }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    job.state = "done";
+    job.settledAt = Date.now();
+
+    stream.failRunning(id, "job not found on server — connection lost");
+
+    expect(job.state).toBe("done");
+    expect(job.error).toBeNull();
+    expect(stream.canvasErrorJobId.value).toBeNull();
   });
 
   it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
@@ -424,6 +505,7 @@ describe("auto-remove completed jobs", () => {
       /* ignore — happy-dom should have it */
     }
     const stream = useGenerateStream();
+    stream.canvasErrorJobId.value = null;
     // Cancel anything still "running" then drop everything settled.
     for (const j of stream.jobs.value) {
       if (j.state === "running") stream.cancel(j.id);
@@ -439,6 +521,7 @@ describe("auto-remove completed jobs", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
+    stream.canvasErrorJobId.value = "prior-failure";
 
     // Fire the SSE complete callback the singleton registered.
     expect(lastSingleHandlers).not.toBeNull();
@@ -447,6 +530,7 @@ describe("auto-remove completed jobs", () => {
     // Job is "done" but still on screen during the grace period.
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("done");
+    expect(stream.canvasErrorJobId.value).toBeNull();
 
     // Just before the timer — still present.
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS - 1);
@@ -455,6 +539,37 @@ describe("auto-remove completed jobs", () => {
     // Tick past the timer — gone.
     vi.advanceTimersByTime(2);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+  });
+
+  it("does not restore an older failure after a later success auto-removes", () => {
+    const stream = useGenerateStream();
+    const failedId = stream.submit(singleGen({ prompt: "first attempt" }), {
+      kind: "single",
+    });
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 500,
+      body: "owner thread lost",
+    });
+    const failed = stream.jobs.value.find((job) => job.id === failedId)!;
+    expect(stream.canvasErrorJobId.value).toBe(failedId);
+
+    const successfulId = stream.submit(
+      singleGen({ prompt: "second attempt" }),
+      { kind: "single" },
+    );
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    expect(stream.canvasErrorJobId.value).toBeNull();
+
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
+
+    expect(
+      stream.jobs.value.find((job) => job.id === successfulId),
+    ).toBeUndefined();
+    expect(stream.jobs.value.find((job) => job.id === failedId)).toBe(failed);
+    expect(
+      latestUnresolvedError(stream.jobs.value, stream.canvasErrorJobId.value),
+    ).toBeUndefined();
   });
 
   it("does NOT auto-remove a job that errors out", () => {
@@ -468,6 +583,7 @@ describe("auto-remove completed jobs", () => {
     });
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("error");
+    expect(stream.canvasErrorJobId.value).toBe(id);
 
     // Even well past the would-be auto-remove window, an errored card
     // sticks around for the user to read.
@@ -496,9 +612,12 @@ describe("auto-remove completed jobs", () => {
   it("does NOT auto-remove a canceled job", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    stream.select(id);
+    expect(stream.selectedJob.value?.id).toBe(id);
     stream.cancel(id);
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("canceled");
+    expect(stream.selectedJob.value).toBeNull();
 
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS * 5);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
@@ -767,6 +886,71 @@ describe("activeCanvasJob", () => {
     const older = runningJob({ id: "older", startedAt: 100 });
     const settled = runningJob({ id: "done", startedAt: 50, state: "done" });
     expect(activeCanvasJob([newer, older, settled])?.id).toBe("older");
+  });
+});
+
+describe("latestUnresolvedError", () => {
+  function failedJob(
+    id: string,
+    settledAt: number,
+    overrides: Partial<Job> = {},
+  ): Job {
+    return {
+      id,
+      request: singleGen({ frames: 1 }),
+      startedAt: settledAt - 100,
+      controller: new AbortController(),
+      progress: {
+        stage: "Failed",
+        step: null,
+        totalSteps: null,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: "model load error",
+      state: "error",
+      settledAt,
+      chain: null,
+      lastProgressAt: settledAt,
+      workStarted: true,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: null,
+      previewUrl: null,
+      seedVisual: "seed",
+      ...overrides,
+    };
+  }
+
+  it("does not resurrect a historical failure without live canvas authority", () => {
+    const stale = failedJob("stale", 100);
+    expect(latestUnresolvedError([stale], null)).toBeUndefined();
+  });
+
+  it("shows the exact live failure that owns the canvas", () => {
+    const current = failedJob("current", 300);
+    expect(latestUnresolvedError([current], "current")?.id).toBe("current");
+  });
+
+  it("fails closed when the authority id is missing or no longer failed", () => {
+    const current = failedJob("current", 300);
+    expect(latestUnresolvedError([current], "missing")).toBeUndefined();
+    expect(
+      latestUnresolvedError(
+        [failedJob("done", 300, { state: "done", error: null })],
+        "done",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("shows an explicitly opened historical failure", () => {
+    const stale = failedJob("stale", 100);
+    expect(latestUnresolvedError([stale], null, stale)?.id).toBe("stale");
   });
 });
 

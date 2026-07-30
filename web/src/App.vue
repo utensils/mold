@@ -15,7 +15,7 @@ import {
 } from "./composables/useDownloads";
 import { useCatalog } from "./composables/useCatalog";
 import { useGenerateStream } from "./composables/useGenerateStream";
-import { startQueueReconciler } from "./composables/useQueueReconciler";
+import { startGenerateQueueReconciler } from "./composables/useQueueReconciler";
 import { installNotifications } from "./lib/notifications";
 import {
   useResources,
@@ -34,7 +34,7 @@ const downloads = useDownloads();
 // once at the App root so the loop runs regardless of which page the
 // user is on.
 const stream = useGenerateStream();
-const reconciler = startQueueReconciler(stream.jobs);
+const reconciler = startGenerateQueueReconciler(stream);
 
 // Downloads popover (spec §06). Opened by the AppNav button and ⌘K palette,
 // both of which dispatch the shared `mold:open-downloads` window event.

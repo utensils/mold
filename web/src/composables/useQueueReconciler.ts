@@ -1,6 +1,6 @@
 import type { Ref } from "vue";
 import { fetchQueue } from "../api";
-import type { Job } from "./useGenerateStream";
+import type { Job, UseGenerateStream } from "./useGenerateStream";
 
 /// How long to poll `GET /api/queue` between rounds when the server is
 /// reachable. Reconciliation is a safety net behind the L1 SSE silent-close
@@ -28,8 +28,9 @@ export const RECONCILE_GRACE_MS = 30_000;
 /// reconciler just sleeps a bit longer and retries.
 export const RECONCILE_BACKOFF_MAX_MS = 120_000;
 
-/// One round of reconciliation. Exported so unit tests can drive the
-/// logic synchronously without wrangling timers.
+/// One read-only round of reconciliation. Returns jobs that are no longer
+/// present server-side; the generation-stream owner performs settlement so
+/// terminal metadata and canvas error authority cannot diverge.
 ///
 /// Takes the current `now` as a parameter (rather than reading `Date.now()`
 /// internally) so tests can simulate the grace window deterministically.
@@ -37,15 +38,16 @@ export function reconcileRound(
   jobs: Job[],
   serverIds: ReadonlySet<string>,
   now: number,
-): void {
+): Job[] {
+  const missing: Job[] = [];
   for (const j of jobs) {
     if (j.state !== "running") continue;
     if (!j.serverId) continue; // Request has not received its queued frame yet.
     if (serverIds.has(j.serverId)) continue; // server confirms it's alive
     if (now - j.lastProgressAt < RECONCILE_GRACE_MS) continue;
-    j.state = "error";
-    j.error = "job not found on server — connection lost";
+    missing.push(j);
   }
+  return missing;
 }
 
 export interface QueueReconcilerHandle {
@@ -62,6 +64,7 @@ export interface QueueReconcilerHandle {
 /// `/api/queue` call goes out unless we have something to reconcile.
 export function startQueueReconciler(
   jobs: Ref<Job[]>,
+  failRunning: (id: string, error: string) => void,
   options: { intervalMs?: number } = {},
 ): QueueReconcilerHandle {
   const intervalMs = options.intervalMs ?? RECONCILE_INTERVAL_MS;
@@ -89,7 +92,9 @@ export function startQueueReconciler(
       [...groups.values()].map(async (group) => {
         const listing = await fetchQueue(group.target ?? undefined);
         const known = new Set(listing.entries.map((e) => e.id));
-        reconcileRound(group.jobs, known, Date.now());
+        for (const missing of reconcileRound(group.jobs, known, Date.now())) {
+          failRunning(missing.id, "job not found on server — connection lost");
+        }
       }),
     );
     if (results.some((result) => result.status === "rejected")) {
@@ -119,4 +124,13 @@ export function startQueueReconciler(
       timer = null;
     },
   };
+}
+
+/** Wire the App-level generation stream to reconciliation without duplicating
+ * its ownership boundary at the composition root. */
+export function startGenerateQueueReconciler(
+  stream: Pick<UseGenerateStream, "jobs" | "failRunning">,
+  options: { intervalMs?: number } = {},
+): QueueReconcilerHandle {
+  return startQueueReconciler(stream.jobs, stream.failRunning, options);
 }

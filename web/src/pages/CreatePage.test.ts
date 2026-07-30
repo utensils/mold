@@ -92,6 +92,13 @@ const expandPromptMock = vi.hoisted(() =>
   })),
 );
 const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
+const streamCanvasErrorJobIdRef = vi.hoisted(() => ({
+  value: null as string | null,
+}));
+const streamSelectedJobRef = vi.hoisted(() => ({
+  value: null as Job | null,
+}));
+const streamSelectMock = vi.hoisted(() => vi.fn());
 const placementPreviewMock = vi.hoisted(() =>
   vi.fn(async () => ({
     version: 1,
@@ -180,10 +187,14 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
   >()),
   useGenerateStream: () => ({
     jobs: streamJobsRef,
+    canvasErrorJobId: streamCanvasErrorJobIdRef,
+    selectedJob: streamSelectedJobRef,
     submit: submitMock,
     cancel: vi.fn(),
+    failRunning: vi.fn(),
     remove: vi.fn(),
     clearDone: vi.fn(),
+    select: streamSelectMock,
   }),
 }));
 
@@ -286,6 +297,9 @@ describe("CreatePage layout and behavior", () => {
       },
     });
     streamJobsRef.value = [];
+    streamCanvasErrorJobIdRef.value = null;
+    streamSelectedJobRef.value = null;
+    streamSelectMock.mockReset();
     upscaleStreamMock.mockReset();
     upscaleStreamMock.mockResolvedValue(undefined);
     createChainJobMock.mockClear();
@@ -403,6 +417,102 @@ describe("CreatePage layout and behavior", () => {
     );
     expect(caption).toContain("Juggernaut XL - Ragnarok");
     expect(caption).not.toContain("cv:1759168");
+  });
+
+  it("renders a settled failure only while it has live canvas authority", async () => {
+    streamJobsRef.value = [
+      {
+        id: "stale-error",
+        request: {
+          model: "cv:2937936",
+          prompt: "old failed print",
+          width: 512,
+          height: 512,
+          steps: 1,
+          guidance: 1,
+        },
+        startedAt: 100,
+        controller: new AbortController(),
+        progress: {
+          stage: "Loading model",
+          step: null,
+          totalSteps: null,
+          weightBytesLoaded: null,
+          weightBytesTotal: null,
+          queuePosition: null,
+          gpu: null,
+          elapsedMs: null,
+        },
+        result: null,
+        error:
+          "model load error: stable device placement requires a scheduler-bound GPU owner thread",
+        state: "error",
+        settledAt: 200,
+        chain: null,
+        lastProgressAt: 200,
+        workStarted: true,
+        hostId: null,
+        hostLabel: null,
+        target: null,
+        serverId: "failed-server-job",
+        previewUrl: null,
+        seedVisual: "old",
+      },
+    ];
+    // The successful card has already auto-removed from the rail. Explicit
+    // live canvas authority is clear, so settled history cannot retake it.
+    streamCanvasErrorJobIdRef.value = null;
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    // ColdStartGuide and ResultCanvas are mutually exclusive in production;
+    // reaching the empty-state guide is the component-level proof that the
+    // stale job did not select error mode.
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
+    wrapper.unmount();
+
+    const staleError = streamJobsRef.value[0];
+    streamJobsRef.value = [
+      {
+        ...staleError,
+        id: "newer-done",
+        startedAt: 300,
+        result: {
+          type: "complete",
+          image: "newer-image",
+          format: "png",
+          seed_used: 7,
+          model: "cv:2937936",
+          width: 512,
+          height: 512,
+          generation_time_ms: 1_000,
+        },
+        error: null,
+        state: "done",
+        settledAt: 400,
+        lastProgressAt: 400,
+        serverId: "successful-server-job",
+      } as Job,
+      staleError,
+    ];
+    streamCanvasErrorJobIdRef.value = "stale-error";
+    const liveWrapper = mount(CreatePage, {
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+
+    const canvas = liveWrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("error");
+    expect(liveWrapper.find("[data-test='cold-start-stub']").exists()).toBe(
+      false,
+    );
+
+    liveWrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("open", staleError);
+    await nextTick();
+    expect(streamSelectMock).toHaveBeenCalledWith("stale-error");
   });
 
   it("orders phone Create as prompt, controls, actions, canvas, then recent", async () => {

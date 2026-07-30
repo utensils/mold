@@ -95,6 +95,7 @@ import {
 import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   activeCanvasJob,
+  latestUnresolvedError,
   resolveChainRequest,
   useGenerateStream,
   type Job,
@@ -1452,13 +1453,13 @@ function percentFor(job: Job): number | null {
 // A naive newest-first pick would bind the canvas to a queued batch sibling
 // that never previews while an earlier sibling is mid-denoise.
 const runningJob = computed(() => {
-  const selected = stream.selectedJob?.value ?? null;
+  const selected = stream.selectedJob.value;
   return selected?.state === "running"
     ? selected
     : activeCanvasJob(stream.jobs.value);
 });
 const latestDone = computed(() => {
-  const selected = stream.selectedJob?.value ?? null;
+  const selected = stream.selectedJob.value;
   if (selected) return selected.state === "done" ? selected : null;
   let best: Job | null = null;
   for (const j of stream.jobs.value) {
@@ -1474,11 +1475,11 @@ const latestDone = computed(() => {
 });
 
 const latestError = computed(() =>
-  stream.selectedJob?.value
-    ? stream.selectedJob.value.state === "error"
-      ? stream.selectedJob.value
-      : undefined
-    : stream.jobs.value.find((j) => j.state === "error"),
+  latestUnresolvedError(
+    stream.jobs.value,
+    stream.canvasErrorJobId.value,
+    stream.selectedJob.value,
+  ),
 );
 const latestErrorMessage = computed(() => {
   const job = latestError.value;
@@ -1498,12 +1499,11 @@ const canvasMode = computed<
 >(() => {
   if (variations.value.length) return "variations";
   if (runningJob.value) return "generating";
-  if (
-    latestError.value &&
-    (!latestDone.value ||
-      latestError.value.startedAt > latestDone.value.startedAt)
-  )
-    return "error";
+  // `latestError` exists only when an exact live/selected failure owns the
+  // canvas. Do not second-guess that authority with persisted timestamps:
+  // a newer metadata-only success can survive a reload without its image
+  // payload and must not mask a recovery error discovered by this boot.
+  if (latestError.value) return "error";
   if (latestDone.value) return "result";
   return "empty";
 });
@@ -2308,7 +2308,7 @@ function recreateFromGallery(item: GalleryImage) {
 }
 
 function openJob(job: Job) {
-  stream.select?.(job.id);
+  stream.select(job.id);
   setOutput("single");
   // Activity's print rows call this path; durable sequence rows use the
   // sequence-action handoff below. Keep the broad Job request union at the
