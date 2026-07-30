@@ -69,6 +69,40 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
 
+  it("aspect-fits the settled sequence video inside the canvas instead of clipping it", () => {
+    // The settled result must use the same pure-CSS containment as the
+    // develop preview frame: a size-container region and a frame sized to
+    // the print's own aspect ratio. A width-full frame let the video derive
+    // its height from the canvas width and clip top/bottom on short regions.
+    expect(classesFor(viewSource, "sequence-result-stage")).toContain("[container-type:size]");
+    expect(classesFor(viewSource, "sequence-result-stage")).toContain("min-h-0");
+    expect(tagFor(viewSource, "sequence-result-frame")).toContain(':style="settledFrameStyle"');
+    expect(viewSource).toMatch(/const settledFrameStyle = computed/);
+  });
+
+  it("lets sequence mode shrink the filmstrip on resize instead of growing scrollbars", () => {
+    // The bench floor in sequence mode covers the composer's fixed chrome +
+    // the filmstrip's minimum height, so dragging the resizer compresses the
+    // rail (fluid cqh sizing) rather than overflowing into a scrollbar.
+    expect(viewSource).toContain("MIN_SEQUENCE_BENCH_HEIGHT");
+    expect(viewSource).toMatch(/function minBenchHeight\(\)/);
+    expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), available - MIN_CANVAS_HEIGHT\)/);
+    expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), height\)/);
+    // Switching Output re-clamps the persisted height against the new floor.
+    expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,400}?clampBenchToViewport\(\)/);
+    // The preferred rail height must be the flex BASIS, never a `height`: a
+    // specified height becomes the wrapper's min-content contribution and
+    // resurrects the scrollbar the shrink weight exists to prevent.
+    expect(sequenceComposerSource).toMatch(
+      /\.ms-seqbench__railwrap\s*\{[^}]*flex:\s*0\s+999\s+204px/s,
+    );
+    expect(sequenceComposerSource).not.toMatch(
+      /\.ms-seqbench__railwrap\s*\{[^}]*[\s;]height:\s*\d/s,
+    );
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__railwrap\s*\{[^}]*min-height:/s);
+    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__rail\s*\{[^}]*height:\s*100%/s);
+  });
+
   it("dismisses the Templates popover on document-level Escape and restores trigger focus", () => {
     expect(viewSource).toContain('document.addEventListener("keydown", onDocumentKeydown)');
     expect(viewSource).toContain('document.removeEventListener("keydown", onDocumentKeydown)');

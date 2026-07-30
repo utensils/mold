@@ -209,19 +209,22 @@ describe("ClipRail", () => {
     });
   });
 
-  it("defines tall, default, short, and compact filmstrip density tiers", () => {
+  it("derives filmstrip geometry fluidly from the frame's own height", () => {
+    // The frame is its own size container: paddings, scene, thumb, and tile
+    // cap all follow the frame height continuously, so a surface (desktop's
+    // resizable bench) only ever changes the frame height and the strip
+    // re-proportions instead of stepping through fixed tiers or scrolling.
+    expect(railSource).toMatch(/\.ms-rail-frame\s*\{[^}]*container-type:\s*size/s);
     expect(railSource).toMatch(
-      /\.ms-rail-frame\s*\{[^}]*--filmstrip-tile-max:\s*184px[^}]*height:\s*188px/s,
+      /--filmstrip-scene-height:\s*calc\(\s*100cqh - var\(--filmstrip-pad-top\) - var\(--filmstrip-pad-bottom\)\s*\)/,
     );
     expect(railSource).toMatch(
-      /@container create-bench \(min-height: 620px\)[\s\S]*--filmstrip-tile-max:\s*208px[\s\S]*height:\s*204px/,
+      /--filmstrip-thumb-height:\s*calc\(\s*var\(--filmstrip-scene-height\) - var\(--filmstrip-footer-height\)\s*\)/,
     );
     expect(railSource).toMatch(
-      /@container create-bench \(max-height: 430px\)[\s\S]*--filmstrip-tile-max:\s*156px[\s\S]*height:\s*160px/,
+      /--filmstrip-tile-max:\s*calc\(var\(--filmstrip-thumb-height\) \* 16 \/ 9\)/,
     );
-    expect(railSource).toMatch(
-      /@container create-bench \(max-height: 340px\)[\s\S]*--filmstrip-tile-max:\s*134px[\s\S]*height:\s*138px/,
-    );
+    expect(railSource).not.toContain("@container create-bench");
     expect(pillSource).toContain(
       "width: min(var(--clip-width), var(--filmstrip-tile-max, 196px))",
     );
@@ -261,35 +264,32 @@ describe("ClipRail", () => {
   });
 
   it("uses a cinematic fixed-track filmstrip treatment", () => {
-    expect(railSource).toContain("--filmstrip-thumb-height: 104px");
+    expect(railSource).toMatch(/\.ms-rail-frame\s*\{[^}]*height:\s*188px/s);
     expect(railSource).toMatch(/\.ms-rail__perfs/);
     expect(railSource).toMatch(
       /\.ms-rail-frame\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--print\)/s,
     );
   });
 
-  it("keeps seams as compact connectors instead of thumbnail-height capsules", () => {
-    expect(seamSource).toContain('class="ms-seam__caption"');
+  it("keeps seams as circular glyph connectors centered on the picture", () => {
+    // The seam is the kit's circle-badge + caption design (mockup
+    // sequence-filmstrip); the rail only recolors it for the dark strip and
+    // centers the 32px badge on the thumbnail, not the whole tile.
+    expect(seamSource).toContain('class="ms-seam__diagram"');
+    expect(seamSource).toContain('class="ms-seam__glyph"');
+    expect(seamSource).not.toContain("ms-seam__chevron");
+    expect(seamSource).not.toContain("ms-seam__line-smooth");
     expect(railSource).toMatch(
       /\.ms-rail__item\s*\{[^}]*align-items:\s*flex-start/s,
     );
     expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*grid-template-rows:\s*32px 16px[^}]*margin-top:\s*calc\(\s*var\(--filmstrip-thumb-height\) \/ 2 - var\(--filmstrip-seam-rule-y\)\s*\)[^}]*min-width:\s*44px[^}]*height:\s*54px[^}]*border:\s*0[^}]*background:\s*transparent/s,
-    );
-    expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam::before\)\s*\{[^}]*top:\s*var\(--filmstrip-seam-rule-y\)[^}]*height:\s*1px/s,
-    );
-    expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam__diagram\)\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border-radius:\s*50%/s,
-    );
-    expect(railSource).toMatch(
-      /\.ms-rail-frame :deep\(\.ms-seam__line-smooth\)\s*\{[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)/s,
+      /\.ms-rail-frame :deep\(\.ms-seam\)\s*\{[^}]*min-width:\s*44px[^}]*margin-top:\s*calc\(var\(--filmstrip-thumb-height\) \/ 2 - 16px\)/s,
     );
     expect(railSource).toContain(
       ':deep(.ms-seam[data-transition="fade"] .ms-seam__diagram)',
     );
-    expect(railSource).toMatch(
-      /@container create-bench \(max-height: 340px\)[\s\S]*?\.ms-rail-frame\s*\{[^}]*--filmstrip-thumb-height:\s*76px[^}]*--filmstrip-seam-rule-y:\s*15px/s,
-    );
+    // Legacy lozenge remnants stay gone.
+    expect(railSource).not.toContain("--filmstrip-seam-rule-y");
+    expect(railSource).not.toContain(":deep(.ms-seam::before)");
   });
 });

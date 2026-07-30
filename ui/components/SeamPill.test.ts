@@ -40,11 +40,32 @@ describe("SeamPill", () => {
     expect(wrapper.attributes("disabled")).toBeDefined();
   });
 
+  it("renders the circular glyph badge and no legacy chevron lozenge", () => {
+    for (const transition of ["smooth", "cut", "fade"] as const) {
+      const wrapper = mount(SeamPill, {
+        props: { transition, motionTail: 17 },
+      });
+      expect(wrapper.find(".ms-seam__diagram .ms-seam__glyph rect").exists()).toBe(true);
+      expect(wrapper.find(".ms-seam__chevron").exists()).toBe(false);
+      expect(wrapper.attributes("data-transition")).toBe(transition);
+    }
+  });
+
   it("emits click", async () => {
     const wrapper = mount(SeamPill, {
       props: { transition: "cut", motionTail: 17 },
     });
     await wrapper.trigger("click");
+    expect(wrapper.emitted("click")).toHaveLength(1);
+  });
+
+  it("opens the editor from a right-click too", async () => {
+    // Right-clicking a transition is a natural "edit this" gesture; it must
+    // reach the same seam editor as a left click instead of a browser menu.
+    const wrapper = mount(SeamPill, {
+      props: { transition: "fade", motionTail: 17, fadeFrames: 8 },
+    });
+    await wrapper.trigger("contextmenu");
     expect(wrapper.emitted("click")).toHaveLength(1);
   });
 });

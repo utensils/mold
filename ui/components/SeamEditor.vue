@@ -6,6 +6,7 @@
  * length stepper that clamps to the server's fade_frames_max.
  */
 import { computed } from "vue";
+import SeamGlyph from "./SeamGlyph.vue";
 import Stepper from "./Stepper.vue";
 import {
   transitionDescription,
@@ -102,12 +103,10 @@ function onOptionKeydown(event: KeyboardEvent) {
         @keydown="onOptionKeydown"
       >
         <span class="ms-seam-editor__diagram" aria-hidden="true">
-          <span
-            v-if="option === 'smooth'"
-            class="ms-seam-editor__line-smooth"
+          <SeamGlyph
+            class="ms-seam-editor__glyph"
+            :transition="option"
           />
-          <span v-else-if="option === 'cut'" class="ms-seam-editor__line-cut" />
-          <span v-else class="ms-seam-editor__line-fade" />
         </span>
         <span class="ms-seam-editor__text">
           <span class="ms-seam-editor__label">{{
@@ -221,50 +220,46 @@ function onOptionKeydown(event: KeyboardEvent) {
   outline-offset: 2px;
 }
 
+/* The same circular glyph badge as the seam pill, so the editor teaches
+   with the exact mark the rail shows. */
 .ms-seam-editor__diagram {
-  position: relative;
-  display: block;
-  width: 44px;
-  height: 22px;
-  flex: 0 0 44px;
-  border-radius: 2px;
-  background: var(--print);
-  overflow: hidden;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--ce);
+  border-radius: 50%;
+  background: var(--bath);
+  color: var(--ink-2);
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
 }
 
 .ms-seam-editor--large .ms-seam-editor__diagram {
-  width: 56px;
-  height: 30px;
-  flex-basis: 56px;
+  width: 40px;
+  height: 40px;
+  flex-basis: 40px;
 }
 
-.ms-seam-editor__line-smooth {
-  position: absolute;
-  top: calc(50% - 1px);
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--halide);
+.ms-seam-editor__glyph {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
-.ms-seam-editor__line-cut {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(50% - 1px);
-  width: 2px;
-  background: var(--stop);
+.ms-seam-editor--large .ms-seam-editor__glyph {
+  width: 17px;
+  height: 17px;
 }
 
-.ms-seam-editor__line-fade {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 20%,
-    var(--safelight) 50%,
-    transparent 80%
-  );
+.ms-seam-editor__row[data-on="true"] .ms-seam-editor__diagram {
+  border-color: var(--safelight);
+  background: color-mix(in srgb, var(--safelight) 12%, transparent);
+  color: var(--safelight);
 }
 
 .ms-seam-editor__text {

@@ -78,6 +78,17 @@ describe("SeamEditor", () => {
     expect(wrapper.emitted("update:fadeFrames")).toBeUndefined();
   });
 
+  it("teaches with the same circular glyph badges the seam pill shows", () => {
+    const wrapper = make();
+    const badges = wrapper.findAll(".ms-seam-editor__diagram .ms-seam-editor__glyph");
+    expect(badges).toHaveLength(3);
+    expect(badges.every((badge) => badge.find("rect").exists())).toBe(true);
+    // The legacy rectangle swatches are gone.
+    expect(wrapper.find(".ms-seam-editor__line-smooth").exists()).toBe(false);
+    expect(wrapper.find(".ms-seam-editor__line-cut").exists()).toBe(false);
+    expect(wrapper.find(".ms-seam-editor__line-fade").exists()).toBe(false);
+  });
+
   it("shows the seam context and the apply-all hint when asked", () => {
     const wrapper = make({
       fromLabel: "opening",

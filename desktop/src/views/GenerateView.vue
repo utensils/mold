@@ -280,6 +280,12 @@ const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
 const DEFAULT_BENCH_HEIGHT = 520;
 const MIN_BENCH_HEIGHT = 280;
+/**
+ * Sequence mode's floor covers the composer's fixed chrome (activity header,
+ * edit banner, clip head, prompt, tools, footer) plus the filmstrip's minimum
+ * height, so resizing compresses the rail instead of growing a scrollbar.
+ */
+const MIN_SEQUENCE_BENCH_HEIGHT = 390;
 const MIN_CANVAS_HEIGHT = 144;
 const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
 function readStoredBenchHeight(): number | null {
@@ -299,12 +305,16 @@ const benchHeight = ref(
 let benchResizeStartY = 0;
 let benchResizeStartHeight = 0;
 
+function minBenchHeight(): number {
+  return isSequence.value ? MIN_SEQUENCE_BENCH_HEIGHT : MIN_BENCH_HEIGHT;
+}
+
 function clampBenchHeight(height: number): number {
   const available = workbenchRef.value?.clientHeight ?? window.innerHeight;
   return Math.round(
     Math.min(
-      Math.max(MIN_BENCH_HEIGHT, available - MIN_CANVAS_HEIGHT),
-      Math.max(MIN_BENCH_HEIGHT, height),
+      Math.max(minBenchHeight(), available - MIN_CANVAS_HEIGHT),
+      Math.max(minBenchHeight(), height),
     ),
   );
 }
@@ -1014,6 +1024,21 @@ const settledSequencePrint = computed(() => {
       (entry) => entry.sourceKey === hostId && isPrintOfChainJob(entry.item.metadata, detail.id),
     ) ?? null
   );
+});
+
+/**
+ * Largest rect of the settled print's aspect that fits the canvas region —
+ * the same pure-CSS containment as `previewFrameStyle`, so the stitched video
+ * always shrinks to fit and is never clipped by a width-driven frame.
+ */
+const settledFrameStyle = computed(() => {
+  const meta = settledSequencePrint.value?.item.metadata;
+  const w = meta?.width || 16;
+  const h = meta?.height || 9;
+  return {
+    aspectRatio: `${w} / ${h}`,
+    width: `min(100cqw, ${(100 * w) / h}cqh)`,
+  };
 });
 
 const settledSequenceCaption = computed(() => {
@@ -2236,6 +2261,9 @@ watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true })
 // Leaving Sequence retires the caveat with the rail it described.
 watch(isSequence, (on) => {
   if (!on) sequenceReuseNotice.value = null;
+  // The bench floor is mode-aware; a persisted one-shot height may sit below
+  // the sequence floor and would otherwise scroll the composer.
+  clampBenchToViewport();
 });
 
 // ⌘N — clear the composer for a fresh generation, keeping the model.
@@ -2546,12 +2574,16 @@ onBeforeUnmount(() => {
           >
             <div
               v-if="settledSequencePrint"
-              class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden"
+              data-test="sequence-result-stage"
+              class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
+                data-test="sequence-result-frame"
                 class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                :style="settledFrameStyle"
               >
                 <AuthedMedia
+                  class="absolute inset-0"
                   video
                   controls
                   :path="
@@ -2682,9 +2714,9 @@ onBeforeUnmount(() => {
           aria-label="Resize Activity and sequence editor"
           aria-orientation="horizontal"
           :aria-valuenow="benchHeight"
-          :aria-valuemin="MIN_BENCH_HEIGHT"
+          :aria-valuemin="minBenchHeight()"
           :aria-valuemax="
-            Math.max(MIN_BENCH_HEIGHT, (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
+            Math.max(minBenchHeight(), (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
           "
           tabindex="0"
           title="Drag to resize · double-click to reset"

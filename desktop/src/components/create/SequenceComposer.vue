@@ -587,18 +587,33 @@ async function copyToml() {
   color: var(--rebate);
 }
 
+/*
+ * The filmstrip absorbs bench resizes first: an outsized shrink weight pulls
+ * the rail from its preferred 204px basis down to a hard floor before any
+ * other row gives, so a shorter bench compresses thumbnails (fluid cqh
+ * geometry inside ClipRail) instead of growing a scrollbar. The preferred
+ * height MUST be the flex basis, not a `height` — a specified height becomes
+ * the wrapper's min-content contribution, which propagates up as the
+ * column's minimum and re-creates the scrollbar this exists to prevent.
+ */
 .ms-seqbench__railwrap {
   display: flex;
   width: 100%;
+  flex: 0 999 204px;
+  min-height: 104px;
 }
 .ms-seqbench__railwrap :deep(.ms-popover__trigger) {
   display: flex;
   width: 100%;
   min-width: 0;
+  height: 100%;
 }
-.ms-seqbench__rail {
+/* Descendant selector outranks ClipRail's own `height: 188px` regardless of
+   stylesheet injection order. */
+.ms-seqbench .ms-seqbench__rail {
   flex: 1;
   min-width: 0;
+  height: 100%;
   padding: 2px 0;
 }
 
@@ -665,7 +680,7 @@ async function copyToml() {
 }
 .ms-seqbench__prompt--main {
   flex: 1;
-  min-height: 64px;
+  min-height: 48px;
 }
 .ms-seqbench__prompt--negative {
   font-size: 12px;
