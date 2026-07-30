@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Library selection and deletion now work as one multi-device action.** On iPhone, press and hold a print (or tap **Select**) to enter multi-select, then select all, clear, or delete the chosen prints. iPhone, desktop, and web expand every delete to all matching copies on currently connected devices using the same filename or legacy seed/byte-size identity; partial host failures keep the surviving copy visible and say which cleanup could not finish.
+- **Library selection and deletion now work as one multi-device action without replacing iOS image actions.** On iPhone, image long-press keeps the native Share / Save to Photos / Copy context menu, while the 44-point **Select** control enters multi-select for select all, clear, and bulk delete. iPhone, desktop, and web expand every delete to all matching copies on currently connected devices using the same filename or legacy seed/byte-size identity; partial host failures keep the surviving copy visible and say which cleanup could not finish.
 
 ### Fixed
 

@@ -387,11 +387,6 @@ let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
-let galleryLongPressTimer: ReturnType<typeof setTimeout> | null = null;
-let galleryPressPointerId: number | null = null;
-let galleryPressStartX = 0;
-let galleryPressStartY = 0;
-let suppressGalleryClick = false;
 let resultMediaRecoveryClientId: number | null = null;
 let resultMediaRecoveryAttempts = 0;
 let hostProbeTimer: ReturnType<typeof setInterval> | null = null;
@@ -2743,14 +2738,6 @@ function clearSelectedGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
-function addGallerySelection(print: GalleryPrint): void {
-  const next = new Set(gallerySelection.value);
-  next.add(galleryPrintKey(print));
-  gallerySelection.value = next;
-  gallerySelectMode.value = true;
-  galleryDeleteConfirming.value = false;
-}
-
 function toggleGallerySelection(print: GalleryPrint): void {
   const key = galleryPrintKey(print);
   const next = new Set(gallerySelection.value);
@@ -2765,53 +2752,9 @@ function selectAllGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
-function cancelGalleryLongPress(): void {
-  if (galleryLongPressTimer) clearTimeout(galleryLongPressTimer);
-  galleryLongPressTimer = null;
-  galleryPressPointerId = null;
-}
-
-function beginGalleryLongPress(print: GalleryPrint, event: PointerEvent): void {
-  if (gallerySelectMode.value || event.isPrimary === false) return;
-  if (event.pointerType === "mouse" && event.button !== 0) return;
-  cancelGalleryLongPress();
-  galleryPressPointerId = event.pointerId;
-  galleryPressStartX = event.clientX;
-  galleryPressStartY = event.clientY;
-  galleryLongPressTimer = setTimeout(() => {
-    galleryLongPressTimer = null;
-    galleryPressPointerId = null;
-    suppressGalleryClick = true;
-    addGallerySelection(print);
-  }, 500);
-}
-
-function moveGalleryLongPress(event: PointerEvent): void {
-  if (galleryPressPointerId !== event.pointerId) return;
-  if (
-    Math.abs(event.clientX - galleryPressStartX) > 10 ||
-    Math.abs(event.clientY - galleryPressStartY) > 10
-  ) {
-    cancelGalleryLongPress();
-  }
-}
-
-function finishGalleryLongPress(event: PointerEvent): void {
-  if (galleryPressPointerId === event.pointerId) cancelGalleryLongPress();
-}
-
 function handleGalleryTileClick(print: GalleryPrint): void {
-  if (suppressGalleryClick) {
-    suppressGalleryClick = false;
-    return;
-  }
   if (gallerySelectMode.value) toggleGallerySelection(print);
   else openPrint(print);
-}
-
-function handleGalleryContextMenu(print: GalleryPrint): void {
-  suppressGalleryClick = true;
-  addGallerySelection(print);
 }
 
 async function deleteSelectedGalleryPrints(): Promise<void> {
@@ -3106,7 +3049,6 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", handleForegroundResume);
   window.removeEventListener("pageshow", handleForegroundResume);
   if (hostProbeTimer) clearInterval(hostProbeTimer);
-  cancelGalleryLongPress();
   hostProbeTimer = null;
   stopSequenceTransport();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
@@ -3782,7 +3724,7 @@ onBeforeUnmount(() => {
               {{
                 gallerySelectMode
                   ? `${gallerySelection.size} selected`
-                  : "Prints from every saved host · Hold to select"
+                  : "Prints from every saved host · Tap Select for multiple"
               }}
             </p>
           </div>
@@ -3815,11 +3757,6 @@ onBeforeUnmount(() => {
             "
             data-test="gallery-item"
             @click="handleGalleryTileClick(print)"
-            @contextmenu.prevent="handleGalleryContextMenu(print)"
-            @pointerdown="beginGalleryLongPress(print, $event)"
-            @pointermove="moveGalleryLongPress"
-            @pointerup="finishGalleryLongPress"
-            @pointercancel="finishGalleryLongPress"
           >
             <img
               :src="print.thumbnailUrl"

@@ -3822,27 +3822,22 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
-  it("enters multi-select after holding a Library print", async () => {
+  it("keeps the native image context menu and enters multi-select from Select", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
 
-    vi.useFakeTimers();
-    await wrapper.get("[data-test='gallery-item']").trigger("pointerdown", {
-      pointerId: 1,
-      pointerType: "touch",
-      isPrimary: true,
-      clientX: 20,
-      clientY: 20,
-    });
-    vi.advanceTimersByTime(500);
-    await wrapper.vm.$nextTick();
+    const contextMenu = new Event("contextmenu", { bubbles: true, cancelable: true });
+    wrapper.get("[data-test='gallery-item'] img").element.dispatchEvent(contextMenu);
+    expect(contextMenu.defaultPrevented).toBe(false);
+    expect(wrapper.find("[data-test='mobile-gallery-actions']").exists()).toBe(false);
 
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
     expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
     expect(wrapper.get("[data-test='gallery-item']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
-    vi.useRealTimers();
   });
 
   it("deletes one selected print from every host that contains a copy", async () => {

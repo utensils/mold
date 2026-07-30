@@ -393,7 +393,6 @@ onBeforeUnmount(() => {
         draggable="false"
         @load="mediaReady"
         @error="mediaFailed"
-        @contextmenu.prevent
       />
       <span v-if="upscaled" data-test="upscaled-badge" class="gallery-upscaled-badge">
         Upscaled
@@ -505,7 +504,7 @@ onBeforeUnmount(() => {
   touch-action: pan-y;
   user-select: none;
   -webkit-user-drag: none;
-  -webkit-touch-callout: none;
+  -webkit-touch-callout: default;
 }
 
 .gallery-upscaled-badge {

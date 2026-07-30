@@ -81,6 +81,16 @@ afterEach(() => {
 });
 
 describe("MobileGalleryViewer", () => {
+  it("leaves the native iOS image context menu available", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    const contextMenu = new Event("contextmenu", { bubbles: true, cancelable: true });
+    view.get("[data-test='gallery-viewer-image']").element.dispatchEvent(contextMenu);
+
+    expect(contextMenu.defaultPrevented).toBe(false);
+  });
+
   it("opens full image media in an accessible viewer with explicit reuse", async () => {
     const view = mountViewer();
     await flushPromises();

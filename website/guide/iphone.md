@@ -133,11 +133,13 @@ cancelled or reported as the interrupted print.
 Library merges prints from every saved host, newest first. Unavailable hosts
 are reported without hiding media from hosts that did respond.
 
-Press and hold a tile, or tap **Select**, to select multiple prints. The action
-bar can select all loaded prints, clear the selection, or delete the selection.
-Deletion removes every matching copy from each reachable saved host, including
-legacy copies whose auto-save filename differs. If a host cannot complete the
-delete, its copy remains visible and Library reports the partial cleanup.
+Press and hold an image to open the native iOS image menu for Share, Save to
+Photos, Copy, Copy Subject, and Look Up. Tap **Select** to select multiple
+prints; the action bar can select all loaded prints, clear the selection, or
+delete the selection. Deletion removes every matching copy from each reachable
+saved host, including legacy copies whose auto-save filename differs. If a host
+cannot complete the delete, its copy remains visible and Library reports the
+partial cleanup.
 
 Tap a tile to open the full-screen viewer:
 

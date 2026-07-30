@@ -2297,7 +2297,7 @@ button:disabled {
   background: var(--color-print-surface);
   border-radius: 9px;
   touch-action: manipulation;
-  -webkit-touch-callout: none;
+  -webkit-touch-callout: default;
 }
 
 .gallery-item-selected {
