@@ -15,7 +15,7 @@ import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
-import { modelDisplayName } from "../../lib/modelName";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { requestConfirm, toast } from "../../lib/toasts";
 import type {
   CatalogEntryWire,

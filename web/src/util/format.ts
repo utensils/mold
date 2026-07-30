@@ -1,5 +1,5 @@
 import type { ModelInfoExtended, OutputMetadata } from "../types";
-import { modelDisplayNameForId } from "../lib/modelName";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 
 /** Decimal gigabytes, matching server and storage-vendor reporting. */
 export function formatGB(bytes: number | null | undefined): string {

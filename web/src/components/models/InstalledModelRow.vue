@@ -9,7 +9,7 @@ import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
-import { modelDisplayName } from "../../lib/modelName";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { formatGB } from "../../util/format";
 
 const props = defineProps<{ model: ModelInfoExtended }>();
