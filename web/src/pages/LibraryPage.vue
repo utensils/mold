@@ -62,6 +62,7 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -323,8 +324,8 @@ function clearSelection() {
   selectionAnchor.value = null;
 }
 
-// Delete routes to the host that owns the print — a remote print is deleted on
-// its host, not the origin, and a same-named local twin is left alone.
+// A concrete copy still routes to its owning host. Callers expand one logical
+// print to every matching device copy before invoking this primitive.
 function deleteRouted(entry: GalleryImage): Promise<void> {
   const host = hostForEntry(entry);
   if (!host) return Promise.reject(missingHostError(entry));
@@ -332,10 +333,25 @@ function deleteRouted(entry: GalleryImage): Promise<void> {
   return hostDeleteGalleryImage(host, entry.filename);
 }
 
+function copiesOf(entry: GalleryImage): HostGalleryImage[] {
+  return entries.value.filter((candidate) =>
+    sameLogicalGalleryPrint(entry, candidate),
+  );
+}
+
 async function handleDeleteMany(keys: string[]): Promise<number> {
-  const targets = keys
+  const selectedTargets = keys
     .map((key) => ({ key, entry: entryForKey(key) }))
     .filter((t): t is { key: string; entry: HostGalleryImage } => !!t.entry);
+  const groups = selectedTargets.map((target) => copiesOf(target.entry));
+  const targetsByKey = new Map<string, HostGalleryImage>();
+  for (const group of groups) {
+    for (const entry of group) targetsByKey.set(keyOf(entry), entry);
+  }
+  const targets = [...targetsByKey.entries()].map(([key, entry]) => ({
+    key,
+    entry,
+  }));
   const results = await Promise.allSettled(
     targets.map((t) => deleteRouted(t.entry)),
   );
@@ -351,10 +367,29 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
     for (const key of deleted) next.delete(key);
     selection.value = next;
   }
+  const failedKeys = new Set(
+    targets
+      .filter((_, index) => results[index]?.status === "rejected")
+      .map((target) => target.key),
+  );
+  const failedPrints = groups.filter((group) =>
+    group.some((entry) => failedKeys.has(keyOf(entry))),
+  ).length;
+  const deletedPrints = selectedTargets.length - failedPrints;
   if (failed > 0) {
-    errorMessage.value = `Deleted ${deleted.size} of ${keys.length}. ${failed} failed.`;
+    toast(
+      "error",
+      `Deleted ${deletedPrints} of ${selectedTargets.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`,
+    );
+  } else if (selectedTargets.length > 0) {
+    toast(
+      "success",
+      selectedTargets.length === 1
+        ? "Deleted print everywhere"
+        : `Deleted ${selectedTargets.length} prints everywhere`,
+    );
   }
-  return deleted.size;
+  return deletedPrints;
 }
 
 async function deleteSelected() {
@@ -363,7 +398,7 @@ async function deleteSelected() {
   const accepted = await requestConfirm({
     title:
       keys.length === 1 ? "Delete print?" : `Delete ${keys.length} prints?`,
-    body: "This can't be undone.",
+    body: "Every matching copy on your connected devices will be deleted. This can't be undone.",
     confirmLabel: "Delete",
     danger: true,
   });
@@ -379,7 +414,7 @@ async function deleteAllFiltered() {
     title: everything
       ? `Delete all ${list.length} prints?`
       : `Delete ${list.length} filtered prints?`,
-    body: "This can't be undone.",
+    body: "Every matching copy on your connected devices will be deleted. This can't be undone.",
     confirmLabel: "Delete",
     danger: true,
     typedPhrase: "delete",
@@ -641,7 +676,7 @@ async function onUpscale(item: GalleryImage) {
 async function onLightboxDelete(item: GalleryImage) {
   const accepted = await requestConfirm({
     title: "Delete print?",
-    body: `${item.filename} — you can undo for a few seconds.`,
+    body: `${item.filename} will be deleted from every connected device. You can undo for a few seconds.`,
     confirmLabel: "Delete",
     danger: true,
   });
@@ -649,10 +684,11 @@ async function onLightboxDelete(item: GalleryImage) {
   const key = keyOf(item);
   const entryIdx = entries.value.findIndex((e) => keyOf(e) === key);
   if (entryIdx === -1) return;
-  const removed = entries.value[entryIdx]!;
+  const removed = copiesOf(item);
+  const removedKeys = new Set(removed.map((entry) => keyOf(entry)));
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
-  entries.value = entries.value.filter((e) => keyOf(e) !== key);
+  entries.value = entries.value.filter((e) => !removedKeys.has(keyOf(e)));
   if (filtered.value.length === 0) {
     closeLightbox();
   } else {
@@ -665,21 +701,27 @@ async function onLightboxDelete(item: GalleryImage) {
   }
 
   undoableAction({
-    text: "Print deleted",
+    text: "Print deleted everywhere",
     undo: () => {
-      const next = entries.value.slice();
-      next.splice(Math.min(entryIdx, next.length), 0, removed);
-      entries.value = next;
+      entries.value = [...entries.value, ...removed].sort(
+        (a, b) => b.timestamp - a.timestamp,
+      );
     },
     commit: async () => {
-      try {
-        await deleteRouted(removed);
-      } catch (err) {
-        // Roll the print back into the list so the failure isn't silent.
-        const next = entries.value.slice();
-        next.splice(Math.min(entryIdx, next.length), 0, removed);
-        entries.value = next;
-        toast("error", err instanceof Error ? err.message : String(err));
+      const results = await Promise.allSettled(
+        removed.map((entry) => deleteRouted(entry)),
+      );
+      const failed = removed.filter(
+        (_, index) => results[index]?.status === "rejected",
+      );
+      if (failed.length > 0) {
+        entries.value = [...entries.value, ...failed].sort(
+          (a, b) => b.timestamp - a.timestamp,
+        );
+        toast(
+          "error",
+          `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+        );
       }
     },
   });

@@ -2271,6 +2271,23 @@ button:disabled {
   gap: 6px;
 }
 
+.mobile-library-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-library-heading .section-note {
+  margin-bottom: 0;
+}
+
+.mobile-library-select {
+  min-width: 76px;
+  min-height: 44px;
+  padding: 8px 12px;
+}
+
 .gallery-item {
   position: relative;
   aspect-ratio: 1;
@@ -2279,6 +2296,14 @@ button:disabled {
   overflow: hidden;
   background: var(--color-print-surface);
   border-radius: 9px;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+}
+
+.gallery-item-selected {
+  box-shadow:
+    0 0 0 3px var(--safelight),
+    0 0 0 5px color-mix(in srgb, var(--bench) 72%, transparent);
 }
 
 .gallery-item img,
@@ -2329,6 +2354,75 @@ button:disabled {
 
 .gallery-item .gallery-upscaled-badge {
   right: 7px;
+}
+
+.gallery-selection-indicator {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 2;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid rgba(245, 239, 255, 0.72);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62);
+  color: #f5efff;
+  font-family: var(--font-utility);
+  font-size: 15px;
+  font-weight: 750;
+  backdrop-filter: blur(8px);
+}
+
+.gallery-item-selected .gallery-selection-indicator {
+  border-color: var(--safelight);
+  background: var(--safelight);
+  color: var(--on-accent);
+}
+
+.mobile-gallery-actions {
+  position: sticky;
+  bottom: 8px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 56px;
+  margin-top: 12px;
+  padding: 6px;
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bench) 94%, transparent);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+}
+
+.mobile-gallery-actions > span {
+  min-width: 0;
+  flex: 1;
+  padding-left: 8px;
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  white-space: nowrap;
+}
+
+.mobile-gallery-actions button {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-utility);
+  font-weight: 650;
+}
+
+.mobile-gallery-actions button.danger {
+  border-color: var(--stop);
+  color: var(--stop);
 }
 
 .gallery-viewer {

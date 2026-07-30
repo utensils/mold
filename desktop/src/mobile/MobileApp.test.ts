@@ -3822,6 +3822,101 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
+  it("enters multi-select after holding a Library print", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    vi.useFakeTimers();
+    await wrapper.get("[data-test='gallery-item']").trigger("pointerdown", {
+      pointerId: 1,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    vi.advanceTimersByTime(500);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
+    expect(wrapper.get("[data-test='gallery-item']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
+    vi.useRealTimers();
+  });
+
+  it("deletes one selected print from every host that contains a copy", async () => {
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        return Promise.resolve([{ ...print, timestamp: print.timestamp + (render ? 1 : 0) }]);
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation((_route, _path, init?: RequestInit) =>
+      Promise.resolve(
+        init?.method === "DELETE"
+          ? new Response(null, { status: 204 })
+          : ({ blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response),
+      ),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.findAll("[data-test='gallery-item']")[0]!.trigger("click");
+    const deleteButton = () =>
+      wrapper!.get("[data-test='mobile-gallery-actions']").find("button.danger");
+    await deleteButton().trigger("click");
+    expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain(
+      "Delete 1 everywhere?",
+    );
+    expect(deleteButton().text()).toBe("Confirm");
+    await deleteButton().trigger("click");
+    await flushPromises();
+
+    const deletes = apiFetchTo.mock.calls.filter(([, , init]) => init?.method === "DELETE");
+    expect(deletes).toHaveLength(2);
+    expect(deletes.map(([, path]) => path)).toEqual([
+      "/api/gallery/image/storm%20clip.mp4",
+      "/api/gallery/image/storm%20clip.mp4",
+    ]);
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(0);
+  });
+
   it("defers completion refreshes until an open viewer closes", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

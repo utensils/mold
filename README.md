@@ -36,7 +36,8 @@ macOS and Linux:
   reproducible seeds.
 - **Library** merges prints from every connected machine into a fast,
   searchable gallery with saved prompts, settings, provenance, and native media
-  actions, plus a remembered thumbnail-size control on web and desktop.
+  actions, multi-select on every GUI surface, delete-across-devices semantics,
+  and a remembered thumbnail-size control on web and desktop.
 - **Models** discovers and installs checkpoints from Mold, Hugging Face, and
   Civitai, with live download progress and per-machine routing.
 - **Machines** connects this device, LAN/Tailscale hosts, and RunPod while

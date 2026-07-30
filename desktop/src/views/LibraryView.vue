@@ -27,7 +27,12 @@ import {
   sequenceHostUnreachableMessage,
 } from "@studio/lib/sequenceReuse";
 import { ApiError, apiFetch, apiFetchTo, type ApiTarget } from "../lib/api/client";
-import { useGalleryStore, type GalleryKindFilter, type MergedPrint } from "../stores/gallery";
+import {
+  useGalleryStore,
+  type GalleryKindFilter,
+  type GalleryLocation,
+  type MergedPrint,
+} from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useChainJobsStore } from "../stores/chainJobs";
@@ -352,7 +357,12 @@ watch(rowHeight, (value) => saveGalleryThumbnailSize(value));
 const UNDO_WINDOW_MS = 6000;
 const pendingDeletes = new Map<
   string,
-  { sourceKey: string; filename: string; timer: ReturnType<typeof setTimeout> }
+  {
+    sourceKey: string;
+    filename: string;
+    locations: GalleryLocation[];
+    timer: ReturnType<typeof setTimeout>;
+  }
 >();
 const deleteKey = (sourceKey: string, filename: string) => `${sourceKey}::${filename}`;
 
@@ -448,19 +458,24 @@ async function deleteSelectedPrints() {
   }
   confirmingBulkDelete.value = false;
   if (bulkDeleting.value) return;
-  // Resolve filenames to their represented origin via the current filter —
-  // removeMany then mirrors the single-delete routing per item.
   const targets = gallery.filtered.filter((e) => bulkSelection.value.has(e.item.filename));
   if (targets.length === 0) return;
   bulkDeleting.value = true;
   try {
-    const { deleted, failed } = await gallery.removeMany(
-      targets.map((e) => ({ sourceKey: e.sourceKey, filename: e.item.filename })),
-    );
-    if (failed > 0) {
-      toasts.push(`Deleted ${deleted} of ${targets.length}. ${failed} failed.`, "error");
+    const { deletedPrints, failedPrints, deletedCopies } =
+      await gallery.removeEntriesEverywhere(targets);
+    if (failedPrints > 0) {
+      toasts.push(
+        `Deleted ${deletedPrints} of ${targets.length} prints everywhere. ${failedPrints} still have a copy on an unavailable device.`,
+        "error",
+      );
     } else {
-      toasts.push(deleted === 1 ? "Deleted 1 print" : `Deleted ${deleted} prints`);
+      const copyNote = deletedCopies > deletedPrints ? ` (${deletedCopies} device copies)` : "";
+      toasts.push(
+        deletedPrints === 1
+          ? `Deleted 1 print everywhere${copyNote}`
+          : `Deleted ${deletedPrints} prints everywhere${copyNote}`,
+      );
     }
   } finally {
     bulkDeleting.value = false;
@@ -606,10 +621,14 @@ async function commitDelete(sourceKey: string, filename: string) {
   const pending = pendingDeletes.get(key);
   if (pending) clearTimeout(pending.timer);
   pendingDeletes.delete(key);
-  try {
-    await gallery.commitDelete(sourceKey, filename);
-  } catch (error) {
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  if (!pending) return;
+  const result = await gallery.commitDeleteEverywhere(pending.locations);
+  if (result.failed > 0) {
+    toasts.push(
+      result.error ??
+        `${result.failed} device ${result.failed === 1 ? "copy remains" : "copies remain"} because a delete failed.`,
+      "error",
+    );
   }
 }
 
@@ -619,7 +638,7 @@ function undoDelete(sourceKey: string, filename: string) {
   const pending = pendingDeletes.get(key);
   if (pending) clearTimeout(pending.timer);
   pendingDeletes.delete(key);
-  gallery.cancelDelete(sourceKey, filename);
+  if (pending) gallery.cancelDeleteEverywhere(pending.locations);
 }
 
 /**
@@ -637,7 +656,7 @@ function deletePrint(entry: MergedPrint) {
     (candidate) => candidate.sourceKey === sourceKey && candidate.item.filename === filename,
   );
   const wasSelected = isSelected(entry);
-  gallery.beginDelete(sourceKey, filename);
+  const locations = gallery.beginDeleteEverywhere(entry);
   if (wasSelected) {
     const remaining = gallery.filtered;
     if (remaining.length === 0) {
@@ -649,8 +668,8 @@ function deletePrint(entry: MergedPrint) {
   }
 
   const timer = setTimeout(() => void commitDelete(sourceKey, filename), UNDO_WINDOW_MS);
-  pendingDeletes.set(key, { sourceKey, filename, timer });
-  toasts.push(`Deleted ${filename}`, "info", {
+  pendingDeletes.set(key, { sourceKey, filename, locations, timer });
+  toasts.push(`Deleted ${filename} everywhere`, "info", {
     durationMs: UNDO_WINDOW_MS,
     action: { label: "Undo", run: () => undoDelete(sourceKey, filename) },
   });

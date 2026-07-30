@@ -75,7 +75,11 @@ pushed screen opened from the header.
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
   a desktop/web action until mobile has a chain-detail recovery route.
-  Generated stills open the same viewer on tap. Persistent New badges match desktop Library visits, and post-generation
+  Generated stills open the same viewer on tap. Press and hold a tile (or tap
+  **Select**) to enter multi-select, then select all, clear, or delete the
+  chosen prints. Delete removes every matching copy from reachable saved hosts;
+  a host failure leaves that copy visible and reports the partial cleanup.
+  Persistent New badges match desktop Library visits, and post-generation
   upscaled images carry the shared Upscaled badge.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
