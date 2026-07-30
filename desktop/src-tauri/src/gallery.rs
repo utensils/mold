@@ -492,9 +492,6 @@ pub async fn save_image_as(
     if !valid_filename(&filename) {
         return Err("Invalid filename.".into());
     }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64.as_bytes())
-        .map_err(|error| format!("Invalid image data: {error}"))?;
     let extension = std::path::Path::new(&filename)
         .extension()
         .and_then(|value| value.to_str())
@@ -520,6 +517,9 @@ pub async fn save_image_as(
     let path = path
         .into_path()
         .map_err(|error| format!("Invalid save location: {error}"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|error| format!("Invalid image data: {error}"))?;
     std::fs::write(&path, bytes).map_err(|error| format!("Couldn't save image: {error}"))?;
     Ok(Some(path.display().to_string()))
 }
