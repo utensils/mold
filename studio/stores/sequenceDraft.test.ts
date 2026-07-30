@@ -65,18 +65,48 @@ describe("sequence draft store", () => {
     const store = freshStore();
     store.hydrate();
     store.ensureClips(97);
-    store.openingImage = { filename: "open.png", base64: "QUJD" };
+    store.openingImage = {
+      filename: "open.png",
+      width: 1170,
+      height: 2532,
+      base64: "QUJD",
+    };
+    store.clips[1]!.sourceImage = {
+      filename: "second.jpg",
+      width: 896,
+      height: 1152,
+      base64: "REVG",
+    };
     vi.advanceTimersByTime(1000);
 
     const saved = JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!);
     expect(saved.openingImage.filename).toBe("open.png");
+    expect(saved.openingImage.width).toBe(1170);
+    expect(saved.openingImage.height).toBe(2532);
     expect(saved.openingImage.base64).toBeNull();
+    expect(saved.clips[1].sourceImage).toMatchObject({
+      filename: "second.jpg",
+      width: 896,
+      height: 1152,
+      base64: null,
+    });
     // In-memory payload stays intact.
     expect(store.openingImage?.base64).toBe("QUJD");
 
     const reloaded = freshStore();
     reloaded.hydrate();
     await vi.waitFor(() => expect(reloaded.openingImage?.base64).toBe("QUJD"));
+    expect(reloaded.openingImage).toMatchObject({
+      width: 1170,
+      height: 2532,
+    });
+    await vi.waitFor(() =>
+      expect(reloaded.clips[1]?.sourceImage).toMatchObject({
+        width: 896,
+        height: 1152,
+        base64: "REVG",
+      }),
+    );
   });
 
   it("parks clips while keeping one-shot and sequence prompts independent", () => {

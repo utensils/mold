@@ -82,6 +82,12 @@ export interface GenerateForm {
    * name it came from. Ships as `source_image_name` so Reuse settings can
    * restore the input image later; always cleared with the image. */
   sourceImageName: string | null;
+  /** Decoded dimensions of the effective primary conditioning image. For
+   * single-source families this describes `sourceImage`; for Qwen edit it
+   * describes attachment 0 (the Target). These are UI sizing metadata only
+   * and never travel on the generation wire. */
+  sourceImageWidth: number | null;
+  sourceImageHeight: number | null;
   /** Qwen-Image-Edit picture strip, base64 each (no data-URI prefix). Order is
    * load-bearing: index 0 is the primary edit Target, the rest are References.
    * Only read in `sourceImageMode === "qwen-edit"`; empty everywhere else. */
@@ -141,6 +147,8 @@ export function newGenerateForm(): GenerateForm {
     strength: 0.75,
     sourceImage: null,
     sourceImageName: null,
+    sourceImageWidth: null,
+    sourceImageHeight: null,
     imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
@@ -228,6 +236,8 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   if (!caps.supportsImg2img) {
     form.sourceImage = null;
     form.sourceImageName = null;
+    form.sourceImageWidth = null;
+    form.sourceImageHeight = null;
     form.maskImage = null;
     form.imageAttachments = [];
   } else if (caps.sourceImageMode === "qwen-edit") {
@@ -512,6 +522,8 @@ export function applyMetadataToForm(
   // (The async source restore may repopulate the pair afterwards.)
   form.sourceImage = null;
   form.sourceImageName = null;
+  form.sourceImageWidth = null;
+  form.sourceImageHeight = null;
   form.maskImage = null;
   form.controlImage = null;
   form.imageAttachments = [];
@@ -569,6 +581,8 @@ export function applyRequestToForm(
   form.strength = request.strength ?? form.strength;
   form.sourceImage = request.source_image ?? null;
   form.sourceImageName = request.source_image_name ?? null;
+  form.sourceImageWidth = null;
+  form.sourceImageHeight = null;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;

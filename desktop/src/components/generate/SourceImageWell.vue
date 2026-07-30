@@ -38,6 +38,7 @@ function onSourcePicked(picked: PickedImage[]) {
     props.form.sourceImage = first.base64;
     // Provenance label for Reuse-settings source restore.
     props.form.sourceImageName = first.filename || null;
+    props.form.sourceFit = { mode: "lanczos-resize" };
   }
 }
 function onMaskApplied(mask: string) {
@@ -163,6 +164,7 @@ function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
     props.form.sourceImage = b64;
     // The label lives and dies with the image (Reuse-settings restore).
     props.form.sourceImageName = b64 ? name : null;
+    if (b64) props.form.sourceFit = { mode: "lanczos-resize" };
   } else if (slot === "mask") props.form.maskImage = b64;
   else props.form.controlImage = b64;
 }

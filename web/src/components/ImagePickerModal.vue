@@ -17,6 +17,7 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { listGallery, thumbnailUrl, imageUrl } from "../api";
 import { blobToBase64 } from "../lib/base64";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
 import type { GalleryImage, SourceImageState } from "../types";
 
@@ -114,11 +115,18 @@ async function emitFiles(files: File[]) {
   uploadError.value = null;
   const selected = props.multiple ? images : images.slice(0, 1);
   const picked = await Promise.all(
-    selected.map(async (file) => ({
-      kind: "upload" as const,
-      filename: file.name,
-      base64: await blobToBase64(file),
-    })),
+    selected.map(async (file) => {
+      const base64 = await blobToBase64(file);
+      const dimensions = imageDimensionsFromBase64(base64);
+      return {
+        kind: "upload" as const,
+        filename: file.name,
+        base64,
+        ...(dimensions
+          ? { width: dimensions.width, height: dimensions.height }
+          : {}),
+      };
+    }),
   );
   emit("pick", picked);
   emit("close");
@@ -163,7 +171,17 @@ async function pickFromGallery(item: GalleryImage) {
   }
   const blob = await res.blob();
   const b64 = await blobToBase64(blob);
-  emit("pick", [{ kind: "gallery", filename: item.filename, base64: b64 }]);
+  const dimensions = imageDimensionsFromBase64(b64);
+  emit("pick", [
+    {
+      kind: "gallery",
+      filename: item.filename,
+      base64: b64,
+      ...(dimensions
+        ? { width: dimensions.width, height: dimensions.height }
+        : {}),
+    },
+  ]);
   emit("close");
 }
 </script>

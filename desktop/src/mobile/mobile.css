@@ -709,6 +709,26 @@ textarea.control {
   padding: 0;
 }
 
+.mobile-resolution-source {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--edge));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--safelight) 7%, transparent);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mobile-resolution-source strong {
+  color: var(--rebate);
+}
+
+.mobile-resolution-source .secondary-button {
+  justify-self: start;
+}
+
 .mobile-resolution-legend,
 .mobile-resolution-label {
   color: var(--ink-3);

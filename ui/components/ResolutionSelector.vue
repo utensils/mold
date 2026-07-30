@@ -23,6 +23,14 @@ const props = withDefaults(
     /** Aspect ratio (width / height) the pixels resolve against. */
     ratio: number;
     options?: readonly ResolutionOption[];
+    /** Explicit authoritative pixels for custom/source-derived resolutions.
+     * When both are present they win over the selected preset projection. */
+    resolvedWidth?: number;
+    resolvedHeight?: number;
+    /** Optional badge beside the resolved pixels, e.g. Source or Downscaled. */
+    customLabel?: string | undefined;
+    /** Optional explanatory status rendered below the resolved pixels. */
+    status?: string | undefined;
     /** Accessible name for the group. */
     label?: string;
     disabled?: boolean;
@@ -37,6 +45,14 @@ const segments = computed(() =>
 );
 
 const resolved = computed(() => {
+  if (
+    Number.isFinite(props.resolvedWidth) &&
+    Number.isFinite(props.resolvedHeight) &&
+    Number(props.resolvedWidth) > 0 &&
+    Number(props.resolvedHeight) > 0
+  ) {
+    return `${props.resolvedWidth}×${props.resolvedHeight} px`;
+  }
   const selected = props.options.find(
     (option) => option.mp === props.modelValue,
   );
@@ -55,15 +71,44 @@ const resolved = computed(() => {
       :disabled="disabled"
       @update:model-value="emit('update:modelValue', $event)"
     />
-    <div class="ms-res__dims">{{ resolved }}</div>
+    <div class="ms-res__resolved">
+      <div class="ms-res__dims">{{ resolved }}</div>
+      <span v-if="customLabel" class="ms-res__label">{{ customLabel }}</span>
+    </div>
+    <div v-if="status" class="ms-res__status" role="status">{{ status }}</div>
   </div>
 </template>
 
 <style scoped>
 .ms-res__dims {
-  margin-top: 7px;
   font-family: var(--f-mono);
   font-size: 11px;
   color: var(--ink-3);
+}
+
+.ms-res__resolved {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.ms-res__label {
+  border: 1px solid var(--sel-border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ms-res__status {
+  margin-top: 4px;
+  color: var(--ink-3);
+  font-size: 10px;
+  line-height: 1.4;
 }
 </style>

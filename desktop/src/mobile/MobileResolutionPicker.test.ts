@@ -9,16 +9,22 @@ interface PickerState {
   family: string;
 }
 
-function mountPicker(width: number, height: number, family = "flux") {
+function mountPicker(
+  width: number,
+  height: number,
+  family = "flux",
+  sourceDimensions: { width: number; height: number } | null = null,
+) {
   const state = reactive<PickerState>({ width, height, family });
   const Harness = defineComponent({
     components: { MobileResolutionPicker },
-    setup: () => ({ state }),
+    setup: () => ({ state, sourceDimensions }),
     template: `
       <MobileResolutionPicker
         v-model:width="state.width"
         v-model:height="state.height"
         :family="state.family"
+        :source-dimensions="sourceDimensions"
       />
     `,
   });
@@ -100,6 +106,25 @@ describe("MobileResolutionPicker", () => {
     await tierSegments(wrapper)[0]?.trigger("click");
     expect(state).toMatchObject({ width: 512, height: 512 });
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("512 × 512 px");
+  });
+
+  it("labels a source-matched custom canvas and restores it after a manual override", async () => {
+    const sourceDimensions = { width: 896, height: 1152 };
+    const { wrapper, state } = mountPicker(896, 1152, "qwen-image-edit", sourceDimensions);
+
+    expect(wrapper.get("[data-test='mobile-source-resolution-status']").text()).toContain(
+      "Matches source · 896×1152",
+    );
+    expect(wrapper.find("[data-test='mobile-match-source-resolution']").exists()).toBe(false);
+
+    state.width = 1024;
+    state.height = 1024;
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-source-resolution-status']").text()).toContain(
+      "output is 1024×1024",
+    );
+    await wrapper.get("[data-test='mobile-match-source-resolution']").trigger("click");
+    expect(state).toMatchObject(sourceDimensions);
   });
 
   it("renders however many tiers the family's aspect bucket provides", () => {

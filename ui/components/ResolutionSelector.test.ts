@@ -65,6 +65,36 @@ describe("ResolutionSelector", () => {
     expect(wrapper.text()).toContain("Huge");
   });
 
+  it("shows authoritative custom pixels instead of the nearest selected preset", () => {
+    const options = [
+      {
+        mp: 1,
+        label: "1 MP",
+        width: 1024,
+        height: 1024,
+      },
+    ] as const;
+    const wrapper = make(1, 1, {
+      options,
+      resolvedWidth: 896,
+      resolvedHeight: 1152,
+      customLabel: "Source",
+      status: "Matches source · 896×1152",
+    });
+
+    expect(wrapper.find(".ms-res__dims").text()).toBe("896×1152 px");
+    expect(wrapper.find(".ms-res__label").text()).toBe("Source");
+    expect(wrapper.find("[role=status]").text()).toBe(
+      "Matches source · 896×1152",
+    );
+    expect(wrapper.text()).not.toContain("1024×1024 px");
+  });
+
+  it("requires both authoritative dimensions before overriding projection", () => {
+    const wrapper = make(1, 1, { resolvedWidth: 896 });
+    expect(wrapper.find(".ms-res__dims").text()).toBe("1024×1024 px");
+  });
+
   it("forwards disabled to the segmented control", async () => {
     const wrapper = make(1, 1, { disabled: true });
     await wrapper.find("[role=radiogroup]").trigger("keydown", {

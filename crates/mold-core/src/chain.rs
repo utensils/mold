@@ -709,6 +709,9 @@ impl ChainRequest {
     /// - `self.stages.len() <= MAX_CHAIN_STAGES`.
     /// - All auto-expand fields are `None` (caller must use `self.stages`).
     pub fn normalise(mut self) -> Result<Self> {
+        crate::validation::validate_generation_dimensions(self.width, self.height, None)
+            .map_err(MoldError::Validation)?;
+
         if self.stages.is_empty() {
             let prompt = self.prompt.take().ok_or_else(|| {
                 MoldError::Validation(

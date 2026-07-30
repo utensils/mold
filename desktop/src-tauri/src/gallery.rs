@@ -12,6 +12,8 @@ const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
 pub struct ImportedSourceImage {
     filename: String,
     base64: String,
+    width: u32,
+    height: u32,
     metadata: Option<mold_core::OutputMetadata>,
 }
 
@@ -40,7 +42,7 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
         Some(image::ImageFormat::Jpeg) => mold_core::OutputFormat::Jpeg,
         _ => return Err("Drop a PNG or JPEG image.".into()),
     };
-    reader
+    let (width, height) = reader
         .into_dimensions()
         .map_err(|error| format!("Couldn't decode the dropped image: {error}"))?;
 
@@ -59,6 +61,8 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
     Ok(ImportedSourceImage {
         filename,
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        width,
+        height,
         metadata,
     })
 }

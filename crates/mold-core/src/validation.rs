@@ -53,6 +53,56 @@ fn megapixel_limit_label() -> String {
     format!("{:.1}MP", MAX_PIXELS as f64 / 1_000_000.0)
 }
 
+/// Required pixel grid for a generation family.
+///
+/// LTX video VAEs compress spatial dimensions by 32. Every other current
+/// family uses the shared 16px generation grid.
+pub fn dimension_alignment_for_family(family: Option<&str>) -> u32 {
+    if matches!(family, Some("ltx-video" | "ltx2")) {
+        32
+    } else {
+        16
+    }
+}
+
+/// Validate explicit generation dimensions without rewriting them.
+///
+/// This is the shared admission boundary for one-shot and chain requests.
+/// Clients may project a source image onto this contract, but the server must
+/// reject invalid dimensions rather than silently changing the requested
+/// canvas.
+pub fn validate_generation_dimensions(
+    width: u32,
+    height: u32,
+    family: Option<&str>,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("width and height must be > 0".to_string());
+    }
+
+    let alignment = dimension_alignment_for_family(family);
+    if !width.is_multiple_of(alignment) || !height.is_multiple_of(alignment) {
+        let family_label = family
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" for {value} models"))
+            .unwrap_or_default();
+        return Err(format!(
+            "width ({width}) and height ({height}) must be multiples of {alignment}{family_label}"
+        ));
+    }
+
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_PIXELS {
+        return Err(format!(
+            "{width}x{height} = {:.2} megapixels exceeds the {} limit (VAE VRAM constraint)",
+            pixels as f64 / 1_000_000.0,
+            megapixel_limit_label()
+        ));
+    }
+
+    Ok(())
+}
+
 fn mib_label(bytes: usize) -> String {
     format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
@@ -290,28 +340,7 @@ pub fn validate_generate_request_with_family(
     if req.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
-    if req.width == 0 || req.height == 0 {
-        return Err("width and height must be > 0".to_string());
-    }
-    if !req.width.is_multiple_of(16) || !req.height.is_multiple_of(16) {
-        return Err(format!(
-            "width ({}) and height ({}) must be multiples of 16 (FLUX patchification requirement)",
-            req.width, req.height
-        ));
-    }
-    // Cap by total pixel count rather than per-dimension to allow portrait/landscape.
-    // 896x1152 = 1.03M, 1024x1024 = 1.05M, 1280x768 = 0.98M — all fine.
-    // 1408x1408 = 1.98M — too large, OOMs on VAE decode.
-    let pixels = req.width as u64 * req.height as u64;
-    if pixels > MAX_PIXELS {
-        return Err(format!(
-            "{}x{} = {:.2} megapixels exceeds the {} limit (VAE VRAM constraint)",
-            req.width,
-            req.height,
-            pixels as f64 / 1_000_000.0,
-            megapixel_limit_label()
-        ));
-    }
+    validate_generation_dimensions(req.width, req.height, family)?;
     if req.steps == 0 {
         return Err("steps must be >= 1".to_string());
     }
@@ -1183,6 +1212,29 @@ mod tests {
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("multiples of 16"));
+    }
+
+    #[test]
+    fn ltx2_dimensions_must_be_multiple_of_32() {
+        let mut req = valid_req();
+        req.width = 1008; // multiple of 16, but not 32
+        req.height = 704;
+
+        let error = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("LTX-2 must reject a 16px-only canvas");
+
+        assert!(error.contains("multiples of 32"), "{error}");
+        assert!(error.contains("ltx2"), "{error}");
+    }
+
+    #[test]
+    fn ltx2_accepts_custom_32_aligned_dimensions() {
+        let mut req = valid_req();
+        req.width = 1056;
+        req.height = 736;
+        req.output_format = Some(OutputFormat::Mp4);
+
+        assert!(validate_generate_request_with_family(&req, Some("ltx2")).is_ok());
     }
 
     #[test]

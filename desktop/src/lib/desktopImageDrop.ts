@@ -6,6 +6,8 @@ import { applyMetadataToForm, type GenerateForm } from "./generateForm";
 export interface DesktopImageImport {
   filename: string;
   base64: string;
+  width: number;
+  height: number;
   metadata: OutputMetadata | null;
 }
 
@@ -41,6 +43,8 @@ export function applyDesktopImageDrop(
   } else {
     return { attached: false, metadataApplied };
   }
+  form.sourceImageWidth = image.width;
+  form.sourceImageHeight = image.height;
 
   return { attached: true, metadataApplied };
 }

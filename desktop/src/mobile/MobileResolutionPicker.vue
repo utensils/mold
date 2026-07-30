@@ -11,6 +11,12 @@ import {
 } from "../lib/resolutions";
 import type { ModelEntry } from "../lib/api/types";
 import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  sourceResolutionStatus,
+  type SourceDimensions,
+} from "@studio/lib/sourceResolution";
+import {
   aspectsForOrientation,
   closestResolutionPreset,
   MOBILE_RESOLUTION_ORIENTATIONS,
@@ -25,9 +31,10 @@ const props = withDefaults(
   defineProps<{
     family: string;
     model?: ModelEntry | null;
+    sourceDimensions?: SourceDimensions | null;
     disabled?: boolean;
   }>(),
-  { disabled: false, model: null },
+  { disabled: false, model: null, sourceDimensions: null },
 );
 
 const width = defineModel<number>("width", { required: true });
@@ -45,6 +52,22 @@ const currentAspect = computed(() =>
 );
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
 const resolutionError = computed(() => resolutionValidationError(width.value, height.value));
+const sourceResolution = computed(() =>
+  props.sourceDimensions
+    ? resolveSourceResolution(props.sourceDimensions, props.model ?? props.family)
+    : null,
+);
+const followsSource = computed(
+  () =>
+    sourceResolution.value !== null &&
+    canvasMatchesSourceResolution(
+      { width: width.value, height: height.value },
+      sourceResolution.value,
+    ),
+);
+const sourceStatus = computed(() =>
+  sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
+);
 watch(resolutionError, (next) => emit("validity-change", !next), { immediate: true });
 const aspectOptions = computed(() =>
   aspectsForOrientation(presets.value, currentOrientation.value),
@@ -151,6 +174,14 @@ function snapHeight(event: Event): void {
 function swapDimensions(): void {
   [width.value, height.value] = [height.value, width.value];
 }
+
+function matchSource(): void {
+  const source = sourceResolution.value;
+  if (!source) return;
+  width.value = source.output.width;
+  height.value = source.output.height;
+  manualOpen.value = true;
+}
 </script>
 
 <template>
@@ -166,6 +197,29 @@ function swapDimensions(): void {
       Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
       {{ currentOrientation }}.
     </p>
+
+    <div
+      v-if="sourceStatus"
+      class="mobile-resolution-source"
+      data-test="mobile-source-resolution-status"
+      role="status"
+    >
+      <strong>{{ followsSource ? sourceStatus.label : "Manual" }}</strong>
+      <span>{{
+        followsSource
+          ? sourceStatus.detail
+          : `${sourceStatus.detail} · output is ${width}×${height}`
+      }}</span>
+      <button
+        v-if="!followsSource"
+        type="button"
+        class="secondary-button"
+        data-test="mobile-match-source-resolution"
+        @click="matchSource"
+      >
+        Match source
+      </button>
+    </div>
 
     <div class="mobile-resolution-group">
       <span class="mobile-resolution-label">Orientation</span>

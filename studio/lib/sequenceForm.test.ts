@@ -10,6 +10,8 @@ import {
 } from "./sequenceForm";
 import type { ChainScript } from "./api/chainTypes";
 
+const PNG_1170_BY_2532 = "iVBORw0KGgoAAAANSUhEUgAABJIAAAnk";
+
 function shared(
   extra: Partial<SequenceSharedParams> = {},
 ): SequenceSharedParams {
@@ -150,6 +152,35 @@ describe("script round-trip", () => {
     expect(back.stages[1]?.transition).toBe("fade");
     expect(back.stages[1]?.fade_frames).toBe(8);
     expect(back.stages[0]?.source_image_b64).toBe("QUJD");
+  });
+
+  it("recovers source dimensions from script media without adding wire fields", () => {
+    const script: ChainScript = {
+      chain: { model: "ltx-2-19b-distilled:fp8" },
+      stages: [
+        {
+          prompt: "opening",
+          frames: 97,
+          source_image_b64: PNG_1170_BY_2532,
+        },
+        { prompt: "landing", frames: 97 },
+      ],
+    };
+
+    const loaded = chainScriptToClips(script);
+    expect(loaded.openingImage).toMatchObject({
+      width: 1170,
+      height: 2532,
+      base64: PNG_1170_BY_2532,
+    });
+    const back = clipsToChainScript(shared(), loaded.clips, {
+      motionTailFrames: 17,
+      enableAudio: false,
+      openingImage: loaded.openingImage,
+    });
+    expect(back.stages[0]).not.toHaveProperty("source_image_width");
+    expect(back.stages[0]).not.toHaveProperty("source_image_height");
+    expect(back.stages[0]?.source_image_b64).toBe(PNG_1170_BY_2532);
   });
 
   it("refuses to silently drop an opening image whose payload is still restoring", () => {

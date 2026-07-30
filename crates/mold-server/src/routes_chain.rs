@@ -600,6 +600,13 @@ pub(crate) fn validate_and_normalize_chain_family(
         .clone()
         .or_else(|| manifest.map(|model| model.family.clone()))
         .unwrap_or_default();
+    mold_core::validate_generation_dimensions(
+        req.width,
+        req.height,
+        (!family.is_empty()).then_some(family.as_str()),
+    )
+    .map_err(ApiError::validation)?;
+
     // Only reject early when we positively know the family is non-chain-capable.
     // An empty family means the model isn't in the manifest yet (catalog
     // synth, mock test, etc.) — let it through; the engine's
@@ -1373,6 +1380,43 @@ mod tests {
 
         assert!(error.error.contains("two-stage"));
         assert!(error.error.contains("distilled"));
+    }
+
+    fn ltx2_chain_config(model: &str) -> mold_core::Config {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn chain_preflight_rejects_ltx2_dimensions_aligned_only_to_16() {
+        let mut request = req(OutputFormat::Mp4);
+        request.width = 1008;
+        request.height = 704;
+        let config = ltx2_chain_config(&request.model);
+
+        let error = validate_and_normalize_chain_family(&config, &mut request)
+            .expect_err("LTX-2 chain must reject a 16px-only canvas");
+
+        assert!(error.error.contains("multiples of 32"), "{}", error.error);
+        assert!(error.error.contains("ltx2"), "{}", error.error);
+    }
+
+    #[test]
+    fn chain_preflight_accepts_custom_ltx2_dimensions_aligned_to_32() {
+        let mut request = req(OutputFormat::Mp4);
+        request.width = 1056;
+        request.height = 736;
+        let config = ltx2_chain_config(&request.model);
+
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("custom 32px-aligned LTX-2 canvas should be admitted");
     }
 
     struct HandlerFailingExecutor;
