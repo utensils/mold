@@ -447,6 +447,7 @@ is_schnell = false
     fn exact_ltx2_model_paths_allow_absent_standalone_vae() {
         let config = ModelConfig {
             transformer: Some("/frozen/ltx2-transformer".into()),
+            vae: Some(String::new()),
             family: Some("ltx2".into()),
             ..ModelConfig::default()
         };
@@ -461,6 +462,7 @@ is_schnell = false
     fn exact_diffusion_model_paths_still_require_vae() {
         let config = ModelConfig {
             transformer: Some("/frozen/flux-transformer".into()),
+            vae: Some(String::new()),
             family: Some("flux".into()),
             ..ModelConfig::default()
         };

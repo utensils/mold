@@ -346,7 +346,7 @@ impl ModelPaths {
     /// admission so a restart cannot silently substitute different artifacts.
     pub fn resolve_from_model_config_exact(model_cfg: &ModelConfig) -> Option<Self> {
         let path = |value: Option<&str>| value.map(PathBuf::from);
-        let vae = match model_cfg.vae.as_deref() {
+        let vae = match model_cfg.vae.as_deref().filter(|path| !path.is_empty()) {
             Some(path) => PathBuf::from(path),
             None if model_cfg.family.as_deref().is_some_and(|family| {
                 family == "ltx2"
