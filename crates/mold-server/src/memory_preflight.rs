@@ -925,11 +925,11 @@ fn request_sensitive_activation_memory(
     let batch = u64::from(req.batch_size.max(1));
     let video_frames = u64::from(req.frames.unwrap_or(1).max(1));
     let video_factor = if hint.is_some_and(|h| h.family.streaming_transformer()) {
-        // Video runtimes denoise multiple latent frames but do not keep every
-        // frame's full activation workspace resident at once. Scale
-        // sublinearly so longer clips still move the estimate without
-        // turning it into a file-size guess.
-        video_frames.div_ceil(25).max(1)
+        // LTX-2 keeps the temporally-compressed latent volume live while its
+        // transformer blocks stream through the GPU. Price every latent frame
+        // (8x temporal compression), matching the adaptive-residency planner,
+        // so it does not spend that memory on resident blocks.
+        (video_frames.saturating_sub(1) / 8 + 1).max(1)
     } else {
         1
     };
@@ -1064,6 +1064,30 @@ mod fail_closed_tests {
         assert!(ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("gpu"), None, 7));
         assert!(
             !ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("cpu"), None, 1)
+        );
+    }
+
+    #[test]
+    fn ltx2_activation_budget_scales_with_temporally_compressed_frames() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt": "Bring this image to life",
+                "model": "ltx-2-19b-distilled:fp8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 8,
+                "guidance": 3.0,
+                "frames": 97
+            }"#,
+        )
+        .unwrap();
+        let hint = ActivationHint::from_request(&request, "ltx2");
+        let per_latent_frame = hint.budget_bytes();
+
+        assert_eq!(
+            request_sensitive_activation_memory(&request, Some(hint), false),
+            per_latent_frame * 13,
+            "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
 
