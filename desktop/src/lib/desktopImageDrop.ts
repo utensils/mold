@@ -8,6 +8,8 @@ export interface DesktopImageImport {
   base64: string;
   width: number;
   height: number;
+  /** Content key used by the native app to reopen the original local path. */
+  sha256?: string;
   metadata: OutputMetadata | null;
 }
 
