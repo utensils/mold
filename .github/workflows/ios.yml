@@ -69,9 +69,65 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Do not let an obsolete PR revision hold a macOS runner while its
+  # replacement waits. Main and manual runs always finish.
+  group: ios-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changes:
+    name: Classify iOS changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'apps/mobile/**'
+              - 'studio/**'
+              - 'ui/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'bun.nix'
+              - 'desktop/src/mobile/**'
+              - 'desktop/src/components/**'
+              - 'desktop/src/lib/**'
+              - 'desktop/src/stores/**'
+              - 'desktop/src/styles/**'
+              - 'desktop/src/assets/**'
+              - 'desktop/package.json'
+              - 'desktop/icon-master.png'
+              - 'desktop/vite.mobile.config.ts'
+              - 'desktop/index.mobile.html'
+              - 'scripts/ios.sh'
+              - 'scripts/generate-ios-icons.sh'
+              - 'scripts/tests/ios-release-assets.sh'
+              - 'scripts/tests/ios-testflight-distribution.sh'
+              - 'scripts/ios-sim.sh'
+              - 'scripts/tests/ios-sim-pick.sh'
+              - 'scripts/ensure-testflight-tester.rb'
+              - 'scripts/wait-for-testflight.rb'
+              - '.github/workflows/ios.yml'
+              - '.github/workflows/testflight-ios.yml'
+            rust:
+              - 'apps/mobile/src-tauri/**'
+              - 'flake.nix'
+              - '.github/workflows/ios.yml'
+              - '.github/workflows/testflight-ios.yml'
+
   frontend:
     name: Mobile frontend
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -89,6 +145,8 @@ jobs:
 
   simulator-rust:
     name: iOS simulator Rust
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: macos-14
     defaults:
       run:

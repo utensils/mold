@@ -10,6 +10,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "1"
 
+concurrency:
+  # A pushed commit makes every older run for that PR obsolete. Cancel it
+  # before it can keep scarce macOS/CUDA runners busy. Main runs are never
+  # canceled because they warm caches and provide the post-merge signal.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Cache strategy: jobs that compile the same features share a cache key.
 # Only main-branch pushes save caches; PRs read from main's cache.
 #
@@ -29,6 +36,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      gpu: ${{ steps.filter.outputs.gpu }}
       website: ${{ steps.filter.outputs.website }}
       web: ${{ steps.filter.outputs.web }}
       nix: ${{ steps.filter.outputs.nix }}
@@ -50,6 +58,18 @@ jobs:
               - 'docs/qualification/local-multi-gpu-report.schema.json'
               - 'docs/qualification/README.md'
               - '.github/workflows/ci.yml'
+            # Forced-local checks exist to compile backend-specific code that
+            # the ordinary workspace gate cannot see. Backend-neutral crates
+            # (catalog, DB, Discord, scheduler) are already covered by `rust`.
+            gpu:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/mold-cli/**'
+              - 'crates/mold-core/**'
+              - 'crates/mold-inference/**'
+              - 'crates/mold-server/**'
+              - 'crates/mold-tui/**'
+              - '.github/workflows/ci.yml'
             website:
               - 'website/**'
               - '.github/workflows/ci.yml'
@@ -63,7 +83,6 @@ jobs:
               - '.github/workflows/ci.yml'
             nix:
               - 'web/**'
-              - 'desktop/**'
               - 'studio/**'
               - 'ui/**'
               - 'package.json'
@@ -102,6 +121,7 @@ jobs:
               - 'scripts/validate-cuda-qualification-report.py'
               - 'scripts/verify-png-artifact.py'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
+              - 'scripts/tests/ci-routing-contract.sh'
               - 'scripts/tests/cuda-distribution-contract.sh'
               - 'scripts/tests/cuda-ptx-parser-contract.py'
               - 'scripts/tests/install-cuda-arch.sh'
@@ -124,6 +144,8 @@ jobs:
         run: bash scripts/tests/release-sync-pr.sh
       - name: Test CI coverage disk guard
         run: bash scripts/tests/ci-coverage-disk-guard.sh
+      - name: Test CI job routing
+        run: bash scripts/tests/ci-routing-contract.sh
       - name: Test Docker web build context
         run: bash scripts/tests/docker-web-context.sh
       - name: Test desktop Candle lock synchronization
@@ -242,7 +264,7 @@ jobs:
   cuda-check:
     name: CUDA forced-local typecheck
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.gpu == 'true'
     runs-on: ubuntu-22.04
     env:
       CUDA_COMPUTE_CAP: "89"
@@ -275,7 +297,7 @@ jobs:
   metal-check:
     name: Metal forced-local typecheck
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.gpu == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
@@ -289,7 +311,10 @@ jobs:
 
   coverage:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    # PRs already run the complete test suite in `rust`. Coverage is
+    # informational (Codecov failures are non-blocking), so collect it once
+    # after merge instead of recompiling the workspace on every PR revision.
+    if: github.event_name == 'push' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
