@@ -4743,10 +4743,7 @@ fn ltx2_video_activation_budget(plan: &Ltx2GeneratePlan) -> u64 {
         ActivationFamily::Ltx2Video,
     );
     let latent_frames = ((plan.num_frames.max(1) - 1) / 8 + 1) as u64;
-    let default_latent_frames = 13u64; // 97 pixel frames at 8x temporal compression.
     base.saturating_mul(latent_frames.max(1))
-        .saturating_add(default_latent_frames - 1)
-        / default_latent_frames
 }
 
 fn ltx2_adaptive_transformer_plan(
@@ -6794,6 +6791,28 @@ mod tests {
                 24_000_000_000
             ),
             super::Ltx2TransformerResidencyMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn ltx2_adaptive_residency_reserves_every_live_latent_frame() {
+        let req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+        let per_latent_frame = super::activation_bytes(
+            plan.width,
+            plan.height,
+            1,
+            super::dtype_bytes(DType::BF16),
+            super::ActivationFamily::Ltx2Video,
+        );
+
+        assert_eq!(
+            super::ltx2_video_activation_budget(&plan),
+            per_latent_frame * 13,
+            "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
 

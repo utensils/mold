@@ -212,19 +212,7 @@ function onVideoError() {
   stage.value = "broken";
 }
 
-function onCardClick(evt: MouseEvent) {
-  if (props.selectMode) {
-    emit("toggle-select", {
-      item: props.item,
-      shift: evt.shiftKey,
-      meta: evt.metaKey || evt.ctrlKey,
-    });
-    return;
-  }
-  emit("open", props.item);
-}
-
-function onCardKey(evt: KeyboardEvent) {
+function onCardActivate(evt: MouseEvent | KeyboardEvent) {
   if (props.selectMode) {
     emit("toggle-select", {
       item: props.item,
@@ -268,9 +256,9 @@ function onRecreate(evt: Event) {
         ? `${selected ? 'Deselect' : 'Select'} ${item.filename}`
         : `Open ${item.filename}`
     "
-    @click="onCardClick"
-    @keydown.enter.prevent="onCardKey"
-    @keydown.space.prevent="onCardKey"
+    @click="onCardActivate"
+    @keydown.enter.prevent="onCardActivate"
+    @keydown.space.prevent="onCardActivate"
   >
     <!-- Media frame: aspect-ratio preserved, media absolutely positioned -->
     <div class="relative w-full overflow-hidden" :style="aspectStyle">
