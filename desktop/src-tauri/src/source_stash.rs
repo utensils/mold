@@ -115,6 +115,7 @@ fn remembered_source_read(dir: &Path, sha256: &str) -> Result<Option<Vec<u8>>, S
         let _ = std::fs::remove_file(pointer);
         return Ok(None);
     }
+    touch(&pointer);
     Ok(Some(bytes))
 }
 
@@ -308,16 +309,22 @@ mod tests {
         let bytes = b"target bytes";
         std::fs::write(&source, bytes).unwrap();
         let sha = sha256_hex(bytes);
-        std::fs::write(dir.path().join(&sha), source.as_os_str().as_bytes()).unwrap();
+        let pointer = dir.path().join(&sha);
+        std::fs::write(&pointer, source.as_os_str().as_bytes()).unwrap();
+        filetime::set_file_mtime(&pointer, filetime::FileTime::from_unix_time(1, 0)).unwrap();
 
         assert_eq!(
             remembered_source_read(dir.path(), &sha).unwrap(),
             Some(bytes.to_vec())
         );
+        assert!(
+            std::fs::metadata(&pointer).unwrap().modified().unwrap()
+                > std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)
+        );
 
         std::fs::write(&source, b"changed").unwrap();
         assert_eq!(remembered_source_read(dir.path(), &sha).unwrap(), None);
-        assert!(!dir.path().join(sha).exists());
+        assert!(!pointer.exists());
     }
 
     #[test]

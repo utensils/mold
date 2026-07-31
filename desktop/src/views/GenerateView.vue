@@ -2344,6 +2344,8 @@ function applyPrefill() {
 async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
   if (!caps.value.supportsImg2img) return;
+  const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
+  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
   const modelAtStart = form.model;
   const deps: SourceRestoreDeps = {
     stashGet: (sha) => ipc.sourceStashGet(sha),
@@ -2362,7 +2364,6 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       return blobToBase64(await res.blob());
     },
   };
-  const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
   const editRestore = qwenEdit ? await restoreEditImages(metadata, deps) : null;
   const restored = qwenEdit ? null : await restoreSourceImage(metadata, deps);
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
@@ -2371,8 +2372,8 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   // family can't take an image at all.
   if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
   if (!caps.value.supportsImg2img) return;
+  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
   if (qwenEdit && caps.value.sourceImageMode === "qwen-edit" && editRestore?.images.length) {
-    if (form.imageAttachments.length > 0) return;
     form.imageAttachments = editRestore.images;
     if (editRestore.missing > 0) {
       toasts.push(
@@ -2383,7 +2384,6 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       );
     }
   } else if (!qwenEdit && caps.value.sourceImageMode === "single" && restored) {
-    if (form.sourceImage) return;
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
   } else {
