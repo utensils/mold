@@ -85,6 +85,7 @@ impl LegacyChainWaiter {
 #[derive(Debug, Default)]
 struct ModelCudaOomState {
     failed_ordinals: BTreeSet<usize>,
+    failed_ordinals_retry_at: Option<Instant>,
     unschedulable_until: Option<Instant>,
 }
 
@@ -104,7 +105,10 @@ impl ModelCudaOomOutcome {
 }
 
 pub(crate) fn record_model_cuda_oom(model_name: &str, ordinal: usize) -> ModelCudaOomOutcome {
-    let now = Instant::now();
+    record_model_cuda_oom_at(model_name, ordinal, Instant::now())
+}
+
+fn record_model_cuda_oom_at(model_name: &str, ordinal: usize, now: Instant) -> ModelCudaOomOutcome {
     let mut states = MODEL_CUDA_OOMS.write().unwrap();
     let state = states.entry(model_name.to_string()).or_default();
 
@@ -116,19 +120,27 @@ pub(crate) fn record_model_cuda_oom(model_name: &str, ordinal: usize) -> ModelCu
         }
         state.unschedulable_until = None;
         state.failed_ordinals.clear();
+        state.failed_ordinals_retry_at = None;
+    } else if state
+        .failed_ordinals_retry_at
+        .is_some_and(|retry_at| now >= retry_at)
+    {
+        state.failed_ordinals.clear();
+        state.failed_ordinals_retry_at = None;
     }
 
     state.failed_ordinals.insert(ordinal);
+    let retry_at = now + MODEL_CUDA_OOM_COOLDOWN;
+    state.failed_ordinals_retry_at = Some(retry_at);
     let unschedulable_until = if state.failed_ordinals.len() >= 2 {
-        let until = now + MODEL_CUDA_OOM_COOLDOWN;
-        state.unschedulable_until = Some(until);
+        state.unschedulable_until = Some(retry_at);
         tracing::warn!(
             model = %model_name,
             failed_gpus = ?state.failed_ordinals,
             cooldown_secs = MODEL_CUDA_OOM_COOLDOWN.as_secs(),
             "model marked temporarily unschedulable after CUDA OOM on multiple GPUs"
         );
-        Some(until)
+        Some(retry_at)
     } else {
         None
     };
@@ -155,7 +167,10 @@ pub(crate) fn model_unschedulable_message(model_name: &str) -> Option<String> {
 }
 
 pub(crate) fn failed_ordinals_for_model(model_name: &str) -> Vec<usize> {
-    let now = Instant::now();
+    failed_ordinals_for_model_at(model_name, Instant::now())
+}
+
+fn failed_ordinals_for_model_at(model_name: &str, now: Instant) -> Vec<usize> {
     let mut states = MODEL_CUDA_OOMS.write().unwrap();
     let Some(state) = states.get_mut(model_name) else {
         return Vec::new();
@@ -164,6 +179,13 @@ pub(crate) fn failed_ordinals_for_model(model_name: &str) -> Vec<usize> {
         if now >= until {
             states.remove(model_name);
         }
+        return Vec::new();
+    }
+    if state
+        .failed_ordinals_retry_at
+        .is_some_and(|retry_at| now >= retry_at)
+    {
+        states.remove(model_name);
         return Vec::new();
     }
     state.failed_ordinals.iter().copied().collect()
@@ -2530,6 +2552,26 @@ mod tests {
             .expect("sibling GPU should be tried before cooldown");
 
         assert_eq!(picked.gpu.ordinal, untested.gpu.ordinal);
+        clear_model_cuda_ooms_for_tests();
+    }
+
+    #[test]
+    fn lone_failed_ordinal_becomes_retryable_after_cooldown() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
+        clear_model_cuda_ooms_for_tests();
+        let model = "ltx-2-19b-distilled:fp8";
+        let failed_at = Instant::now();
+
+        record_model_cuda_oom_at(model, 0, failed_at);
+        assert_eq!(
+            failed_ordinals_for_model_at(model, failed_at + Duration::from_secs(59)),
+            vec![0],
+            "the failed device must remain excluded during its recovery cooldown"
+        );
+        assert!(
+            failed_ordinals_for_model_at(model, failed_at + Duration::from_secs(60)).is_empty(),
+            "a one-GPU host must eventually retry instead of blocking the model forever"
+        );
         clear_model_cuda_ooms_for_tests();
     }
 }
