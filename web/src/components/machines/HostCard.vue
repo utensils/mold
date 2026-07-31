@@ -30,7 +30,7 @@ const offline = computed(
   () => !disconnected.value && !showSkeleton.value && !poll.online.value,
 );
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (showSkeleton.value) return "unknown";
+  if (disconnected.value || showSkeleton.value) return "unknown";
   return poll.online.value ? "online" : "offline";
 });
 
@@ -113,10 +113,10 @@ function reconnect(event: Event) {
   <CardSurface v-else>
     <div
       class="hc"
-      role="button"
-      tabindex="0"
+      :role="disconnected ? undefined : 'button'"
+      :tabindex="disconnected ? undefined : 0"
       data-test="host-card"
-      :aria-label="`Open ${host.name}`"
+      :aria-label="disconnected ? undefined : `Open ${host.name}`"
       @click="open"
       @keydown="onKey"
     >

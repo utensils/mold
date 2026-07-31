@@ -40,7 +40,7 @@ import {
   HOSTS_CHANGED_EVENT,
   HOSTS_STORAGE_KEY,
   getGenerateTargetId,
-  getHost,
+  getKnownHost,
   removeHost,
   setHostConnected,
   setGenerateTargetId,
@@ -58,7 +58,7 @@ const registryRevision = ref(0);
 const hostId = computed(() => String(route.params.id));
 const host = computed(() => {
   void registryRevision.value;
-  return getHost(hostId.value);
+  return getKnownHost(hostId.value);
 });
 const isOrigin = computed(() => hostId.value === ORIGIN_HOST_ID);
 const disconnected = computed(() => host.value?.connected === false);
@@ -77,9 +77,11 @@ const poll = useHostPoll(liveHost, { withResources: true, intervalMs: 4000 });
 
 const online = computed(() => poll.online.value);
 const loading = computed(() => poll.loading.value);
-const offline = computed(() => !!host.value && !loading.value && !online.value);
+const offline = computed(
+  () => !!host.value && !disconnected.value && !loading.value && !online.value,
+);
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (!host.value || loading.value) return "unknown";
+  if (!host.value || disconnected.value || loading.value) return "unknown";
   return online.value ? "online" : "offline";
 });
 
@@ -131,7 +133,8 @@ function isCurrentSession(
     epoch === sessionEpoch &&
     current?.id === entry.id &&
     current.url === entry.url &&
-    current.apiKey === entry.apiKey
+    current.apiKey === entry.apiKey &&
+    current.connected !== false
   );
 }
 
@@ -405,7 +408,7 @@ function startHostSession() {
   queuePlan.value = null;
   models.value = [];
   downloads.value = [];
-  hostName.value = entry?.name ?? "";
+  hostName.value = host.value?.name ?? "";
   if (!entry) return;
   sessionAbort = new AbortController();
   const signal = sessionAbort.signal;
@@ -448,7 +451,7 @@ watch(
   () => {
     const entry = host.value;
     return entry
-      ? `${entry.id}\u0000${entry.url}\u0000${entry.apiKey ?? ""}`
+      ? `${entry.id}\u0000${entry.url}\u0000${entry.apiKey ?? ""}\u0000${entry.connected !== false}`
       : `missing:${hostId.value}`;
   },
   () => startHostSession(),
@@ -483,6 +486,7 @@ onBeforeUnmount(() => {
         <span class="md-addr">{{ address }}</span>
         <div class="md-spacer" />
         <button
+          v-if="!disconnected"
           type="button"
           class="md-target"
           data-test="detail-target"
@@ -501,7 +505,7 @@ onBeforeUnmount(() => {
           Rename
         </button>
         <button
-          v-if="!isOrigin"
+          v-if="!isOrigin && !disconnected"
           type="button"
           class="md-action"
           data-test="detail-disconnect"

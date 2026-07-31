@@ -118,9 +118,13 @@ describe("MachinesPage", () => {
     );
     poll.loading.value = false;
     const w = mountPage();
+    const card = w.findAll('[data-test="host-card"]')[1]!;
     expect(w.get('[data-test="host-disconnected"]').text()).toBe(
       "disconnected",
     );
+    expect(card.attributes("role")).toBeUndefined();
+    expect(card.attributes("tabindex")).toBeUndefined();
+    expect(card.attributes("aria-label")).toBeUndefined();
     await w.get('[data-test="host-reconnect"]').trigger("click");
     expect(
       JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0],

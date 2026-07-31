@@ -132,6 +132,11 @@ export function getHost(id: string): HostEntry | null {
   return listHosts().find((h) => h.id === id) ?? null;
 }
 
+/** A remembered host regardless of whether it is currently connected. */
+export function getKnownHost(id: string): HostEntry | null {
+  return listKnownHosts().find((h) => h.id === id) ?? null;
+}
+
 /**
  * The stored remote whose recorded instance id matches `instanceId`, or null.
  * A blank instance id never matches — an unknown server must not merge.
