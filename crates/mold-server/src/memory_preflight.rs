@@ -184,19 +184,46 @@ pub(crate) fn check_planned_memory_budget(
     model_name: &str,
     predicted_peak_bytes: u64,
     available_bytes: u64,
+    suggestion: &str,
 ) -> Result<(), ApiError> {
     if predicted_peak_bytes > available_bytes {
         return Err(ApiError::insufficient_memory(format!(
             "model '{}' frozen execution plan peak ~{:.1} GB no longer fits the current ~{:.1} GB \
              physical memory budget; memory pressure changed after scheduler admission. \
-             Retry after other GPU work releases memory.",
+             Retry after other GPU work releases memory. {}",
             model_name,
             predicted_peak_bytes as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
+            suggestion,
         )));
     }
 
+    let warn_limit = available_bytes * 8 / 10;
+    if predicted_peak_bytes > warn_limit {
+        tracing::warn!(
+            model = %model_name,
+            planned_peak_gb = format_args!("{:.1}", predicted_peak_bytes as f64 / 1_000_000_000.0),
+            available_gb = format_args!("{:.1}", available_bytes as f64 / 1_000_000_000.0),
+            "admitted execution plan is close to the current physical memory limit"
+        );
+    }
+
     Ok(())
+}
+
+fn check_planned_memory_budget_with_resident(
+    model_name: &str,
+    predicted_peak_bytes: u64,
+    free_bytes: u64,
+    resident_vram_bytes: u64,
+    suggestion: &str,
+) -> Result<(), ApiError> {
+    check_planned_memory_budget(
+        model_name,
+        predicted_peak_bytes,
+        free_bytes.saturating_add(resident_vram_bytes),
+        suggestion,
+    )
 }
 
 /// Build the suggestion text appended to preflight rejection messages.
@@ -587,14 +614,20 @@ pub(crate) fn preflight_planned_memory_guard(
     predicted_peak_bytes: u64,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     #[cfg(feature = "cuda")]
     {
-        let available = authoritative_cuda_available(
+        let free = authoritative_cuda_available(
             mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
-        )?
-        .saturating_add(active_vram_bytes);
-        return check_planned_memory_budget(model_name, predicted_peak_bytes, available);
+        )?;
+        return check_planned_memory_budget_with_resident(
+            model_name,
+            predicted_peak_bytes,
+            free,
+            active_vram_bytes,
+            rejection_suggestion(hint),
+        );
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -602,10 +635,12 @@ pub(crate) fn preflight_planned_memory_guard(
         if let Some(available) = mold_inference::device::available_system_memory_bytes()
             .filter(|available| *available > 0)
         {
-            return check_planned_memory_budget(
+            return check_planned_memory_budget_with_resident(
                 model_name,
                 predicted_peak_bytes,
-                available.saturating_add(active_vram_bytes),
+                available,
+                active_vram_bytes,
+                rejection_suggestion(hint),
             );
         }
         Ok(())
@@ -660,18 +695,24 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
     model_name: &str,
     predicted_peak_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     #[cfg(feature = "cuda")]
     {
         let available = authoritative_cuda_available(
             mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
         )?;
-        return check_planned_memory_budget(model_name, predicted_peak_bytes, available);
+        return check_planned_memory_budget(
+            model_name,
+            predicted_peak_bytes,
+            available,
+            rejection_suggestion(hint),
+        );
     }
 
     #[cfg(not(feature = "cuda"))]
     {
-        let _ = (model_name, predicted_peak_bytes, gpu_ordinal);
+        let _ = (model_name, predicted_peak_bytes, gpu_ordinal, hint);
         Ok(())
     }
 }
@@ -1082,7 +1123,13 @@ mod fail_closed_tests {
             "the path-based resident estimate reproduces the false rejection"
         );
         assert!(
-            check_planned_memory_budget("cv:2925935", frozen_offload_peak, fresh_available).is_ok(),
+            check_planned_memory_budget(
+                "cv:2925935",
+                frozen_offload_peak,
+                fresh_available,
+                rejection_suggestion(None),
+            )
+            .is_ok(),
             "a fresh worker must retain the scheduler's admitted block-offload peak"
         );
         assert!(
@@ -1090,6 +1137,7 @@ mod fail_closed_tests {
                 "cv:2925935",
                 frozen_offload_peak,
                 parked_free.saturating_add(reclaimable_active),
+                rejection_suggestion(None),
             )
             .is_ok(),
             "a parked reload must count the active engine that is about to be dropped"
@@ -1098,13 +1146,42 @@ mod fail_closed_tests {
 
     #[test]
     fn frozen_plan_recheck_fails_closed_when_physical_memory_drops_below_peak() {
-        let error = check_planned_memory_budget("planned", 8_300_000_000, 8_200_000_000)
-            .expect_err("new pressure after admission must reject the frozen plan");
+        let error = check_planned_memory_budget(
+            "planned",
+            8_300_000_000,
+            8_200_000_000,
+            rejection_suggestion(None),
+        )
+        .expect_err("new pressure after admission must reject the frozen plan");
 
         assert!(error.error.contains("frozen execution plan peak"));
         assert!(error
             .error
             .contains("memory pressure changed after scheduler admission"));
+    }
+
+    #[test]
+    fn frozen_hot_cache_plan_counts_reused_resident_footprint_but_not_stale_capacity() {
+        let resident_vram = 6_000_000_000;
+        let activation_and_workspace = 2_300_000_000;
+        let frozen_peak = resident_vram + activation_and_workspace;
+
+        assert!(check_planned_memory_budget_with_resident(
+            "hot-cache",
+            frozen_peak,
+            activation_and_workspace,
+            resident_vram,
+            rejection_suggestion(None),
+        )
+        .is_ok());
+        assert!(check_planned_memory_budget_with_resident(
+            "hot-cache",
+            frozen_peak,
+            activation_and_workspace - 1,
+            resident_vram,
+            rejection_suggestion(None),
+        )
+        .is_err());
     }
 
     fn hint(family: ActivationFamily) -> ActivationHint {

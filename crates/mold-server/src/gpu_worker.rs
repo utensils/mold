@@ -3054,26 +3054,28 @@ fn preflight_memory_guard_with_eviction(
     hint: Option<crate::model_manager::ActivationHint>,
     planned_peak_bytes: Option<u64>,
 ) -> Result<(), crate::routes::ApiError> {
+    if let Some(predicted_peak_bytes) = planned_peak_bytes {
+        return preflight_planned_memory_guard_with_eviction(
+            cache_lock,
+            model_name,
+            ordinal,
+            predicted_peak_bytes,
+            hint,
+        );
+    }
+
     loop {
         let active_vram = cache_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_vram_bytes();
-        let guard = match planned_peak_bytes {
-            Some(predicted_peak_bytes) => crate::memory_preflight::preflight_planned_memory_guard(
-                model_name,
-                predicted_peak_bytes,
-                active_vram,
-                ordinal,
-            ),
-            None => crate::model_manager::preflight_memory_guard(
-                model_name,
-                paths,
-                active_vram,
-                ordinal,
-                hint,
-            ),
-        };
+        let guard = crate::model_manager::preflight_memory_guard(
+            model_name,
+            paths,
+            active_vram,
+            ordinal,
+            hint,
+        );
         let err = match guard {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -3094,6 +3096,54 @@ fn preflight_memory_guard_with_eviction(
         );
         // Drop outside the cache lock — `cuMemFree` and safetensor unmap
         // can block other cache users during the drop.
+        drop(engine);
+
+        #[cfg(feature = "cuda")]
+        device::post_drop_free_vram_bytes(ordinal).map_err(device_memory_api_error)?;
+    }
+}
+
+/// Revalidate an admitted plan against fresh physical pressure, surrendering
+/// parked cache entries before failing. For a hot-cache hit, `active_vram` is
+/// the resident footprint already included in the frozen peak, so adding it
+/// back to driver-reported free memory reconstructs the capacity available to
+/// that unchanged engine and its request-specific activation workspace.
+fn preflight_planned_memory_guard_with_eviction(
+    cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    model_name: &str,
+    ordinal: usize,
+    predicted_peak_bytes: u64,
+    hint: Option<crate::model_manager::ActivationHint>,
+) -> Result<(), crate::routes::ApiError> {
+    loop {
+        let active_vram = cache_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_vram_bytes();
+        let err = match crate::memory_preflight::preflight_planned_memory_guard(
+            model_name,
+            predicted_peak_bytes,
+            active_vram,
+            ordinal,
+            hint,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+        let evicted = {
+            let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
+            cache.evict_lru_parked_except(Some(model_name))
+        };
+        let Some((evicted_name, engine)) = evicted else {
+            return Err(err);
+        };
+        tracing::info!(
+            gpu = ordinal,
+            target_model = %model_name,
+            evicted_model = %evicted_name,
+            "evicting LRU parked entry to preserve admitted execution plan"
+        );
         drop(engine);
 
         #[cfg(feature = "cuda")]
@@ -3225,12 +3275,27 @@ fn ensure_model_ready_sync_inner(
         )
     });
 
-    // Already loaded?
-    if let Some(entry) = cache.get(cache_key) {
-        if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
-            cache.touch(cache_key);
-            return Ok(ModelLoadDisposition::Unchanged);
+    // Already loaded? A matching engine avoids reconstruction, but an
+    // admitted request can have a different activation peak and physical
+    // pressure can change after admission. Recheck the frozen demand before
+    // returning the hot-cache hit.
+    let unchanged_cached = cache.get(cache_key).is_some_and(|entry| {
+        entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction
+    });
+    if unchanged_cached {
+        cache.touch(cache_key);
+        drop(cache);
+        if let Some(predicted_peak_bytes) = planned_peak_bytes {
+            preflight_planned_memory_guard_with_eviction(
+                &worker.model_cache,
+                cache_key,
+                worker.gpu.ordinal,
+                predicted_peak_bytes,
+                hint,
+            )
+            .map_err(|e| anyhow::anyhow!(e.error))?;
         }
+        return Ok(ModelLoadDisposition::Unchanged);
     }
 
     // Check if we have it cached but not on GPU (Parked).
@@ -3283,6 +3348,7 @@ fn ensure_model_ready_sync_inner(
                         model_name,
                         predicted_peak_bytes,
                         worker.gpu.ordinal,
+                        hint,
                     )
                 }
                 None => crate::memory_preflight::preflight_memory_guard_after_drop(
@@ -3517,6 +3583,7 @@ fn ensure_model_ready_sync_inner(
                 model_name,
                 predicted_peak_bytes,
                 worker.gpu.ordinal,
+                hint,
             )
         }
         None => crate::memory_preflight::preflight_memory_guard_after_drop(
@@ -4293,6 +4360,29 @@ mod tests {
         assert_eq!(
             configured.configured_execution_fingerprint(),
             Some("plan-fingerprint")
+        );
+    }
+
+    #[test]
+    fn hot_cached_planned_engine_rechecks_pressure_before_unchanged_return() {
+        let source = include_str!("gpu_worker.rs");
+        let hot_cache_path = source
+            .split("// Already loaded?")
+            .nth(1)
+            .expect("hot-cache path must exist")
+            .split("// Check if we have it cached but not on GPU")
+            .next()
+            .expect("hot-cache path must have a bounded section");
+        let recheck = hot_cache_path
+            .find("preflight_planned_memory_guard_with_eviction(")
+            .expect("planned hot-cache hits must recheck fresh physical pressure");
+        let unchanged = hot_cache_path
+            .find("return Ok(ModelLoadDisposition::Unchanged)")
+            .expect("hot-cache path must retain its unchanged disposition");
+
+        assert!(
+            recheck < unchanged,
+            "fresh physical-pressure recheck must precede the hot-cache return"
         );
     }
 
