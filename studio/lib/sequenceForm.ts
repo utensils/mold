@@ -15,10 +15,14 @@ import type {
   ChainScript,
   ChainStageWire,
 } from "./api/chainTypes";
+import { imageDimensionsFromBase64 } from "./imageDimensions";
 import type { SequenceTransition } from "./sequence";
 
 export interface SequenceClipSourceImage {
   filename: string;
+  /** Original source raster dimensions, when decoded by the picker/loader. */
+  width?: number;
+  height?: number;
   /** IndexedDB key used to restore the payload without localStorage quota risk. */
   draftId?: string;
   /** Raw base64 payload; stripped before persistence (quota), kept in memory. */
@@ -140,9 +144,11 @@ export function chainScriptToClips(script: ChainScript): {
     clip.fadeFrames = stage.fade_frames ?? DEFAULT_FADE_FRAMES;
     clip.negativePrompt = stage.negative_prompt ?? "";
     if (stage.source_image_b64) {
+      const dimensions = imageDimensionsFromBase64(stage.source_image_b64);
       const sourceImage = {
         filename: stage.source_image_path ?? "opening image",
         base64: stage.source_image_b64,
+        ...(dimensions ?? {}),
       };
       if (idx === 0) openingImage = sourceImage;
       else clip.sourceImage = sourceImage;

@@ -22,12 +22,36 @@ describe("ipc.pickSourceImages", () => {
   it("opens the native chooser with only supported still-image filters", async () => {
     open.mockResolvedValue(["/tmp/source.png", "/tmp/reference.jpeg"]);
     invoke
-      .mockResolvedValueOnce({ filename: "source.png", base64: "aA==", metadata: null })
-      .mockResolvedValueOnce({ filename: "reference.jpeg", base64: "aQ==", metadata: null });
+      .mockResolvedValueOnce({
+        filename: "source.png",
+        base64: "aA==",
+        width: 64,
+        height: 64,
+        metadata: null,
+      })
+      .mockResolvedValueOnce({
+        filename: "reference.jpeg",
+        base64: "aQ==",
+        width: 80,
+        height: 96,
+        metadata: null,
+      });
 
     await expect(ipc.pickSourceImages(true)).resolves.toEqual([
-      { filename: "source.png", base64: "aA==", metadata: null },
-      { filename: "reference.jpeg", base64: "aQ==", metadata: null },
+      {
+        filename: "source.png",
+        base64: "aA==",
+        width: 64,
+        height: 64,
+        metadata: null,
+      },
+      {
+        filename: "reference.jpeg",
+        base64: "aQ==",
+        width: 80,
+        height: 96,
+        metadata: null,
+      },
     ]);
     expect(open).toHaveBeenCalledWith({
       title: "Choose image",

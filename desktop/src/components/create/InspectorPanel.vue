@@ -31,6 +31,11 @@ import {
   presetsForModel,
   presetsNearRatio,
 } from "../../lib/resolutions";
+import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  sourceResolutionStatus,
+} from "@studio/lib/sourceResolution";
 import { resolutionValidationError, stepsValidationError } from "../../lib/generateValidation";
 import { randomSeed } from "../../stores/generation";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -236,7 +241,50 @@ function pickModel(m: ModelEntry) {
 }
 
 // ── Shape + resolution projection ────────────────────────────────────────────
-const shapeId = computed(() => aspectIdFor(props.form.width, props.form.height) ?? "");
+const sourceDimensions = computed(() => {
+  if (isSequence.value) {
+    const { width, height } = draft.openingImage ?? {};
+    return width && height ? { width, height } : null;
+  }
+  return props.form.sourceImageWidth && props.form.sourceImageHeight
+    ? {
+        width: props.form.sourceImageWidth,
+        height: props.form.sourceImageHeight,
+      }
+    : null;
+});
+const sourceResolution = computed(() =>
+  sourceDimensions.value
+    ? resolveSourceResolution(sourceDimensions.value, selectedModel.value ?? props.form.family)
+    : null,
+);
+const followsSource = computed(
+  () =>
+    sourceResolution.value !== null &&
+    canvasMatchesSourceResolution(
+      { width: props.form.width, height: props.form.height },
+      sourceResolution.value,
+    ),
+);
+const sourceStatus = computed(() =>
+  sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
+);
+const shapeOptions = computed(() => {
+  const source = sourceResolution.value;
+  return source
+    ? [
+        ...ASPECTS,
+        {
+          id: "source",
+          label: "Source",
+          ratio: source.output.width / source.output.height,
+        },
+      ]
+    : ASPECTS;
+});
+const shapeId = computed(() =>
+  followsSource.value ? "source" : (aspectIdFor(props.form.width, props.form.height) ?? ""),
+);
 const resolutionRatio = computed(() => props.form.width / props.form.height);
 const resolutionPresets = computed(() =>
   presetsNearRatio(
@@ -244,8 +292,8 @@ const resolutionPresets = computed(() =>
     resolutionRatio.value,
   ),
 );
-const resolutionOptions = computed(() =>
-  resolutionPresets.value.map((preset, index, all) => ({
+const resolutionOptions = computed(() => {
+  const presets = resolutionPresets.value.map((preset, index, all) => ({
     mp: (preset.width * preset.height) / 1_000_000,
     label: megapixelLabel(preset.width, preset.height),
     sub:
@@ -258,8 +306,23 @@ const resolutionOptions = computed(() =>
             : "Standard",
     width: preset.width,
     height: preset.height,
-  })),
-);
+  }));
+  const exact = presets.some(
+    (option) => option.width === props.form.width && option.height === props.form.height,
+  );
+  if (exact) return presets;
+  const currentMp = (props.form.width * props.form.height) / 1_000_000;
+  return [
+    {
+      mp: currentMp,
+      label: followsSource.value ? (sourceStatus.value?.label ?? "Source") : "Custom",
+      sub: followsSource.value ? "Matched" : "Manual",
+      width: props.form.width,
+      height: props.form.height,
+    },
+    ...presets.filter((option) => Math.abs(option.mp - currentMp) > Number.EPSILON),
+  ];
+});
 const resolutionMp = computed(() => {
   const exact = resolutionOptions.value.find(
     (option) => option.width === props.form.width && option.height === props.form.height,
@@ -278,6 +341,10 @@ const resolutionError = computed(() =>
 const stepsError = computed(() => stepsValidationError(props.form.steps));
 
 function onShape(id: string) {
+  if (id === "source") {
+    matchSource();
+    return;
+  }
   const aspect = ASPECTS.find((option) => option.id === id);
   if (!aspect) return;
   const preset = closestResolutionPreset(
@@ -289,6 +356,12 @@ function onShape(id: string) {
     props.form.width = preset.width;
     props.form.height = preset.height;
   }
+}
+function matchSource() {
+  const source = sourceResolution.value;
+  if (!source) return;
+  props.form.width = source.output.width;
+  props.form.height = source.output.height;
 }
 function onResolution(mp: number) {
   const preset = resolutionPresets.value.find(
@@ -401,7 +474,12 @@ function resetSettings() {
       <!-- Shape -->
       <div class="ms-field">
         <div class="ms-field__label">Shape</div>
-        <ShapePicker :model-value="shapeId" label="Aspect ratio" @update:model-value="onShape" />
+        <ShapePicker
+          :model-value="shapeId"
+          :options="shapeOptions"
+          label="Aspect ratio"
+          @update:model-value="onShape"
+        />
       </div>
 
       <!-- Resolution -->
@@ -411,8 +489,27 @@ function resetSettings() {
           :model-value="resolutionMp"
           :ratio="resolutionRatio"
           :options="resolutionOptions"
+          :resolved-width="form.width"
+          :resolved-height="form.height"
+          :custom-label="sourceStatus?.label"
+          :status="
+            sourceStatus
+              ? followsSource
+                ? sourceStatus.detail
+                : `${sourceStatus.detail} · manual output`
+              : undefined
+          "
           @update:model-value="onResolution"
         />
+        <button
+          v-if="sourceResolution && !followsSource"
+          type="button"
+          class="ms-field__match-source"
+          data-test="match-source-resolution"
+          @click="matchSource"
+        >
+          Match source
+        </button>
         <p v-if="resolutionError" class="ms-field__error" role="alert">{{ resolutionError }}</p>
       </div>
 
@@ -659,6 +756,17 @@ function resetSettings() {
   font-size: 11px;
   color: var(--stop);
   margin-top: 6px;
+}
+.ms-field__match-source {
+  margin-top: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ms-field__match-source:hover {
+  text-decoration: underline;
 }
 .ms-seg {
   display: flex;

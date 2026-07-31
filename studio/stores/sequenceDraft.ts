@@ -95,7 +95,17 @@ function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
   return clips.map((clip) => ({
     ...clip,
     sourceImage: clip.sourceImage
-      ? { filename: clip.sourceImage.filename, base64: null }
+      ? {
+          filename: clip.sourceImage.filename,
+          ...(clip.sourceImage.draftId
+            ? { draftId: clip.sourceImage.draftId }
+            : {}),
+          ...(clip.sourceImage.width ? { width: clip.sourceImage.width } : {}),
+          ...(clip.sourceImage.height
+            ? { height: clip.sourceImage.height }
+            : {}),
+          base64: null,
+        }
       : null,
   }));
 }
@@ -152,6 +162,12 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
         ? {
             filename: openingImage.value.filename,
             draftId: openingImage.value.draftId ?? OPENING_MEDIA_ID,
+            ...(openingImage.value.width
+              ? { width: openingImage.value.width }
+              : {}),
+            ...(openingImage.value.height
+              ? { height: openingImage.value.height }
+              : {}),
             base64: null,
           }
         : null,
@@ -191,6 +207,12 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
             openingImage.value = {
               filename: stored.filename,
               draftId: stored.draftId,
+              ...((stored.width ?? marker.width)
+                ? { width: stored.width ?? marker.width }
+                : {}),
+              ...((stored.height ?? marker.height)
+                ? { height: stored.height ?? marker.height }
+                : {}),
               base64: stored.base64,
             };
           }
@@ -208,6 +230,12 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
             clip.sourceImage = {
               filename: stored.filename,
               draftId: stored.draftId,
+              ...((stored.width ?? marker.width)
+                ? { width: stored.width ?? marker.width }
+                : {}),
+              ...((stored.height ?? marker.height)
+                ? { height: stored.height ?? marker.height }
+                : {}),
               base64: stored.base64,
             };
           }

@@ -17,6 +17,12 @@ import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  type SourceResolutionResult,
+} from "@studio/lib/sourceResolution";
 import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
@@ -595,6 +601,117 @@ const selectedModelAvailable = computed(
 );
 const selectedGenerationModel = computed(
   () => generationModels.value.find((model) => model.name === form.model) ?? null,
+);
+
+let previousStillSource = "";
+let previousStillResolution: SourceResolutionResult | null = null;
+let previousOpeningSource = "";
+let previousOpeningResolution: SourceResolutionResult | null = null;
+
+function applyMobileSourceResolution(
+  base64: string | null,
+  previous: {
+    base64: string;
+    resolution: SourceResolutionResult | null;
+  },
+  setDimensions: (width: number | null, height: number | null) => void,
+): { base64: string; resolution: SourceResolutionResult | null } {
+  if (!base64) {
+    setDimensions(null, null);
+    return { base64: "", resolution: null };
+  }
+  const dimensions =
+    base64 === previous.base64 && previous.resolution
+      ? previous.resolution.source
+      : imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    setDimensions(null, null);
+    return { base64, resolution: null };
+  }
+  setDimensions(dimensions.width, dimensions.height);
+  const resolution = resolveSourceResolution(
+    dimensions,
+    selectedGenerationModel.value ?? form.family,
+  );
+  const replaced = base64 !== previous.base64;
+  const wasFollowing =
+    previous.resolution !== null &&
+    canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
+  if (replaced || wasFollowing) {
+    form.width = resolution.output.width;
+    form.height = resolution.output.height;
+  }
+  return { base64, resolution };
+}
+
+watch(
+  [
+    () =>
+      caps.value.sourceImageMode === "qwen-edit"
+        ? (form.imageAttachments[0] ?? null)
+        : form.sourceImage,
+    () => selectedGenerationModel.value?.name ?? form.model,
+    () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.dimension_alignment ?? null,
+    () =>
+      selectedGenerationModel.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  ([base64]) => {
+    if (isSequence.value) return;
+    const replaced = Boolean(base64 && base64 !== previousStillSource);
+    const next = applyMobileSourceResolution(
+      base64,
+      {
+        base64: previousStillSource,
+        resolution: previousStillResolution,
+      },
+      (width, height) => {
+        form.sourceImageWidth = width;
+        form.sourceImageHeight = height;
+      },
+    );
+    previousStillSource = next.base64;
+    previousStillResolution = next.resolution;
+    if (replaced && caps.value.sourceImageMode === "single") {
+      form.sourceFit = { mode: "lanczos-resize" };
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  [
+    () => draft.openingImage?.base64 ?? null,
+    () => selectedGenerationModel.value?.name ?? form.model,
+    () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.dimension_alignment ?? null,
+    () =>
+      selectedGenerationModel.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  ([base64]) => {
+    if (!isSequence.value) return;
+    const next = applyMobileSourceResolution(
+      base64,
+      {
+        base64: previousOpeningSource,
+        resolution: previousOpeningResolution,
+      },
+      (width, height) => {
+        if (!draft.openingImage) return;
+        if (width === null) delete draft.openingImage.width;
+        else draft.openingImage.width = width;
+        if (height === null) delete draft.openingImage.height;
+        else draft.openingImage.height = height;
+      },
+    );
+    previousOpeningSource = next.base64;
+    previousOpeningResolution = next.resolution;
+  },
+  { immediate: true },
 );
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
 const stepsError = computed(() => stepsValidationError(form.steps));

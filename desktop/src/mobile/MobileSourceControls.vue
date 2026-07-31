@@ -195,6 +195,7 @@ async function pickSource(event: Event): Promise<void> {
   if (!picked) return;
   props.form.sourceImage = picked.b64;
   props.form.sourceImageName = picked.file.name || null;
+  props.form.sourceFit = { mode: "lanczos-resize" };
 }
 
 async function pickEditImages(event: Event): Promise<void> {

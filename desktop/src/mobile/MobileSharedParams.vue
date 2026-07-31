@@ -12,6 +12,7 @@ import type { GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 const props = withDefaults(
   defineProps<{
@@ -33,6 +34,19 @@ const emit = defineEmits<{
 }>();
 
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
+const draft = useSequenceDraftStore();
+const sourceDimensions = computed(() => {
+  if (props.showFps) {
+    const { width, height } = draft.openingImage ?? {};
+    return width && height ? { width, height } : null;
+  }
+  return props.form.sourceImageWidth && props.form.sourceImageHeight
+    ? {
+        width: props.form.sourceImageWidth,
+        height: props.form.sourceImageHeight,
+      }
+    : null;
+});
 </script>
 
 <template>
@@ -41,6 +55,7 @@ const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.f
     v-model:height="form.height"
     :family="form.family"
     :model="model"
+    :source-dimensions="sourceDimensions"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
   />

@@ -27,6 +27,12 @@ import {
 import type { OutputMode } from "@studio/lib/sequence";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
+import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  sourceResolutionStatus,
+  type SourceDimensions,
+} from "@studio/lib/sourceResolution";
 import HostRoutingPicker from "./HostRoutingPicker.vue";
 import { useHostRouting } from "../../composables/useHostRouting";
 
@@ -35,6 +41,7 @@ const props = withDefaults(
     modelValue: GenerateFormState;
     family: string;
     model?: ModelInfoExtended | null;
+    sourceDimensions?: SourceDimensions | null;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
@@ -56,6 +63,7 @@ const props = withDefaults(
     output: "single",
     clipCount: 0,
     model: null,
+    sourceDimensions: null,
   },
 );
 
@@ -104,7 +112,46 @@ const projection = computed(() =>
   projectResolution(props.modelValue.width, props.modelValue.height),
 );
 
-const aspectId = computed(() => projection.value.aspectId ?? "");
+const sourceResolution = computed(() =>
+  props.sourceDimensions
+    ? resolveSourceResolution(
+        props.sourceDimensions,
+        props.model ?? props.family,
+      )
+    : null,
+);
+const followsSource = computed(
+  () =>
+    sourceResolution.value !== null &&
+    canvasMatchesSourceResolution(
+      {
+        width: props.modelValue.width,
+        height: props.modelValue.height,
+      },
+      sourceResolution.value,
+    ),
+);
+const sourceStatus = computed(() =>
+  sourceResolution.value
+    ? sourceResolutionStatus(sourceResolution.value)
+    : null,
+);
+const shapeOptions = computed(() => {
+  const source = sourceResolution.value;
+  return source
+    ? [
+        ...ASPECTS,
+        {
+          id: "source",
+          label: "Source",
+          ratio: source.output.width / source.output.height,
+        },
+      ]
+    : ASPECTS;
+});
+const aspectId = computed(() =>
+  followsSource.value ? "source" : (projection.value.aspectId ?? ""),
+);
 const mp = computed(() => projection.value.mp);
 
 const currentRatio = computed(() => {
@@ -124,8 +171,8 @@ const resolutionPresets = computed(() =>
     currentRatio.value,
   ),
 );
-const resolutionOptions = computed(() =>
-  resolutionPresets.value.map((preset, index, all) => ({
+const resolutionOptions = computed(() => {
+  const presets = resolutionPresets.value.map((preset, index, all) => ({
     mp: (preset.width * preset.height) / 1_000_000,
     label: megapixelLabel(preset.width, preset.height),
     sub:
@@ -138,8 +185,30 @@ const resolutionOptions = computed(() =>
             : "Standard",
     width: preset.width,
     height: preset.height,
-  })),
-);
+  }));
+  const exact = presets.some(
+    (option) =>
+      option.width === props.modelValue.width &&
+      option.height === props.modelValue.height,
+  );
+  if (exact) return presets;
+  const currentMp =
+    (props.modelValue.width * props.modelValue.height) / 1_000_000;
+  return [
+    {
+      mp: currentMp,
+      label: followsSource.value
+        ? (sourceStatus.value?.label ?? "Source")
+        : "Custom",
+      sub: followsSource.value ? "Matched" : "Manual",
+      width: props.modelValue.width,
+      height: props.modelValue.height,
+    },
+    ...presets.filter(
+      (option) => Math.abs(option.mp - currentMp) > Number.EPSILON,
+    ),
+  ];
+});
 const selectedMp = computed(() => {
   const exact = resolutionOptions.value.find(
     (option) =>
@@ -157,6 +226,10 @@ const selectedMp = computed(() => {
 });
 
 function setAspect(id: string) {
+  if (id === "source") {
+    matchSource();
+    return;
+  }
   const a = ASPECTS.find((x) => x.id === id);
   if (!a) return;
   const preset = closestResolutionPreset(
@@ -165,6 +238,12 @@ function setAspect(id: string) {
     props.modelValue.height,
   );
   if (preset) patch({ width: preset.width, height: preset.height });
+}
+
+function matchSource() {
+  const source = sourceResolution.value;
+  if (!source) return;
+  patch({ width: source.output.width, height: source.output.height });
 }
 
 function setMp(nextMp: number) {
@@ -236,6 +315,7 @@ function lockLastSeed() {
       <div class="controls__label">Shape</div>
       <ShapePicker
         :model-value="aspectId"
+        :options="shapeOptions"
         label="Shape"
         @update:model-value="setAspect"
       />
@@ -247,8 +327,27 @@ function lockLastSeed() {
         :model-value="selectedMp"
         :ratio="currentRatio"
         :options="resolutionOptions"
+        :resolved-width="modelValue.width"
+        :resolved-height="modelValue.height"
+        :custom-label="sourceStatus?.label"
+        :status="
+          sourceStatus
+            ? followsSource
+              ? sourceStatus.detail
+              : `${sourceStatus.detail} · manual output`
+            : undefined
+        "
         @update:model-value="setMp"
       />
+      <button
+        v-if="sourceResolution && !followsSource"
+        type="button"
+        class="controls__match-source"
+        data-test="match-source-resolution"
+        @click="matchSource"
+      >
+        Match source
+      </button>
     </div>
 
     <div class="controls__group">
@@ -482,6 +581,18 @@ function lockLastSeed() {
   font-size: 11px;
   color: var(--ink-3);
   line-height: 1.4;
+}
+
+.controls__match-source {
+  margin-top: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font-size: 11px;
+  cursor: pointer;
+}
+.controls__match-source:hover {
+  text-decoration: underline;
 }
 
 .controls__lock {

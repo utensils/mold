@@ -24,7 +24,13 @@ const qwenEdit = {
 } as ModelEntry;
 
 function dropped(metadata: OutputMetadata | null = null): DesktopImageImport {
-  return { filename: "reference.png", base64: "IMAGE_BYTES", metadata };
+  return {
+    filename: "reference.png",
+    base64: "IMAGE_BYTES",
+    width: 896,
+    height: 1152,
+    metadata,
+  };
 }
 
 function metadata(overrides: Partial<OutputMetadata> = {}): OutputMetadata {
@@ -52,6 +58,8 @@ describe("applyDesktopImageDrop", () => {
     });
     expect(form.sourceImage).toBe("IMAGE_BYTES");
     expect(form.sourceImageName).toBe("reference.png");
+    expect(form.sourceImageWidth).toBe(896);
+    expect(form.sourceImageHeight).toBe(1152);
   });
 
   it("loads embedded generation metadata and keeps the dropped image as source", () => {

@@ -338,7 +338,13 @@ describe("ImagePickerModal", () => {
   it("uses the native file chooser with PNG/JPEG filtering instead of the WebView picker", async () => {
     const { ipc } = await import("../../lib/ipc");
     vi.mocked(ipc.pickSourceImages).mockResolvedValue([
-      { filename: "source.jpeg", base64: "eA==", metadata: null },
+      {
+        filename: "source.jpeg",
+        base64: "eA==",
+        width: 896,
+        height: 1152,
+        metadata: null,
+      },
     ]);
     const gallery = useGalleryStore();
     vi.spyOn(gallery, "fetchAll").mockResolvedValue();

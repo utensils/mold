@@ -36,6 +36,12 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  type SourceResolutionResult,
+} from "@studio/lib/sourceResolution";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
 import {
   defaultClipFrames,
@@ -905,6 +911,106 @@ function stopAutoRefresh() {
 const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
 );
+
+let previousStillSource = "";
+let previousStillResolution: SourceResolutionResult | null = null;
+let previousOpeningSource = "";
+let previousOpeningResolution: SourceResolutionResult | null = null;
+
+function syncSourceCanvas(
+  image: {
+    base64: string | null;
+    width?: number | null;
+    height?: number | null;
+  } | null,
+  previous: { base64: string; resolution: SourceResolutionResult | null },
+): { base64: string; resolution: SourceResolutionResult | null } {
+  if (!image?.base64) return { base64: "", resolution: null };
+  const dimensions =
+    image.width && image.height
+      ? { width: image.width, height: image.height }
+      : imageDimensionsFromBase64(image.base64);
+  if (!dimensions) return { base64: image.base64, resolution: null };
+  image.width = dimensions.width;
+  image.height = dimensions.height;
+  const resolution = resolveSourceResolution(
+    dimensions,
+    currentModel.value ?? form.state.value.modelFamily,
+  );
+  const replaced = image.base64 !== previous.base64;
+  const wasFollowing =
+    previous.resolution !== null &&
+    canvasMatchesSourceResolution(
+      {
+        width: form.state.value.width,
+        height: form.state.value.height,
+      },
+      previous.resolution,
+    );
+  if (replaced || wasFollowing) {
+    form.state.value.width = resolution.output.width;
+    form.state.value.height = resolution.output.height;
+  }
+  return { base64: image.base64, resolution };
+}
+
+watch(
+  [
+    () => form.state.value.imageAttachments[0]?.base64 ?? null,
+    () => currentModel.value?.name ?? form.state.value.model,
+    () => currentModel.value?.max_pixels ?? null,
+    () => currentModel.value?.dimension_alignment ?? null,
+    () =>
+      currentModel.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  () => {
+    if (sequenceMode.value) return;
+    const next = syncSourceCanvas(
+      form.state.value.imageAttachments[0] ?? null,
+      {
+        base64: previousStillSource,
+        resolution: previousStillResolution,
+      },
+    );
+    previousStillSource = next.base64;
+    previousStillResolution = next.resolution;
+  },
+  { immediate: true },
+);
+
+watch(
+  [
+    () => draft.openingImage?.base64 ?? null,
+    () => currentModel.value?.name ?? form.state.value.model,
+    () => currentModel.value?.max_pixels ?? null,
+    () => currentModel.value?.dimension_alignment ?? null,
+    () =>
+      currentModel.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  () => {
+    if (!sequenceMode.value) return;
+    const next = syncSourceCanvas(draft.openingImage, {
+      base64: previousOpeningSource,
+      resolution: previousOpeningResolution,
+    });
+    previousOpeningSource = next.base64;
+    previousOpeningResolution = next.resolution;
+  },
+  { immediate: true },
+);
+
+const activeSourceDimensions = computed(() => {
+  const image = sequenceMode.value
+    ? draft.openingImage
+    : form.state.value.imageAttachments[0];
+  return image?.width && image.height
+    ? { width: image.width, height: image.height }
+    : null;
+});
 
 /** Human title for the selected model — falls back to the raw form value. */
 const currentModelLabel = computed(() =>
@@ -2300,6 +2406,8 @@ async function onPickSource(v: SourceImageState[]) {
         filename: first.filename,
         base64: first.base64,
         draftId: first.draftId,
+        width: first.width ?? undefined,
+        height: first.height ?? undefined,
       };
     }
     composerError.value = null;
@@ -2321,6 +2429,11 @@ async function onPickSource(v: SourceImageState[]) {
   form.state.value.imageAttachments = qwenEdit
     ? [...form.state.value.imageAttachments, ...v]
     : v.slice(0, 1);
+  if (!qwenEdit && v.length > 0) {
+    // A source-matched canvas differs only by the model's pixel grid or safe
+    // downscale. Resize exactly instead of manufacturing narrow repaint bands.
+    form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
+  }
   composerError.value = null;
 }
 
@@ -2670,6 +2783,7 @@ onBeforeUnmount(() => {
               v-model="form.state.value"
               :family="currentFamily"
               :model="currentModel"
+              :source-dimensions="activeSourceDimensions"
               :adv-count="advCount"
               :mobile="true"
               :last-seed="lastSeedUsed"
@@ -2860,6 +2974,7 @@ onBeforeUnmount(() => {
                   v-model="form.state.value"
                   :family="currentFamily"
                   :model="currentModel"
+                  :source-dimensions="activeSourceDimensions"
                   :adv-count="advCount"
                   :mobile="true"
                   :last-seed="lastSeedUsed"
@@ -3012,6 +3127,7 @@ onBeforeUnmount(() => {
           v-model="form.state.value"
           :family="currentFamily"
           :model="currentModel"
+          :source-dimensions="activeSourceDimensions"
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"

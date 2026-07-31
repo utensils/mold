@@ -65,6 +65,43 @@ describe("ControlsAside", () => {
     );
   });
 
+  it("renders a custom source canvas and restores it after a manual override", async () => {
+    const sourceDimensions = { width: 896, height: 1152 };
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm(sourceDimensions),
+        family: "qwen-image-edit",
+        advCount: 0,
+        sourceDimensions,
+      },
+    });
+
+    expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe(
+      "source",
+    );
+    expect(wrapper.getComponent(ResolutionSelector).props()).toMatchObject({
+      resolvedWidth: 896,
+      resolvedHeight: 1152,
+      customLabel: "Source",
+      status: "Matches source · 896×1152",
+    });
+    expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.setProps({
+      modelValue: baseForm({ width: 1024, height: 1024 }),
+    });
+    expect(wrapper.getComponent(ResolutionSelector).props("status")).toContain(
+      "manual output",
+    );
+    await wrapper.get("[data-test='match-source-resolution']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next).toMatchObject(sourceDimensions);
+  });
+
   it("matches the desktop inspector's Detail range (1–60 steps)", () => {
     const wrapper = factory({}, "sdxl");
     const detail = wrapper

@@ -25,6 +25,12 @@ import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  canvasMatchesSourceResolution,
+  resolveSourceResolution,
+  type SourceResolutionResult,
+} from "@studio/lib/sourceResolution";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
@@ -614,6 +620,114 @@ const draft = useSequenceDraftStore();
 const chains = useChainJobsStore();
 const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() => findInstalledModel(installedModels.value, form.model));
+
+let previousStillSource = "";
+let previousStillResolution: SourceResolutionResult | null = null;
+let previousOpeningSource = "";
+let previousOpeningResolution: SourceResolutionResult | null = null;
+
+function applyDecodedSourceResolution(
+  base64: string | null,
+  previous: {
+    base64: string;
+    resolution: SourceResolutionResult | null;
+  },
+  setDimensions: (width: number | null, height: number | null) => void,
+): { base64: string; resolution: SourceResolutionResult | null } {
+  if (!base64) {
+    setDimensions(null, null);
+    return { base64: "", resolution: null };
+  }
+  const dimensions =
+    base64 === previous.base64 && previous.resolution
+      ? previous.resolution.source
+      : imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    setDimensions(null, null);
+    return { base64, resolution: null };
+  }
+  setDimensions(dimensions.width, dimensions.height);
+  const resolution = resolveSourceResolution(dimensions, selectedEntry.value ?? form.family);
+  const replaced = base64 !== previous.base64;
+  const wasFollowing =
+    previous.resolution !== null &&
+    canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
+  if (replaced || wasFollowing) {
+    form.width = resolution.output.width;
+    form.height = resolution.output.height;
+  }
+  return { base64, resolution };
+}
+
+watch(
+  [
+    () =>
+      caps.value.sourceImageMode === "qwen-edit"
+        ? (form.imageAttachments[0] ?? null)
+        : form.sourceImage,
+    () => selectedEntry.value?.name ?? form.model,
+    () => selectedEntry.value?.max_pixels ?? null,
+    () => selectedEntry.value?.dimension_alignment ?? null,
+    () =>
+      selectedEntry.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  ([base64]) => {
+    if (isSequence.value) return;
+    const replaced = Boolean(base64 && base64 !== previousStillSource);
+    const next = applyDecodedSourceResolution(
+      base64,
+      {
+        base64: previousStillSource,
+        resolution: previousStillResolution,
+      },
+      (width, height) => {
+        form.sourceImageWidth = width;
+        form.sourceImageHeight = height;
+      },
+    );
+    previousStillSource = next.base64;
+    previousStillResolution = next.resolution;
+    if (replaced && caps.value.sourceImageMode === "single") {
+      form.sourceFit = { mode: "lanczos-resize" };
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  [
+    () => draft.openingImage?.base64 ?? null,
+    () => selectedEntry.value?.name ?? form.model,
+    () => selectedEntry.value?.max_pixels ?? null,
+    () => selectedEntry.value?.dimension_alignment ?? null,
+    () =>
+      selectedEntry.value?.recommended_dimensions
+        ?.map(({ width, height }) => `${width}x${height}`)
+        .join("|") ?? "",
+  ],
+  ([base64]) => {
+    if (!isSequence.value) return;
+    const next = applyDecodedSourceResolution(
+      base64,
+      {
+        base64: previousOpeningSource,
+        resolution: previousOpeningResolution,
+      },
+      (width, height) => {
+        if (!draft.openingImage) return;
+        if (width === null) delete draft.openingImage.width;
+        else draft.openingImage.width = width;
+        if (height === null) delete draft.openingImage.height;
+        else draft.openingImage.height = height;
+      },
+    );
+    previousOpeningSource = next.base64;
+    previousOpeningResolution = next.resolution;
+  },
+  { immediate: true },
+);
 /** Sequence inventory follows the route policy. A pinned host must never
  * inherit a compatible model from another machine's union. Edit sessions are
  * stricter still: their immutable durable route owns the available model. */
