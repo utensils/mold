@@ -8,7 +8,6 @@ import {
   fetchModelComponents,
   fetchModels,
   loadModel,
-  postCatalogDownload,
   unloadModel,
 } from "../api";
 import { useDownloads } from "./useDownloads";
@@ -402,13 +401,14 @@ function build() {
   }
 
   async function startDownload(id: string) {
-    const result = await postCatalogDownload(id);
-    // The catalog endpoint enqueues 1–N download jobs (primary + companions).
-    // Force the downloads drawer to repaint immediately rather than waiting
-    // for the SSE `enqueued` events, which can lag when the page is in a
-    // background tab or right after an SSE reconnect.
-    void useDownloads().refresh();
-    return result;
+    // The downloads composable owns id-shape routing, and both endpoints are
+    // strict: `/api/downloads` validates against the manifest registry and
+    // 400s on a `cv:` / `hf:` id, while `/api/catalog/:id/download` 400s on a
+    // plain manifest name — which is what component repairs (`repair_model`)
+    // and the installed shelf are made of. It also forces the downloads drawer
+    // to repaint immediately rather than waiting for the SSE `enqueued`
+    // events, which lag in a background tab or right after an SSE reconnect.
+    await useDownloads().enqueue(id);
   }
 
   return {

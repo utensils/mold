@@ -3126,6 +3126,15 @@ button:disabled {
   font-size: var(--text-edge-code);
 }
 
+/* Column 2 of the card: the "installed somewhere" chip and the action stack
+   together, because a model installed on another machine shows both. */
+.mobile-catalog-card-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
 .mobile-catalog-installed {
   color: var(--halide);
   font-family: var(--font-utility);
@@ -3566,6 +3575,13 @@ button:disabled {
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* What picking this machine actually does — install or repair. */
+.mobile-catalog-target-list small.mobile-catalog-target-action {
+  color: var(--halide);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
 }
 
 .host-row {

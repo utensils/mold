@@ -3,8 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import CatalogLayoutToggle, {
   type CatalogLayoutChoice,
 } from "@ui/components/CatalogLayoutToggle.vue";
+import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
+import { useInventoryKnown } from "../../lib/modelInventory";
 import { isGenerationModel, useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
@@ -46,6 +48,7 @@ const toasts = useToastStore();
 const hosts = useHostsStore();
 const models = useModelStore();
 const ui = useUiStore();
+const inventoryKnown = useInventoryKnown();
 
 /** Grid or table — the layout toggle lives here now (Discover's secondary
  *  control); an explicit `layout` prop still overrides for embeddings/tests. */
@@ -254,10 +257,39 @@ const readyHosts = computed(() =>
   hosts.all.filter((host) => host.status === "ready" && host.baseUrl),
 );
 
-function actionHosts(entry: CatalogEntry & { hostIds?: string[] }): HostView[] {
-  if (!entry.installed) return readyHosts.value;
-  const ownerIds = new Set(entry.hostIds ?? []);
-  return readyHosts.value.filter((host) => ownerIds.has(host.id));
+/**
+ * Where this model can still go. Being installed on one machine says nothing
+ * about the others, so every reachable machine that lacks it stays an install
+ * target and only the owners degrade to repair. Machines whose inventory has
+ * not been read are left out entirely rather than assumed empty.
+ */
+function installPlan(entry: CatalogEntry & { hostIds?: string[] }) {
+  return planModelInstall(readyHosts.value, ownerIdsFor(entry), { inventoryKnown });
+}
+
+/**
+ * Machines known to hold this row. A merged installed row carries every owner
+ * in `hostIds`; a live catalog row carries none, and its `installed` flag is
+ * only the browsed host's answer — so that host stands in as the sole known
+ * owner. Installed LoRAs and ControlNets arrive exactly this way, being
+ * excluded from the merged generation-model shelf.
+ */
+function ownerIdsFor(entry: CatalogEntry & { hostIds?: string[] }): string[] {
+  const ids = entry.hostIds ?? [];
+  if (ids.length > 0) return ids;
+  if (!entry.installed) return [];
+  const browsing = readyHosts.value.find((host) => host.id === "local") ?? readyHosts.value[0];
+  return browsing ? [browsing.id] : [];
+}
+
+function actionTargets(entry: CatalogEntry & { hostIds?: string[] }) {
+  return installPlan(entry).targets;
+}
+
+/** The row keeps its action while any machine can still receive the model —
+ *  and an entry nobody owns always keeps it, even before hosts resolve. */
+function installable(entry: CatalogEntry & { hostIds?: string[] }): boolean {
+  return !entry.installed || installPlan(entry).canInstall;
 }
 
 /**
@@ -411,16 +443,16 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
 }
 
 function pull(entry: CatalogEntry) {
-  const candidates = actionHosts(entry);
+  const candidates = actionTargets(entry);
   if (entry.installed && candidates.length === 0) {
-    toasts.push("No online owning host is available to repair this model.", "error");
+    toasts.push("No online machine is available for this model.", "error");
     return;
   }
   if (candidates.length > 1) {
     pendingEntry.value = entry;
     return;
   }
-  void pullTo(entry, candidates[0] ?? null);
+  void pullTo(entry, candidates[0]?.host ?? null);
 }
 
 /** The detail drawer fetches on the same host the catalog list came from. */
@@ -449,6 +481,11 @@ function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
 
 const detailVariants = computed(() =>
   detailEntry.value ? variantsFor(detailEntry.value) : undefined,
+);
+
+/** Pull vs Repair in the drawer follows the fleet, not this one row's flag. */
+const detailAction = computed(() =>
+  detailEntry.value ? installPlan(detailEntry.value).label : undefined,
 );
 
 /** Pull (or Repair — same endpoint, missing files only) from the drawer. */
@@ -601,6 +638,7 @@ onMounted(async () => {
           :entry="entry"
           :pulling="pulling.has(entry.id)"
           :hosts="hostLabelsFor(entry)"
+          :installable="installable(entry)"
           @pull="pull"
           @open="detailEntry = $event"
         />
@@ -609,6 +647,7 @@ onMounted(async () => {
           :entry="entry"
           :pulling="pulling.has(entry.id)"
           :hosts="hostLabelsFor(entry)"
+          :installable="installable(entry)"
           class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
@@ -629,8 +668,7 @@ onMounted(async () => {
     <DownloadTargetDialog
       v-if="pendingEntry"
       :model-name="pendingEntry.display_name ?? pendingEntry.name"
-      :hosts="actionHosts(pendingEntry)"
-      :action="pendingEntry.installed ? 'repair' : 'download'"
+      :targets="actionTargets(pendingEntry)"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"
     />
@@ -642,6 +680,7 @@ onMounted(async () => {
       :target="detailTarget.target"
       :forward-credentials="detailTarget.forward"
       :variants="detailVariants"
+      :action="detailAction"
       @close="detailEntry = null"
       @pull="pullFromDrawer"
     />

@@ -27,12 +27,20 @@ import type { CatalogEntry } from "../../lib/api/types";
  * civitai.com. Install state and the Pull action stay with the parent tab
  * via the `pull` event.
  */
-const props = defineProps<{
-  entry: CatalogEntry;
-  pulling: boolean;
-  /** Labels of hosts that have this model installed (unified-list tags). */
-  hosts?: string[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    entry: CatalogEntry;
+    pulling: boolean;
+    /** Labels of hosts that have this model installed (unified-list tags). */
+    hosts?: string[];
+    /** Whether some machine can still receive this model. An installed card
+     *  keeps its Pull action until every reachable machine has it; the parent
+     *  decides, because only it knows the fleet. */
+    installable?: boolean | undefined;
+  }>(),
+  // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
+  { installable: undefined },
+);
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
@@ -41,6 +49,9 @@ const emit = defineEmits<{
 const glyphSource = computed<ModelSource>(() =>
   props.entry.source === "civitai" ? "civitai" : "hf",
 );
+/** Without an explicit answer from the parent, fall back to single-machine
+ *  truth: installed here means there is nothing left to pull. */
+const showAction = computed(() => props.installable ?? !props.entry.installed);
 
 const pageUrl = computed(() => catalogPageUrl(props.entry));
 const displayName = computed(() => props.entry.display_name ?? props.entry.name);
@@ -229,10 +240,10 @@ function onCardKeydown(event: KeyboardEvent): void {
         </div>
       </div>
 
-      <div class="mt-auto flex shrink-0 justify-end pt-1">
+      <div class="mt-auto flex shrink-0 items-center justify-end gap-2 pt-1">
         <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
         <button
-          v-else
+          v-if="showAction"
           type="button"
           data-test="pull"
           class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"

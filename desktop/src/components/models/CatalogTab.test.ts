@@ -29,6 +29,7 @@ vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 import CatalogTab from "./CatalogTab.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
+import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 
@@ -762,6 +763,172 @@ describe("CatalogTab installed repair routing", () => {
 
     expect(startCatalogDownload).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("Choose where to repair");
+    wrapper.unmount();
+  });
+});
+
+describe("CatalogTab install on a machine that is missing the model", () => {
+  /** Local primary + two ready remotes, all with their inventory already read. */
+  function threeReadyHosts() {
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue(undefined);
+    useHostsStore().extras.push(
+      {
+        id: "studio-7680",
+        label: "Studio GPU",
+        url: "http://studio:7680",
+        apiKey: "studio-key",
+        status: "ready",
+        error: null,
+        instanceId: null,
+      },
+      {
+        id: "other-7680",
+        label: "Other GPU",
+        url: "http://other:7680",
+        apiKey: "other-key",
+        status: "ready",
+        error: null,
+        instanceId: null,
+      },
+    );
+    const hostModels = useHostModelsStore();
+    for (const id of ["local", "studio-7680", "other-7680"]) {
+      hostModels.byHost[id] = { entries: [], fetchedAt: Date.now(), error: null };
+    }
+  }
+
+  const videoModel = {
+    name: "ltx2-distilled",
+    family: "ltx2",
+    size_gb: 24,
+    is_loaded: false,
+    hf_repo: "Lightricks/LTX-2",
+    default_steps: 8,
+    default_guidance: 1,
+    default_width: 1216,
+    default_height: 704,
+    description: "",
+    downloaded: true,
+  };
+
+  it("offers an install for a model only the remote hosts have", async () => {
+    setActivePinia(createPinia());
+    threeReadyHosts();
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [{ ...videoModel, hostIds: ["studio-7680"] }],
+      },
+    });
+    await flushPromises();
+
+    // Installed elsewhere, so the row keeps its marker — and still offers the pull.
+    expect(wrapper.text()).toContain("● installed");
+    await wrapper.get("[data-test='pull']").trigger("click");
+    await flushPromises();
+
+    const dialog = document.body.querySelector<HTMLElement>(
+      "[data-test='download-target-dialog']",
+    )!;
+    expect(dialog.textContent).toContain("Choose where to install");
+    // The two machines that lack it are installs; the owner is only a repair.
+    expect(dialog.querySelector("[data-test='download-target-local']")?.textContent).toContain(
+      "Install",
+    );
+    expect(dialog.querySelector("[data-test='download-target-other-7680']")?.textContent).toContain(
+      "Install",
+    );
+    expect(
+      dialog.querySelector("[data-test='download-target-studio-7680']")?.textContent,
+    ).toContain("Already installed");
+
+    dialog.querySelector<HTMLButtonElement>("[data-test='download-target-local']")!.click();
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "ltx2-distilled",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
+    wrapper.unmount();
+  });
+
+  it("stops offering an install once every machine has the model", async () => {
+    setActivePinia(createPinia());
+    threeReadyHosts();
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [{ ...videoModel, hostIds: ["local", "studio-7680", "other-7680"] }],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("never treats a machine whose inventory is unread as missing the model", async () => {
+    setActivePinia(createPinia());
+    threeReadyHosts();
+    // Other GPU connected but its /api/models has not landed yet.
+    delete useHostModelsStore().byHost["other-7680"];
+    const wrapper = mount(CatalogTab, {
+      attachTo: document.body,
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [{ ...videoModel, hostIds: ["local", "studio-7680"] }],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("credits the browsing host for a live row it reports as installed", async () => {
+    // A live catalog row carries no hostIds — its `installed` flag is only the
+    // browsed host's answer (LoRAs and ControlNets never reach the merged
+    // generation-model shelf). With one machine that is nothing left to pull.
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostModelsStore().byHost["local"] = {
+      entries: [],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    searchCatalog.mockResolvedValue({
+      entries: [{ ...entry("portrait-lora", "flux"), kind: "lora", installed: true }],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
   });
 });

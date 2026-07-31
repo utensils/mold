@@ -32,6 +32,16 @@ const hosts: HostView[] = [
   },
 ];
 
+/** Every listed machine is missing the model — the plain first-download case. */
+function install(list: HostView[]) {
+  return list.map((host) => ({ host, action: "install" as const }));
+}
+
+/** Every listed machine already owns the model. */
+function repair(list: HostView[]) {
+  return list.map((host) => ({ host, action: "repair" as const }));
+}
+
 describe("DownloadTargetDialog", () => {
   afterEach(() => {
     document.body.innerHTML = "";
@@ -39,13 +49,13 @@ describe("DownloadTargetDialog", () => {
 
   it("offers every ready host and returns the selected target", async () => {
     const wrapper = mount(DownloadTargetDialog, {
-      props: { modelName: "Flux Dev", hosts },
+      props: { modelName: "Flux Dev", targets: install(hosts) },
       attachTo: document.body,
     });
 
     const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
     expect(dialog.getAttribute("aria-modal")).toBe("true");
-    expect(dialog.textContent).toContain("Choose where to download Flux Dev");
+    expect(dialog.textContent).toContain("Choose where to install Flux Dev");
     expect(dialog.textContent).toContain("This Mac");
     expect(dialog.textContent).toContain("Studio GPU");
 
@@ -56,17 +66,59 @@ describe("DownloadTargetDialog", () => {
     wrapper.unmount();
   });
 
+  it("says per machine whether this installs or repairs", () => {
+    // The whole point of a mixed list: one machine is missing the model, the
+    // other already has it, and the user must be able to tell them apart.
+    const wrapper = mount(DownloadTargetDialog, {
+      props: {
+        modelName: "Flux Dev",
+        targets: [
+          { host: hosts[0]!, action: "install" as const },
+          { host: hosts[1]!, action: "repair" as const },
+        ],
+      },
+      attachTo: document.body,
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain("Choose where to install Flux Dev");
+    expect(
+      document.body.querySelector('[data-test="download-target-local"]')?.textContent,
+    ).toContain("Install");
+    expect(
+      document.body.querySelector('[data-test="download-target-studio-7680"]')?.textContent,
+    ).toContain("Already installed");
+    // The body copy must not promise a fresh install for the whole list when
+    // one of the machines on it can only be repaired.
+    expect(dialog.textContent).toContain("machines that already have it are repaired instead");
+    wrapper.unmount();
+  });
+
+  it("promises only an install when no listed machine already has the model", () => {
+    const wrapper = mount(DownloadTargetDialog, {
+      props: { modelName: "Flux Dev", targets: install(hosts) },
+      attachTo: document.body,
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain(
+      "The model and its required components will be stored on the machine you pick.",
+    );
+    expect(dialog.textContent).not.toContain("repaired instead");
+    wrapper.unmount();
+  });
+
   it("moves focus into the dialog and restores it when closed", async () => {
     const opener = document.createElement("button");
     document.body.appendChild(opener);
     opener.focus();
     const wrapper = mount(DownloadTargetDialog, {
-      props: { modelName: "Flux Dev", hosts },
+      props: { modelName: "Flux Dev", targets: install(hosts) },
       attachTo: document.body,
     });
 
     await wrapper.vm.$nextTick();
-    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close download target picker");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close install target picker");
 
     wrapper.unmount();
     expect(document.activeElement).toBe(opener);
@@ -74,7 +126,7 @@ describe("DownloadTargetDialog", () => {
 
   it("uses repair-specific confirmation copy", () => {
     const wrapper = mount(DownloadTargetDialog, {
-      props: { modelName: "Flux Dev", hosts, action: "repair" },
+      props: { modelName: "Flux Dev", targets: repair(hosts) },
       attachTo: document.body,
     });
 

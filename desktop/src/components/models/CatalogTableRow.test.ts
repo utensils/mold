@@ -119,4 +119,23 @@ describe("CatalogTableRow", () => {
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     expect(wrapper.text()).toContain("● installed");
   });
+
+  it("still offers Pull for a model another machine is missing", async () => {
+    const wrapper = mount(CatalogTableRow, {
+      props: { entry: entry({ installed: true }), pulling: false, installable: true },
+    });
+    await flushPromises();
+    // The host chips say where it already is; the button sends it somewhere new.
+    expect(wrapper.text()).toContain("● installed");
+    await wrapper.get("[data-test='pull']").trigger("click");
+    expect(wrapper.emitted("pull")).toHaveLength(1);
+  });
+
+  it("drops Pull once every machine has the model", async () => {
+    const wrapper = mount(CatalogTableRow, {
+      props: { entry: entry({ installed: true }), pulling: false, installable: false },
+    });
+    await flushPromises();
+    expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
+  });
 });

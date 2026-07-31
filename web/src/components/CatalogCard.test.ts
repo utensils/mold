@@ -1,7 +1,42 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ref } from "vue";
 import type { CatalogEntryWire } from "../types";
+import type { RoutableHost } from "../lib/hostRouting";
 import CatalogCard from "./CatalogCard.vue";
+
+/*
+ * The card's action label is multi-host: it stays a Pull while any reachable
+ * machine lacks the model. Stub the routing poller so each test states exactly
+ * which machines exist and which of them own the entry.
+ */
+const mockHosts = ref<RoutableHost[]>([]);
+const mockOwners = ref<Record<string, string[]>>({});
+
+vi.mock("../composables/useHostRouting", () => ({
+  useHostRouting: () => ({
+    hosts: mockHosts,
+    modelOwnerIds: (name: string) => mockOwners.value[name] ?? [],
+    inventoryKnown: () => true,
+  }),
+}));
+
+function host(id: string, over: Partial<RoutableHost> = {}): RoutableHost {
+  return {
+    id,
+    label: id === "origin" ? "this server" : id,
+    url: id === "origin" ? "" : `http://${id}:7680`,
+    status: "ready",
+    queueDepth: 0,
+    gpu: null,
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  mockHosts.value = [host("origin")];
+  mockOwners.value = {};
+});
 
 const baseEntry: CatalogEntryWire = {
   id: "hf:a",
@@ -154,6 +189,29 @@ describe("CatalogCard (discover)", () => {
   it("does not show an installed badge when not installed", () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
     expect(w.text()).not.toMatch(/installed/i);
+  });
+
+  it("still offers a Pull when a connected machine lacks an installed model", () => {
+    // Installed here, absent there: collapsing that into one boolean is what
+    // hid the install action for the machine that does not have it.
+    mockHosts.value = [host("origin"), host("studio")];
+    mockOwners.value = { "hf:a": ["origin"] };
+    const entry: CatalogEntryWire = { ...baseEntry, installed: true };
+    const w = mount(CatalogCard, { props: { entry } });
+
+    expect(w.find("[data-test=pull-btn]").text()).toContain("Pull");
+    expect(w.find("[data-test=pull-btn]").text()).not.toContain("Repair");
+    // The origin still owns it, so the "installed" tag is still accurate.
+    expect(w.text()).toMatch(/installed/i);
+  });
+
+  it("degrades to Repair once every reachable machine owns it", () => {
+    mockHosts.value = [host("origin"), host("studio")];
+    mockOwners.value = { "hf:a": ["origin", "studio"] };
+    const entry: CatalogEntryWire = { ...baseEntry, installed: true };
+    const w = mount(CatalogCard, { props: { entry } });
+
+    expect(w.find("[data-test=pull-btn]").text()).toContain("Repair");
   });
 
   it("renders a lazy preview image when the entry has a thumbnail", () => {

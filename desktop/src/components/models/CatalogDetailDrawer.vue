@@ -49,6 +49,12 @@ const props = defineProps<{
   forwardCredentials?: boolean | undefined;
   /** Selectable pull variants; the chosen chip is the exact pull target. */
   variants?: DrawerVariant[] | undefined;
+  /**
+   * Pull or Repair, decided by the owner of the host list: a model installed
+   * on one machine is still a Pull for every machine that lacks it. Omitted
+   * (single-machine callers) falls back to this entry's own install flag.
+   */
+  action?: "Pull" | "Repair" | undefined;
 }>();
 const emit = defineEmits<{
   (e: "close"): void;
@@ -170,7 +176,7 @@ const showHero = computed(() => thumbnailUrl.value !== null && !thumbFailed.valu
 
 const downloadItems = computed(() => buildDownloadContents(merged.value));
 const downloadTotal = computed(() => downloadContentsTotalBytes(downloadItems.value));
-const actionLabel = computed(() => catalogActionLabel(merged.value));
+const actionLabel = computed(() => props.action ?? catalogActionLabel(merged.value));
 const downloadable = computed(() => canDownloadEntry(merged.value));
 const unsupported = computed(() => !downloadable.value);
 

@@ -14,6 +14,7 @@ import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
+import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { requestConfirm, toast } from "../../lib/toasts";
@@ -338,19 +339,60 @@ const canPull = computed(() => {
   return e ? cat.canDownload(e) : false;
 });
 
-const isRepair = computed(() => entry.value?.installed === true);
+/*
+ * Install targeting. `installed` is one machine's answer, so the drawer asks
+ * the shared plan instead: the action stays a Pull while any reachable machine
+ * lacks the model, and an installed model this server has is still installable
+ * on the machine next to it.
+ */
+const installTargets = useModelInstallTargets();
+const installPlan = computed(() => {
+  const e = entry.value;
+  if (e) return installTargets.planFor(e.id, e.installed);
+  const m = installedModel.value;
+  return installTargets.planFor(m?.name ?? "", true);
+});
+const isRepair = computed(() => installPlan.value.label === "Repair");
+/** The Installed segment's cross-machine install; hidden when nobody lacks it. */
+const canInstallElsewhere = computed(
+  () => isInstalled.value && installPlan.value.canInstall,
+);
+
+/** Resolve a machine, send the download there, and report what happened. */
+async function runInstall(modelId: string, displayName: string) {
+  const choice = await installTargets.chooseInstallTarget({
+    modelId,
+    displayName,
+    ownedByOrigin: entry.value ? entry.value.installed : true,
+  });
+  if (choice.kind === "cancelled") return false;
+  try {
+    await installTargets.startDownloadOn(choice.target, modelId);
+    toast(
+      "success",
+      installTargets.queuedMessage(
+        choice.target,
+        isRepair.value ? "repair" : "install",
+      ),
+    );
+    return true;
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
 
 async function handlePull() {
   const e = entry.value;
   if (!e) return;
-  const target = isRepair.value ? e.id : (selectedVariantId.value ?? e.id);
-  try {
-    await cat.startDownload(target);
-    toast("success", isRepair.value ? "Repair queued" : "Download queued");
-    cat.closeDetail();
-  } catch (error) {
-    toast("error", error instanceof Error ? error.message : String(error));
-  }
+  const modelId = isRepair.value ? e.id : (selectedVariantId.value ?? e.id);
+  if (await runInstall(modelId, e.name)) cat.closeDetail();
+}
+
+async function handleInstallElsewhere() {
+  const m = installedModel.value;
+  if (!m || busy.value) return;
+  await runInstall(m.name, modelDisplayName(m));
 }
 
 async function handleComponentRepair(component: ModelComponentStatus) {
@@ -682,6 +724,19 @@ function onRetry() {
               Delete
             </button>
           </div>
+          <!-- Installed here, missing there: the install action has to stay
+               reachable until every connected machine owns it. -->
+          <button
+            v-if="canInstallElsewhere"
+            type="button"
+            class="md__ghost md__ghost--wide"
+            data-test="install-elsewhere-btn"
+            :disabled="busy"
+            @click="handleInstallElsewhere"
+          >
+            <Icon name="download" :size="14" />
+            Install on another machine
+          </button>
         </template>
 
         <!-- Discover (catalog) row: pull / repair -->
@@ -964,6 +1019,15 @@ function onRetry() {
   transition:
     border-color var(--dur-quick) var(--ease),
     color var(--dur-quick) var(--ease);
+}
+
+.md__ghost--wide {
+  width: 100%;
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
 }
 
 .md__ghost:hover:not(:disabled) {

@@ -9,6 +9,7 @@ import { computed, ref } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import Icon from "@ui/components/Icon.vue";
+import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
 
@@ -100,10 +101,20 @@ const accessibleName = computed(() => {
   return `${props.entry.name} — ${classification}${mature}`;
 });
 const detailsAriaLabel = computed(() => `${accessibleName.value} — details`);
-const pullLabel = computed(() => {
-  if (!supported.value) return "Unsupported";
-  return props.entry.installed ? "Repair" : "Pull";
-});
+
+/*
+ * "Installed" is per-machine, so `entry.installed` (the serving host's answer)
+ * can't decide this label on its own: a model this server has and the machine
+ * next to it doesn't is still installable. The action only degrades to Repair
+ * once every reachable machine owns it.
+ */
+const installTargets = useModelInstallTargets();
+const installPlan = computed(() =>
+  installTargets.planFor(props.entry.id, props.entry.installed),
+);
+const pullLabel = computed(() =>
+  supported.value ? installPlan.value.label : "Unsupported",
+);
 </script>
 
 <template>

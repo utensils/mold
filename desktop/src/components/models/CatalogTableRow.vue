@@ -16,13 +16,21 @@ import type { CatalogEntry } from "../../lib/api/types";
  * `size_bytes`), SIZE/FETCH as the two size lines, and Pull / installed
  * state in the actions column. Clicking the row opens the detail drawer.
  */
-const props = defineProps<{
-  entry: CatalogEntry;
-  pulling: boolean;
-  /** Labels of hosts that have this model installed — the unified list's
-   *  "you have this" indicator. */
-  hosts?: string[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    entry: CatalogEntry;
+    pulling: boolean;
+    /** Labels of hosts that have this model installed — the unified list's
+     *  "you have this" indicator. */
+    hosts?: string[];
+    /** Whether some machine can still receive this model. An installed row
+     *  keeps its Pull action until every reachable machine has it; the parent
+     *  decides, because only it knows the fleet. */
+    installable?: boolean | undefined;
+  }>(),
+  // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
+  { installable: undefined },
+);
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
@@ -31,6 +39,9 @@ const emit = defineEmits<{
 const glyphSource = computed<ModelSource>(() =>
   props.entry.source === "civitai" ? "civitai" : "hf",
 );
+/** Without an explicit answer from the parent, fall back to single-machine
+ *  truth: installed here means there is nothing left to pull. */
+const showAction = computed(() => props.installable ?? !props.entry.installed);
 const pageUrl = computed(() => catalogPageUrl(props.entry));
 const kindValue = computed(() => modelKindValue(props.entry));
 const accessibilityLabel = computed(
@@ -106,7 +117,7 @@ const counts = computed(() => {
     <template #actions>
       <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
       <button
-        v-else
+        v-if="showAction"
         type="button"
         data-test="pull"
         class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"

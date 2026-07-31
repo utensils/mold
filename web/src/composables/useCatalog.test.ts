@@ -566,4 +566,24 @@ describe("useCatalog infinite scroll", () => {
     expect(listCalls.length).toBe(1);
     expect(cat.entries.value.length).toBe(96);
   });
+
+  it("starts a manifest-named download on /api/downloads, not the catalog route", async () => {
+    // `/api/catalog/:id/download` answers 400 "id must be `cv:` or `hf:`
+    // prefixed". Component repairs pass a `repair_model` and the installed
+    // shelf passes model names, so both are plain manifest ids.
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "job-1", position: 0 }),
+      };
+    }) as unknown as typeof fetch;
+
+    await useCatalog().startDownload("sdxl-base:fp16");
+
+    expect(calls.some((url) => url.endsWith("/api/downloads"))).toBe(true);
+    expect(calls.some((url) => url.includes("/api/catalog/"))).toBe(false);
+  });
 });
