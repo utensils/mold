@@ -3825,6 +3825,12 @@ describe("MobileApp create settings reset", () => {
     expect(
       (wrapper.get("[data-test='mobile-ltx2-stg-scale']").element as HTMLInputElement).value,
     ).toBe("");
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.guidanceOverrides.stgScale = 1.5;
+    liveForm.family = "flux";
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
   });
 });
 

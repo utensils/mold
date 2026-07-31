@@ -310,7 +310,12 @@ const advancedActiveCount = computed(() => {
   if (form.scheduler !== "default") count += 1;
   if (form.cfgPlus) count += 1;
   if (form.cameraControl) count += 1;
-  if (!guidanceOverridesAreEmpty(form.guidanceOverrides)) count += 1;
+  if (
+    generationCapabilitiesForFamily(form.family).supportsAdvancedVideo &&
+    !guidanceOverridesAreEmpty(form.guidanceOverrides)
+  ) {
+    count += 1;
+  }
   return count;
 });
 

@@ -6,8 +6,13 @@ import {
   type SequenceReuseLossiness,
 } from "@studio/lib/sequenceReuse";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
-import { defaultOutputFormat, outputFormatsForFamily } from "../lib/capabilities";
+import {
+  defaultOutputFormat,
+  generationCapabilitiesForFamily,
+  outputFormatsForFamily,
+} from "../lib/capabilities";
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
+import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 
 /** The clip rail a sequence print reloads, plus what it could not give back. */
 export interface MobileSequenceReuse {
@@ -64,6 +69,9 @@ export function applyMobileGalleryMetadata(
     form.controlModel = "";
     form.cameraControl = null;
     form.icLoraControl = null;
+    if (!generationCapabilitiesForFamily(fallbackModel.family).supportsAdvancedVideo) {
+      form.guidanceOverrides = emptyGuidanceOverrides();
+    }
   }
 
   // A substituted model can belong to a different family. Keep the original

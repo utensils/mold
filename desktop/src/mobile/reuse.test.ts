@@ -40,6 +40,10 @@ const metadata: OutputMetadata = {
   pipeline: "two-stage-hq",
   spatial_upscale: "x2",
   temporal_upscale: "x2",
+  guidance_overrides: {
+    stg_scale: 1.25,
+    stg_blocks: [28, 29],
+  },
 };
 
 describe("applyMobileGalleryMetadata", () => {
@@ -81,6 +85,10 @@ describe("applyMobileGalleryMetadata", () => {
       pipeline: "two-stage-hq",
       spatialUpscale: "x2",
       temporalUpscale: "x2",
+      guidanceOverrides: {
+        stgScale: 1.25,
+        stgBlocks: "28, 29",
+      },
     });
 
     const request = buildRequest(form);
@@ -92,6 +100,10 @@ describe("applyMobileGalleryMetadata", () => {
       pipeline: "two-stage-hq",
       spatial_upscale: "x2",
       temporal_upscale: "x2",
+      guidance_overrides: {
+        stg_scale: 1.25,
+        stg_blocks: [28, 29],
+      },
     });
     expect(request.scheduler).toBeUndefined();
     expect(request.cfg_plus).toBeUndefined();
@@ -122,7 +134,15 @@ describe("applyMobileGalleryMetadata", () => {
     expect(form.upscaleModel).toBe("");
     expect(form.controlModel).toBe("");
     expect(form.cameraControl).toBeNull();
+    expect(form.guidanceOverrides).toEqual({
+      stgScale: null,
+      stgBlocks: "",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: null,
+    });
     expect(buildRequest(form)).toMatchObject({ model: replacement.name });
+    expect(buildRequest(form).guidance_overrides).toBeUndefined();
     expect(buildRequest(form).loras).toBeUndefined();
     expect(buildRequest(form).upscale_model).toBeUndefined();
   });
