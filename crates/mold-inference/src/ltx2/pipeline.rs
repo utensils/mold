@@ -1092,7 +1092,13 @@ fn ltx2_runtime_device_refs(
 ) {
     let runtime = placement
         .and_then(|placement| placement.advanced.as_ref())
-        .map(|advanced| advanced.transformer.clone());
+        .map(|advanced| match &advanced.transformer {
+            // LTX-2's transformer and VAE share one native runtime device.
+            // Honor an explicit VAE pin when the transformer remains Auto;
+            // a concrete transformer pin is the primary runtime authority.
+            mold_core::types::DeviceRef::Auto => advanced.vae.clone(),
+            transformer => transformer.clone(),
+        });
     let prompt = placement.map(|placement| placement.text_encoders.clone());
     (runtime, prompt)
 }
@@ -2090,6 +2096,27 @@ mod tests {
         assert_eq!(
             runtime, None,
             "without an explicit transformer placement the runtime must retain its CUDA-first backend selection",
+        );
+        assert_eq!(prompt, Some(mold_core::types::DeviceRef::Cpu));
+    }
+
+    #[test]
+    fn explicit_vae_placement_selects_runtime_when_transformer_is_auto() {
+        let placement = mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Cpu,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::types::DeviceRef::Auto,
+                vae: mold_core::types::DeviceRef::device("cuda:1"),
+                ..Default::default()
+            }),
+        };
+
+        let (runtime, prompt) = ltx2_runtime_device_refs(Some(&placement));
+
+        assert_eq!(
+            runtime,
+            Some(mold_core::types::DeviceRef::device("cuda:1")),
+            "the single-device native runtime must honor a concrete VAE pin when the transformer remains Auto",
         );
         assert_eq!(prompt, Some(mold_core::types::DeviceRef::Cpu));
     }
