@@ -118,9 +118,13 @@ describe("MachinesPage", () => {
     );
     poll.loading.value = false;
     const w = mountPage();
-    expect(w.get('[data-test="host-disconnected"]').text()).toBe("disconnected");
+    expect(w.get('[data-test="host-disconnected"]').text()).toBe(
+      "disconnected",
+    );
     await w.get('[data-test="host-reconnect"]').trigger("click");
-    expect(JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0]).toMatchObject({
+    expect(
+      JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0],
+    ).toMatchObject({
       connected: true,
       apiKey: "secret",
     });
