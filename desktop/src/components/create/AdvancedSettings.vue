@@ -16,6 +16,7 @@ import type {
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
   ModelEntry,
+  Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
   OutputFormat,
 } from "../../lib/api/types";
@@ -34,7 +35,7 @@ import {
   fpsValidationError,
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { CAMERA_MOTION_PRESETS, cameraMotionMode } from "@studio/lib/cameraMotion";
+import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -46,8 +47,16 @@ const props = withDefaults(
     selectedModel?: ModelEntry | null;
     upscalers?: ModelEntry[];
     controlAdapters?: Ltx2ControlAdapterInfo[];
+    cameraControls?: Ltx2CameraControlInfo[];
+    cameraControlsLoaded?: boolean;
   }>(),
-  { selectedModel: null, upscalers: () => [], controlAdapters: () => [] },
+  {
+    selectedModel: null,
+    upscalers: () => [],
+    controlAdapters: () => [],
+    cameraControls: () => [],
+    cameraControlsLoaded: false,
+  },
 );
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
@@ -118,7 +127,6 @@ const cameraError = computed(() => cameraControlValidationError(props.form));
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
 const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
 
-const isLtx23Model = computed(() => props.form.model.includes("ltx-2.3"));
 const uiCameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
   () => props.form.cameraControl,
@@ -468,13 +476,8 @@ function reset() {
             @change="setCameraMode(($event.target as HTMLSelectElement).value)"
           >
             <option value="">None</option>
-            <option
-              v-for="p in CAMERA_MOTION_PRESETS"
-              :key="p.id"
-              :value="p.id"
-              :disabled="isLtx23Model"
-            >
-              {{ p.label }}
+            <option v-for="p in cameraControls" :key="p.id" :value="p.id">
+              {{ p.label }}{{ p.installed ? "" : " · downloads on first use" }}
             </option>
             <option value="custom">Custom LoRA path…</option>
           </select>
@@ -489,8 +492,13 @@ function reset() {
             :value="form.cameraControl ?? ''"
             @input="form.cameraControl = ($event.target as HTMLInputElement).value"
           />
-          <p v-if="isLtx23Model" data-test="camera-motion-23-hint" class="ms-hint">
-            Presets are published for LTX-2 19B only — use a custom LoRA path for LTX-2.3.
+          <p
+            v-if="cameraControlsLoaded && cameraControls.length === 0"
+            data-test="camera-motion-19b-hint"
+            class="ms-hint"
+          >
+            Built-in camera motions are available for LTX-2 19B only. Use a custom LoRA path for
+            this model.
           </p>
           <p v-if="cameraError" data-test="camera-motion-error" class="ms-error" role="alert">
             {{ cameraError }}

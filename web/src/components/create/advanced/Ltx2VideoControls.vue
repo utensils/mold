@@ -14,6 +14,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
   GenerateFormState,
+  Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
@@ -23,8 +24,8 @@ import type {
 } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
 import {
-  CAMERA_MOTION_PRESETS,
   cameraMotionMode,
+  isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
 
 const props = withDefaults(
@@ -36,32 +37,65 @@ const props = withDefaults(
 );
 const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
+const cameraControlsLoaded = ref(false);
 let controlEpoch = 0;
 watch(
   () => props.modelValue.model,
   async (model) => {
     const epoch = ++controlEpoch;
     controlAdapters.value = [];
+    cameraControls.value = [];
+    cameraControlsLoaded.value = false;
     if (!model) return;
-    try {
-      const response = await fetch(
-        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(model)}`,
-      );
+    const read = async <T,>(path: string): Promise<T> => {
+      const response = await fetch(path);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const options = (await response.json()) as Ltx2ControlAdapterInfo[];
-      if (epoch !== controlEpoch) return;
-      controlAdapters.value = options;
-      if (
-        props.modelValue.icLoraControl &&
-        !options.some(
-          (adapter) => adapter.id === props.modelValue.icLoraControl,
-        )
-      ) {
+      return (await response.json()) as T;
+    };
+    const controlsRequest = read<Ltx2ControlAdapterInfo[]>(
+      `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(model)}`,
+    )
+      .then((options) => {
+        if (epoch !== controlEpoch) return;
+        controlAdapters.value = options;
+        if (
+          props.modelValue.icLoraControl &&
+          !options.some(
+            (adapter) => adapter.id === props.modelValue.icLoraControl,
+          )
+        ) {
+          patch({ icLoraControl: null });
+        }
+      })
+      .catch(() => {
+        if (epoch !== controlEpoch) return;
+        controlAdapters.value = [];
         patch({ icLoraControl: null });
-      }
-    } catch {
-      if (epoch === controlEpoch) patch({ icLoraControl: null });
-    }
+      });
+    const camerasRequest = read<Ltx2CameraControlInfo[]>(
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(model)}`,
+    )
+      .then((cameras) => {
+        if (epoch !== controlEpoch) return;
+        cameraControls.value = cameras;
+        cameraControlsLoaded.value = true;
+        if (
+          props.modelValue.cameraControl &&
+          isCameraMotionPreset(props.modelValue.cameraControl) &&
+          !cameras.some(
+            (camera) => camera.id === props.modelValue.cameraControl,
+          )
+        ) {
+          patch({ cameraControl: null });
+        }
+      })
+      .catch(() => {
+        if (epoch !== controlEpoch) return;
+        cameraControls.value = [];
+        cameraControlsLoaded.value = false;
+      });
+    await Promise.allSettled([controlsRequest, camerasRequest]);
   },
   { immediate: true },
 );
@@ -107,9 +141,6 @@ function setControlAdapter(raw: string) {
   });
 }
 
-// Camera-control LoRAs published for LTX-2 19B. LTX-2.3 uses a different
-// architecture, so its users get the custom-path escape hatch only.
-const isLtx23Model = computed(() => props.modelValue.model.includes("ltx-2.3"));
 const cameraMode = ref(cameraMotionMode(props.modelValue.cameraControl));
 watch(
   () => props.modelValue.cameraControl,
@@ -309,12 +340,12 @@ function removeKeyframe(index: number) {
       >
         <option value="">None</option>
         <option
-          v-for="preset in CAMERA_MOTION_PRESETS"
+          v-for="preset in cameraControls"
           :key="preset.id"
           :value="preset.id"
-          :disabled="isLtx23Model"
         >
-          {{ preset.label }}
+          {{ preset.label
+          }}{{ preset.installed ? "" : " · downloads on first use" }}
         </option>
         <option value="custom">Custom LoRA path…</option>
       </select>
@@ -328,8 +359,13 @@ function removeKeyframe(index: number) {
           patch({ cameraControl: ($event.target as HTMLInputElement).value })
         "
       />
-      <p v-if="isLtx23Model" class="ltx2__hint">
-        Presets are for LTX-2 19B; use a custom LoRA path for LTX-2.3.
+      <p
+        v-if="cameraControlsLoaded && cameraControls.length === 0"
+        class="ltx2__hint"
+        data-test="ltx2-camera-motion-19b-hint"
+      >
+        Built-in camera motions are available for LTX-2 19B only. This model
+        accepts a custom LoRA path.
       </p>
     </div>
 

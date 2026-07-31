@@ -1453,7 +1453,20 @@ fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLor
         .into_iter()
         .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
         .map(|lora| {
-            let path = PathBuf::from(lora.path);
+            let path = lora
+                .path
+                .strip_prefix("camera-control:")
+                .and_then(|id| mold_core::ltx2_camera::resolve_camera_control_preset(id).ok())
+                .and_then(|preset| {
+                    let manifest = mold_core::manifest::find_manifest(preset.download_model)?;
+                    let file = manifest.files.first()?;
+                    Some(
+                        config
+                            .resolved_models_dir()
+                            .join(mold_core::manifest::storage_path(manifest, file)),
+                    )
+                })
+                .unwrap_or_else(|| PathBuf::from(lora.path));
             PlannedLora {
                 content_fingerprint: fingerprint_path(&path),
                 path,
@@ -3833,6 +3846,35 @@ mod tests {
             validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
+    }
+
+    #[test]
+    fn camera_control_alias_plans_the_verified_manifest_path() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let mut config = config(root.path(), "ltx2", None);
+        config.models_dir = root.path().display().to_string();
+        let preset = mold_core::ltx2_camera::resolve_camera_control_preset("dolly-in").unwrap();
+        let manifest = mold_core::manifest::find_manifest(preset.download_model).unwrap();
+        let file = manifest.files.first().unwrap();
+        let expected = root
+            .path()
+            .join(mold_core::manifest::storage_path(manifest, file));
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"camera").unwrap();
+
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: "camera-control:dolly-in".into(),
+            scale: 1.0,
+        }]);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_eq!(plan.effective_loras[0].path, expected);
+        assert!(plan.components.contains_key(&ComponentRole::Lora(0)));
     }
 
     #[test]

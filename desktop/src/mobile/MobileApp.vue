@@ -57,9 +57,11 @@ import type {
   GalleryImage,
   GenerateRequest,
   Ltx2ControlAdapterInfo,
+  Ltx2CameraControlInfo,
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
+import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -306,6 +308,7 @@ const advancedActiveCount = computed(() => {
   if (form.upscaleModel) count += 1;
   if (form.scheduler !== "default") count += 1;
   if (form.cfgPlus) count += 1;
+  if (form.cameraControl) count += 1;
   return count;
 });
 
@@ -479,30 +482,58 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   return host ? mobileHostTarget(host) : null;
 });
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
+const cameraControlsLoaded = ref(false);
 let controlAdaptersEpoch = 0;
 watch(
   [selectedHostId, () => form.model, () => selectedHost.value?.online],
   async () => {
     const epoch = ++controlAdaptersEpoch;
     controlAdapters.value = [];
+    cameraControls.value = [];
+    cameraControlsLoaded.value = false;
     const target = selectedTarget.value;
     if (!target || !selectedHost.value?.online || form.family !== "ltx2" || !form.model) {
       form.icLoraControl = null;
       return;
     }
-    try {
-      const options = await apiJsonTo<Ltx2ControlAdapterInfo[]>(
-        target,
-        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(form.model)}`,
-      );
-      if (epoch !== controlAdaptersEpoch) return;
-      controlAdapters.value = options;
-      if (form.icLoraControl && !options.some((adapter) => adapter.id === form.icLoraControl)) {
+    const controlsRequest = apiJsonTo<Ltx2ControlAdapterInfo[]>(
+      target,
+      `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(form.model)}`,
+    )
+      .then((options) => {
+        if (epoch !== controlAdaptersEpoch) return;
+        controlAdapters.value = options;
+        if (form.icLoraControl && !options.some((adapter) => adapter.id === form.icLoraControl)) {
+          form.icLoraControl = null;
+        }
+      })
+      .catch(() => {
+        if (epoch !== controlAdaptersEpoch) return;
+        controlAdapters.value = [];
         form.icLoraControl = null;
-      }
-    } catch {
-      if (epoch === controlAdaptersEpoch) form.icLoraControl = null;
-    }
+      });
+    const cameraRequest = apiJsonTo<Ltx2CameraControlInfo[]>(
+      target,
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(form.model)}`,
+    )
+      .then((cameras) => {
+        if (epoch !== controlAdaptersEpoch) return;
+        cameraControls.value = cameras;
+        cameraControlsLoaded.value = true;
+        const compatible = (value: string | null) =>
+          !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
+        if (!compatible(form.cameraControl)) form.cameraControl = null;
+        for (const clip of draft.clips) {
+          if (!compatible(clip.cameraControl)) clip.cameraControl = null;
+        }
+      })
+      .catch(() => {
+        if (epoch !== controlAdaptersEpoch) return;
+        cameraControls.value = [];
+        cameraControlsLoaded.value = false;
+      });
+    await Promise.allSettled([controlsRequest, cameraRequest]);
   },
   { immediate: true },
 );
@@ -3413,6 +3444,8 @@ onBeforeUnmount(() => {
               :submitting="sequenceStarting"
               :error="sequenceError"
               :settings-summary="sequenceSettingsSummary"
+              :camera-controls="cameraControls"
+              :camera-controls-loaded="cameraControlsLoaded"
               @submit="submitMobileSequence"
             >
               <template #settings>
@@ -3629,6 +3662,8 @@ onBeforeUnmount(() => {
                 :upscalers="upscalers"
                 :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
                 :control-adapters="controlAdapters"
+                :camera-controls="cameraControls"
+                :camera-controls-loaded="cameraControlsLoaded"
                 @validity-change="parameterValid = $event"
               />
               <label v-if="form.model && caps.supportsNegativePrompt" class="field">

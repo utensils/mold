@@ -17,6 +17,11 @@ import type {
 } from "./api/chainTypes";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
 import type { SequenceTransition } from "./sequence";
+import {
+  CAMERA_MOTION_PRESETS,
+  cameraMotionLabel,
+  isCameraMotionPreset,
+} from "./cameraMotion";
 
 export interface SequenceClipSourceImage {
   filename: string;
@@ -38,6 +43,8 @@ export interface SequenceClipForm {
   transition: SequenceTransition;
   fadeFrames: number;
   negativePrompt: string;
+  /** Camera-control preset id or an explicit server-local `.safetensors` path. */
+  cameraControl: string | null;
   sourceImage: SequenceClipSourceImage | null;
 }
 
@@ -64,6 +71,7 @@ export function newSequenceClip(frames: number): SequenceClipForm {
     transition: "smooth",
     fadeFrames: DEFAULT_FADE_FRAMES,
     negativePrompt: "",
+    cameraControl: null,
     sourceImage: null,
   };
 }
@@ -81,6 +89,17 @@ function stageForWire(
   };
   if (idx > 0 && transition === "fade") stage.fade_frames = clip.fadeFrames;
   if (clip.negativePrompt.trim()) stage.negative_prompt = clip.negativePrompt;
+  const cameraControl = clip.cameraControl?.trim();
+  if (cameraControl) {
+    const preset = isCameraMotionPreset(cameraControl);
+    stage.loras = [
+      {
+        path: preset ? `camera-control:${cameraControl}` : cameraControl,
+        scale: 1,
+        name: preset ? cameraMotionLabel(cameraControl) : "Camera motion",
+      },
+    ];
+  }
   const sourceImage = idx === 0 ? openingImage : clip.sourceImage;
   if (sourceImage?.base64) stage.source_image = sourceImage.base64;
   return stage;
@@ -143,6 +162,24 @@ export function chainScriptToClips(script: ChainScript): {
     clip.transition = idx === 0 ? "smooth" : (stage.transition ?? "smooth");
     clip.fadeFrames = stage.fade_frames ?? DEFAULT_FADE_FRAMES;
     clip.negativePrompt = stage.negative_prompt ?? "";
+    const cameraLora = stage.loras?.find(
+      (lora) =>
+        lora.path.startsWith("camera-control:") ||
+        lora.name === "Camera motion" ||
+        Boolean(
+          lora.name &&
+          CAMERA_MOTION_PRESETS.some((preset) => preset.label === lora.name),
+        ),
+    );
+    if (cameraLora) {
+      const alias = cameraLora.path.replace(/^camera-control:/, "");
+      const namedPreset = CAMERA_MOTION_PRESETS.find(
+        (preset) => preset.label === cameraLora.name,
+      )?.id;
+      clip.cameraControl = isCameraMotionPreset(alias)
+        ? alias
+        : (namedPreset ?? cameraLora.path);
+    }
     if (stage.source_image_b64) {
       const dimensions = imageDimensionsFromBase64(stage.source_image_b64);
       const sourceImage = {
@@ -205,6 +242,17 @@ export function clipsToChainScript(
         stage.fade_frames = clip.fadeFrames;
       if (clip.negativePrompt.trim())
         stage.negative_prompt = clip.negativePrompt;
+      const cameraControl = clip.cameraControl?.trim();
+      if (cameraControl) {
+        const preset = isCameraMotionPreset(cameraControl);
+        stage.loras = [
+          {
+            path: preset ? `camera-control:${cameraControl}` : cameraControl,
+            scale: 1,
+            name: preset ? cameraMotionLabel(cameraControl) : "Camera motion",
+          },
+        ];
+      }
       const sourceImage =
         idx === 0 ? (opts.openingImage ?? null) : clip.sourceImage;
       if (sourceImage?.base64) stage.source_image_b64 = sourceImage.base64;
@@ -233,6 +281,7 @@ function renderIdentity(clip: SequenceClipForm, idx: number): string {
     clip.prompt,
     clip.frames,
     clip.negativePrompt,
+    clip.cameraControl,
     clip.sourceImage?.base64 ?? clip.sourceImage?.filename ?? null,
     usesCarry,
   ]);

@@ -895,6 +895,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ltx2_camera_capabilities_return_only_compatible_19b_presets() {
+        let app = app_empty();
+        for model in ["ltx-2-19b-distilled%3Afp8", "ltx-2-19b-dev%3Afp8"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/api/capabilities/ltx2-camera-controls?model={model}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "response body: {body}");
+            let ids = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [
+                    "dolly-in",
+                    "dolly-left",
+                    "dolly-out",
+                    "dolly-right",
+                    "jib-down",
+                    "jib-up",
+                    "static",
+                ]
+            );
+            assert!(body
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["installed"] == false));
+        }
+
+        let response = app
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2.3-22b-distilled%3Afp8",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::post("/api/generate/chain/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "ltx-2.3-22b-distilled:fp8",
+                            "stages": [
+                                {
+                                    "prompt": "orbit the subject",
+                                    "frames": 25,
+                                    "loras": [
+                                        {
+                                            "path": "camera-control:dolly-left",
+                                            "scale": 1.0,
+                                            "name": "Dolly left"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "motion_tail_frames": 17,
+                            "width": 704,
+                            "height": 416,
+                            "fps": 24,
+                            "steps": 8,
+                            "guidance": 3.0,
+                            "output_format": "mp4"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(json_body(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("published for LTX-2 19B only"));
+    }
+
+    #[tokio::test]
     async fn invalid_built_in_control_pairing_is_rejected_before_media_or_queue_work() {
         let app = app_empty();
         let response = app

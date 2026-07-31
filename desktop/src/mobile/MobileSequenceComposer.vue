@@ -26,9 +26,10 @@ import {
 } from "@studio/lib/sequence";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { sequenceOpeningImageError } from "@studio/lib/sequenceForm";
+import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
-import type { ModelEntry } from "../lib/api/types";
+import type { Ltx2CameraControlInfo, ModelEntry } from "../lib/api/types";
 import { base64ToDataUrl } from "../lib/image";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
@@ -48,8 +49,18 @@ const props = withDefaults(
     busy?: boolean;
     /** Collapsed caption for the shared-parameter disclosure. */
     settingsSummary?: string;
+    cameraControls?: Ltx2CameraControlInfo[];
+    cameraControlsLoaded?: boolean;
   }>(),
-  { target: null, submitting: false, error: "", busy: false, settingsSummary: "" },
+  {
+    target: null,
+    submitting: false,
+    error: "",
+    busy: false,
+    settingsSummary: "",
+    cameraControls: () => [],
+    cameraControlsLoaded: false,
+  },
 );
 
 const emit = defineEmits<{ submit: [] }>();
@@ -75,8 +86,19 @@ const advancedCount = computed(
   () =>
     Number(Boolean(draft.openingImage)) +
     Number(Boolean(activeClip.value?.negativePrompt.trim())) +
+    Number(Boolean(activeClip.value?.cameraControl)) +
     Number(draft.enableAudio),
 );
+
+function setCameraMode(mode: string) {
+  const clip = activeClip.value;
+  if (!clip) return;
+  if (mode === "custom") {
+    if (cameraMotionMode(clip.cameraControl) !== "custom") clip.cameraControl = "";
+  } else {
+    clip.cameraControl = mode || null;
+  }
+}
 
 /** Durations are the 8n+1 grid up to the cap, strictly above the motion tail;
  *  an off-grid loaded value stays visible rather than silently re-snapping. */
@@ -317,7 +339,10 @@ function sourceImageMime(filename: string): string {
       @reset="
         draft.openingImage = null;
         draft.enableAudio = false;
-        draft.clips.forEach((clip) => (clip.negativePrompt = ''));
+        draft.clips.forEach((clip) => {
+          clip.negativePrompt = '';
+          clip.cameraControl = null;
+        });
       "
     >
       <details class="mobile-native-disclosure" open data-test="mobile-sequence-advanced-opening">
@@ -360,6 +385,58 @@ function sourceImageMime(filename: string): string {
         <span>Clip {{ activeIndex + 1 }} negative prompt</span>
         <input v-model="activeClip.negativePrompt" class="control" placeholder="Optional" />
       </label>
+      <label
+        v-if="activeClip && selectedModel?.family === 'ltx2'"
+        class="field"
+        data-test="mobile-sequence-advanced-camera"
+      >
+        <span>Clip {{ activeIndex + 1 }} camera motion</span>
+        <select
+          class="control"
+          data-test="mobile-sequence-camera-motion"
+          aria-label="Active clip camera motion"
+          :disabled="locked"
+          :value="cameraMotionMode(activeClip.cameraControl)"
+          @change="setCameraMode(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">None</option>
+          <option v-for="control in cameraControls" :key="control.id" :value="control.id">
+            {{ control.label }}{{ control.installed ? "" : " · downloads on first use" }}
+          </option>
+          <option value="custom">Custom LoRA path…</option>
+        </select>
+      </label>
+      <label
+        v-if="
+          activeClip &&
+          selectedModel?.family === 'ltx2' &&
+          cameraMotionMode(activeClip.cameraControl) === 'custom'
+        "
+        class="field"
+      >
+        <span>Camera LoRA path</span>
+        <input
+          v-model="activeClip.cameraControl"
+          class="control"
+          data-test="mobile-sequence-camera-motion-custom"
+          aria-label="Active clip camera motion LoRA path"
+          placeholder="/path/to/lora.safetensors"
+          :disabled="locked"
+        />
+      </label>
+      <p
+        v-if="
+          activeClip &&
+          selectedModel?.family === 'ltx2' &&
+          cameraControlsLoaded &&
+          cameraControls.length === 0
+        "
+        class="mobile-sequence-camera-note"
+        data-test="mobile-sequence-camera-motion-19b-hint"
+      >
+        Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA
+        path.
+      </p>
       <label
         v-if="chainLimits?.supports_audio"
         class="mobile-sequence-check"
@@ -467,6 +544,13 @@ function sourceImageMime(filename: string): string {
   min-height: 44px;
   align-items: center;
   gap: 10px;
+}
+
+.mobile-sequence-camera-note {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .mobile-sequence-error {

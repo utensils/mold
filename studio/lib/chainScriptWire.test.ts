@@ -79,6 +79,31 @@ describe("normalizeServerChainScript", () => {
     expect(script?.stages[1]?.seed_offset).toBe("3");
   });
 
+  it("preserves per-stage camera LoRAs for sequence editing", () => {
+    const script = normalizeServerChainScript({
+      chain: { model: "ltx-2-19b-distilled:fp8" },
+      stage: [
+        {
+          prompt: "a",
+          loras: [
+            {
+              path: "camera-control:dolly-in",
+              scale: 1,
+              name: "Dolly in",
+            },
+          ],
+        },
+      ],
+    });
+    expect(script?.stages[0]?.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        scale: 1,
+        name: "Dolly in",
+      },
+    ]);
+  });
+
   it("carries enable_audio only when the server said true", () => {
     const on = normalizeServerChainScript({
       chain: { model: "m", enable_audio: true },

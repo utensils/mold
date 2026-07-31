@@ -206,9 +206,6 @@ function modelDefaultsPatch(
     next.spatialUpscale = null;
     next.temporalUpscale = null;
     next.cameraControl = null;
-  } else if (model.name.includes("ltx-2.3")) {
-    const camera = next.cameraControl?.trim();
-    if (camera && !camera.endsWith(".safetensors")) next.cameraControl = null;
   }
   if (capabilities.sourceImageMode === "qwen-edit") {
     next.batchSize = 1;

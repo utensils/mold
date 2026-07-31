@@ -75,22 +75,28 @@ describe("Ltx2VideoControls", () => {
   });
 
   it("renders host-provided controls and their guide copy", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
-        {
-          id: "motion-track",
-          label: "Motion track",
-          guide: "A trajectory-overlay guide video.",
-          size_bytes: 327_309_314,
-          installed: false,
-          download_model: "ltx2-control-motion-track-23",
-          download_repo: "Lightricks/control",
-          download_filename: "control.safetensors",
-          download_sha256: "a".repeat(64),
-        },
-      ],
-    } as Response);
+    vi.mocked(fetch).mockImplementation(
+      async (input) =>
+        ({
+          ok: true,
+          json: async () =>
+            String(input).includes("ltx2-control-adapters")
+              ? [
+                  {
+                    id: "motion-track",
+                    label: "Motion track",
+                    guide: "A trajectory-overlay guide video.",
+                    size_bytes: 327_309_314,
+                    installed: false,
+                    download_model: "ltx2-control-motion-track-23",
+                    download_repo: "Lightricks/control",
+                    download_filename: "control.safetensors",
+                    download_sha256: "a".repeat(64),
+                  },
+                ]
+              : [],
+        }) as Response,
+    );
     const wrapper = factory({ model: "ltx-2.3-22b-distilled:fp8" });
     await vi.waitFor(() =>
       expect(
@@ -110,31 +116,96 @@ describe("Ltx2VideoControls", () => {
     );
   });
 
-  it("offers the seven LTX-2 camera presets and writes the selected motion", async () => {
+  it("keeps IC options and camera state when an older host lacks the camera endpoint", async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input).includes("ltx2-camera-controls")) {
+        return { ok: false, status: 404 } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => [
+          {
+            id: "pose",
+            label: "Pose control",
+            guide: "A pose guide.",
+            size_bytes: 1,
+            installed: true,
+            download_model: "pose",
+            download_repo: "Lightricks/pose",
+            download_filename: "pose.safetensors",
+            download_sha256: "a".repeat(64),
+          },
+        ],
+      } as Response;
+    });
+    const wrapper = factory({
+      model: "ltx-2-19b-distilled:fp8",
+      cameraControl: "dolly-in",
+    });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='ltx2-reference-control']").findAll("option"),
+      ).toHaveLength(2),
+    );
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    expect(
+      wrapper.find("[data-test='ltx2-camera-motion-19b-hint']").exists(),
+    ).toBe(false);
+  });
+
+  it("offers compatible camera presets with download copy and writes the selected motion", async () => {
+    vi.mocked(fetch).mockImplementation(
+      async (input) =>
+        ({
+          ok: true,
+          json: async () =>
+            String(input).includes("ltx2-camera-controls")
+              ? [
+                  {
+                    id: "jib-up",
+                    label: "Jib up",
+                    size_bytes: 327_309_208,
+                    installed: false,
+                    download_model: "ltx2-camera-control-jib-up-19b",
+                    download_repo: "Lightricks/camera",
+                    download_filename: "jib-up.safetensors",
+                    download_sha256: "a".repeat(64),
+                  },
+                ]
+              : [],
+        }) as Response,
+    );
     const wrapper = factory({ model: "ltx-2-19b-distilled:fp8" });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='ltx2-camera-motion']").findAll("option"),
+      ).toHaveLength(3),
+    );
     const select = wrapper.get("[data-test='ltx2-camera-motion']");
     expect(select.findAll("option").map((option) => option.text())).toEqual([
       "None",
-      "Dolly in",
-      "Dolly left",
-      "Dolly out",
-      "Dolly right",
-      "Jib down",
-      "Jib up",
-      "Static",
+      "Jib up · downloads on first use",
       "Custom LoRA path…",
     ]);
     await select.setValue("jib-up");
     expect(lastPatch(wrapper).cameraControl).toBe("jib-up");
   });
 
-  it("keeps presets disabled for LTX-2.3 and accepts a custom camera LoRA", async () => {
+  it("shows 19B guidance without disabled rows and accepts a custom camera LoRA", async () => {
     const wrapper = factory({ model: "ltx-2.3-22b-distilled:fp8" });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.find("[data-test='ltx2-camera-motion-19b-hint']").exists(),
+      ).toBe(true),
+    );
     const select = wrapper.get("[data-test='ltx2-camera-motion']");
-    const presets = select.findAll("option").slice(1, 8);
+    expect(select.findAll("option").map((option) => option.text())).toEqual([
+      "None",
+      "Custom LoRA path…",
+    ]);
     expect(
-      presets.every((option) => option.attributes("disabled") !== undefined),
-    ).toBe(true);
+      wrapper.get("[data-test='ltx2-camera-motion-19b-hint']").text(),
+    ).toContain("LTX-2 19B");
 
     await select.setValue("custom");
     await wrapper

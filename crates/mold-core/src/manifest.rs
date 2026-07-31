@@ -15,7 +15,7 @@ pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
 
 /// Model families that are auxiliary (not standalone generators).
 /// ControlNet models are used via `--control-model`, not as the primary model.
-pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet", "ltx2-control"];
+pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet", "ltx2-control", "ltx2-camera-control"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
@@ -1216,6 +1216,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
     manifests.extend(ltx2_control_manifests());
+    manifests.extend(ltx2_camera_control_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
@@ -4425,6 +4426,37 @@ fn ltx2_control_manifests() -> Vec<ModelManifest> {
         .collect()
 }
 
+fn ltx2_camera_control_manifests() -> Vec<ModelManifest> {
+    crate::ltx2_camera::LTX2_CAMERA_CONTROLS
+        .iter()
+        .map(|preset| ModelManifest {
+            name: preset.download_model.to_string(),
+            family: "ltx2-camera-control".to_string(),
+            description: format!("{} camera control — LTX-2 19B", preset.label),
+            files: vec![ModelFile {
+                hf_repo: preset.hf_repo.to_string(),
+                hf_filename: preset.hf_filename.to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: preset.size_bytes,
+                gated: false,
+                sha256: Some(preset.sha256),
+            }],
+            defaults: ManifestDefaults {
+                steps: 1,
+                guidance: 0.0,
+                width: 16,
+                height: 16,
+                is_schnell: true,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: true,
+        })
+        .collect()
+}
+
 fn controlnet_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 25,
@@ -5139,6 +5171,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn camera_control_presets_have_hidden_auxiliary_download_manifests() {
+        let visible_names = visible_manifests()
+            .map(|manifest| manifest.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        for preset in crate::ltx2_camera::LTX2_CAMERA_CONTROLS {
+            let manifest = find_manifest(preset.download_model)
+                .unwrap_or_else(|| panic!("missing manifest for {}", preset.download_model));
+            assert!(manifest.hidden);
+            assert!(manifest.is_auxiliary());
+            assert!(!manifest.is_generation_model());
+            assert!(!visible_names.contains(preset.download_model));
+            assert_eq!(manifest.family, "ltx2-camera-control");
+            assert_eq!(manifest.files.len(), 1);
+
+            let file = &manifest.files[0];
+            assert_eq!(file.hf_repo, preset.hf_repo);
+            assert_eq!(file.hf_filename, preset.hf_filename);
+            assert_eq!(file.component, ModelComponent::Transformer);
+            assert_eq!(file.size_bytes, preset.size_bytes);
+            assert_eq!(file.sha256, Some(preset.sha256));
+            assert!(!file.gated);
+        }
+    }
+
+    #[test]
     fn storage_path_transformer_is_model_specific() {
         let manifest = find_manifest("flux-schnell:q8").unwrap();
         let transformer_file = manifest
@@ -5673,13 +5731,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 121
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 128
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 121);
+        assert_eq!(known_manifests().len(), 128);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 import { computed, ref, useId, watch } from "vue";
 import type {
   Ltx2PipelineMode,
+  Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
@@ -27,7 +28,7 @@ import {
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { fileToBase64, isStillImageFile } from "../lib/image";
-import { CAMERA_MOTION_PRESETS, cameraMotionMode } from "@studio/lib/cameraMotion";
+import { cameraMotionMode } from "@studio/lib/cameraMotion";
 
 const props = withDefaults(
   defineProps<{
@@ -35,8 +36,16 @@ const props = withDefaults(
     upscalers?: ModelEntry[];
     audioOutputSupported?: boolean;
     controlAdapters?: Ltx2ControlAdapterInfo[];
+    cameraControls?: Ltx2CameraControlInfo[];
+    cameraControlsLoaded?: boolean;
   }>(),
-  { upscalers: () => [], audioOutputSupported: true, controlAdapters: () => [] },
+  {
+    upscalers: () => [],
+    audioOutputSupported: true,
+    controlAdapters: () => [],
+    cameraControls: () => [],
+    cameraControlsLoaded: false,
+  },
 );
 const MAX_BATCH_SIZE = 10_000;
 
@@ -130,8 +139,6 @@ const schedulerLabels: Record<string, string> = {
   "euler-ancestral": "Euler ancestral",
   unipc: "UniPC",
 };
-
-const isLtx23Model = computed(() => props.form.model.includes("ltx-2.3"));
 
 const cameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
@@ -561,13 +568,8 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           @change="setCameraMode(($event.target as HTMLSelectElement).value)"
         >
           <option value="">None</option>
-          <option
-            v-for="preset in CAMERA_MOTION_PRESETS"
-            :key="preset.id"
-            :value="preset.id"
-            :disabled="isLtx23Model"
-          >
-            {{ preset.label }}
+          <option v-for="preset in cameraControls" :key="preset.id" :value="preset.id">
+            {{ preset.label }}{{ preset.installed ? "" : " · downloads on first use" }}
           </option>
           <option value="custom">Custom LoRA path…</option>
         </select>
@@ -589,8 +591,13 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           @input="form.cameraControl = ($event.target as HTMLInputElement).value"
         />
       </label>
-      <p v-if="caps.supportsAdvancedVideo && isLtx23Model" class="mobile-generate-note">
-        Motion presets are for LTX-2 19B. LTX-2.3 accepts a custom LoRA path.
+      <p
+        v-if="caps.supportsAdvancedVideo && cameraControlsLoaded && cameraControls.length === 0"
+        class="mobile-generate-note"
+        data-test="mobile-camera-motion-19b-hint"
+      >
+        Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA
+        path.
       </p>
       <p
         v-if="cameraError"

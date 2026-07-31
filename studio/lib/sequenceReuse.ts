@@ -27,6 +27,7 @@ import {
   newSequenceClip,
   type SequenceClipForm,
 } from "./sequenceForm";
+import { CAMERA_MOTION_PRESETS, isCameraMotionPreset } from "./cameraMotion";
 
 export interface OutputMetadataLike {
   chain_job_id?: string | null;
@@ -61,6 +62,21 @@ export function chainMetadataToClips(
     clip.transition = idx === 0 ? "smooth" : (stage.transition ?? "smooth");
     clip.fadeFrames = stage.fade_frames ?? DEFAULT_FADE_FRAMES;
     clip.negativePrompt = idx === 0 ? negative : "";
+    const cameraLora = stage.loras?.find(
+      (lora) =>
+        lora.path.startsWith("camera-control:") ||
+        lora.name === "Camera motion" ||
+        CAMERA_MOTION_PRESETS.some((preset) => preset.label === lora.name),
+    );
+    if (cameraLora) {
+      const alias = cameraLora.path.replace(/^camera-control:/, "");
+      const namedPreset = CAMERA_MOTION_PRESETS.find(
+        (preset) => preset.label === cameraLora.name,
+      )?.id;
+      clip.cameraControl = isCameraMotionPreset(alias)
+        ? alias
+        : (namedPreset ?? cameraLora.path);
+    }
     return clip;
   });
 }

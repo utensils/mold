@@ -6,7 +6,11 @@ import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
-import type { Ltx2ControlAdapterInfo, ModelEntry } from "../../lib/api/types";
+import type {
+  Ltx2CameraControlInfo,
+  Ltx2ControlAdapterInfo,
+  ModelEntry,
+} from "../../lib/api/types";
 
 vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
@@ -47,6 +51,17 @@ function mountSettings(form: GenerateForm, extra: Record<string, unknown> = {}) 
     attachTo: document.body,
   });
 }
+
+const cameraControl = (id = "dolly-in", installed = false): Ltx2CameraControlInfo => ({
+  id,
+  label: id === "dolly-in" ? "Dolly in" : id,
+  size_bytes: 327_309_208,
+  installed,
+  download_model: `ltx2-camera-control-${id}-19b`,
+  download_repo: `Lightricks/${id}`,
+  download_filename: `${id}.safetensors`,
+  download_sha256: "a".repeat(64),
+});
 
 describe("AdvancedSettings — capability matrix", () => {
   it("renders every applicable section open with an icon and no nested disclosure", () => {
@@ -290,18 +305,36 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     );
   });
 
-  it("offers the seven camera presets, disabling them on LTX-2.3", async () => {
+  it("renders compatible host camera controls enabled with first-use download copy", async () => {
     const form = formFor("ltx2");
-    form.model = "ltx-2.3-22b-distilled:fp8";
-    const wrapper = mountSettings(form);
+    form.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mountSettings(form, {
+      cameraControls: [cameraControl("dolly-in", false)],
+      cameraControlsLoaded: true,
+    });
     await openSection(wrapper, "Video");
     const options = wrapper.get("[data-test='camera-motion']").findAll("option");
-    for (const o of options) {
-      const value = o.attributes("value");
-      const shouldDisable = value !== "" && value !== "custom";
-      expect(o.attributes("disabled") !== undefined).toBe(shouldDisable);
-    }
-    expect(wrapper.get("[data-test='camera-motion-23-hint']").text()).toContain("LTX-2 19B");
+    expect(options.map((option) => option.text())).toContain("Dolly in · downloads on first use");
+    expect(options[1]?.attributes("disabled")).toBeUndefined();
+    await wrapper.get("[data-test='camera-motion']").setValue("dolly-in");
+    expect(form.cameraControl).toBe("dolly-in");
+  });
+
+  it("keeps custom camera motion available when the host reports no built-ins", async () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    const wrapper = mountSettings(form, {
+      cameraControls: [],
+      cameraControlsLoaded: true,
+    });
+    await openSection(wrapper, "Video");
+    expect(wrapper.get("[data-test='camera-motion-19b-hint']").text()).toContain("LTX-2 19B");
+    expect(
+      wrapper
+        .get("[data-test='camera-motion']")
+        .findAll("option")
+        .map((option) => option.text()),
+    ).toEqual(["None", "Custom LoRA path…"]);
   });
 
   it("reveals a custom camera-motion path input", async () => {

@@ -12,7 +12,12 @@ import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@s
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
-import type { Ltx2ControlAdapterInfo, ModelEntry } from "../../lib/api/types";
+import type {
+  Ltx2CameraControlInfo,
+  Ltx2ControlAdapterInfo,
+  ModelEntry,
+} from "../../lib/api/types";
+import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import {
   filterModelsForTarget,
@@ -70,6 +75,8 @@ const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
+const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
+const cameraControlsLoaded = ref(false);
 let controlAdaptersEpoch = 0;
 watch(
   [
@@ -80,18 +87,20 @@ watch(
   async () => {
     const epoch = ++controlAdaptersEpoch;
     controlAdapters.value = [];
+    cameraControls.value = [];
+    cameraControlsLoaded.value = false;
     if (props.form.family !== "ltx2" || !props.form.model) return;
     const route = hosts.resolveRoute(
       normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
       props.form.model,
     );
     if (!route) return;
-    try {
-      const options = await apiJsonTo<Ltx2ControlAdapterInfo[]>(
-        route.target,
-        `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(props.form.model)}`,
-      );
-      if (epoch === controlAdaptersEpoch) {
+    const controlsRequest = apiJsonTo<Ltx2ControlAdapterInfo[]>(
+      route.target,
+      `/api/capabilities/ltx2-control-adapters?model=${encodeURIComponent(props.form.model)}`,
+    )
+      .then((options) => {
+        if (epoch !== controlAdaptersEpoch) return;
         controlAdapters.value = options;
         if (
           props.form.icLoraControl &&
@@ -99,13 +108,35 @@ watch(
         ) {
           props.form.icLoraControl = null;
         }
-      }
-    } catch {
-      if (epoch === controlAdaptersEpoch) {
+      })
+      .catch(() => {
+        if (epoch !== controlAdaptersEpoch) return;
         controlAdapters.value = [];
         props.form.icLoraControl = null;
-      }
-    }
+      });
+    const cameraRequest = apiJsonTo<Ltx2CameraControlInfo[]>(
+      route.target,
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.form.model)}`,
+    )
+      .then((cameras) => {
+        if (epoch !== controlAdaptersEpoch) return;
+        cameraControls.value = cameras;
+        cameraControlsLoaded.value = true;
+        const compatible = (value: string | null) =>
+          !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
+        if (!compatible(props.form.cameraControl)) {
+          props.form.cameraControl = null;
+        }
+        for (const clip of draft.clips) {
+          if (!compatible(clip.cameraControl)) clip.cameraControl = null;
+        }
+      })
+      .catch(() => {
+        if (epoch !== controlAdaptersEpoch) return;
+        cameraControls.value = [];
+        cameraControlsLoaded.value = false;
+      });
+    await Promise.allSettled([controlsRequest, cameraRequest]);
   },
   { immediate: true },
 );
@@ -138,6 +169,7 @@ const advancedCount = computed(() =>
   isSequence.value
     ? Number(Boolean(draft.openingImage)) +
       Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
       Number(draft.enableAudio)
     : advancedActiveCount(props.form),
 );
@@ -659,6 +691,9 @@ function resetSettings() {
         v-if="advancedExpanded && isSequence"
         id="desktop-inline-advanced"
         :chain-limits="chainLimits"
+        :camera-controls-enabled="form.family === 'ltx2'"
+        :camera-controls="cameraControls"
+        :camera-controls-loaded="cameraControlsLoaded"
       />
       <AdvancedSettings
         v-else-if="advancedExpanded"
@@ -667,6 +702,8 @@ function resetSettings() {
         :selected-model="selectedModel"
         :upscalers="models.upscalers"
         :control-adapters="controlAdapters"
+        :camera-controls="cameraControls"
+        :camera-controls-loaded="cameraControlsLoaded"
         @append-word="emit('append-word', $event)"
       />
     </div>

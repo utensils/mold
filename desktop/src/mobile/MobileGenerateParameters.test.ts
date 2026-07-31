@@ -2,7 +2,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, reactive } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
-import type { Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
+import type { Ltx2CameraControlInfo, Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 
 const { fileToBase64 } = vi.hoisted(() => ({ fileToBase64: vi.fn() }));
@@ -25,6 +25,16 @@ const upscaler: ModelEntry = {
   description: "4x upscaler",
   downloaded: false,
 };
+const cameraControl: Ltx2CameraControlInfo = {
+  id: "dolly-in",
+  label: "Dolly in",
+  size_bytes: 327_309_208,
+  installed: false,
+  download_model: "ltx2-camera-control-dolly-in-19b",
+  download_repo: "Lightricks/camera",
+  download_filename: "dolly-in.safetensors",
+  download_sha256: "a".repeat(64),
+};
 
 function formFor(family: string, model = `${family}:test`): GenerateForm {
   return { ...newGenerateForm(), family, model };
@@ -35,12 +45,19 @@ function mountParameters(
   upscalers: ModelEntry[] = [],
   audioOutputSupported = true,
   controlAdapters: Ltx2ControlAdapterInfo[] = [],
+  cameraControls: Ltx2CameraControlInfo[] = [cameraControl],
 ): { wrapper: VueWrapper; form: GenerateForm } {
   const form = reactive(initial) as GenerateForm;
   const Harness = defineComponent({
     components: { MobileGenerateParameters },
-    setup: () => ({ audioOutputSupported, controlAdapters, form, upscalers }),
-    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" />`,
+    setup: () => ({
+      audioOutputSupported,
+      cameraControls,
+      controlAdapters,
+      form,
+      upscalers,
+    }),
+    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" :camera-controls="cameraControls" camera-controls-loaded />`,
   });
   return { wrapper: mount(Harness), form };
 }

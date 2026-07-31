@@ -16,5 +16,5 @@ prompt = "a"
 frames = 97
 
 [[stage.loras]]
-path = "/tmp/reserved.safetensors"
+path = "/tmp/sequence-camera.safetensors"
 scale = 0.8

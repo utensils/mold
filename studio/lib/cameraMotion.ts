@@ -13,6 +13,13 @@ export function isCameraMotionPreset(value: string): boolean {
 }
 
 export function cameraMotionMode(value: string | null): string {
-  if (!value) return "";
+  if (value === null) return "";
   return isCameraMotionPreset(value) ? value : "custom";
+}
+
+export function cameraMotionLabel(value: string): string {
+  return (
+    CAMERA_MOTION_PRESETS.find((preset) => preset.id === value)?.label ??
+    "Camera motion"
+  );
 }

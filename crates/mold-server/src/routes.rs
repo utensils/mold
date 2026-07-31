@@ -224,6 +224,7 @@ use crate::queue::clean_error_message;
         discovery_peers,
         capabilities_chain_limits,
         capabilities_ltx2_control_adapters,
+        capabilities_ltx2_camera_controls,
         stream_events,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
@@ -246,6 +247,7 @@ use crate::queue::clean_error_message;
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::Ltx2ControlAdapterInfo,
+        mold_core::Ltx2CameraControlInfo,
         mold_core::GenerateResponse,
         mold_core::GenerationPlacementPreviewRequest,
         mold_core::GenerationPlacementPreview,
@@ -494,6 +496,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/capabilities/ltx2-control-adapters",
             get(capabilities_ltx2_control_adapters),
         )
+        .route(
+            "/api/capabilities/ltx2-camera-controls",
+            get(capabilities_ltx2_camera_controls),
+        )
         .route("/api/shutdown", post(shutdown_server))
         // ─── /api/config — HTTP counterpart of the `mold config` verbs ────
         .route("/api/config", get(crate::routes_config::list_config))
@@ -640,6 +646,7 @@ async fn prepare_generation(
     request.normalise_output_format(resolved_family.as_deref());
 
     let planned_control = plan_builtin_ltx2_control(state, request).await?;
+    let planned_camera_controls = plan_builtin_ltx2_camera_controls(state, request).await?;
 
     let mut singleton_validation;
     let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
@@ -657,6 +664,7 @@ async fn prepare_generation(
     if let Some((adapter, path)) = planned_control {
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
     }
+    materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
 
     let _ = model_manager::check_model_available(state, &request.model).await?;
 
@@ -675,6 +683,161 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning, preferred_gpu))
+}
+
+pub(crate) async fn plan_builtin_ltx2_camera_controls(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+) -> Result<
+    Vec<(
+        &'static mold_core::ltx2_camera::Ltx2CameraControlPreset,
+        std::path::PathBuf,
+    )>,
+    ApiError,
+> {
+    let config = state.config.read().await;
+    plan_builtin_ltx2_camera_controls_in_config(&config, request)
+}
+
+fn plan_builtin_ltx2_camera_controls_in_config(
+    config: &mold_core::Config,
+    request: &mold_core::GenerateRequest,
+) -> Result<
+    Vec<(
+        &'static mold_core::ltx2_camera::Ltx2CameraControlPreset,
+        std::path::PathBuf,
+    )>,
+    ApiError,
+> {
+    let aliases = request
+        .loras
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .chain(request.lora.iter())
+        .filter_map(|lora| lora.path.strip_prefix("camera-control:"))
+        .collect::<Vec<_>>();
+    if aliases.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let effective_config =
+        crate::model_manager::resolve_existing_model_authority(&request.model, config)?
+            .map_or_else(|| config.clone(), |authority| authority.config);
+    let effective = effective_config.resolved_model_config(&request.model);
+    mold_core::ltx2_camera::camera_profile_for_model(&request.model, &effective)
+        .map_err(ApiError::validation)?;
+    let models_dir = config.resolved_models_dir();
+    let mut planned: Vec<(
+        &'static mold_core::ltx2_camera::Ltx2CameraControlPreset,
+        std::path::PathBuf,
+    )> = Vec::new();
+    for alias in aliases {
+        let preset = mold_core::ltx2_camera::resolve_camera_control_preset(alias)
+            .map_err(ApiError::validation)?;
+        if planned.iter().any(|(existing, _)| existing.id == preset.id) {
+            continue;
+        }
+        let manifest = mold_core::manifest::find_manifest(preset.download_model)
+            .expect("camera-control registry and hidden manifests must stay in sync");
+        let file = manifest
+            .files
+            .first()
+            .expect("camera-control manifests contain one adapter file");
+        planned.push((
+            preset,
+            models_dir.join(mold_core::manifest::storage_path(manifest, file)),
+        ));
+    }
+    Ok(planned)
+}
+
+pub(crate) async fn materialize_chain_camera_controls(
+    state: &AppState,
+    config: &mold_core::Config,
+    request: &mold_core::ChainRequest,
+) -> Result<(), ApiError> {
+    let mut generate = request.synthetic_generate_request(
+        mold_core::OutputFormat::Mp4,
+        request.estimated_total_frames(),
+        request.fps,
+    );
+    generate.loras = Some(
+        request
+            .stages
+            .iter()
+            .flat_map(|stage| stage.loras.iter())
+            .map(|lora| mold_core::LoraWeight {
+                path: lora.path.clone(),
+                scale: lora.scale,
+            })
+            .collect(),
+    );
+    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
+    materialize_builtin_ltx2_camera_controls(state, &planned).await
+}
+
+async fn materialize_builtin_ltx2_camera_controls(
+    state: &AppState,
+    planned: &[(
+        &'static mold_core::ltx2_camera::Ltx2CameraControlPreset,
+        std::path::PathBuf,
+    )],
+) -> Result<(), ApiError> {
+    for (preset, path) in planned {
+        if camera_control_artifact_is_complete(preset, path) {
+            continue;
+        }
+        let mut events = state.downloads.subscribe();
+        let (job_id, _, _) = state
+            .downloads
+            .enqueue(preset.download_model.to_string())
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("cannot queue camera-control preset: {error}"))
+            })?;
+        loop {
+            match events.recv().await {
+                Ok(mold_core::DownloadEvent::JobDone { id, .. }) if id == job_id => break,
+                Ok(mold_core::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "failed to download camera-control preset '{}': {error}",
+                        preset.id
+                    )));
+                }
+                Ok(mold_core::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "camera-control preset '{}' download was cancelled",
+                        preset.id
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ApiError::internal(format!(
+                        "lost camera-control download status: {error}"
+                    )));
+                }
+            }
+        }
+        if !camera_control_artifact_is_complete(preset, path) {
+            return Err(ApiError::internal(format!(
+                "camera-control preset '{}' download completed without a verified {}",
+                preset.id,
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn camera_control_artifact_is_complete(
+    preset: &mold_core::ltx2_camera::Ltx2CameraControlPreset,
+    path: &std::path::Path,
+) -> bool {
+    mold_core::download::has_sha256_marker(path)
+        || path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == preset.size_bytes)
 }
 
 async fn plan_builtin_ltx2_control(
@@ -2079,6 +2242,14 @@ pub(crate) async fn placement_preview_for_request(
             return response;
         }
     };
+    let planned_camera_controls = match plan_builtin_ltx2_camera_controls(state, &request).await {
+        Ok(controls) => controls,
+        Err(error) => {
+            let mut response = unavailable("infeasible", error.error);
+            response.authoritative = true;
+            return response;
+        }
+    };
     if planned_control.is_some() {
         if let Err(error) = mold_core::validate_generate_request_with_family(&request, Some("ltx2"))
         {
@@ -2144,6 +2315,39 @@ pub(crate) async fn placement_preview_for_request(
                         });
                 }
                 let artifact_fingerprint = format!(":ic-lora:{}", adapter.sha256);
+                if let Some(candidate) = response.candidate.as_mut() {
+                    candidate
+                        .execution_fingerprint
+                        .push_str(&artifact_fingerprint);
+                    if let Some(equivalence) = candidate.execution_equivalence_fingerprint.as_mut()
+                    {
+                        equivalence.push_str(&artifact_fingerprint);
+                    }
+                }
+                for stage in &mut response.stage_candidates {
+                    stage
+                        .candidate
+                        .execution_fingerprint
+                        .push_str(&artifact_fingerprint);
+                    if let Some(equivalence) =
+                        stage.candidate.execution_equivalence_fingerprint.as_mut()
+                    {
+                        equivalence.push_str(&artifact_fingerprint);
+                    }
+                }
+            }
+            for (preset, path) in planned_camera_controls {
+                if !camera_control_artifact_is_complete(preset, &path) {
+                    response
+                        .pending_downloads
+                        .push(mold_core::PendingModelDownload {
+                            kind: "camera-control".to_string(),
+                            name: preset.hf_filename.to_string(),
+                            repo: preset.hf_repo.to_string(),
+                            bytes: preset.size_bytes,
+                        });
+                }
+                let artifact_fingerprint = format!(":camera-control:{}", preset.sha256);
                 if let Some(candidate) = response.candidate.as_mut() {
                     candidate
                         .execution_fingerprint
@@ -3742,6 +3946,57 @@ async fn capabilities_ltx2_control_adapters(
         })
         .collect();
     Ok(Json(adapters))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/capabilities/ltx2-camera-controls",
+    tag = "generation",
+    params(("model" = String, Query, description = "Installed LTX-2 model ID")),
+    responses(
+        (status = 200, description = "Compatible built-in camera controls", body = Vec<mold_core::Ltx2CameraControlInfo>),
+        (status = 422, description = "Model is not an LTX-2 model")
+    )
+)]
+async fn capabilities_ltx2_camera_controls(
+    State(state): State<AppState>,
+    Query(query): Query<Ltx2ControlAdaptersQuery>,
+) -> Result<Json<Vec<mold_core::Ltx2CameraControlInfo>>, ApiError> {
+    let config = state.config.read().await;
+    let effective_config =
+        crate::model_manager::resolve_existing_model_authority(&query.model, &config)?
+            .map_or_else(|| config.clone(), |authority| authority.config);
+    let model_config = effective_config.resolved_model_config(&query.model);
+    let profile =
+        match mold_core::ltx2_camera::camera_profile_for_model(&query.model, &model_config) {
+            Ok(profile) => profile,
+            Err(error) if error.contains("published for LTX-2 19B only") => {
+                return Ok(Json(Vec::new()));
+            }
+            Err(error) => return Err(ApiError::validation(error)),
+        };
+    let models_dir = config.resolved_models_dir();
+    let controls = mold_core::ltx2_camera::camera_controls_for_profile(profile)
+        .map(|preset| {
+            let manifest = mold_core::manifest::find_manifest(preset.download_model)
+                .expect("camera-control registry and hidden manifests must stay in sync");
+            let installed = manifest.files.iter().all(|file| {
+                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+                camera_control_artifact_is_complete(preset, &path)
+            });
+            mold_core::Ltx2CameraControlInfo {
+                id: preset.id.to_string(),
+                label: preset.label.to_string(),
+                size_bytes: preset.size_bytes,
+                installed,
+                download_model: preset.download_model.to_string(),
+                download_repo: preset.hf_repo.to_string(),
+                download_filename: preset.hf_filename.to_string(),
+                download_sha256: preset.sha256.to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(controls))
 }
 
 fn device_capabilities(

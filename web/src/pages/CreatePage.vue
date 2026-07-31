@@ -1528,6 +1528,7 @@ const advCount = computed(() =>
   sequenceMode.value
     ? Number(Boolean(draft.openingImage)) +
       Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
       Number(draft.enableAudio)
     : advancedActiveCount({
         negativePrompt: capabilities.value.supportsNegativePrompt
@@ -1550,6 +1551,7 @@ const advCount = computed(() =>
         videoSuite:
           capabilities.value.supportsVideo &&
           (form.state.value.gifPreview ||
+            form.state.value.cameraControl != null ||
             form.state.value.enableAudio === false ||
             form.state.value.pipeline != null ||
             form.state.value.icLoraControl != null ||
