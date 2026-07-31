@@ -23,6 +23,8 @@ export interface PaletteItem {
   id: string;
   section: string;
   label: string;
+  /** Trailing meta — the machine a model lives on, its load state, its family. */
+  hint?: string;
 }
 
 /** One clip on the sequence rail (ClipRail's generic element constraint). */

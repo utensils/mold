@@ -6,6 +6,9 @@ import Keycap from "@ui/components/Keycap.vue";
 import { useUiStore } from "../../stores/ui";
 import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useHostsStore } from "../../stores/hosts";
+import { useDownloadsStore } from "../../stores/downloads";
 import { useComposerStore } from "../../stores/composer";
 import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
@@ -14,7 +17,18 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
+import { searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
+import { useInventoryKnown } from "../../lib/modelInventory";
+import { planModelInstall } from "@studio/lib/modelInstallTargets";
+import {
+  buildInstallModelCommands,
+  buildUseModelCommands,
+  shouldSearchCatalog,
+  CATALOG_SEARCH_DEBOUNCE_MS,
+  type SearchableCatalogEntry,
+} from "@studio/lib/modelSearch";
 import { newGenerateForm, applyModelDefaults } from "../../lib/generateForm";
+import type { ModelEntry } from "../../lib/api/types";
 
 interface Command extends Matchable {
   id: string;
@@ -23,21 +37,29 @@ interface Command extends Matchable {
   run: () => void;
 }
 
+/** Target sentinels meaning "let the router pick a machine"; null is Auto. */
+const AUTO_TARGET_IDS = ["capable"] as const;
+
 const ui = useUiStore();
 const router = useRouter();
 const gallery = useGalleryStore();
 const models = useModelStore();
+const hostModels = useHostModelsStore();
+const hosts = useHostsStore();
+const downloads = useDownloadsStore();
 const composer = useComposerStore();
 const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
+const inventoryKnown = useInventoryKnown();
 
 /** Mono section label for a result row, derived from its id prefix. */
 function sectionLabel(id: string): string {
   if (id.startsWith("nav-")) return "go";
   if (id.startsWith("theme-") || id.startsWith("appear-")) return "theme";
   if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-")) return "model";
+  if (id.startsWith("install-")) return "install";
   if (id.startsWith("history-")) return "recent";
   if (id.startsWith("print-")) return "print";
   return "run";
@@ -47,7 +69,12 @@ const query = ref("");
 const selected = ref(0);
 const inputEl = ref<HTMLInputElement | null>(null);
 const history = ref<HistoryEntry[]>([]);
+const catalogEntries = ref<SearchableCatalogEntry[]>([]);
 let debounce: ReturnType<typeof setTimeout> | null = null;
+let catalogDebounce: ReturnType<typeof setTimeout> | null = null;
+// Monotonic epoch so a slow response for an abandoned query can never
+// overwrite the results of a newer one.
+let catalogEpoch = 0;
 // The element focused before the palette opened, so we can hand focus back on
 // close (keyboard users don't get dumped at the top of the document).
 let restoreFocusEl: HTMLElement | null = null;
@@ -64,9 +91,37 @@ function go(route: string) {
   close();
 }
 
+/**
+ * Every installed generation model in the fleet with the machines that hold
+ * it. The primary's canonical list lives in its own store, so it is merged in
+ * rather than waiting on the per-host fan-out — otherwise a palette opened
+ * before `hostModels.refresh()` lands would list no models at all.
+ */
+const fleetModels = computed(() => {
+  const byName = new Map<string, { entry: ModelEntry; owners: string[] }>();
+  for (const m of models.installed) byName.set(m.name, { entry: m, owners: ["local"] });
+  for (const m of hostModels.unionInstalled) {
+    const existing = byName.get(m.name);
+    byName.set(m.name, {
+      entry: existing?.entry ?? m,
+      owners: [...new Set([...(existing?.owners ?? []), ...m.hostIds])],
+    });
+  }
+  return byName;
+});
+
+/** The pinned generation target; null is Auto, "capable" is Most capable. */
+const generateTargetHost = computed(() => appPrefs.settings?.generateTargetHost ?? null);
+
+function hostLabel(id: string): string {
+  return hosts.all.find((h) => h.id === id)?.label ?? id;
+}
+
 /** Prefill the composer with a model's defaults (and optional prompt). */
 function prefillModel(model: string, prompt = "") {
-  const installed = models.installed.find((m) => m.name === model);
+  // Resolve across the fleet, not just the primary: a model that only exists
+  // on another machine still has to bring its own defaults with it.
+  const installed = fleetModels.value.get(model)?.entry;
   const form = newGenerateForm();
   if (installed) applyModelDefaults(form, installed);
   composer.set({
@@ -79,6 +134,39 @@ function prefillModel(model: string, prompt = "") {
     guidance: form.guidance,
   });
   go("/create");
+}
+
+/** Use a model, repinning the generation target when it lives elsewhere. */
+function useModel(name: string, switchToHostId: string | null) {
+  if (switchToHostId) {
+    void appPrefs.update({ generateTargetHost: switchToHostId });
+    toasts.push(`Generating on ${hostLabel(switchToHostId)}`);
+  }
+  prefillModel(name);
+}
+
+/**
+ * Queue a pull for a model nobody has yet.
+ *
+ * Unlike the Models workspace this never opens the machine picker — that
+ * dialog belongs to Models, and a palette invoked from any other route would
+ * pop it somewhere the user cannot see. The plan's first target (installs
+ * before repairs, primary first) is taken and named in the toast instead.
+ */
+async function installModel(modelId: string, displayName: string) {
+  const readyHosts = hosts.all.filter((h) => h.status === "ready" && h.baseUrl);
+  const host = planModelInstall(readyHosts, [], { inventoryKnown }).targets[0]?.host ?? null;
+  close();
+  try {
+    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+    // Attach the snapshot-first stream before enqueueing so a cached,
+    // near-instant pull still produces a visible terminal event.
+    await downloads.subscribe(host ?? undefined);
+    await startCatalogDownload(modelId, target, host ? host.kind === "remote" : false);
+    toasts.push(`Pulling ${displayName}${host && hosts.all.length > 1 ? ` on ${host.label}` : ""}`);
+  } catch (err) {
+    toasts.push(`Couldn't queue ${displayName}: ${String(err)}`, "error");
+  }
 }
 
 const staticCommands = computed<Command[]>(() => {
@@ -257,14 +345,29 @@ const staticCommands = computed<Command[]>(() => {
       },
     });
   }
-  for (const m of models.installed) {
+  // Fleet-wide "Use <model>" rows, ranked with everything else by the shared
+  // matcher so a model name typed in full outranks a nav row that merely
+  // contains it. Load/unload stay scoped to the primary below — they act on
+  // this machine's GPU, not on whichever machine happens to hold the weights.
+  const fleet = fleetModels.value;
+  for (const row of buildUseModelCommands(
+    [...fleet.values()].map((f) => f.entry),
+    {
+      ownersFor: (name) => fleet.get(name)?.owners ?? [],
+      targetHostId: generateTargetHost.value,
+      autoTargetIds: AUTO_TARGET_IDS,
+      hostLabel,
+    },
+  )) {
     cmds.push({
-      id: `model-${m.name}`,
-      title: `Generate with ${m.name}`,
-      subtitle: m.family,
-      keywords: [m.family, "model"],
-      run: () => prefillModel(m.name),
+      id: row.id,
+      title: row.label,
+      ...(row.hint ? { subtitle: row.hint } : {}),
+      keywords: row.keywords,
+      run: () => useModel(row.model, row.switchToHostId),
     });
+  }
+  for (const m of models.installed) {
     if (m.is_loaded) {
       cmds.push({
         id: `unload-${m.name}`,
@@ -329,8 +432,25 @@ const galleryCommands = computed<Command[]>(() => {
     }));
 });
 
+/** Live catalog hits nobody has yet. Kept in the server's relevance order and
+ *  appended, so a slow round trip can never reorder rows under a keystroke. */
+const installCommands = computed<Command[]>(() =>
+  buildInstallModelCommands(catalogEntries.value, {
+    installedNames: [...fleetModels.value.keys()],
+  }).map((row) => ({
+    id: row.id,
+    title: row.label,
+    subtitle: row.hint,
+    keywords: row.keywords,
+    run: () => {
+      void installModel(row.model, row.displayName);
+    },
+  })),
+);
+
 const results = computed<Command[]>(() => [
   ...matchCommands(query.value, staticCommands.value),
+  ...installCommands.value,
   ...galleryCommands.value,
   ...historyCommands.value,
 ]);
@@ -349,6 +469,39 @@ watch(query, (q) => {
   }, 200);
 });
 
+/** Debounced live catalog search, so a model you don't have is still findable. */
+watch(query, (q) => {
+  if (catalogDebounce) clearTimeout(catalogDebounce);
+  const epoch = ++catalogEpoch;
+  if (!shouldSearchCatalog(q)) {
+    catalogEntries.value = [];
+    return;
+  }
+  catalogDebounce = setTimeout(() => {
+    // Checkpoints only: the palette's promise is "switch to this model", and
+    // a LoRA or VAE is not something you can switch to.
+    void searchCatalog({ q: q.trim(), kind: "checkpoint", page_size: 12 })
+      .then((response) => {
+        if (epoch !== catalogEpoch) return;
+        catalogEntries.value = response.entries
+          // An unsupported entry has no runnable pipeline — offering to pull
+          // it would end in a model the user cannot switch to.
+          .filter((entry) => entry.supported !== false)
+          .map((entry) => ({
+            id: entry.id,
+            name: entry.display_name ?? entry.name,
+            family: entry.family ?? null,
+            source: entry.source ?? null,
+            installed: entry.installed ?? null,
+          }));
+      })
+      .catch(() => {
+        // The palette still works offline; it just stops offering installs.
+        if (epoch === catalogEpoch) catalogEntries.value = [];
+      });
+  }, CATALOG_SEARCH_DEBOUNCE_MS);
+});
+
 watch(
   () => ui.paletteOpen,
   (open) => {
@@ -357,14 +510,22 @@ watch(
       query.value = "";
       selected.value = 0;
       history.value = [];
+      catalogEntries.value = [];
       void fetchHistory("", 6)
         .then((entries) => (history.value = entries))
         .catch(() => {});
       // Warm the gallery buckets so print results can match, but never
       // refetch on every open — a loaded store is reused as-is.
       if (!gallery.loaded) void gallery.fetchAll();
+      // Fleet inventory so a model on another machine is findable from here.
+      // The store's own staleness window keeps this from being a fan-out on
+      // every ⌘K.
+      void hostModels.refresh();
       void nextTick(() => inputEl.value?.focus());
     } else {
+      if (catalogDebounce) clearTimeout(catalogDebounce);
+      catalogDebounce = null;
+      catalogEpoch++;
       // Return focus to whatever launched the palette.
       restoreFocusEl?.focus?.();
       restoreFocusEl = null;
