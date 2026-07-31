@@ -3048,6 +3048,7 @@ fn finish_generation_success(
 /// a fresh load into the context between our reclaim and the actual load.
 fn preflight_memory_guard_with_eviction(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
@@ -3057,10 +3058,12 @@ fn preflight_memory_guard_with_eviction(
     if let Some(predicted_peak_bytes) = planned_peak_bytes {
         return preflight_planned_memory_guard_with_eviction(
             cache_lock,
+            cache_key,
             model_name,
             ordinal,
             predicted_peak_bytes,
             hint,
+            None,
         );
     }
 
@@ -3083,7 +3086,7 @@ fn preflight_memory_guard_with_eviction(
 
         let evicted = {
             let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
-            cache.evict_lru_parked_except(Some(model_name))
+            cache.evict_lru_parked_except(Some(cache_key))
         };
         let Some((evicted_name, engine)) = evicted else {
             return Err(err);
@@ -3103,37 +3106,71 @@ fn preflight_memory_guard_with_eviction(
     }
 }
 
+fn planned_active_vram_credit(measured_active_vram: u64, credit_cap: Option<u64>) -> u64 {
+    credit_cap.map_or(measured_active_vram, |cap| measured_active_vram.min(cap))
+}
+
 /// Revalidate an admitted plan against fresh physical pressure, surrendering
-/// parked cache entries before failing. For a hot-cache hit, `active_vram` is
-/// the resident footprint already included in the frozen peak, so adding it
-/// back to driver-reported free memory reconstructs the capacity available to
-/// that unchanged engine and its request-specific activation workspace.
+/// parked cache entries before failing. Swap paths may provisionally count the
+/// active cache measurement because their post-drop sample is authoritative.
+/// Hot-cache paths cap that measurement at fresh process-attributed VRAM so a
+/// stale/global load delta cannot become fictitious reusable capacity.
 fn preflight_planned_memory_guard_with_eviction(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
     model_name: &str,
     ordinal: usize,
     predicted_peak_bytes: u64,
     hint: Option<crate::model_manager::ActivationHint>,
+    active_vram_credit_cap: Option<u64>,
+) -> Result<(), crate::routes::ApiError> {
+    preflight_planned_memory_guard_with_eviction_using(
+        cache_lock,
+        cache_key,
+        model_name,
+        ordinal,
+        active_vram_credit_cap,
+        |active_vram| {
+            crate::memory_preflight::preflight_planned_memory_guard(
+                model_name,
+                predicted_peak_bytes,
+                active_vram,
+                ordinal,
+                hint,
+            )
+        },
+    )
+}
+
+fn preflight_planned_memory_guard_with_eviction_using(
+    cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
+    model_name: &str,
+    ordinal: usize,
+    active_vram_credit_cap: Option<u64>,
+    mut guard: impl FnMut(u64) -> Result<(), crate::routes::ApiError>,
 ) -> Result<(), crate::routes::ApiError> {
     loop {
-        let active_vram = cache_lock
+        let measured_active_vram = cache_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_vram_bytes();
-        let err = match crate::memory_preflight::preflight_planned_memory_guard(
-            model_name,
-            predicted_peak_bytes,
-            active_vram,
-            ordinal,
-            hint,
-        ) {
+        let active_vram = planned_active_vram_credit(measured_active_vram, active_vram_credit_cap);
+        let err = match guard(active_vram) {
             Ok(()) => return Ok(()),
             Err(error) => error,
         };
 
+        // An attributed cap marks an unchanged hot-cache engine. Parked
+        // entries have already unloaded GPU weights, so destroying the warm
+        // set cannot create credible capacity for this request.
+        if active_vram_credit_cap.is_some() {
+            return Err(err);
+        }
+
         let evicted = {
             let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
-            cache.evict_lru_parked_except(Some(model_name))
+            cache.evict_lru_parked_except(Some(cache_key))
         };
         let Some((evicted_name, engine)) = evicted else {
             return Err(err);
@@ -3286,12 +3323,22 @@ fn ensure_model_ready_sync_inner(
         cache.touch(cache_key);
         drop(cache);
         if let Some(predicted_peak_bytes) = planned_peak_bytes {
+            let process_vram = crate::resources::current_process_vram_bytes(&worker.gpu);
+            if process_vram.is_none() {
+                tracing::debug!(
+                    gpu = worker.gpu.ordinal,
+                    model = %model_name,
+                    "process-attributed VRAM unavailable; hot-cache plan recheck grants no resident credit"
+                );
+            }
             preflight_planned_memory_guard_with_eviction(
                 &worker.model_cache,
                 cache_key,
+                model_name,
                 worker.gpu.ordinal,
                 predicted_peak_bytes,
                 hint,
+                Some(process_vram.unwrap_or(0)),
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -3326,6 +3373,7 @@ fn ensure_model_ready_sync_inner(
             preflight_memory_guard_with_eviction(
                 &worker.model_cache,
                 cache_key,
+                model_name,
                 paths,
                 worker.gpu.ordinal,
                 hint,
@@ -3562,6 +3610,7 @@ fn ensure_model_ready_sync_inner(
     // entries on budget failure and retries before giving up.
     preflight_memory_guard_with_eviction(
         &worker.model_cache,
+        model_name,
         model_name,
         &paths,
         worker.gpu.ordinal,
@@ -4384,6 +4433,78 @@ mod tests {
             recheck < unchanged,
             "fresh physical-pressure recheck must precede the hot-cache return"
         );
+        assert!(
+            hot_cache_path.contains("current_process_vram_bytes(&worker.gpu)"),
+            "hot-cache credit must be clamped by fresh Mold-process attribution"
+        );
+    }
+
+    #[test]
+    fn hot_cache_credit_clamps_inflated_or_unattributed_load_delta() {
+        let stale_global_load_delta = 16 << 30;
+
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, Some(6 << 30)),
+            6 << 30,
+            "fresh process attribution bounds a stale cache measurement"
+        );
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, Some(0)),
+            0,
+            "missing attribution grants no reusable hot-cache capacity"
+        );
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, None),
+            stale_global_load_delta,
+            "swap paths may provisionally count active memory because they recheck after drop"
+        );
+    }
+
+    #[test]
+    fn hot_cache_guard_propagates_pressure_with_attributed_credit_cap() {
+        struct LoadedEngine;
+        impl InferenceEngine for LoadedEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!()
+            }
+            fn model_name(&self) -> &str {
+                "hot-cache"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let cache = std::sync::Mutex::new(ModelCache::new(2));
+        cache.lock().unwrap().insert_loaded(
+            "hot-cache".to_string(),
+            Box::new(LoadedEngine),
+            16 << 30,
+        );
+        let observed_credit = Arc::new(Mutex::new(None));
+        let observed = observed_credit.clone();
+
+        let error = preflight_planned_memory_guard_with_eviction_using(
+            &cache,
+            "hot-cache",
+            "display-model",
+            0,
+            Some(6 << 30),
+            move |credit| {
+                *observed.lock().unwrap() = Some(credit);
+                Err(crate::routes::ApiError::insufficient_memory(
+                    "injected fresh-pressure rejection",
+                ))
+            },
+        )
+        .expect_err("a hot-cache guard failure must reach the owner path");
+
+        assert_eq!(*observed_credit.lock().unwrap(), Some(6 << 30));
+        assert!(error.error.contains("injected fresh-pressure rejection"));
+        assert!(cache.lock().unwrap().contains("hot-cache"));
     }
 
     #[test]
