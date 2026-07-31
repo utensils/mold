@@ -20,6 +20,12 @@ const action = computed<"install" | "repair">(() =>
   props.targets.some((target) => target.action === "install") ? "install" : "repair",
 );
 const title = computed(() => `Choose where to ${action.value} ${props.modelName}`);
+/** Install and repair targets in the same list — the copy has to cover both. */
+const mixed = computed(
+  () =>
+    props.targets.some((target) => target.action === "install") &&
+    props.targets.some((target) => target.action === "repair"),
+);
 let restoreFocusEl: HTMLElement | null = null;
 
 function onKeydown(event: KeyboardEvent) {
@@ -56,6 +62,12 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
             <p class="mt-1 text-caption text-ink-2">
               <template v-if="action === 'repair'">
                 Only missing or damaged files will be fetched on the selected host.
+              </template>
+              <!-- A mixed list must not promise a fresh install for a machine
+                   that can only be repaired. -->
+              <template v-else-if="mixed">
+                The model and its required components will be stored on the machine you pick;
+                machines that already have it are repaired instead.
               </template>
               <template v-else>
                 The model and its required components will be stored on the machine you pick.

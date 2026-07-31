@@ -88,6 +88,23 @@ describe("DownloadTargetDialog", () => {
     expect(
       document.body.querySelector('[data-test="download-target-studio-7680"]')?.textContent,
     ).toContain("Already installed");
+    // The body copy must not promise a fresh install for the whole list when
+    // one of the machines on it can only be repaired.
+    expect(dialog.textContent).toContain("machines that already have it are repaired instead");
+    wrapper.unmount();
+  });
+
+  it("promises only an install when no listed machine already has the model", () => {
+    const wrapper = mount(DownloadTargetDialog, {
+      props: { modelName: "Flux Dev", targets: install(hosts) },
+      attachTo: document.body,
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain(
+      "The model and its required components will be stored on the machine you pick.",
+    );
+    expect(dialog.textContent).not.toContain("repaired instead");
     wrapper.unmount();
   });
 

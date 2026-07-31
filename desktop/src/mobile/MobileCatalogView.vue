@@ -193,6 +193,13 @@ const targetPlan = computed<ModelInstallPlan<MobileHost> | null>(() => {
   return entry ? installPlan(entry) : null;
 });
 
+/** Install and repair targets in the same list — the sheet copy covers both. */
+const targetPlanMixed = computed(
+  () =>
+    (targetPlan.value?.canInstall ?? false) &&
+    (targetPlan.value?.targets.some((target) => target.action === "repair") ?? false),
+);
+
 function targetActionLabel(action: ModelInstallAction): string {
   return action === "repair" ? "Repair · already installed" : "Install";
 }
@@ -1688,10 +1695,16 @@ onBeforeUnmount(() => {
                 {{ targetPlan?.canInstall ? "Choose where to install" : "Choose where to repair" }}
               </h2>
               <p>
-                <template v-if="targetPlan?.canInstall">
+                <!-- Only a mixed list needs the repair caveat; a plain first
+                     download must not imply some machine already has it. -->
+                <template v-if="targetPlanMixed">
                   {{ targetEntry.display_name ?? targetEntry.name }} and its required components
                   will be stored on the machine you pick; machines that already have it are repaired
                   instead.
+                </template>
+                <template v-else-if="targetPlan?.canInstall">
+                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
+                  will be stored on the machine you pick.
                 </template>
                 <template v-else>
                   Only missing or damaged files for

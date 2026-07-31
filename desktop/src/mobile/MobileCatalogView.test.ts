@@ -1124,6 +1124,9 @@ describe("MobileCatalogView", () => {
       "[data-test='mobile-catalog-target-sheet']",
     )!;
     expect(picker.textContent).toContain("Choose where to install");
+    // A mixed list must not promise a fresh install for the machine that can
+    // only be repaired.
+    expect(picker.textContent).toContain("machines that already have it are repaired instead");
     const options = [
       ...picker.querySelectorAll<HTMLButtonElement>("[data-test='mobile-catalog-target-option']"),
     ];
