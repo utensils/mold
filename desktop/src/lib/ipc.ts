@@ -91,7 +91,7 @@ export interface AppSettings {
   updateChannel: UpdateChannel;
   /** Remote hosts the app remembers, most recently used first. */
   savedHosts: SavedHost[];
-  /** Legacy reconnect markers; every saved host is now attempted at boot. */
+  /** Remote hosts explicitly enabled for boot reconnect and active routing. */
   connectedHostIds: string[];
   /** Sticky generation-target host id; null routes automatically. */
   generateTargetHost: string | null;
