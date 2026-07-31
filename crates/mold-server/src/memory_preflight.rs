@@ -720,25 +720,26 @@ pub(crate) fn select_server_load_strategy_for_device(
 /// their load-use-drop generation paths for adapted requests. Eagerly loading
 /// an unadapted transformer first leaves it resident when `generate()` begins,
 /// so the subsequent LoRA transformer build either doubles the peak or fails
-/// immediately on 24 GB cards. The execution plan must therefore make
-/// sequential loading authoritative for these requests.
+/// immediately on 24 GB cards.
+///
+/// Flux.2 source-image requests also require the sequential path. It encodes
+/// the source in a VAE-only phase and drops the VAE before loading the
+/// transformer; eager mode keeps both resident and can OOM with Klein-9B BF16
+/// on a 24 GB card. The execution plan must make these runtime constraints
+/// authoritative.
 pub(crate) fn request_aware_load_strategy(
     strategy: mold_inference::LoadStrategy,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
+    request_has_source_image: bool,
 ) -> mold_inference::LoadStrategy {
     let transformer_path = transformer_path_lower(paths);
-    if request_has_lora
-        && (transformer_path_looks_flux2(&transformer_path)
-            || transformer_path_looks_zimage(&transformer_path)
-            || hint.is_some_and(|hint| {
-                matches!(
-                    hint.family,
-                    ActivationFamily::Flux2Dit | ActivationFamily::ZImageDit
-                )
-            }))
-    {
+    let flux2 = transformer_path_looks_flux2(&transformer_path)
+        || hint.is_some_and(|hint| hint.family == ActivationFamily::Flux2Dit);
+    let zimage = transformer_path_looks_zimage(&transformer_path)
+        || hint.is_some_and(|hint| hint.family == ActivationFamily::ZImageDit);
+    if (request_has_lora && (flux2 || zimage)) || (request_has_source_image && flux2) {
         mold_inference::LoadStrategy::Sequential
     } else {
         strategy
@@ -889,6 +890,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         paths,
         hint,
         request_has_lora,
+        req.source_image.is_some(),
     );
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
@@ -1016,6 +1018,7 @@ mod fail_closed_tests {
                     &paths("/models/opaque/model.safetensors"),
                     Some(hint(family)),
                     true,
+                    false,
                 ),
                 mold_inference::LoadStrategy::Sequential
             );
@@ -1026,6 +1029,7 @@ mod fail_closed_tests {
                 &paths("/models/opaque/model.safetensors"),
                 Some(hint(ActivationFamily::Flux2Dit)),
                 false,
+                false,
             ),
             mold_inference::LoadStrategy::Eager
         );
@@ -1035,6 +1039,7 @@ mod fail_closed_tests {
                 &paths("/models/opaque/model.safetensors"),
                 Some(hint(ActivationFamily::FluxDit)),
                 true,
+                false,
             ),
             mold_inference::LoadStrategy::Eager
         );
@@ -1052,10 +1057,78 @@ mod fail_closed_tests {
                     &paths(transformer),
                     None,
                     true,
+                    false,
                 ),
                 mold_inference::LoadStrategy::Sequential
             );
         }
+    }
+
+    #[test]
+    fn flux2_source_images_force_sequential_engine_plans() {
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/cv-opaque/model.safetensors"),
+                Some(hint(ActivationFamily::Flux2Dit)),
+                false,
+                true,
+            ),
+            mold_inference::LoadStrategy::Sequential
+        );
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/cv-opaque/model.safetensors"),
+                Some(hint(ActivationFamily::FluxDit)),
+                false,
+                true,
+            ),
+            mold_inference::LoadStrategy::Eager,
+            "source images must not change unrelated family load policies"
+        );
+    }
+
+    #[test]
+    fn generation_memory_budget_carries_source_image_into_flux2_load_policy() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "cv:test-klein-9b",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let model_paths = paths("/models/cv-opaque/model.safetensors");
+        let activation = Some(hint(ActivationFamily::Flux2Dit));
+
+        let plain = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(64_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(plain.load_strategy, mold_inference::LoadStrategy::Eager);
+
+        request.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        let source = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(64_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            source.load_strategy,
+            mold_inference::LoadStrategy::Sequential
+        );
     }
 
     #[test]
