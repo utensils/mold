@@ -409,6 +409,48 @@ describe("CommandK", () => {
     expect(ids).not.toContain("install-hf:org/first");
   });
 
+  it("drops the previous query's install rows the moment a new query starts", async () => {
+    fetchCatalogSearchMock.mockResolvedValue({
+      entries: [
+        {
+          id: "hf:org/qwen",
+          name: "Qwen Image",
+          family: "qwen-image",
+          source: "hf",
+          installed: false,
+          supported: true,
+        },
+      ],
+      page: 1,
+      page_size: 12,
+      total: 1,
+    });
+    const wrapper = await openPalette();
+    await type(wrapper, "qwen");
+    expect(items(wrapper).some((i) => i.id === "install-hf:org/qwen")).toBe(
+      true,
+    );
+
+    // Mid-flight for the NEW query, the old row must already be gone —
+    // otherwise Enter here queues a model the user is no longer looking at.
+    wrapper.findComponent(PalettePanel).vm.$emit("update:query", "wuerstchen");
+    await nextTick();
+    expect(items(wrapper).some((i) => i.id.startsWith("install-"))).toBe(false);
+  });
+
+  it("never offers to switch to a model whose only owner is unreachable", async () => {
+    owners.value["ltx2-distilled"] = ["ghost"];
+    const wrapper = await openPalette();
+    // "ghost" is not a listed host at all, so it is not a reachable owner.
+    expect(
+      items(wrapper).find((i) => i.id === "model-ltx2-distilled")?.hint,
+    ).toBe("ltx2");
+    wrapper.findComponent(PalettePanel).vm.$emit("run", "model-ltx2-distilled");
+    await nextTick();
+    expect(setTargetMock).not.toHaveBeenCalled();
+    owners.value["ltx2-distilled"] = ["bender"];
+  });
+
   it("marks the palette busy only while a catalog search is in flight", async () => {
     const wrapper = await openPalette();
     const panel = wrapper.findComponent(PalettePanel);

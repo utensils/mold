@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 const routerPush = vi.hoisted(() => vi.fn());
@@ -269,6 +269,113 @@ describe("CommandPalette model search", () => {
     });
     vi.useRealTimers();
     wrapper.unmount();
+  });
+
+  it("commits the repin before navigating to Create", async () => {
+    seedFleet();
+    const prefs = useAppPrefsStore();
+    prefs.settings = { generateTargetHost: "local" } as never;
+    // `appPrefs.update` re-reads and rewrites the whole settings file; Create's
+    // own last-route write must not interleave with it and restore the old pin.
+    const order: string[] = [];
+    let releaseUpdate: () => void = () => {};
+    vi.spyOn(prefs, "update").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseUpdate = () => {
+            order.push("update");
+            resolve();
+          };
+        }),
+    );
+    routerPush.mockImplementation(() => {
+      order.push("navigate");
+    });
+    useHostModelsStore().byHost["bender-7680"] = {
+      entries: [model("ltx2-distilled", "ltx2")],
+      fetchedAt: 1,
+      error: null,
+    };
+
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("ltx2");
+    await wrapper
+      .findAll("[role='option']")
+      .find((o) => o.text().includes("Use ltx2-distilled"))!
+      .trigger("click");
+
+    expect(order).toEqual([]);
+    releaseUpdate();
+    await flushPromises();
+    expect(order).toEqual(["update", "navigate"]);
+    routerPush.mockImplementation(() => {});
+    wrapper.unmount();
+  });
+
+  it("ignores an unreachable machine's cached inventory", async () => {
+    seedFleet();
+    useHostsStore().telemetry["bender-7680"] = { status: "error" } as never;
+    const bender = useHostsStore().extras.find((h) => h.id === "bender-7680")!;
+    bender.status = "error";
+    // The host dropped offline but its last model list is still cached.
+    useHostModelsStore().byHost["bender-7680"] = {
+      entries: [model("ltx2-distilled", "ltx2")],
+      fetchedAt: 1,
+      error: "offline",
+    };
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("ltx2");
+
+    const texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Use ltx2-distilled"))).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("drops the previous query's install rows the moment a new query starts", async () => {
+    vi.useFakeTimers();
+    seedFleet();
+    searchCatalogMock.mockResolvedValue({
+      entries: [
+        {
+          id: "hf:org/qwen",
+          name: "Qwen Image",
+          family: "qwen-image",
+          source: "hf",
+          installed: false,
+          supported: true,
+        },
+      ],
+      page: 1,
+      page_size: 12,
+      total: 1,
+    });
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("qwen");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(
+      wrapper.findAll("[role='option']").some((o) => o.text().includes("Install Qwen Image")),
+    ).toBe(true);
+
+    // Mid-flight for the NEW query the stale row must already be gone —
+    // otherwise Enter here queues a model the user is no longer looking at.
+    await wrapper.get("input").setValue("wuerstchen");
+    expect(
+      wrapper.findAll("[role='option']").some((o) => o.text().includes("Install Qwen Image")),
+    ).toBe(false);
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
+  it("disarms a pending search when the palette unmounts mid-keystroke", async () => {
+    vi.useFakeTimers();
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("qwen");
+    wrapper.unmount();
+    await vi.advanceTimersByTimeAsync(500);
+
+    // A request whose response nothing can consume must never be issued.
+    expect(searchCatalogMock).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("offers an install row for a catalog model nobody has, and pulls it", async () => {

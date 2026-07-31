@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
@@ -98,13 +98,22 @@ function go(route: string) {
  * before `hostModels.refresh()` lands would list no models at all.
  */
 const fleetModels = computed(() => {
+  // `hostModels` keeps a machine's last inventory after it drops offline, so
+  // an errored host's cache must not become a palette row: the model would be
+  // unusable, and repinning generation to that owner would leave Create
+  // unable to submit at all. A model every remaining owner has lost is gone.
+  const unreachable = new Set(hosts.all.filter((h) => h.status === "error").map((h) => h.id));
   const byName = new Map<string, { entry: ModelEntry; owners: string[] }>();
-  for (const m of models.installed) byName.set(m.name, { entry: m, owners: ["local"] });
+  if (!unreachable.has("local")) {
+    for (const m of models.installed) byName.set(m.name, { entry: m, owners: ["local"] });
+  }
   for (const m of hostModels.unionInstalled) {
+    const reachable = m.hostIds.filter((id) => !unreachable.has(id));
+    if (reachable.length === 0) continue;
     const existing = byName.get(m.name);
     byName.set(m.name, {
       entry: existing?.entry ?? m,
-      owners: [...new Set([...(existing?.owners ?? []), ...m.hostIds])],
+      owners: [...new Set([...(existing?.owners ?? []), ...reachable])],
     });
   }
   return byName;
@@ -137,9 +146,14 @@ function prefillModel(model: string, prompt = "") {
 }
 
 /** Use a model, repinning the generation target when it lives elsewhere. */
-function useModel(name: string, switchToHostId: string | null) {
+async function useModel(name: string, switchToHostId: string | null) {
   if (switchToHostId) {
-    void appPrefs.update({ generateTargetHost: switchToHostId });
+    // Await the write before navigating. `appPrefs.update` re-reads the whole
+    // settings file, merges, and writes it back; navigating to Create kicks
+    // off its own last-route persistence, and the two interleaved would
+    // restore the stale `generateTargetHost` — pinning Create to the machine
+    // that does not have the model the user just picked.
+    await appPrefs.update({ generateTargetHost: switchToHostId });
     toasts.push(`Generating on ${hostLabel(switchToHostId)}`);
   }
   prefillModel(name);
@@ -364,7 +378,9 @@ const staticCommands = computed<Command[]>(() => {
       title: row.label,
       ...(row.hint ? { subtitle: row.hint } : {}),
       keywords: row.keywords,
-      run: () => useModel(row.model, row.switchToHostId),
+      run: () => {
+        void useModel(row.model, row.switchToHostId);
+      },
     });
   }
   for (const m of models.installed) {
@@ -473,10 +489,12 @@ watch(query, (q) => {
 watch(query, (q) => {
   if (catalogDebounce) clearTimeout(catalogDebounce);
   const epoch = ++catalogEpoch;
-  if (!shouldSearchCatalog(q)) {
-    catalogEntries.value = [];
-    return;
-  }
+  // Drop the previous query's rows immediately. Install rows are appended
+  // unmatched, so leaving them up through the debounce and request would let
+  // Enter queue a model the user is no longer looking at — a multi-gigabyte
+  // download they never asked for.
+  catalogEntries.value = [];
+  if (!shouldSearchCatalog(q)) return;
   catalogDebounce = setTimeout(() => {
     // Checkpoints only: the palette's promise is "switch to this model", and
     // a LoRA or VAE is not something you can switch to.
@@ -532,6 +550,17 @@ watch(
     }
   },
 );
+
+// A palette torn down mid-keystroke must not leave a search armed: both
+// debounces would otherwise fire against a dead component, issuing a request
+// whose response nothing can consume.
+onBeforeUnmount(() => {
+  if (debounce) clearTimeout(debounce);
+  if (catalogDebounce) clearTimeout(catalogDebounce);
+  debounce = null;
+  catalogDebounce = null;
+  catalogEpoch++;
+});
 
 function move(delta: number) {
   const n = results.value.length;

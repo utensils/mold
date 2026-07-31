@@ -72,6 +72,17 @@ function hostLabel(hostId: string): string {
   return routing.hosts.value.find((h) => h.id === hostId)?.label ?? hostId;
 }
 
+/** Owners we could actually repin to. `modelOwnerIds` reports every machine
+ * whose last inventory held the model, including ones that have since errored
+ * or left the registry — repinning generation to one of those would strand
+ * Create on a machine it cannot reach. */
+function reachableOwners(name: string): string[] {
+  const reachable = new Set(
+    routing.hosts.value.filter((h) => h.status !== "error").map((h) => h.id),
+  );
+  return routing.modelOwnerIds(name).filter((id) => reachable.has(id));
+}
+
 const ctx: CommandContext = {
   go: (path) => {
     void router.push(path);
@@ -118,7 +129,7 @@ const ctx: CommandContext = {
 const commands = computed<Command[]>(() => [
   ...baseCommands(ctx),
   ...modelCommands(installed.value, ctx, {
-    ownersFor: (name) => routing.modelOwnerIds(name),
+    ownersFor: reachableOwners,
     targetHostId: routing.targetId.value,
     hostLabel,
   }),
@@ -191,8 +202,12 @@ async function searchCatalog(q: string, epoch: number) {
 watch(query, (q) => {
   clearDebounce();
   const epoch = ++searchEpoch;
+  // Drop the previous query's rows immediately. Install rows are appended
+  // unmatched, so leaving them up through the debounce and request would let
+  // Enter queue a model the user is no longer looking at — a multi-gigabyte
+  // download they never asked for. The busy line covers the gap.
+  catalogEntries.value = [];
   if (!shouldSearchCatalog(q)) {
-    catalogEntries.value = [];
     catalogBusy.value = false;
     return;
   }

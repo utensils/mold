@@ -251,13 +251,18 @@ const targetModels = computed<ModelInfoExtended[]>(() => {
   return unionModels(modelsByHost.value, ids);
 });
 
-/** Every model any ready machine holds — the ⌘K palette's search corpus.
+/** Every model any reachable machine holds — the ⌘K palette's search corpus.
  * Unlike `targetModels` this deliberately ignores the pinned target: the
- * palette's whole point is that picking a model can move the target. */
+ * palette's whole point is that picking a model can move the target.
+ *
+ * Before the first poll nothing is ready yet, so machines still connecting
+ * stand in — but an errored one never does, even though its last inventory is
+ * still cached. Offering a model no reachable machine can run would let the
+ * palette repin generation to an unavailable owner. */
 const installedModels = computed<ModelInfoExtended[]>(() => {
   const ids = readyHostIds.value.length
     ? readyHostIds.value
-    : hosts.value.map((h) => h.id);
+    : hosts.value.filter((h) => h.status !== "error").map((h) => h.id);
   return unionModels(modelsByHost.value, ids).filter((m) => m.downloaded);
 });
 
