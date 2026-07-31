@@ -23,16 +23,16 @@ pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEven
 pub use crate::memory_preflight::ActivationHint;
 #[cfg(test)]
 pub(crate) use crate::memory_preflight::{
-    check_model_memory_budget, preflight_memory_guard_with_available,
-    preflight_memory_guard_with_available_and_policy, rejection_suggestion,
-    request_requires_fresh_engine_for_offload_policy_with_request,
+    check_model_memory_budget, preflight_memory_guard_after_drop,
+    preflight_memory_guard_with_available, preflight_memory_guard_with_available_and_policy,
+    rejection_suggestion, request_requires_fresh_engine_for_offload_policy_with_request,
     server_offload_enabled_for_paths_with_request,
 };
 pub(crate) use crate::memory_preflight::{
-    effective_load_available_bytes, estimate_generation_memory_for_request, preflight_memory_guard,
-    preflight_memory_guard_after_drop, request_requires_fresh_engine_for_offload_policy,
-    select_server_load_strategy_for_budget, select_server_load_strategy_for_device,
-    server_offload_enabled_for_paths,
+    effective_load_available_bytes, estimate_generation_memory_for_request,
+    preflight_memory_guard_after_drop_for_request, preflight_memory_guard_for_request,
+    request_requires_fresh_engine_for_offload_policy, select_server_load_strategy_for_budget,
+    select_server_load_strategy_for_device, server_offload_enabled_for_paths,
 };
 
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
@@ -1310,7 +1310,14 @@ pub(crate) async fn ensure_model_ready(
             // Include the active model's footprint as reclaimable memory.
             let cached_paths = entry.engine.model_paths().cloned();
             if let Some(paths) = cached_paths.as_ref() {
-                preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
+                preflight_memory_guard_for_request(
+                    model_name,
+                    paths,
+                    active_vram,
+                    0,
+                    hint,
+                    request_has_lora,
+                )?;
             }
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
@@ -1326,7 +1333,13 @@ pub(crate) async fn ensure_model_ready(
 
             drop(cache);
             if let Some(paths) = cached_paths.as_ref() {
-                preflight_memory_guard_after_drop(model_name, paths, 0, hint)?;
+                preflight_memory_guard_after_drop_for_request(
+                    model_name,
+                    paths,
+                    0,
+                    hint,
+                    request_has_lora,
+                )?;
             } else {
                 #[cfg(feature = "cuda")]
                 mold_inference::device::post_drop_free_vram_bytes(0)
@@ -1593,7 +1606,7 @@ async fn create_and_load_engine(
         let cache = state.model_cache.lock().await;
         cache.active_vram_bytes()
     };
-    preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
+    preflight_memory_guard_for_request(model_name, &paths, active_vram, 0, hint, request_has_lora)?;
     // Unload the current active model to free GPU memory.
     {
         let mut cache = state.model_cache.lock().await;
@@ -1608,7 +1621,7 @@ async fn create_and_load_engine(
             );
         }
     }
-    preflight_memory_guard_after_drop(model_name, &paths, 0, hint)?;
+    preflight_memory_guard_after_drop_for_request(model_name, &paths, 0, hint, request_has_lora)?;
     let load_strategy = crate::memory_preflight::request_aware_load_strategy(
         select_server_load_strategy_for_device(
             &paths,

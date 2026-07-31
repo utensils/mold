@@ -164,7 +164,7 @@ function onInspectorReset() {
   void appPrefs.update({ generateParamsWidth: null });
 }
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
 const advancedCount = computed(() =>
   isSequence.value
     ? Number(Boolean(draft.openingImage)) +
@@ -433,7 +433,12 @@ function rerollSeed() {
 }
 
 const MAX_BATCH_SIZE = 10_000;
-const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : MAX_BATCH_SIZE));
+const batchLocked = computed(
+  () =>
+    caps.value.forcesBatchSizeOne ||
+    (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
+);
+const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 
 // Same contract as the Advanced pane's Reset, surfaced without opening it:
 // the prompt, the model, and any prepared batch size survive.
@@ -653,17 +658,17 @@ function resetSettings() {
         <span class="ms-field__label ms-field__label--inline">Batch</span>
         <Stepper
           v-if="!isSequence"
-          :model-value="form.batchSize"
+          :model-value="batchLocked ? 1 : form.batchSize"
           :min="1"
           :max="batchMax"
-          :editable="!caps.forcesBatchSizeOne"
+          :editable="!batchLocked"
           label="Batch size"
           @update:model-value="form.batchSize = $event"
         />
         <span v-else class="data-mono text-ink-2" data-test="batch-locked">1</span>
       </div>
       <p v-if="isSequence" class="ms-field__hint -mt-2">a sequence renders one timeline</p>
-      <p v-else-if="caps.forcesBatchSizeOne" class="ms-field__hint -mt-2">
+      <p v-else-if="batchLocked" class="ms-field__hint -mt-2">
         Locked to 1 — edit models render one at a time.
       </p>
 

@@ -66,6 +66,33 @@ fn large_flux_bf16_should_auto_offload(paths: &ModelPaths, hint: Option<Activati
     transformer_component_size(paths) >= LARGE_FLUX_BF16_TRANSFORMER_BYTES
 }
 
+fn large_flux2_bf16_should_auto_offload(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    activation_bytes: u64,
+) -> bool {
+    const LARGE_FLUX2_BF16_TRANSFORMER_BYTES: u64 = 20_000_000_000;
+    let eligible = hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit)
+        && !transformer_path_is_gguf(paths)
+        && !transformer_path_lower(paths).contains("nvfp4")
+        && transformer_component_size(paths) >= LARGE_FLUX2_BF16_TRANSFORMER_BYTES;
+    if !eligible {
+        return false;
+    }
+
+    available_bytes
+        .filter(|bytes| *bytes > 0)
+        .is_none_or(|available| {
+            let resident_peak = mold_inference::device::estimate_peak_memory(
+                paths,
+                mold_inference::LoadStrategy::Sequential,
+            )
+            .saturating_add(activation_bytes);
+            resident_peak > available.saturating_mul(9) / 10
+        })
+}
+
 /// Per-request shape hint passed into [`preflight_memory_guard`] so the
 /// activation budget can scale with resolution / dtype / arch. `None`
 /// degrades to the previous fixed-headroom approximation (the
@@ -281,6 +308,7 @@ pub(crate) fn preflight_memory_guard_with_available(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn preflight_memory_guard_with_available_on_gpu(
     model_name: &str,
     paths: &ModelPaths,
@@ -289,22 +317,46 @@ pub(crate) fn preflight_memory_guard_with_available_on_gpu(
     gpu_ordinal: usize,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
+    preflight_memory_guard_with_available_on_gpu_for_request(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        gpu_ordinal,
+        hint,
+        false,
+    )
+}
+
+fn preflight_memory_guard_with_available_on_gpu_for_request(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> Result<(), ApiError> {
     let forced_offload = matches!(
         mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     );
     let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal);
-    preflight_memory_guard_with_available_and_policy(
+    preflight_memory_guard_with_available_and_policy_for_request(
         model_name,
         paths,
         active_vram_bytes,
         available_bytes,
         hint,
-        forced_offload,
-        gemma_competes,
+        LegacyPreflightPolicy {
+            forced_offload,
+            gemma_competes,
+            request_has_lora,
+        },
     )
 }
 
+#[cfg(test)]
 pub(crate) fn preflight_memory_guard_with_available_and_policy(
     model_name: &str,
     paths: &ModelPaths,
@@ -313,6 +365,35 @@ pub(crate) fn preflight_memory_guard_with_available_and_policy(
     hint: Option<ActivationHint>,
     forced_offload: bool,
     gemma_competes: bool,
+) -> Result<(), ApiError> {
+    preflight_memory_guard_with_available_and_policy_for_request(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        hint,
+        LegacyPreflightPolicy {
+            forced_offload,
+            gemma_competes,
+            request_has_lora: false,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct LegacyPreflightPolicy {
+    forced_offload: bool,
+    gemma_competes: bool,
+    request_has_lora: bool,
+}
+
+fn preflight_memory_guard_with_available_and_policy_for_request(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    hint: Option<ActivationHint>,
+    policy: LegacyPreflightPolicy,
 ) -> Result<(), ApiError> {
     // Streaming-transformer families (LTX-Video / LTX-2) load only a couple
     // of transformer blocks onto GPU at a time via `new_streaming` — the
@@ -327,9 +408,26 @@ pub(crate) fn preflight_memory_guard_with_available_and_policy(
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && forced_offload)
-        || large_flux_bf16_should_auto_offload(paths, hint);
+    let effective_available = available_bytes.saturating_add(active_vram_bytes);
+    let conservative_flux_offload = server_offload_enabled_for_paths_with_request(
+        paths,
+        hint,
+        policy.request_has_lora,
+        policy.forced_offload,
+    );
+    let flux_offload = if conservative_flux_offload
+        && !policy.forced_offload
+        && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
+    {
+        large_flux2_bf16_should_auto_offload(
+            paths,
+            hint,
+            Some(effective_available),
+            activation_memory_for_estimate(hint, false),
+        )
+    } else {
+        conservative_flux_offload
+    };
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
     let qwen_quantized = qwen_family
         && paths
@@ -343,7 +441,7 @@ pub(crate) fn preflight_memory_guard_with_available_and_policy(
         streaming,
         flux_offload,
         qwen_quantized,
-        gemma_competes,
+        policy.gemma_competes,
     );
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
@@ -351,7 +449,6 @@ pub(crate) fn preflight_memory_guard_with_available_and_policy(
     // hint is the resolution/dtype/arch-aware delta on top.
     let activation = activation_memory_for_estimate(hint, qwen_quantized);
     let peak_with_activation = peak.saturating_add(activation);
-    let effective_available = available_bytes.saturating_add(active_vram_bytes);
     // Qwen-Image runs phase-sequential on BOTH runtimes — GGUF and BF16 drop
     // the text encoder before the transformer loads (encode → drop TE →
     // denoise → VAE) — so the flat 90% cap double-penalizes a peak estimate
@@ -412,12 +509,12 @@ fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: 
 /// that bounds "block-streaming overhead, fully-resident top-level weights,
 /// and VAE."
 ///
-/// When `gemma_on_cpu` is true, encoder_total is dropped from the max because
-/// the prompt encoder won't compete for VRAM at all — it lives in system RAM
-/// and pipes its conditioning across to the transformer GPU at encode time.
-/// When false, the encoder phase still pays full encoder_total (text encoders
-/// load whole; the runtime drops them before denoise but during the encode
-/// phase they're co-resident with allocations made earlier in the request).
+/// When the encoder does not compete with the transformer GPU, `encoder_total`
+/// is dropped from the max because the prompt encoder lives in system RAM or
+/// streams one layer at a time and pipes its conditioning to the transformer
+/// GPU. This covers both LTX-2's CPU Gemma recovery and FLUX.2 Dev's streamed
+/// Mistral3 prefix. When it does compete, the encoder phase pays the full file
+/// total because those encoders load whole before being dropped for denoise.
 ///
 /// The cap is conservative: at 22B BF16 with `streaming_prefetch_count=2`,
 /// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
@@ -427,7 +524,6 @@ fn streaming_transformer_peak(
     paths: &ModelPaths,
     gemma_competes_with_transformer_gpu: bool,
 ) -> u64 {
-    const STREAMING_TRANSFORMER_CAP: u64 = 6_000_000_000; // 6 GB
     const HEADROOM: u64 = 2_000_000_000; // 2 GB, mirrors device::MEMORY_BUDGET_HEADROOM
 
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -449,7 +545,7 @@ fn streaming_transformer_peak(
         0
     };
 
-    let inference_phase = STREAMING_TRANSFORMER_CAP;
+    let inference_phase = mold_inference::device::STREAMING_TRANSFORMER_CAP_BYTES;
     std::cmp::max(encoder_total, inference_phase) + HEADROOM
 }
 
@@ -562,25 +658,27 @@ fn ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
 /// budget applies because tensors freed during `unload()` return to the
 /// system page cache.
 /// On other platforms with no memory query available, the guard is a no-op.
-pub(crate) fn preflight_memory_guard(
+pub(crate) fn preflight_memory_guard_for_request(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
     hint: Option<ActivationHint>,
+    request_has_lora: bool,
 ) -> Result<(), ApiError> {
     #[cfg(feature = "cuda")]
     {
         let effective_free = authoritative_cuda_available(
             mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
         )?;
-        preflight_memory_guard_with_available_on_gpu(
+        preflight_memory_guard_with_available_on_gpu_for_request(
             model_name,
             paths,
             active_vram_bytes,
             effective_free,
             gpu_ordinal,
             hint,
+            request_has_lora,
         )
     }
 
@@ -589,13 +687,14 @@ pub(crate) fn preflight_memory_guard(
         // macOS unified memory: query system memory and add reclaimable footprint.
         if let Some(available) = mold_inference::device::available_system_memory_bytes() {
             if available > 0 {
-                return preflight_memory_guard_with_available_on_gpu(
+                return preflight_memory_guard_with_available_on_gpu_for_request(
                     model_name,
                     paths,
                     active_vram_bytes,
                     available,
                     gpu_ordinal,
                     hint,
+                    request_has_lora,
                 );
             }
         }
@@ -654,24 +753,36 @@ pub(crate) fn preflight_planned_memory_guard(
 /// reclaimable active footprint: anything the driver still reports as used is
 /// unavailable pressure, regardless of whether Mold expected the drop to
 /// release it.
+#[cfg(test)]
 pub(crate) fn preflight_memory_guard_after_drop(
     model_name: &str,
     paths: &ModelPaths,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
+    preflight_memory_guard_after_drop_for_request(model_name, paths, gpu_ordinal, hint, false)
+}
+
+pub(crate) fn preflight_memory_guard_after_drop_for_request(
+    model_name: &str,
+    paths: &ModelPaths,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> Result<(), ApiError> {
     #[cfg(feature = "cuda")]
     {
         let available = authoritative_cuda_available(
             mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
         )?;
-        preflight_memory_guard_with_available_on_gpu(
+        preflight_memory_guard_with_available_on_gpu_for_request(
             model_name,
             paths,
             0,
             available,
             gpu_ordinal,
             hint,
+            request_has_lora,
         )
     }
     #[cfg(not(feature = "cuda"))]
@@ -680,7 +791,7 @@ pub(crate) fn preflight_memory_guard_after_drop(
         // memory plus the active engine's reclaimable footprint in the first
         // guard. A second instantaneous sample after `unload()` can lag page
         // reclamation and falsely reject a swap.
-        let _ = (model_name, paths, gpu_ordinal, hint);
+        let _ = (model_name, paths, gpu_ordinal, hint, request_has_lora);
         Ok(())
     }
 }
@@ -769,6 +880,15 @@ pub(crate) fn select_server_load_strategy_for_budget(
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
     let transformer_is_gguf = transformer_path_is_gguf(paths);
+
+    if large_flux2_bf16_should_auto_offload(
+        paths,
+        hint,
+        available_bytes,
+        activation_memory_for_estimate(hint, false),
+    ) {
+        return mold_inference::LoadStrategy::Sequential;
+    }
 
     if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) && !transformer_is_gguf {
         return mold_inference::LoadStrategy::Sequential;
@@ -921,7 +1041,9 @@ pub(crate) fn server_offload_enabled_for_paths_with_request(
         return false;
     }
 
-    forced_offload || large_flux_bf16_should_auto_offload(paths, hint)
+    forced_offload
+        || large_flux_bf16_should_auto_offload(paths, hint)
+        || large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
 }
 
 pub(crate) fn server_offload_enabled_for_paths(
@@ -995,15 +1117,30 @@ pub(crate) fn estimate_generation_memory_for_request(
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let block_offload = server_offload_enabled_for_paths_with_request(
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && transformer_path_is_gguf(paths);
+    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+    let conservative_block_offload = server_offload_enabled_for_paths_with_request(
         paths,
         hint,
         request_has_lora,
         forced_offload,
     );
-    let flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit) && block_offload;
-    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
-        && transformer_path_is_gguf(paths);
+    let block_offload = if conservative_block_offload
+        && !forced_offload
+        && !request_has_lora
+        && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
+    {
+        large_flux2_bf16_should_auto_offload(paths, hint, available_memory_bytes, activation)
+    } else {
+        conservative_block_offload
+    };
+    let flux_offload = hint.is_some_and(|h| {
+        matches!(
+            h.family,
+            ActivationFamily::FluxDit | ActivationFamily::Flux2Dit
+        )
+    }) && block_offload;
     let base_peak = base_peak_memory_for_paths(
         paths,
         hint,
@@ -1012,7 +1149,6 @@ pub(crate) fn estimate_generation_memory_for_request(
         qwen_quantized,
         gemma_competes,
     );
-    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
     let load_strategy = request_aware_load_strategy(
@@ -1076,6 +1212,39 @@ fn request_sensitive_activation_memory(
         .saturating_mul(video_factor)
         .saturating_mul(cfg_factor);
 
+    if hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
+        if let Some(images) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
+            let target_pixels = u64::from(req.width)
+                .saturating_mul(u64::from(req.height))
+                .max(1);
+            let per_image_cap = if images.len() == 1 {
+                mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
+            } else {
+                mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
+            };
+            // Reference bytes are already part of the finalized request, so
+            // plan against their real dimensions. Falling back to the full
+            // preprocessing cap on an unreadable header remains fail-closed.
+            let reference_pixels = images.iter().fold(0u64, |total, bytes| {
+                let pixels = image::ImageReader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+                    .map(|(width, height)| {
+                        u64::from(width)
+                            .saturating_mul(u64::from(height))
+                            .min(per_image_cap)
+                    })
+                    .unwrap_or(per_image_cap);
+                total.saturating_add(pixels)
+            });
+            let token_factor = target_pixels
+                .saturating_add(reference_pixels)
+                .div_ceil(target_pixels);
+            activation = activation.saturating_mul(token_factor);
+        }
+    }
+
     let pixel_bytes = u64::from(req.width)
         .saturating_mul(u64::from(req.height))
         .saturating_mul(4);
@@ -1107,7 +1276,18 @@ fn request_sensitive_activation_memory(
 #[cfg(test)]
 mod fail_closed_tests {
     use super::*;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+    use std::io::Cursor;
     use std::path::PathBuf;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let image = ImageBuffer::from_pixel(width, height, Rgb([1u8, 2, 3]));
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
 
     #[test]
     fn frozen_flux_offload_plan_recheck_accepts_fresh_and_parked_budgets() {
@@ -1212,6 +1392,28 @@ mod fail_closed_tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    #[test]
+    fn forced_flux2_offload_never_applies_streaming_admission_to_gguf() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("opaque.gguf");
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(30_000_000_000)
+            .unwrap();
+        let model_paths = paths(transformer.to_str().unwrap());
+
+        assert!(preflight_memory_guard_with_available_and_policy(
+            "opaque-flux2-gguf",
+            &model_paths,
+            0,
+            10_000_000_000,
+            Some(hint(ActivationFamily::Flux2Dit)),
+            true,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1333,6 +1535,98 @@ mod fail_closed_tests {
         assert_eq!(
             source.load_strategy,
             mold_inference::LoadStrategy::Sequential
+        );
+    }
+
+    #[test]
+    fn large_flux2_bf16_auto_offloads_only_when_residency_does_not_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut model_paths = paths("/unused/first-shard.safetensors");
+        model_paths.transformer_shards = (0..7)
+            .map(|index| {
+                let path = dir.path().join(format!("transformer-{index}.safetensors"));
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(9_000_000_000)
+                    .unwrap();
+                path
+            })
+            .collect();
+        model_paths.transformer = model_paths.transformer_shards[0].clone();
+        let activation = Some(hint(ActivationFamily::Flux2Dit));
+        assert!(large_flux2_bf16_should_auto_offload(
+            &model_paths,
+            activation,
+            Some(24_000_000_000),
+            256_000_000,
+        ));
+
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux2-dev:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 50,
+            "guidance": 4.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let plain = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(24_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert!(plain.block_offload);
+        assert_eq!(
+            plain.load_strategy,
+            mold_inference::LoadStrategy::Sequential
+        );
+        assert!(plain.peak_memory_bytes < 24_000_000_000);
+
+        let resident_capable = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(96_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            !resident_capable.block_offload,
+            "a 96 GB GPU should keep FLUX.2 Dev resident instead of paying the streaming penalty"
+        );
+
+        request.edit_images = Some(vec![png(256, 256), png(256, 256)]);
+        let with_references = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(24_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert!(with_references.activation_memory_bytes > plain.activation_memory_bytes);
+        assert!(with_references.fits_available_memory == Some(true));
+
+        request.edit_images = Some(vec![vec![1], vec![2]]);
+        let unreadable_references = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            Some(24_000_000_000),
+            false,
+            false,
+            false,
+        );
+        assert!(
+            unreadable_references.activation_memory_bytes > with_references.activation_memory_bytes,
+            "unreadable reference headers must retain the cap-based fail-closed estimate"
         );
     }
 

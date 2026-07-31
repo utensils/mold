@@ -1,13 +1,13 @@
-//! Flux.2 Klein-4B sampling utilities.
+//! FLUX.2 sampling utilities shared by Klein and Dev checkpoints.
 //!
 //! Similar to FLUX.1 sampling but adapted for:
 //! - 128 input channels (latent_channels=32, patchified)
 //! - 4D positional IDs (vs FLUX.1's 3D)
-//! - No pooled text vector (Klein uses only timestep conditioning)
+//! - No pooled text vector (Dev adds guidance conditioning separately)
 
 use candle_core::{Result, Tensor};
 
-/// Sampling state for Flux.2 Klein-4B.
+/// Sampling state for FLUX.2 Klein and Dev checkpoints.
 ///
 /// Prepares image tokens, positional IDs, text embeddings, and the
 /// conditioning vector for the transformer's denoising loop.
@@ -17,18 +17,19 @@ pub struct Flux2State {
     pub img: Tensor,
     /// Image positional IDs: (B, seq_len, 4)
     pub img_ids: Tensor,
-    /// Text encoder hidden states: (B, txt_len, 7680)
+    /// Text encoder hidden states: (B, txt_len, context_dim)
     pub txt: Tensor,
     /// Text positional IDs: (B, txt_len, 4) — zeros for text tokens
     pub txt_ids: Tensor,
-    /// Conditioning vector: (B, vec_dim) — zeros for Klein (no pooled text)
+    /// Conditioning vector: (B, vec_dim) — retained as zeros because FLUX.2
+    /// has no pooled text input.
     pub vec: Tensor,
 }
 
 impl Flux2State {
     /// Build sampling state from text embeddings and noise.
     ///
-    /// - `txt_emb`: (1, txt_len, 7680) from Qwen3 encoder (stacked 3x hidden states)
+    /// - `txt_emb`: (1, txt_len, context_dim) from three stacked encoder states
     /// - `img`: (B, 32, H/8, W/8) noise tensor
     ///
     /// The image is patchified with 2x2 patches, producing:
@@ -36,43 +37,15 @@ impl Flux2State {
     /// - `img_ids`: (B, seq_len, 4) with [0, row, col, 0] layout
     pub fn new(txt_emb: &Tensor, img: &Tensor) -> Result<Self> {
         let dtype = img.dtype();
-        let (bs, c, h, w) = img.dims4()?;
+        let (bs, _, _, _) = img.dims4()?;
         let dev = img.device();
-
-        // Patchify: reshape (B, C, H, 2, W, 2) -> (B, H*W, C*4)
-        let img = img.reshape((bs, c, h / 2, 2, w / 2, 2))?;
-        let img = img.permute((0, 2, 4, 1, 3, 5))?;
-        let img = img.reshape((bs, h / 2 * w / 2, c * 4))?;
-
-        // Build 4D image position IDs: [channel_idx=0, row, col, extra=0]
-        let ph = h / 2;
-        let pw = w / 2;
-        let img_ids = Tensor::stack(
-            &[
-                // Axis 0: constant 0 (channel index placeholder)
-                Tensor::full(0u32, (ph, pw), dev)?,
-                // Axis 1: row index
-                Tensor::arange(0u32, ph as u32, dev)?
-                    .reshape(((), 1))?
-                    .broadcast_as((ph, pw))?,
-                // Axis 2: column index
-                Tensor::arange(0u32, pw as u32, dev)?
-                    .reshape((1, ()))?
-                    .broadcast_as((ph, pw))?,
-                // Axis 3: constant 0 (extra axis for 4D RoPE)
-                Tensor::full(0u32, (ph, pw), dev)?,
-            ],
-            2,
-        )?
-        .to_dtype(dtype)?;
-        let img_ids = img_ids.reshape((1, ph * pw, 4))?;
-        let img_ids = img_ids.repeat((bs, 1, 1))?;
+        let (img, img_ids) = pack_image_tokens(img, 0)?;
 
         // Text tokens
         let txt = txt_emb.repeat(bs)?;
-        let txt_ids = Tensor::zeros((bs, txt.dim(1)?, 4), dtype, dev)?;
+        let txt_ids = Tensor::zeros((bs, txt.dim(1)?, 4), candle_core::DType::F32, dev)?;
 
-        // Klein has no pooled text vector — use a zero vector
+        // FLUX.2 has no pooled text vector — use a zero vector.
         // The transformer's vector_in is None so this won't be used,
         // but we keep a minimal tensor for API compatibility.
         let vec = Tensor::zeros((bs, 1), dtype, dev)?;
@@ -85,6 +58,41 @@ impl Flux2State {
             vec,
         })
     }
+}
+
+/// Patchify one FLUX.2 VAE latent and create its four-axis position IDs.
+/// Target noise uses time coordinate 0; ordered reference images use 10, 20,
+/// ... so the transformer can distinguish their token groups exactly as in
+/// the upstream BFL implementation.
+pub fn pack_image_tokens(img: &Tensor, time_coordinate: u32) -> Result<(Tensor, Tensor)> {
+    let (batch, channels, height, width) = img.dims4()?;
+    let device = img.device();
+    let ph = height / 2;
+    let pw = width / 2;
+    let tokens = img
+        .reshape((batch, channels, ph, 2, pw, 2))?
+        .permute((0, 2, 4, 1, 3, 5))?
+        .reshape((batch, ph * pw, channels * 4))?;
+    let ids = Tensor::stack(
+        &[
+            Tensor::full(time_coordinate, (ph, pw), device)?,
+            Tensor::arange(0u32, ph as u32, device)?
+                .reshape(((), 1))?
+                .broadcast_as((ph, pw))?,
+            Tensor::arange(0u32, pw as u32, device)?
+                .reshape((1, ()))?
+                .broadcast_as((ph, pw))?,
+            Tensor::full(0u32, (ph, pw), device)?,
+        ],
+        2,
+    )?
+    // BFL keeps coordinate IDs exact until RoPE evaluates them in float32.
+    // BF16 cannot represent every integer above 256, which is reachable by
+    // valid wide reference images.
+    .to_dtype(candle_core::DType::F32)?
+    .reshape((1, ph * pw, 4))?
+    .repeat((batch, 1, 1))?;
+    Ok((tokens, ids))
 }
 
 /// Compute the Flux.2 flow-matching timestep schedule.
@@ -160,7 +168,7 @@ pub fn unpack(xs: &Tensor, height: usize, width: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use candle_core::{DType, Device};
 
     #[test]
     fn schedule_endpoints() {
@@ -223,5 +231,27 @@ mod tests {
         assert_eq!(state.img_ids.dims(), &[1, 64 * 64, 4]); // 4D IDs
         assert_eq!(state.txt.dims(), &[1, 50, 7680]);
         assert_eq!(state.txt_ids.dims(), &[1, 50, 4]);
+    }
+
+    #[test]
+    fn reference_tokens_carry_ordered_time_coordinate() {
+        let dev = Device::Cpu;
+        let latent = Tensor::zeros((1, 32, 8, 6), DType::F32, &dev).unwrap();
+        let (tokens, ids) = pack_image_tokens(&latent, 20).unwrap();
+        assert_eq!(tokens.dims(), &[1, 12, 128]);
+        assert_eq!(ids.dims(), &[1, 12, 4]);
+        let ids = ids.to_vec3::<f32>().unwrap();
+        assert!(ids[0].iter().all(|id| id[0] == 20.0 && id[3] == 0.0));
+    }
+
+    #[test]
+    fn wide_reference_position_ids_remain_exact_above_bf16_integer_range() {
+        let dev = Device::Cpu;
+        let latent = Tensor::zeros((1, 32, 2, 520), DType::BF16, &dev).unwrap();
+        let (_, ids) = pack_image_tokens(&latent, 10).unwrap();
+        assert_eq!(ids.dtype(), DType::F32);
+        let ids = ids.to_vec3::<f32>().unwrap();
+        assert_eq!(ids[0][257][2], 257.0);
+        assert_eq!(ids[0][259][2], 259.0);
     }
 }

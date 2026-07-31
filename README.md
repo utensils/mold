@@ -178,7 +178,7 @@ with prompt, model, seed, and generation metadata.
 
 ## What it supports
 
-- FLUX.1, Flux.2 Klein, SD 1.5, SDXL, SD 3.5, Z-Image, Qwen-Image,
+- FLUX.1, Flux.2 Klein and Dev, SD 1.5, SDXL, SD 3.5, Z-Image, Qwen-Image,
   Qwen-Image-Edit, Wuerstchen v2, LTX Video, and LTX-2 / LTX-2.3
 - Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
   LoRA, prompt expansion, and Real-ESRGAN upscaling

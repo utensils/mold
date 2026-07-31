@@ -1,7 +1,7 @@
 import type { Scheduler } from "../types";
 import { LORA_CAPABLE_FAMILIES } from "../types";
 
-export type SourceImageMode = "single" | "qwen-edit";
+export type SourceImageMode = "single" | "qwen-edit" | "references";
 
 export interface GenerationCapabilities {
   supportsNegativePrompt: boolean;
@@ -49,9 +49,11 @@ const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
 export function generationCapabilitiesForFamily(
   family: string,
+  model = "",
 ): GenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
+  const referenceEdit = qwenEdit || isFlux2DevModel(model);
   const schedulerOptions = SCHEDULER_FAMILIES.has(normalized)
     ? SCHEDULER_OPTIONS
     : [];
@@ -62,12 +64,19 @@ export function generationCapabilitiesForFamily(
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
     supportsVideo: VIDEO_FAMILIES.has(normalized),
     supportsAudio: AUDIO_FAMILIES.has(normalized),
-    supportsLora: (LORA_CAPABLE_FAMILIES as readonly string[]).includes(
-      normalized,
-    ),
+    supportsLora:
+      !isFlux2DevModel(model) &&
+      (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
-    sourceImageMode: qwenEdit ? "qwen-edit" : "single",
-    supportsMask: !qwenEdit,
+    sourceImageMode: isFlux2DevModel(model)
+      ? "references"
+      : qwenEdit
+        ? "qwen-edit"
+        : "single",
+    supportsMask: !referenceEdit,
+    // Qwen edit always has a target image. FLUX.2 Dev only requires one
+    // output when references are actually attached; serializers and controls
+    // apply that request-sensitive lock.
     forcesBatchSizeOne: qwenEdit,
   };
 }
@@ -94,4 +103,9 @@ export function supportsLora(family: string): boolean {
 
 export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
+}
+
+export function isFlux2DevModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");
 }

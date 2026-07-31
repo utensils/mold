@@ -281,12 +281,32 @@ fn is_virtual_lora_alias(value: &str) -> bool {
         .is_some_and(|preset| !preset.trim().is_empty())
 }
 
-fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> {
+fn is_flux2_dev_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("flux2-dev") || model.contains("flux.2-dev")
+}
+
+fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) -> Result<()> {
+    let flux2_dev = is_flux2_dev_model(model);
+    let ordered_images = family == "qwen-image-edit" || flux2_dev;
     if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
         anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
     }
-    if family != "qwen-image-edit" && image.len() > 1 {
-        anyhow::bail!("multiple --image values are only supported for qwen-image-edit models");
+    if flux2_dev && image.iter().any(|img| img == "-") {
+        anyhow::bail!(
+            "FLUX.2 Dev ordered references do not support --image -; pass file paths instead"
+        );
+    }
+    if !ordered_images && image.len() > 1 {
+        anyhow::bail!(
+            "multiple --image values are only supported for Qwen-Image-Edit and FLUX.2 Dev models"
+        );
+    }
+    if flux2_dev && image.len() > mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES {
+        anyhow::bail!(
+            "FLUX.2 Dev supports at most {} ordered --image references",
+            mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES
+        );
     }
     Ok(())
 }
@@ -657,7 +677,7 @@ pub async fn run(
         })?;
     }
 
-    validate_image_args_for_family(&family, &image)?;
+    validate_image_args_for_model(&family, &model, &image)?;
 
     let loaded_images = image
         .iter()
@@ -672,12 +692,13 @@ pub async fn run(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    let source_image = if family == "qwen-image-edit" {
+    let ordered_images = family == "qwen-image-edit" || is_flux2_dev_model(&model);
+    let source_image = if ordered_images {
         None
     } else {
         loaded_images.first().cloned()
     };
-    let edit_images = if family == "qwen-image-edit" && !loaded_images.is_empty() {
+    let edit_images = if ordered_images && !loaded_images.is_empty() {
         Some(loaded_images)
     } else {
         None
@@ -1608,15 +1629,20 @@ mod tests {
 
     #[test]
     fn qwen_image_edit_rejects_stdin_image_arg() {
-        let err =
-            validate_image_args_for_family("qwen-image-edit", &[String::from("-")]).unwrap_err();
+        let err = validate_image_args_for_model(
+            "qwen-image-edit",
+            "qwen-image-edit-2511:q4",
+            &[String::from("-")],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("does not support --image -"));
     }
 
     #[test]
     fn non_edit_models_reject_multiple_image_args() {
-        let err = validate_image_args_for_family(
+        let err = validate_image_args_for_model(
             "flux",
+            "flux-dev:q4",
             &[String::from("one.png"), String::from("two.png")],
         )
         .unwrap_err();
@@ -1625,11 +1651,41 @@ mod tests {
 
     #[test]
     fn qwen_image_edit_accepts_multiple_image_args() {
-        assert!(validate_image_args_for_family(
+        assert!(validate_image_args_for_model(
             "qwen-image-edit",
+            "qwen-image-edit-2511:q4",
             &[String::from("one.png"), String::from("two.png")]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn flux2_dev_accepts_up_to_four_ordered_reference_paths() {
+        assert!(validate_image_args_for_model(
+            "flux2",
+            "flux2-dev:bf16",
+            &[
+                String::from("one.png"),
+                String::from("two.png"),
+                String::from("three.jpg"),
+                String::from("four.jpg"),
+            ],
+        )
+        .is_ok());
+        let error = validate_image_args_for_model(
+            "flux2",
+            "flux2-dev:bf16",
+            &vec![String::from("reference.png"); 5],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("at most 4"));
+    }
+
+    #[test]
+    fn flux2_dev_rejects_stdin_reference_arg() {
+        let error = validate_image_args_for_model("flux2", "flux2-dev:bf16", &[String::from("-")])
+            .unwrap_err();
+        assert!(error.to_string().contains("do not support --image -"));
     }
 
     #[test]

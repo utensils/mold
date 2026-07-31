@@ -237,6 +237,19 @@ fn known_transformer_repositories_are_offered_as_builtin_downloads() {
 }
 
 #[test]
+fn flux2_dev_hugging_face_checkpoint_is_offered_as_one_builtin_download() {
+    let entry = hf_checkpoint("black-forest-labs/FLUX.2-dev");
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    assert!(super::hf_repo_has_one_builtin_model(&entry.source_id));
+    assert!(super::entry_download_supported(&entry));
+    assert_eq!(
+        super::live_entry_to_wire(&entry, tmp.path())["supported"],
+        true
+    );
+}
+
+#[test]
 fn named_ltx23_bf16_manifests_remain_downloadable() {
     for model in ["ltx-2.3-22b-dev:bf16", "ltx-2.3-22b-distilled:bf16"] {
         let entry = hf_checkpoint(model);

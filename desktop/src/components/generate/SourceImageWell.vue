@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
-import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { generationCapabilitiesForFamily, isFlux2DevModel } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
 import {
   attachmentRoleLabel,
@@ -27,7 +27,8 @@ const appPrefs = useAppPrefsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 
 const pickerOpen = ref(false);
 const maskOpen = ref(false);
@@ -54,7 +55,8 @@ const dragIndex = ref<number | null>(null);
 
 function onEditPicked(picked: PickedImage[]) {
   if (picked.length === 0) return;
-  props.form.imageAttachments = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
+  const next = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
+  props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
 }
 function removeAttachmentAt(index: number) {
   const next = props.form.imageAttachments.slice();
@@ -223,8 +225,8 @@ function setSourceFitMode(e: Event) {
 </script>
 
 <template>
-  <!-- Qwen-edit: reorderable Target + Reference picture strip. -->
-  <div v-if="caps.supportsImg2img && caps.sourceImageMode === 'qwen-edit'">
+  <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->
+  <div v-if="caps.supportsImg2img && caps.sourceImageMode !== 'single'">
     <div class="mt-5 mb-2 flex items-center gap-2">
       <span class="edge-code">Pictures</span>
       <div class="border-edge h-px flex-1 border-t" />
@@ -249,7 +251,7 @@ function setSourceFitMode(e: Event) {
         />
         <div class="px-1.5 py-1 leading-tight">
           <div class="edge-code" :data-test="`attachment-role-${index}`">
-            {{ attachmentRoleLabel(index) }}
+            {{ flux2Dev ? `Reference ${index + 1}` : attachmentRoleLabel(index) }}
           </div>
           <div class="truncate text-caption text-ink" :data-test="`attachment-title-${index}`">
             {{ attachmentTitleLabel(index) }}
@@ -297,7 +299,11 @@ function setSourceFitMode(e: Event) {
       </button>
     </div>
     <p class="mt-1 text-caption text-ink-3">
-      First picture is the edit Target; the rest are References. Drag (or ‹ ›) to reorder.
+      {{
+        flux2Dev
+          ? "Up to four ordered references. Drag (or ‹ ›) to reorder."
+          : "First picture is the edit Target; the rest are References. Drag (or ‹ ›) to reorder."
+      }}
     </p>
 
     <ImagePickerModal

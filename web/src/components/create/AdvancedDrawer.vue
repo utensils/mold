@@ -36,7 +36,10 @@ import type {
   SourceFitPolicy,
   SourceImageState,
 } from "../../types";
-import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
+import {
+  generationCapabilitiesForFamily,
+  isFlux2DevModel,
+} from "../../lib/generateCapabilities";
 import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
@@ -162,7 +165,10 @@ const NEG_CHIPS = [
 // column. Phone: render inside the Advanced sheet.
 const inline = computed(() => !props.mobile);
 
-const caps = computed(() => generationCapabilitiesForFamily(props.family));
+const caps = computed(() =>
+  generationCapabilitiesForFamily(props.family, props.modelValue.model),
+);
+const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
 const formats = computed(() => outputFormatsForFamily(props.family));
 
 const showScheduler = computed(
@@ -614,17 +620,21 @@ function setSequenceCameraMode(mode: string) {
         <AccordionSection
           icon="image"
           :title="
-            caps.sourceImageMode === 'qwen-edit'
-              ? 'Edit images'
+            caps.sourceImageMode !== 'single'
+              ? flux2Dev
+                ? 'Reference images'
+                : 'Edit images'
               : 'Source image'
           "
           :summary="
             hasSource
-              ? caps.sourceImageMode === 'qwen-edit'
+              ? caps.sourceImageMode !== 'single'
                 ? `${modelValue.imageAttachments.length} attached`
                 : `1 image · denoise ${modelValue.strength.toFixed(2)}`
-              : caps.sourceImageMode === 'qwen-edit'
-                ? 'Target and reference images'
+              : caps.sourceImageMode !== 'single'
+                ? flux2Dev
+                  ? 'Optional · up to 4 ordered references'
+                  : 'Target and reference images'
                 : 'Image-to-image & inpainting'
           "
           :open="true"
@@ -639,8 +649,10 @@ function setSequenceCameraMode(mode: string) {
             @click="emit('open-picker')"
           >
             {{
-              caps.sourceImageMode === "qwen-edit"
-                ? "Attach images or "
+              caps.sourceImageMode !== "single"
+                ? flux2Dev
+                  ? "Attach references or "
+                  : "Attach images or "
                 : "Drop an image or "
             }}<span class="adv__accent">browse</span>
           </button>

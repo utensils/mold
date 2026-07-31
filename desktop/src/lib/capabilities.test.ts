@@ -66,6 +66,20 @@ describe("generationCapabilitiesForFamily", () => {
     expect(caps.supportsMask).toBe(false);
   });
 
+  it("distinguishes FLUX.2 Dev references from Klein img2img", () => {
+    expect(generationCapabilitiesForFamily("flux2", "flux2-dev:bf16")).toMatchObject({
+      sourceImageMode: "references",
+      supportsMask: false,
+      supportsLora: false,
+      forcesBatchSizeOne: false,
+    });
+    expect(generationCapabilitiesForFamily("flux2", "flux2-klein:q8")).toMatchObject({
+      sourceImageMode: "single",
+      supportsMask: true,
+      supportsLora: true,
+    });
+  });
+
   it("exposes video + audio only on the ltx families", () => {
     expect(generationCapabilitiesForFamily("ltx2")).toMatchObject({
       supportsVideo: true,

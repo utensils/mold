@@ -470,7 +470,7 @@ const jobErrorCopy = computed(() =>
   job.value?.error ? copyableError(job.value.error, jobErrorMessage.value) : jobErrorMessage.value,
 );
 const siblings = computed(() => generation.siblings);
-const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const caps = computed(() => generationCapabilitiesForFamily(form.family, form.model));
 const formValidationError = computed(
   () =>
     resolutionValidationError(form.width, form.height) ??
@@ -548,7 +548,10 @@ const stickyTarget = computed<string | null>(() =>
 );
 
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne ? 1 : Math.max(1, Math.floor(form.batchSize)),
+  caps.value.forcesBatchSizeOne ||
+  (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
+    ? 1
+    : Math.max(1, Math.floor(form.batchSize)),
 );
 
 /** Expansion always resolves a concrete host, even in the one-host case. */
@@ -655,7 +658,7 @@ function applyDecodedSourceResolution(
   const wasFollowing =
     previous.resolution !== null &&
     canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
-  if (replaced || wasFollowing) {
+  if (caps.value.sourceImageMode !== "references" && (replaced || wasFollowing)) {
     form.width = resolution.output.width;
     form.height = resolution.output.height;
   }
@@ -665,7 +668,7 @@ function applyDecodedSourceResolution(
 watch(
   [
     () =>
-      caps.value.sourceImageMode === "qwen-edit"
+      caps.value.sourceImageMode !== "single"
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedEntry.value?.name ?? form.model,
@@ -1932,7 +1935,7 @@ async function preprocessSourceFit(
   route: HostRoute | null,
   draft: ReturnType<typeof cloneGenerateForm>,
 ): Promise<boolean> {
-  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
   if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
   if (!draft.sourceImage) return true;
   try {
@@ -1976,7 +1979,7 @@ async function preprocessSourceFit(
 }
 
 function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateForm>): boolean {
-  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
   return (
     draftCaps.supportsImg2img &&
     draftCaps.sourceImageMode === "single" &&
@@ -2037,7 +2040,7 @@ async function generate() {
   submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
-    const draftCaps = generationCapabilitiesForFamily(draft.family);
+    const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
     // The composer style preset is baked into the OUTGOING request at submit —
     // the textarea and negative field are never mutated. Reviewed prepared
     // prompts ship verbatim (the style already reached them through the
@@ -2380,8 +2383,8 @@ function applyPrefill() {
 async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
   if (!caps.value.supportsImg2img) return;
-  const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
-  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
+  const attachmentMode = caps.value.sourceImageMode !== "single";
+  if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
   const modelAtStart = form.model;
   const deps: SourceRestoreDeps = {
     stashGet: (sha) => ipc.sourceStashGet(sha),
@@ -2400,31 +2403,38 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       return blobToBase64(await res.blob());
     },
   };
-  const editRestore = qwenEdit ? await restoreEditImages(metadata, deps) : null;
-  const restored = qwenEdit ? null : await restoreSourceImage(metadata, deps);
+  const editRestore = attachmentMode ? await restoreEditImages(metadata, deps) : null;
+  const restored = attachmentMode ? null : await restoreSourceImage(metadata, deps);
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
   // this restore was superseded: a newer prefill or ⌘N bumped the epoch, the
   // user attached their own source, the model changed under us, or the new
   // family can't take an image at all.
   if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
   if (!caps.value.supportsImg2img) return;
-  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
-  if (qwenEdit && caps.value.sourceImageMode === "qwen-edit" && editRestore?.images.length) {
-    form.imageAttachments = editRestore.images;
-    if (editRestore.missing > 0) {
+  if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
+  if (attachmentMode && caps.value.sourceImageMode !== "single" && editRestore?.images.length) {
+    const restoredImages =
+      caps.value.sourceImageMode === "references"
+        ? editRestore.images.slice(0, 4)
+        : editRestore.images;
+    const omitted = editRestore.images.length - restoredImages.length;
+    form.imageAttachments = restoredImages;
+    if (editRestore.missing > 0 || omitted > 0) {
       toasts.push(
-        `Restored ${editRestore.images.length} source ${
-          editRestore.images.length === 1 ? "image" : "images"
-        }; ${editRestore.missing} ${editRestore.missing === 1 ? "is" : "are"} no longer available.`,
+        `Restored ${restoredImages.length} source ${
+          restoredImages.length === 1 ? "image" : "images"
+        }; ${editRestore.missing + omitted} ${
+          editRestore.missing + omitted === 1 ? "was" : "were"
+        } unavailable or beyond this model's limit.`,
         "error",
       );
     }
-  } else if (!qwenEdit && caps.value.sourceImageMode === "single" && restored) {
+  } else if (!attachmentMode && caps.value.sourceImageMode === "single" && restored) {
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
   } else {
     toasts.push(
-      qwenEdit
+      attachmentMode
         ? "Couldn't restore the edit images — the original local files are no longer available."
         : "Couldn't restore the source image — the original file wasn't found on any connected host.",
       "error",

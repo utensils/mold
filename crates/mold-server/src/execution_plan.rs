@@ -3293,6 +3293,7 @@ mod tests {
         let file = std::fs::File::create(path).unwrap();
         file.set_len(bytes).unwrap();
         drop(file);
+        mold_core::download::write_sha256_marker(path, &format!("{bytes:064x}")).unwrap();
         // Admission tests use logical multi-GiB sparse zero files solely for
         // their metadata length. Seed their synthetic identity so unrelated
         // memory-planning tests do not spend minutes hashing hole ranges.
@@ -3492,6 +3493,63 @@ mod tests {
         assert!(
             plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 24 * GIB,
             "streamed transformer weights remain resident in host memory"
+        );
+    }
+
+    #[test]
+    fn flux2_dev_shards_reserve_the_full_streamed_transformer_in_host_ram() {
+        let root = TempDir::new().unwrap();
+        let transformer_shards = (0..7)
+            .map(|index| {
+                let path = root.path().join(format!("flux2-dev-{index}.safetensors"));
+                sparse_file(&path, 9 * GIB);
+                path
+            })
+            .collect::<Vec<_>>();
+        let vae = root.path().join("flux2-dev-vae.safetensors");
+        sparse_file(&vae, GIB);
+        let encoder = root.path().join("flux2-dev-text.safetensors");
+        sparse_file(&encoder, GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            "test-flux2-dev:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer_shards[0].display().to_string()),
+                transformer_shards: Some(
+                    transformer_shards
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                ),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request = serde_json::from_str(
+            r#"{"prompt":"x","model":"test-flux2-dev:bf16","width":1024,"height":1024,"steps":50,"guidance":4.0}"#,
+        )
+        .unwrap();
+
+        let resident_plan =
+            resolve_execution_plans(&config, &request, &devices(&[96 * GIB]), false)
+                .expect("FLUX.2 Dev should stay resident on a 96 GB GPU")
+                .remove(0);
+        assert_eq!(resident_plan.offload_mode, OffloadMode::None);
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("FLUX.2 Dev should fit a 24 GB GPU through automatic block offload")
+            .remove(0);
+
+        assert_eq!(plan.offload_mode, OffloadMode::Block);
+        assert_eq!(
+            plan.engine_load_strategy,
+            mold_inference::LoadStrategy::Sequential
+        );
+        assert!(
+            plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 63 * GIB,
+            "all seven streamed transformer shards must remain charged to the host ledger"
         );
     }
 

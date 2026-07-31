@@ -77,7 +77,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));

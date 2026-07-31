@@ -1,4 +1,36 @@
-# Flux.2 Klein
+# Flux.2
+
+Mold supports the lightweight distilled Klein checkpoints and the full gated
+FLUX.2 Dev checkpoint.
+
+## Flux.2 Dev
+
+The full 32B-class BF16 checkpoint uses a streamed Mistral3 prompt encoder and
+automatically block-offloads transformer blocks when the selected CUDA GPU
+cannot keep the transformer resident. Expect substantial host-RAM and model
+storage requirements even when GPU residency is bounded.
+
+- **Model**: `flux2-dev:bf16`
+- **Defaults**: 50 steps, guidance 4.0, 1024x1024
+- **License**: FLUX Non-Commercial License
+- **HuggingFace**:
+  [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev)
+  (gated — accept the license and authenticate before pulling)
+- **Conditioning**: text-to-image or up to four ordered PNG/JPEG references
+
+```bash
+hf auth login
+mold pull flux2-dev:bf16
+mold run flux2-dev:bf16 "a cinematic portrait in rain"
+mold run flux2-dev:bf16 "preserve the subject, change the lighting" \
+  --image reference.png
+```
+
+Classic strength-based img2img, masks, ControlNet, LoRA, and batches with
+references are rejected because the checkpoint-native reference protocol does
+not implement those controls. Text-only batches remain supported.
+
+## Flux.2 Klein
 
 A lightweight 4B parameter FLUX variant. Fast 4-step generation with low VRAM
 requirements.

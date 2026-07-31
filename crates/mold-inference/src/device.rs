@@ -1019,6 +1019,10 @@ pub const QWEN3_FP16_VRAM_THRESHOLD: u64 = 10_200_000_000;
 
 /// Headroom for activation memory during inference (denoising + VAE decode workspace).
 const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
+/// Conservative GPU working-set cap for block-streamed transformers. Covers
+/// resident top-level weights, streamed block weights, VAE residency, and
+/// allocator slack; activations are budgeted separately.
+pub const STREAMING_TRANSFORMER_CAP_BYTES: u64 = 6_000_000_000;
 
 // ── Placement resolution ─────────────────────────────────────────────────────
 

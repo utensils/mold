@@ -402,6 +402,23 @@ pub struct Flux2Config {
 }
 
 impl Flux2Config {
+    /// Configuration for the full FLUX.2 [dev] checkpoint.
+    pub fn dev() -> Self {
+        Self {
+            in_channels: 128,
+            vec_in_dim: 0,
+            context_in_dim: 15360,
+            hidden_size: 6144,
+            mlp_ratio: 3.0,
+            num_heads: 48,
+            depth: 8,
+            depth_single_blocks: 48,
+            axes_dim: vec![32, 32, 32, 32],
+            theta: 2000,
+            guidance_embed: true,
+        }
+    }
+
     /// Configuration for Flux.2 Klein-4B (Apache 2.0, distilled).
     pub fn klein() -> Self {
         Self {
@@ -465,8 +482,10 @@ pub(crate) fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
         .collect();
     let inv_freq_len = inv_freq.len();
     let inv_freq = Tensor::from_vec(inv_freq, (1, 1, inv_freq_len), dev)?;
-    let inv_freq = inv_freq.to_dtype(pos.dtype())?;
-    let freqs = pos.unsqueeze(2)?.broadcast_mul(&inv_freq)?;
+    let freqs = pos
+        .to_dtype(DType::F32)?
+        .unsqueeze(2)?
+        .broadcast_mul(&inv_freq)?;
     let cos = freqs.cos()?;
     let sin = freqs.sin()?;
     let out = Tensor::stack(&[&cos, &sin.neg()?, &sin, &cos], 3)?;
@@ -475,14 +494,19 @@ pub(crate) fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
 }
 
 pub(crate) fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
+    let output_dtype = x.dtype();
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
-    let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
+    let x = x
+        .to_dtype(DType::F32)?
+        .reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
     let x0 = x.narrow(D::Minus1, 0, 1)?;
     let x1 = x.narrow(D::Minus1, 1, 1)?;
     let fr0 = freq_cis.get_on_dim(D::Minus1, 0)?;
     let fr1 = freq_cis.get_on_dim(D::Minus1, 1)?;
-    (fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())
+    (fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?
+        .reshape(dims.to_vec())?
+        .to_dtype(output_dtype)
 }
 
 pub(crate) fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
@@ -1467,6 +1491,7 @@ impl Flux2TransformerWrapper {
         &self,
         img: &Tensor,
         img_ids: &Tensor,
+        reference: Option<(&Tensor, &Tensor)>,
         txt: &Tensor,
         txt_ids: &Tensor,
         vec_: &Tensor,
@@ -1494,10 +1519,19 @@ impl Flux2TransformerWrapper {
             };
             let t_vec = Tensor::full(*t_curr as f32, b_sz, dev)?;
 
+            let (model_img, model_img_ids) = if let Some((reference_img, reference_ids)) = reference
+            {
+                (
+                    Tensor::cat(&[&img, reference_img], 1)?,
+                    Tensor::cat(&[img_ids, reference_ids], 1)?,
+                )
+            } else {
+                (img.clone(), img_ids.clone())
+            };
             let pred = match self {
                 Self::BF16(m) => m.forward(
-                    &img,
-                    img_ids,
+                    &model_img,
+                    &model_img_ids,
                     txt,
                     txt_ids,
                     &t_vec,
@@ -1505,8 +1539,8 @@ impl Flux2TransformerWrapper {
                     Some(&guidance_tensor),
                 )?,
                 Self::Offloaded(m) => m.forward(
-                    &img,
-                    img_ids,
+                    &model_img,
+                    &model_img_ids,
                     txt,
                     txt_ids,
                     &t_vec,
@@ -1514,8 +1548,8 @@ impl Flux2TransformerWrapper {
                     Some(&guidance_tensor),
                 )?,
                 Self::Quantized(m) => m.forward(
-                    &img,
-                    img_ids,
+                    &model_img,
+                    &model_img_ids,
                     txt,
                     txt_ids,
                     &t_vec,
@@ -1523,6 +1557,7 @@ impl Flux2TransformerWrapper {
                     Some(&guidance_tensor),
                 )?,
             };
+            let pred = pred.narrow(1, 0, img.dim(1)?)?;
             img = (img + &pred * (t_prev - t_curr))?;
 
             // Inpainting: blend preserved regions back at current noise level

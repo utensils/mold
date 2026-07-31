@@ -1,4 +1,5 @@
 pub(crate) mod clip;
+pub(crate) mod mistral3;
 pub(crate) mod park;
 pub(crate) mod qwen2_text;
 pub(crate) mod qwen2_text_gguf;

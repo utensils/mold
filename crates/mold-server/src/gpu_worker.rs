@@ -3046,23 +3046,29 @@ fn finish_generation_success(
 /// outside it. The caller is expected to hold
 /// `worker.model_load_lock`, which keeps a concurrent generation from slotting
 /// a fresh load into the context between our reclaim and the actual load.
+#[derive(Clone, Copy)]
+struct WorkerPreflightPolicy {
+    hint: Option<crate::model_manager::ActivationHint>,
+    planned_peak_bytes: Option<u64>,
+    request_has_lora: bool,
+}
+
 fn preflight_memory_guard_with_eviction(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
     cache_key: &str,
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
-    hint: Option<crate::model_manager::ActivationHint>,
-    planned_peak_bytes: Option<u64>,
+    policy: WorkerPreflightPolicy,
 ) -> Result<(), crate::routes::ApiError> {
-    if let Some(predicted_peak_bytes) = planned_peak_bytes {
+    if let Some(predicted_peak_bytes) = policy.planned_peak_bytes {
         return preflight_planned_memory_guard_with_eviction(
             cache_lock,
             cache_key,
             model_name,
             ordinal,
             predicted_peak_bytes,
-            hint,
+            policy.hint,
             None,
         );
     }
@@ -3072,12 +3078,13 @@ fn preflight_memory_guard_with_eviction(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_vram_bytes();
-        let guard = crate::model_manager::preflight_memory_guard(
+        let guard = crate::memory_preflight::preflight_memory_guard_for_request(
             model_name,
             paths,
             active_vram,
             ordinal,
-            hint,
+            policy.hint,
+            policy.request_has_lora,
         );
         let err = match guard {
             Ok(()) => return Ok(()),
@@ -3376,8 +3383,11 @@ fn ensure_model_ready_sync_inner(
                 model_name,
                 paths,
                 worker.gpu.ordinal,
-                hint,
-                planned_peak_bytes,
+                WorkerPreflightPolicy {
+                    hint,
+                    planned_peak_bytes,
+                    request_has_lora,
+                },
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -3399,11 +3409,12 @@ fn ensure_model_ready_sync_inner(
                         hint,
                     )
                 }
-                None => crate::memory_preflight::preflight_memory_guard_after_drop(
+                None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
                     model_name,
                     paths,
                     worker.gpu.ordinal,
                     hint,
+                    request_has_lora,
                 ),
             }
             .map_err(|e| anyhow::anyhow!(e.error))?;
@@ -3614,8 +3625,11 @@ fn ensure_model_ready_sync_inner(
         model_name,
         &paths,
         worker.gpu.ordinal,
-        hint,
-        planned_peak_bytes,
+        WorkerPreflightPolicy {
+            hint,
+            planned_peak_bytes,
+            request_has_lora,
+        },
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
@@ -3635,11 +3649,12 @@ fn ensure_model_ready_sync_inner(
                 hint,
             )
         }
-        None => crate::memory_preflight::preflight_memory_guard_after_drop(
+        None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
             model_name,
             &paths,
             worker.gpu.ordinal,
             hint,
+            request_has_lora,
         ),
     }
     .map_err(|e| anyhow::anyhow!(e.error))?;

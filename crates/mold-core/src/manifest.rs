@@ -290,6 +290,14 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
     } else {
+        // FLUX.2 [dev] publishes a different Mistral encoder, tokenizer, and
+        // VAE under the same relative filenames used by the Klein repos. Do
+        // not let installing one variant overwrite the other's shared assets.
+        if file.hf_repo == "black-forest-labs/FLUX.2-dev" {
+            return PathBuf::from("shared")
+                .join("flux2-dev")
+                .join(&file.hf_filename);
+        }
         // Companion manifests (`t5-v1_1-xxl`, `clip-l`, etc.) route their
         // shared components to the canonical owning family's bucket so an
         // already-installed FLUX/SDXL/SD1.5 model's encoders/tokenizers are
@@ -2104,9 +2112,92 @@ fn shared_flux2_files() -> Vec<ModelFile> {
     ]
 }
 
+/// Runtime assets for the gated FLUX.2 [dev] checkpoint.
+///
+/// The official Mistral3 conditioner concatenates hidden states after decoder
+/// layers 10, 20, and 30 (zero-based hidden-state indices 10/20/30). Shards
+/// 9-10 contain only later decoder layers and the unused language-model head,
+/// so downloading them would add bytes that can never affect Mold output.
+fn shared_flux2_dev_files() -> Vec<ModelFile> {
+    const REPO: &str = "black-forest-labs/FLUX.2-dev";
+    const TEXT_SHARDS: [(&str, u64, &str); 8] = [
+        (
+            "text_encoder/model-00001-of-00010.safetensors",
+            4_883_550_696,
+            "91831c2ce219df0ce63bc33c6249e5cb01db8d93816bcebf975f1c406286520e",
+        ),
+        (
+            "text_encoder/model-00002-of-00010.safetensors",
+            4_781_593_336,
+            "8ffe80706a66b2f5ef1fb058806ccf09f124ec4ad38af7a377e44ab1ee2fd664",
+        ),
+        (
+            "text_encoder/model-00003-of-00010.safetensors",
+            4_886_472_224,
+            "99ec66e891f9563f568734eadfc5b7701e04620e8e163d4d5755277a3b50cf2f",
+        ),
+        (
+            "text_encoder/model-00004-of-00010.safetensors",
+            4_781_593_376,
+            "e1df1527b12b1eb5cbd9a50914f9e6eb24e885ec830a3c16b5eed6ad0b53a396",
+        ),
+        (
+            "text_encoder/model-00005-of-00010.safetensors",
+            4_781_593_368,
+            "3556ac03f47c24eb8ad27c237e25baad639c651d9596fd72cb1523137bf56163",
+        ),
+        (
+            "text_encoder/model-00006-of-00010.safetensors",
+            4_886_472_248,
+            "2c41e6f80f2b5ca384ce703eac048a13daf2aff689c3acca66a8943f45338aae",
+        ),
+        (
+            "text_encoder/model-00007-of-00010.safetensors",
+            4_781_593_376,
+            "62a725f154f6ba942a36b5cc450db2b2df32f434e3224558c789bc04fa05fd36",
+        ),
+        (
+            "text_encoder/model-00008-of-00010.safetensors",
+            4_781_593_368,
+            "3a1a6ac77e6434418bb7273b68a7b3534fed5217c990061c92a8f990dd6ab20e",
+        ),
+    ];
+
+    let mut files = TEXT_SHARDS
+        .into_iter()
+        .map(|(hf_filename, size_bytes, sha256)| ModelFile {
+            hf_repo: REPO.to_string(),
+            hf_filename: hf_filename.to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes,
+            gated: true,
+            sha256: Some(sha256),
+        })
+        .collect::<Vec<_>>();
+    files.extend([
+        ModelFile {
+            hf_repo: REPO.to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 336_213_556,
+            gated: true,
+            sha256: Some("d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"),
+        },
+        ModelFile {
+            hf_repo: REPO.to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 17_078_037,
+            gated: true,
+            sha256: Some("b76085f9923309d873994d444989f7eb6ec074b06f25b58f1e8d7b7741070949"),
+        },
+    ]);
+    files
+}
+
 /// All known Flux.2 model manifests.
 fn flux2_manifests() -> Vec<ModelManifest> {
-    vec![
+    let mut manifests = vec![
         // Flux.2 Klein-4B BF16 (Apache 2.0, NOT gated)
         ModelManifest {
             name: "flux2-klein:bf16".to_string(),
@@ -2356,7 +2447,79 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             hidden: false,
         },
-    ]
+    ];
+
+    const REPO: &str = "black-forest-labs/FLUX.2-dev";
+    const TRANSFORMER_SHARDS: [(&str, u64, &str); 7] = [
+        (
+            "transformer/diffusion_pytorch_model-00001-of-00007.safetensors",
+            9_935_797_200,
+            "9d9b85f75f72fb17c7d29dacf7c430e924da93122d578a559a36a7635e153714",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00002-of-00007.safetensors",
+            9_890_181_048,
+            "86adf6f41474b00bd57afbb29a09f008be7d6af8ae914956585ba5bc6bf97c28",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00003-of-00007.safetensors",
+            9_814_681_480,
+            "a14e26e8f305dd26d7881f333e6e6ce5b562cbb55282538f46d38e1ff2715179",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00004-of-00007.safetensors",
+            9_814_681_536,
+            "5c4f38976fd8d7e5fb2d4cd20562d74eebba3264566987e3ef938d807c75be90",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00005-of-00007.safetensors",
+            9_814_681_536,
+            "4d7a74d916fc22117cde8bad76aa4b561e6dc92368cddc23bdae06dbc586ad95",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00006-of-00007.safetensors",
+            9_814_681_536,
+            "08f3ad03610651f9d630177ac3a4770d532fa72d788d3b36c39a0301b1595447",
+        ),
+        (
+            "transformer/diffusion_pytorch_model-00007-of-00007.safetensors",
+            5_361_898_792,
+            "789b9bacb607e9b97597f77c86056fa6cbb747c2a6016588e6e196814b5f9733",
+        ),
+    ];
+    let mut files = shared_flux2_dev_files();
+    files.extend(
+        TRANSFORMER_SHARDS
+            .into_iter()
+            .map(|(hf_filename, size_bytes, sha256)| ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: hf_filename.to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes,
+                gated: true,
+                sha256: Some(sha256),
+            }),
+    );
+    manifests.push(ModelManifest {
+        name: "flux2-dev:bf16".to_string(),
+        family: "flux2".to_string(),
+        description: "FLUX.2 [dev] BF16 — 32B guidance-distilled image generation and editing"
+            .to_string(),
+        files,
+        defaults: ManifestDefaults {
+            steps: 50,
+            guidance: 4.0,
+            width: 1024,
+            height: 1024,
+            is_schnell: false,
+            scheduler: None,
+            negative_prompt: None,
+            frames: None,
+            fps: None,
+        },
+        hidden: false,
+    });
+    manifests
 }
 
 /// Shared Flux.2 Klein-9B component files (Qwen3 text encoder 4 shards, VAE, tokenizer).
@@ -5500,6 +5663,65 @@ mod tests {
     }
 
     #[test]
+    fn flux2_dev_manifest_is_exact_and_collision_free() {
+        let manifest = find_manifest_exact("flux2-dev:bf16").unwrap();
+        assert_eq!(manifest.family, "flux2");
+        assert_eq!(manifest.defaults.steps, 50);
+        assert_eq!(manifest.defaults.guidance, 4.0);
+        assert!(manifest.is_gated());
+        assert!(!manifest.hidden);
+        assert_eq!(manifest.total_size_bytes(), 103_364_356_713);
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .filter(|file| file.component == ModelComponent::TransformerShard)
+                .count(),
+            7
+        );
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .filter(|file| file.component == ModelComponent::TextEncoder)
+                .count(),
+            8
+        );
+        assert!(manifest
+            .files
+            .iter()
+            .all(|file| file.hf_repo == "black-forest-labs/FLUX.2-dev"));
+        assert!(manifest.files.iter().all(|file| file.sha256.is_some()));
+        assert!(!manifest
+            .files
+            .iter()
+            .any(|file| file.hf_filename == "flux2-dev.safetensors"));
+
+        for file in manifest
+            .files
+            .iter()
+            .filter(|file| !is_model_specific_component(file.component))
+        {
+            assert!(storage_path(manifest, file).starts_with("shared/flux2-dev"));
+        }
+        let klein = find_manifest_exact("flux2-klein:bf16").unwrap();
+        let dev_vae = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Vae)
+            .unwrap();
+        let klein_vae = klein
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Vae)
+            .unwrap();
+        assert_ne!(
+            storage_path(manifest, dev_vae),
+            storage_path(klein, klein_vae)
+        );
+    }
+
+    #[test]
     fn sd3_resolves_to_q8() {
         let manifest = find_manifest("sd3.5-large").unwrap();
         assert_eq!(manifest.name, "sd3.5-large:q8");
@@ -5731,13 +5953,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 128
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 129
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 128);
+        assert_eq!(known_manifests().len(), 129);
     }
 
     #[test]
