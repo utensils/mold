@@ -1,9 +1,12 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 import ModelsPage from "./ModelsPage.vue";
 import type { ModelInfoExtended } from "../types";
+import type { RoutableHost } from "../lib/hostRouting";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
+import { addHost } from "../lib/hostRegistry";
+import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 
 function makeModel(over: Partial<ModelInfoExtended> = {}): ModelInfoExtended {
   return {
@@ -44,6 +47,39 @@ vi.mock("vue-router", () => ({
   useRoute: () => ({ query: routeQuery.value }),
 }));
 
+/* Multi-host install targeting; single-host by default so nothing changes. */
+const mockHosts = ref<RoutableHost[]>([]);
+const mockOwners = ref<Record<string, string[]>>({});
+vi.mock("../composables/useHostRouting", () => ({
+  useHostRouting: () => ({
+    hosts: mockHosts,
+    modelOwnerIds: (name: string) => mockOwners.value[name] ?? [],
+    inventoryKnown: () => true,
+  }),
+}));
+
+const mockHostCatalogDownload = vi.fn().mockResolvedValue({ queued: 1 });
+vi.mock("../components/machines/hostClient", () => ({
+  hostModelDownload: (...args: unknown[]) => mockHostCatalogDownload(...args),
+}));
+
+const mockToast = vi.fn();
+vi.mock("../lib/toasts", () => ({
+  toast: (...args: unknown[]) => mockToast(...args),
+}));
+
+function host(id: string, over: Partial<RoutableHost> = {}): RoutableHost {
+  return {
+    id,
+    label: id === "origin" ? "this server" : id,
+    url: id === "origin" ? "" : `http://${id}:7680`,
+    status: "ready",
+    queueDepth: 0,
+    gpu: null,
+    ...over,
+  };
+}
+
 const mountPage = () =>
   mount(ModelsPage, {
     global: {
@@ -57,7 +93,12 @@ const mountPage = () =>
   });
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.clear();
   routeQuery.value = {};
+  mockHosts.value = [host("origin")];
+  mockOwners.value = {};
+  useModelInstallTargets().cancel();
   mock = {
     tab: ref("installed"),
     installed: ref<ModelInfoExtended[]>([]),
@@ -105,6 +146,43 @@ describe("ModelsPage — Models workspace", () => {
     const w = mountPage();
     await w.find("[data-test=installed-row]").trigger("click");
     expect(mock.openInstalledDetail).toHaveBeenCalledWith(model);
+  });
+
+  it("keeps the installed shelf free of install controls on one machine", () => {
+    mock.installed.value = [makeModel()];
+    const w = mountPage();
+    expect(w.find("[data-test=install-elsewhere-btn]").exists()).toBe(false);
+    expect(w.find("[data-test=install-target-host]").exists()).toBe(false);
+  });
+
+  it("installs an already-installed model on the machine that lacks it", async () => {
+    const remote = addHost({ url: "http://studio.local:7680", name: "Studio" });
+    mockHosts.value = [host("origin"), host(remote.id, { label: remote.name })];
+    mockOwners.value = { "flux-schnell:q8": ["origin"] };
+    mock.installed.value = [makeModel()];
+    const w = mountPage();
+
+    await w.find("[data-test=install-elsewhere-btn]").trigger("click");
+    await flushPromises();
+
+    // Two machines, two outcomes — the picker names both.
+    const options = w.findAll("[data-test=install-target-option]");
+    expect(options).toHaveLength(2);
+    expect(options[0].attributes("data-host")).toBe(remote.id);
+    expect(options[0].text()).toContain("Install");
+
+    await options[0].trigger("click");
+    await flushPromises();
+
+    expect(mockHostCatalogDownload).toHaveBeenCalledWith(
+      remote,
+      "flux-schnell:q8",
+    );
+    expect(mockToast).toHaveBeenCalledWith(
+      "success",
+      "Download queued on Studio",
+    );
+    expect(w.find("[data-test=install-target-host]").exists()).toBe(false);
   });
 
   it("switches to Discover via the segmented control", async () => {

@@ -27,6 +27,7 @@ import type {
   ServerStatus,
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
+import { looksLikeCatalogId, type CatalogDownloadResponse } from "../../api";
 import { parseCurrentServerStatus } from "@studio/api/client";
 import {
   listDevices,
@@ -173,6 +174,41 @@ export async function hostDownloads(
     queued: raw.queued ?? [],
     history: raw.history ?? [],
   };
+}
+
+/**
+ * Enqueue a model download on ONE machine.
+ *
+ * Routed by id shape, exactly like `useDownloads().enqueue` does for the
+ * origin: `/api/downloads` validates against the manifest registry and 400s on
+ * a `cv:` / `hf:` id, while `/api/catalog/:id/download` owns the catalog
+ * recipe + companion flow and 400s on a plain manifest name. The origin keeps
+ * going through the catalog composable so the downloads centre repaints
+ * immediately; this is the path for every other machine.
+ *
+ * It deliberately does not reuse `send()`, which treats a 404 as already-done —
+ * for a download that would report a queued job that never existed.
+ */
+export async function hostModelDownload(
+  host: HostEntry,
+  id: string,
+): Promise<CatalogDownloadResponse | null> {
+  const catalog = looksLikeCatalogId(id);
+  const path = catalog
+    ? `/api/catalog/${encodeURIComponent(id)}/download`
+    : "/api/downloads";
+  const headers = authHeaders(host.apiKey);
+  if (!catalog) headers["content-type"] = "application/json";
+  const res = await fetch(`${host.url}${path}`, {
+    method: "POST",
+    headers,
+    ...(catalog ? {} : { body: JSON.stringify({ model: id }) }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(detail || `POST ${path} failed: ${res.status}`);
+  }
+  return catalog ? ((await res.json()) as CatalogDownloadResponse) : null;
 }
 
 const DEFAULT_CAPABILITIES: HostCapabilities = {

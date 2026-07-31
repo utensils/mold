@@ -1,11 +1,32 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 import CatalogCardGrid from "./CatalogCardGrid.vue";
+import type { RoutableHost } from "../lib/hostRouting";
 
 const toastMock = vi.fn();
 vi.mock("../lib/toasts", () => ({
   toast: (...args: unknown[]) => toastMock(...args),
+}));
+
+// Single-host registry: pulls resolve to the serving origin with no picker,
+// exactly as this grid behaved before installs became host-targeted.
+const mockHosts = ref<RoutableHost[]>([
+  {
+    id: "origin",
+    label: "this server",
+    url: "",
+    status: "ready",
+    queueDepth: 0,
+    gpu: null,
+  },
+]);
+vi.mock("../composables/useHostRouting", () => ({
+  useHostRouting: () => ({
+    hosts: mockHosts,
+    modelOwnerIds: () => [],
+    inventoryKnown: () => true,
+  }),
 }));
 
 // Stub IntersectionObserver so jsdom/happy-dom mounts don't crash on it.
@@ -122,8 +143,7 @@ describe("CatalogCardGrid download feedback", () => {
     const w = mount(CatalogCardGrid);
 
     w.getComponent({ name: "CatalogCard" }).vm.$emit("pull");
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushPromises();
 
     expect(toastMock).toHaveBeenCalledWith(
       "error",

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { useModelStore } from "../../stores/models";
+import { useInventoryKnown } from "../../lib/modelInventory";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
@@ -41,6 +43,7 @@ const models = useModelStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const toasts = useToastStore();
+const inventoryKnown = useInventoryKnown();
 const sourceEntries = computed(() => props.entries ?? models.installed);
 
 const filtered = computed(() => {
@@ -90,11 +93,17 @@ function targetForHost(target: HostView | null) {
     : undefined;
 }
 
-function repairHosts(m: LibraryModelEntry): HostView[] {
-  const ownerIds = new Set(m.hostIds ?? ["local"]);
-  return hosts.all.filter(
-    (host) => ownerIds.has(host.id) && host.status === "ready" && Boolean(host.baseUrl),
-  );
+const readyHosts = computed(() =>
+  hosts.all.filter((host) => host.status === "ready" && Boolean(host.baseUrl)),
+);
+
+/**
+ * A row here is merged across machines, so "installed" never means "installed
+ * everywhere". Every ready machine that lacks the model stays an install
+ * target; only the owners degrade to repair.
+ */
+function installPlan(m: LibraryModelEntry) {
+  return planModelInstall(readyHosts.value, m.hostIds ?? ["local"], { inventoryKnown });
 }
 
 function hostLabels(m: LibraryModelEntry): string[] {
@@ -142,29 +151,32 @@ async function remove(m: LibraryModelEntry) {
   }
 }
 
-/** Whole-model repair from the drawer: re-fetches only missing files. */
+/** Whole-model install/repair from the drawer or the row's Install action. */
 const drawerRepairing = ref(false);
 
-function requestRepair(m: LibraryModelEntry) {
-  const candidates = repairHosts(m);
+function requestDownload(m: LibraryModelEntry) {
+  const candidates = installPlan(m).targets;
   if (candidates.length === 0) {
-    toasts.push("No online owning host is available to repair this model.", "error");
+    toasts.push("No online machine is available for this model.", "error");
     return;
   }
   if (candidates.length > 1) {
     pendingRepair.value = m;
     return;
   }
-  void repairOnHost(m, candidates[0]!);
+  void downloadOnHost(m, candidates[0]!.host);
 }
 
-async function repairOnHost(m: LibraryModelEntry, host: HostView | null) {
+async function downloadOnHost(m: LibraryModelEntry, host: HostView | null) {
   pendingRepair.value = null;
   drawerRepairing.value = true;
+  const owns = (m.hostIds ?? ["local"]).includes(host?.id ?? "local");
   try {
     const target = targetForHost(host);
     await startCatalogDownload(m.name, target, !!target);
-    toasts.push(`Repairing ${modelDisplayName(m)}${host ? ` on ${host.label}` : ""}`);
+    toasts.push(
+      `${owns ? "Repairing" : "Installing"} ${modelDisplayName(m)}${host ? ` on ${host.label}` : ""}`,
+    );
   } catch (err) {
     toasts.push(
       err instanceof ApiError && err.status === 409
@@ -260,6 +272,19 @@ async function unload(m: LibraryModelEntry) {
                 />
               </template>
               <template #actions>
+                <!-- Installed on one machine says nothing about the others:
+                     offer the install until every ready machine has it. -->
+                <button
+                  v-if="installPlan(m).canInstall"
+                  type="button"
+                  data-test="install-elsewhere"
+                  class="border-edge h-7 rounded-control border px-2 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-40"
+                  title="Install this model on another machine"
+                  :disabled="busy === m.name"
+                  @click="requestDownload(m)"
+                >
+                  Install
+                </button>
                 <button
                   v-if="!m.is_loaded"
                   type="button"
@@ -307,16 +332,16 @@ async function unload(m: LibraryModelEntry) {
     :pulling="drawerRepairing"
     :target="targetFor(detailModel)"
     :forward-credentials="!!targetFor(detailModel)"
+    :action="installPlan(detailModel).label"
     @close="detailModel = null"
-    @pull="detailModel && requestRepair(detailModel)"
+    @pull="detailModel && requestDownload(detailModel)"
   />
 
   <DownloadTargetDialog
     v-if="pendingRepair"
-    action="repair"
     :model-name="modelDisplayName(pendingRepair)"
-    :hosts="repairHosts(pendingRepair)"
+    :targets="installPlan(pendingRepair).targets"
     @close="pendingRepair = null"
-    @select="(host) => pendingRepair && void repairOnHost(pendingRepair, host)"
+    @select="(host) => pendingRepair && void downloadOnHost(pendingRepair, host)"
   />
 </template>

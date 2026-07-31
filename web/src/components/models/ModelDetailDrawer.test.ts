@@ -4,6 +4,9 @@ import { ref } from "vue";
 import ModelDetailDrawer from "./ModelDetailDrawer.vue";
 import type { CatalogEntryWire, ModelInfoExtended } from "../../types";
 import type { ModelDetail, ModelVariant } from "../../composables/useCatalog";
+import type { RoutableHost } from "../../lib/hostRouting";
+import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
+import { addHost } from "../../lib/hostRegistry";
 
 const makeEntry = (over: Partial<CatalogEntryWire> = {}): CatalogEntryWire => ({
   id: "hf:a",
@@ -100,6 +103,38 @@ vi.mock("../../lib/toasts", () => ({
   toast: (...args: unknown[]) => mockToast(...args),
 }));
 
+/*
+ * Multi-host install targeting. The drawer's action is only "Repair" once every
+ * reachable machine owns the model; stub the routing poller so each test says
+ * which machines exist and who owns what.
+ */
+const mockHosts = ref<RoutableHost[]>([]);
+const mockOwners = ref<Record<string, string[]>>({});
+vi.mock("../../composables/useHostRouting", () => ({
+  useHostRouting: () => ({
+    hosts: mockHosts,
+    modelOwnerIds: (name: string) => mockOwners.value[name] ?? [],
+    inventoryKnown: () => true,
+  }),
+}));
+
+const mockHostCatalogDownload = vi.fn().mockResolvedValue({ queued: 1 });
+vi.mock("../machines/hostClient", () => ({
+  hostModelDownload: (...args: unknown[]) => mockHostCatalogDownload(...args),
+}));
+
+function host(id: string, over: Partial<RoutableHost> = {}): RoutableHost {
+  return {
+    id,
+    label: id === "origin" ? "this server" : id,
+    url: id === "origin" ? "" : `http://${id}:7680`,
+    status: "ready",
+    queueDepth: 0,
+    gpu: null,
+    ...over,
+  };
+}
+
 describe("ModelDetailDrawer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -107,6 +142,10 @@ describe("ModelDetailDrawer", () => {
     mockDetail.value = null;
     mockDetailLoadingId.value = null;
     mockDetailError.value = null;
+    localStorage.clear();
+    mockHosts.value = [host("origin")];
+    mockOwners.value = {};
+    useModelInstallTargets().cancel();
   });
 
   describe("never-blank states (G4)", () => {
@@ -253,6 +292,7 @@ describe("ModelDetailDrawer", () => {
       mockDetail.value = catalogDetail();
       const w = mount(ModelDetailDrawer);
       await w.find("[data-test=pull-btn]").trigger("click");
+      await flushPromises();
       expect(mockStartDownload).toHaveBeenCalledWith("hf:a");
       expect(mockCloseDetail).toHaveBeenCalled();
     });
@@ -294,6 +334,38 @@ describe("ModelDetailDrawer", () => {
       expect(repair.exists()).toBe(true);
       await repair.trigger("click");
       expect(mockStartDownload).toHaveBeenCalledWith("hf:a");
+    });
+
+    it("keeps Pull for an installed entry a connected machine still lacks", async () => {
+      const entry = addHost({
+        url: "http://studio.local:7680",
+        name: "Studio",
+      });
+      mockHosts.value = [host("origin"), host(entry.id)];
+      mockOwners.value = { "hf:a": ["origin"] };
+      mockDetail.value = catalogDetail(makeEntry({ installed: true }));
+
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=repair-btn]").exists()).toBe(false);
+      const pull = w.find("[data-test=pull-btn]");
+      expect(pull.exists()).toBe(true);
+
+      await pull.trigger("click");
+      await flushPromises();
+
+      // Two machines, two different outcomes — the user picks.
+      const targeting = useModelInstallTargets();
+      expect(targeting.pending.value?.targets.map((t) => t.action)).toEqual([
+        "install",
+        "repair",
+      ]);
+      expect(mockStartDownload).not.toHaveBeenCalled();
+
+      targeting.choose(targeting.pending.value!.targets[0]);
+      await flushPromises();
+
+      expect(mockHostCatalogDownload).toHaveBeenCalledWith(entry, "hf:a");
+      expect(mockCloseDetail).toHaveBeenCalled();
     });
 
     it("disables Pull with an unsupported tooltip", () => {
@@ -594,6 +666,63 @@ describe("ModelDetailDrawer", () => {
       expect(w.get("[data-test=model-modality-badge]").text()).toBe("Video");
       expect(w.get("[data-test=model-kind-badge]").text()).toBe("LoRA");
       expect(w.get("[data-test=model-nsfw-badge]").text()).toBe("18+ NSFW");
+    });
+
+    it("offers to install an installed model on a machine that lacks it", async () => {
+      const entry = addHost({
+        url: "http://studio.local:7680",
+        name: "Studio",
+      });
+      mockHosts.value = [host("origin"), host(entry.id)];
+      mockOwners.value = { "flux-schnell:q8": ["origin"] };
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel(),
+        components: [],
+      };
+
+      const w = mount(ModelDetailDrawer);
+      const install = w.find("[data-test=install-elsewhere-btn]");
+      expect(install.exists()).toBe(true);
+
+      await install.trigger("click");
+      await flushPromises();
+
+      const targeting = useModelInstallTargets();
+      targeting.choose(targeting.pending.value!.targets[0]);
+      await flushPromises();
+
+      expect(mockHostCatalogDownload).toHaveBeenCalledWith(
+        entry,
+        "flux-schnell:q8",
+      );
+    });
+
+    it("hides the install action once every reachable machine owns it", () => {
+      const entry = addHost({
+        url: "http://studio.local:7680",
+        name: "Studio",
+      });
+      mockHosts.value = [host("origin"), host(entry.id)];
+      mockOwners.value = { "flux-schnell:q8": ["origin", entry.id] };
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel(),
+        components: [],
+      };
+
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=install-elsewhere-btn]").exists()).toBe(false);
+    });
+
+    it("shows no install action for a single-host registry", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel(),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=install-elsewhere-btn]").exists()).toBe(false);
     });
 
     it("renders Load, Unload and Delete actions", () => {

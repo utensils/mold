@@ -176,6 +176,18 @@ with the request preserving visual stack order. Civitai LoRAs ship trigger
 phrases (`trainedWords`); they render as click-to-insert chips beside the
 selected LoRA — clicking a chip appends the phrase to the active prompt.
 
+**Model install targets (web, desktop, iPhone):** a Models row is merged
+across machines, so `installed` means "installed somewhere", never "installed
+here". Every surface derives its action from `planModelInstall`
+(`studio/lib/modelInstallTargets.ts`): each reachable machine missing the
+model stays an install target, owners degrade to repair, and the action
+collapses to Repair only once every reachable machine has it. Never hide the
+install because another machine has the model. The destination picker names
+the per-machine outcome, and on desktop and web a machine whose `/api/models`
+has not been read is never offered as an install target. Route every download
+on the id shape: `/api/downloads` takes manifest names, `/api/catalog/:id/download`
+takes `cv:` / `hf:` ids, and each rejects the other with HTTP 400.
+
 **Create web UI:** the Create tab only lists downloaded standalone
 generation models; the Models tab is the install/repair surface for missing
 models and companions. Web and desktop selectors label installed `cv:` / `hf:`

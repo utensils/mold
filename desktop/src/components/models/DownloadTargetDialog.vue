@@ -1,17 +1,31 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from "vue";
+import type { ModelInstallTarget } from "@studio/lib/modelInstallTargets";
 import type { HostView } from "../../stores/hosts";
 
-const props = withDefaults(
-  defineProps<{ modelName: string; hosts: HostView[]; action?: "download" | "repair" }>(),
-  { action: "download" },
-);
+const props = defineProps<{
+  modelName: string;
+  /** Every machine this model can be sent to, and what sending it there does.
+   *  A mixed list is normal: some machines lack the model, others already
+   *  have it and can only be repaired. */
+  targets: ModelInstallTarget<HostView>[];
+}>();
 const emit = defineEmits<{
   (e: "select", host: HostView): void;
   (e: "close"): void;
 }>();
 const closeBtn = ref<HTMLButtonElement | null>(null);
-const title = computed(() => `Choose where to ${props.action} ${props.modelName}`);
+/** One verb for the whole dialog: an install is on offer, or it is a repair. */
+const action = computed<"install" | "repair">(() =>
+  props.targets.some((target) => target.action === "install") ? "install" : "repair",
+);
+const title = computed(() => `Choose where to ${action.value} ${props.modelName}`);
+/** Install and repair targets in the same list — the copy has to cover both. */
+const mixed = computed(
+  () =>
+    props.targets.some((target) => target.action === "install") &&
+    props.targets.some((target) => target.action === "repair"),
+);
 let restoreFocusEl: HTMLElement | null = null;
 
 function onKeydown(event: KeyboardEvent) {
@@ -49,8 +63,14 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
               <template v-if="action === 'repair'">
                 Only missing or damaged files will be fetched on the selected host.
               </template>
+              <!-- A mixed list must not promise a fresh install for a machine
+                   that can only be repaired. -->
+              <template v-else-if="mixed">
+                The model and its required components will be stored on the machine you pick;
+                machines that already have it are repaired instead.
+              </template>
               <template v-else>
-                The model and its required components will be stored on the selected host.
+                The model and its required components will be stored on the machine you pick.
               </template>
             </p>
           </div>
@@ -67,28 +87,37 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
         <div class="flex flex-col gap-1" role="list">
           <button
-            v-for="host in hosts"
-            :key="host.id"
+            v-for="target in targets"
+            :key="target.host.id"
             type="button"
             role="listitem"
-            :data-test="`download-target-${host.id}`"
+            :data-test="`download-target-${target.host.id}`"
             class="border-edge flex min-h-12 items-center gap-3 rounded-control border px-3 py-2 text-left transition-colors duration-150 hover:border-safelight hover:bg-bath"
-            @click="emit('select', host)"
+            @click="emit('select', target.host)"
           >
             <span
               class="h-2 w-2 shrink-0 rounded-full"
-              :class="host.status === 'ready' ? 'bg-halide' : 'bg-stop'"
+              :class="target.host.status === 'ready' ? 'bg-halide' : 'bg-stop'"
               aria-hidden="true"
             />
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-body font-medium text-ink">{{ host.label }}</span>
+              <span class="block truncate text-body font-medium text-ink">
+                {{ target.host.label }}
+              </span>
               <span class="block truncate text-caption text-ink-3">
-                {{ host.kind === "local" ? "This device" : host.baseUrl }}
+                {{ target.host.kind === "local" ? "This device" : target.host.baseUrl }}
               </span>
             </span>
-            <span v-if="host.primary" class="edge-code">Current</span>
-            <span v-if="host.queueDepth != null" class="data-mono text-caption text-ink-3">
-              {{ host.queueDepth }} queued
+            <!-- Says what picking this machine actually does, so a mixed list
+                 never leaves the user guessing which one is the fresh copy. -->
+            <span
+              class="edge-code shrink-0"
+              :class="target.action === 'install' ? 'text-safelight' : 'text-ink-3'"
+            >
+              {{ target.action === "install" ? "Install" : "Already installed · repair" }}
+            </span>
+            <span v-if="target.host.queueDepth != null" class="data-mono text-caption text-ink-3">
+              {{ target.host.queueDepth }} queued
             </span>
           </button>
         </div>

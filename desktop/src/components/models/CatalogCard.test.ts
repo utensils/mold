@@ -216,4 +216,14 @@ describe("CatalogCard", () => {
     expect(installed.text()).toContain("installed");
     expect(installed.find("[data-test='pull']").exists()).toBe(false);
   });
+
+  it("keeps the Pull button on an installed card another machine is missing", async () => {
+    const wrapper = mount(CatalogCard, {
+      props: { entry: entry({ installed: true }), pulling: false, installable: true },
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("installed");
+    await wrapper.get("[data-test='pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
+  });
 });
