@@ -398,4 +398,24 @@ describe("MobileGenerateParameters", () => {
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", new File(["a"], "voice.wav"));
     expect(form.audioFile).toEqual({ filename: "voice.wav", base64: "b64:voice.wav" });
   });
+
+  it("edits guidance overrides and blocks invalid values before submission", async () => {
+    const initial = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    initial.outputFormat = "mp4";
+    const { wrapper, form } = mountParameters(initial);
+    const child = wrapper.getComponent(MobileGenerateParameters);
+    await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
+
+    await wrapper.get("[data-test='mobile-ltx2-stg-scale']").setValue("1.25");
+    await wrapper.get("[data-test='mobile-ltx2-stg-blocks']").setValue("28, nope");
+    expect(form.guidanceOverrides.stgScale).toBe(1.25);
+    expect(wrapper.get("[data-test='mobile-ltx2-stg-blocks-error']").text()).toContain(
+      "not a block index",
+    );
+    expect(wrapper.get("[data-test='mobile-ltx2-guidance-count']").text()).toBe("2");
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    await wrapper.get("[data-test='mobile-ltx2-stg-blocks']").setValue("28, 29");
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
+  });
 });

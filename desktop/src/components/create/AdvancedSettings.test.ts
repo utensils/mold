@@ -238,6 +238,26 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.find("[data-test='ltx2-retake-start']").exists()).toBe(true);
   });
 
+  it("edits, validates, counts, and resets guidance overrides", async () => {
+    const form = formFor("ltx2");
+    const wrapper = mountSettings(form);
+    await openSection(wrapper, "Video");
+
+    await wrapper.get("[data-test='ltx2-stg-scale']").setValue("1.5");
+    await wrapper.get("[data-test='ltx2-stg-blocks']").setValue("28, nope");
+    expect(form.guidanceOverrides.stgScale).toBe(1.5);
+    expect(wrapper.get("[data-test='ltx2-stg-blocks-error']").text()).toContain(
+      "not a block index",
+    );
+    expect(wrapper.get("[data-test='ltx2-guidance-count']").text()).toBe("2");
+    expect(wrapper.text()).toContain("1 active");
+
+    await wrapper.get("[data-test='ltx2-guidance-reset']").trigger("click");
+    expect(form.guidanceOverrides.stgScale).toBeNull();
+    expect(form.guidanceOverrides.stgBlocks).toBe("");
+    expect(wrapper.find("[data-test='ltx2-stg-blocks-error']").exists()).toBe(false);
+  });
+
   it("renders host-provided reference controls and guide copy", async () => {
     const form = formFor("ltx2");
     const controlAdapters: Ltx2ControlAdapterInfo[] = [

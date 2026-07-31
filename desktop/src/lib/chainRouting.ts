@@ -57,7 +57,8 @@ export type AutoChainUnsupportedField =
   | "ic_lora_control"
   | "retake_range"
   | "spatial_upscale"
-  | "temporal_upscale";
+  | "temporal_upscale"
+  | "guidance_overrides";
 
 /**
  * Report meaningful fields that would be lost when a normal generation is
@@ -76,6 +77,9 @@ export function unsupportedAutoChainFields(req: GenerateRequest): AutoChainUnsup
   if (req.retake_range) unsupported.push("retake_range");
   if (req.spatial_upscale) unsupported.push("spatial_upscale");
   if (req.temporal_upscale) unsupported.push("temporal_upscale");
+  if (req.guidance_overrides && Object.keys(req.guidance_overrides).length > 0) {
+    unsupported.push("guidance_overrides");
+  }
   return unsupported;
 }
 

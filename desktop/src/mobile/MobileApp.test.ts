@@ -3806,6 +3806,26 @@ describe("MobileApp create settings reset", () => {
       "Reset settings to model defaults",
     );
   });
+
+  it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
+    await wrapper.get("[data-test='mobile-ltx2-stg-scale']").setValue("1.5");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("1");
+    expect(wrapper.get("[data-test='mobile-advanced-count']").text()).toBe("1");
+
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+    expect(
+      (wrapper.get("[data-test='mobile-ltx2-stg-scale']").element as HTMLInputElement).value,
+    ).toBe("");
+  });
 });
 
 describe("MobileApp primary navigation", () => {

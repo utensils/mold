@@ -62,6 +62,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -309,6 +310,7 @@ const advancedActiveCount = computed(() => {
   if (form.scheduler !== "default") count += 1;
   if (form.cfgPlus) count += 1;
   if (form.cameraControl) count += 1;
+  if (!guidanceOverridesAreEmpty(form.guidanceOverrides)) count += 1;
   return count;
 });
 
@@ -345,6 +347,7 @@ function resetAdvancedSettings(): void {
   form.controlImage = defaults.controlImage;
   form.controlModel = defaults.controlModel;
   form.controlScale = defaults.controlScale;
+  form.guidanceOverrides = emptyGuidanceOverrides();
 }
 const preparingGeneration = ref(false);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);

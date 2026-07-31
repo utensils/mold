@@ -1,6 +1,7 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 
 export const MAX_GENERATION_PIXELS = 1_800_000;
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -119,6 +120,8 @@ function keyframePositionValidationError(form: GenerateForm): string | null {
 
 export function advancedVideoValidationError(form: GenerateForm): string | null {
   if (!generationCapabilitiesForFamily(form.family).supportsAdvancedVideo) return null;
+  const guidanceError = guidanceOverridesError(form.guidanceOverrides);
+  if (guidanceError) return guidanceError;
   if (form.sourceVideo && !form.sourceVideo.base64) return "Source video cannot be empty.";
   if (form.keyframes.some((keyframe) => !keyframe.image.base64)) {
     return "Keyframe images cannot be empty.";

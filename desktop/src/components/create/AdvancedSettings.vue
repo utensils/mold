@@ -36,6 +36,15 @@ import {
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  emptyGuidanceOverrides,
+  guidanceOverrideCount,
+  skipStepError,
+  stgBlocksError,
+  MAX_GUIDANCE_SCALE,
+  MAX_GUIDANCE_SKIP_STEP,
+  type Ltx2GuidanceOverridesState,
+} from "@studio/lib/guidanceOverrides";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -173,6 +182,22 @@ function setSpatial(v: string) {
 }
 function setTemporal(v: string) {
   props.form.temporalUpscale = (v || null) as Ltx2TemporalUpscale | null;
+}
+const guidance = computed<Ltx2GuidanceOverridesState>(() => props.form.guidanceOverrides);
+const guidanceCount = computed(() => guidanceOverrideCount(guidance.value));
+const stgBlocksMessage = computed(() => stgBlocksError(guidance.value.stgBlocks));
+const skipStepMessage = computed(() => skipStepError(guidance.value.skipStep));
+function setGuidance(next: Partial<Ltx2GuidanceOverridesState>) {
+  props.form.guidanceOverrides = { ...guidance.value, ...next };
+}
+function numberOrNull(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+function resetGuidance() {
+  props.form.guidanceOverrides = emptyGuidanceOverrides();
 }
 function setRetake(edge: "start" | "end", raw: string) {
   const value = Number(raw) || 0;
@@ -590,6 +615,143 @@ function reset() {
               </div>
             </div>
 
+            <div class="ms-guidance ms-label--mt">
+              <div class="ms-guidance__head">
+                <label class="ms-label">
+                  Guidance overrides
+                  <span
+                    v-if="guidanceCount"
+                    class="ms-guidance__count"
+                    data-test="ltx2-guidance-count"
+                    >{{ guidanceCount }}</span
+                  >
+                </label>
+                <button
+                  v-if="guidanceCount"
+                  type="button"
+                  class="ms-guidance__reset"
+                  data-test="ltx2-guidance-reset"
+                  @click="resetGuidance"
+                >
+                  Reset
+                </button>
+              </div>
+              <p class="ms-hint">
+                Empty keeps this checkpoint’s pipeline defaults. Used by two-stage, two-stage HQ,
+                keyframe, and audio-to-video renders.
+              </p>
+              <div class="ms-grid2 ms-label--mt">
+                <label class="ms-guidance__label">
+                  STG scale
+                  <input
+                    type="number"
+                    inputmode="decimal"
+                    step="0.1"
+                    min="0"
+                    :max="MAX_GUIDANCE_SCALE"
+                    placeholder="Default"
+                    class="ms-input data-mono"
+                    data-test="ltx2-stg-scale"
+                    :value="guidance.stgScale ?? ''"
+                    @input="
+                      setGuidance({
+                        stgScale: numberOrNull(($event.target as HTMLInputElement).value),
+                      })
+                    "
+                  />
+                </label>
+                <label class="ms-guidance__label">
+                  STG blocks
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="28, 29"
+                    class="ms-input data-mono"
+                    data-test="ltx2-stg-blocks"
+                    :aria-invalid="stgBlocksMessage ? 'true' : undefined"
+                    :value="guidance.stgBlocks"
+                    @input="setGuidance({ stgBlocks: ($event.target as HTMLInputElement).value })"
+                  />
+                </label>
+              </div>
+              <p
+                v-if="stgBlocksMessage"
+                class="ms-error"
+                role="alert"
+                data-test="ltx2-stg-blocks-error"
+              >
+                {{ stgBlocksMessage }}
+              </p>
+              <div class="ms-grid2 ms-label--mt">
+                <label class="ms-guidance__label">
+                  CFG rescale
+                  <input
+                    type="number"
+                    inputmode="decimal"
+                    step="0.05"
+                    min="0"
+                    max="1"
+                    placeholder="Default"
+                    class="ms-input data-mono"
+                    data-test="ltx2-rescale-scale"
+                    :value="guidance.rescaleScale ?? ''"
+                    @input="
+                      setGuidance({
+                        rescaleScale: numberOrNull(($event.target as HTMLInputElement).value),
+                      })
+                    "
+                  />
+                </label>
+                <label class="ms-guidance__label">
+                  Modality scale
+                  <input
+                    type="number"
+                    inputmode="decimal"
+                    step="0.1"
+                    min="0"
+                    :max="MAX_GUIDANCE_SCALE"
+                    placeholder="Default"
+                    class="ms-input data-mono"
+                    data-test="ltx2-modality-scale"
+                    :value="guidance.modalityScale ?? ''"
+                    @input="
+                      setGuidance({
+                        modalityScale: numberOrNull(($event.target as HTMLInputElement).value),
+                      })
+                    "
+                  />
+                </label>
+              </div>
+              <label class="ms-guidance__label ms-label--mt">
+                Guidance skip stride
+                <input
+                  type="number"
+                  inputmode="numeric"
+                  step="1"
+                  min="0"
+                  :max="MAX_GUIDANCE_SKIP_STEP"
+                  placeholder="Every step"
+                  class="ms-input data-mono"
+                  data-test="ltx2-guidance-skip-step"
+                  :aria-invalid="skipStepMessage ? 'true' : undefined"
+                  :value="guidance.skipStep ?? ''"
+                  @input="
+                    setGuidance({
+                      skipStep: numberOrNull(($event.target as HTMLInputElement).value),
+                    })
+                  "
+                />
+              </label>
+              <p
+                v-if="skipStepMessage"
+                class="ms-error"
+                role="alert"
+                data-test="ltx2-guidance-skip-step-error"
+              >
+                {{ skipStepMessage }}
+              </p>
+            </div>
+
             <template v-if="form.pipeline === 'retake'">
               <label class="ms-label ms-label--mt">Retake range (seconds)</label>
               <div class="ms-grid2">
@@ -900,6 +1062,45 @@ function reset() {
   background: transparent;
   border: 0;
   cursor: pointer;
+}
+.ms-guidance {
+  border-top: 1px solid var(--ce);
+  padding-top: 16px;
+}
+.ms-guidance__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ms-guidance__head .ms-label {
+  margin-bottom: 0;
+}
+.ms-guidance__count {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--ce);
+  border-radius: 999px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+}
+.ms-guidance__reset {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+.ms-guidance__label {
+  display: block;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ms-guidance__label .ms-input {
+  margin-top: 6px;
 }
 .ms-adv__reset {
   border: 1px solid var(--ce);

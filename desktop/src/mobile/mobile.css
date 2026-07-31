@@ -1625,6 +1625,26 @@ button.mobile-generate-disclosure {
   padding-bottom: 4px;
 }
 
+.mobile-generate-guidance {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--edge);
+}
+
+.mobile-generate-inline-count {
+  display: inline-flex;
+  min-width: 22px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-data);
+}
+
 /* Full-screen Advanced trigger + sheet (Mold Studio iOS spec). */
 .mobile-advanced-row {
   display: flex;

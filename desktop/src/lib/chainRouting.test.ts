@@ -311,6 +311,7 @@ describe("automatic chain request projection", () => {
         retake_range: { start_seconds: 1, end_seconds: 2 },
         spatial_upscale: "x2",
         temporal_upscale: "x2",
+        guidance_overrides: { stg_scale: 1.5 },
       }),
     ).toEqual([
       "negative_prompt",
@@ -322,6 +323,7 @@ describe("automatic chain request projection", () => {
       "retake_range",
       "spatial_upscale",
       "temporal_upscale",
+      "guidance_overrides",
     ]);
   });
 

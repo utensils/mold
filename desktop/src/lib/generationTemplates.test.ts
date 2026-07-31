@@ -92,6 +92,32 @@ describe("save / load round-trip", () => {
     expect(tpl?.mediaReferences).toEqual([]);
   });
 
+  it("hydrates an empty guidance override state for legacy templates", () => {
+    const legacyForm: Partial<GenerateForm> = newGenerateForm();
+    delete legacyForm.guidanceOverrides;
+    localStorage.setItem(
+      GENERATION_TEMPLATES_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: "legacy",
+          name: "Legacy",
+          createdAt: 1,
+          updatedAt: 1,
+          form: legacyForm,
+          mediaReferences: [],
+        },
+      ]),
+    );
+
+    expect(loadGenerationTemplates()[0]?.form.guidanceOverrides).toEqual({
+      stgScale: null,
+      stgBlocks: "",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: null,
+    });
+  });
+
   it("strips video, keyframe, and conditioning-audio media", () => {
     const form = formWith({
       prompt: "a river",
