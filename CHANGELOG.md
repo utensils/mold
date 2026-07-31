@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-31
+
 ### Added
 
 - **LTX-2's guidance knobs are now user-tunable instead of pinned per pipeline.** The multimodal guider's spatiotemporal-guidance strength and perturbed blocks, CFG-rescale factor, audio/video cross-modality scale, and guidance skip stride were fixed constants chosen per (pipeline, stage), so the quality and motion trade-offs the model actually supports were unreachable. `mold run` gains `--stg-scale`, `--stg-blocks`, `--rescale-scale`, `--modality-scale`, and `--guidance-skip-step`; `GenerateRequest` gains an additive `guidance_overrides` object; and web's Advanced video panel gains the matching controls with an active-count badge, one-click reset, and inline block-list validation. Every field is optional and an absent field keeps its pipeline constant, so an unflagged request reproduces earlier outputs exactly. Overrides apply only to pipelines that run the multimodal guider (`two-stage`, `two-stage-hq`, `keyframe`, `a2vid`), never switch on a guider a pipeline deliberately disables (`a2vid`'s positive-only audio pass), are rejected with HTTP 422 for non-LTX-2 families and out-of-range values, are re-checked against the resolved checkpoint's transformer depth, and are recorded in gallery metadata. Sequences keep their per-stage constants and `mold run` says so rather than pretending a flag landed.
@@ -1452,7 +1454,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
