@@ -53,6 +53,10 @@ pub struct ChainStageMetadata {
     pub fade_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
+    /// Ordered LoRA stack that shaped this clip. Kept per-stage because
+    /// sequence clips may intentionally use different adapters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<LoraSpec>,
 }
 
 /// Structured multi-clip provenance block on [`crate::OutputMetadata`]
@@ -74,10 +78,7 @@ pub struct ChainProvenance<'a> {
     pub stage_seeds: Option<&'a [u64]>,
 }
 
-/// Per-stage LoRA adapter spec. **Reserved for sub-project B** — populating
-/// this in a request before B lands causes `ChainRequest::normalise` to
-/// return 422. Defined now so scripts that round-trip through v1 clients
-/// don't drop fields silently.
+/// Per-stage LoRA adapter spec.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LoraSpec {
     pub path: String,
@@ -148,13 +149,13 @@ pub struct ChainStage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_frames: Option<u32>,
 
-    // RESERVED for B/C — populated values are rejected by normalise ───
+    // RESERVED for C — populated values are rejected by normalise ─────
     /// **Reserved for sub-project C.** Populating this in a request
     /// produces 422 in this release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// **Reserved for sub-project B.** Non-empty values produce 422.
+    /// Ordered LoRA stack applied while rendering this clip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<LoraSpec>,
 
@@ -693,6 +694,7 @@ impl ChainRequest {
                     seed: stage_seeds
                         .and_then(|seeds| seeds.get(idx))
                         .map(u64::to_string),
+                    loras: stage.loras.clone(),
                 })
                 .collect(),
         });
@@ -789,17 +791,34 @@ impl ChainRequest {
             }
         }
 
-        // Reserved-field rejection (sub-projects B/C).
+        // Per-stage LoRAs use the same wire-level constraints as ordinary
+        // generation. Paths are server-local except for built-in
+        // `camera-control:<preset>` aliases, which the server materializes
+        // before execution.
         for (idx, stage) in self.stages.iter().enumerate() {
             if stage.model.is_some() {
                 return Err(MoldError::Validation(format!(
                     "stages[{idx}].model is reserved for sub-project C and not yet supported"
                 )));
             }
-            if !stage.loras.is_empty() {
+            if stage.loras.len() > 4 {
                 return Err(MoldError::Validation(format!(
-                    "stages[{idx}].loras is reserved for sub-project B and not yet supported"
+                    "stages[{idx}].loras exceeds the four-LoRA stack limit"
                 )));
+            }
+            for (lora_idx, lora) in stage.loras.iter().enumerate() {
+                if !(0.0..=2.0).contains(&lora.scale) {
+                    return Err(MoldError::Validation(format!(
+                        "stages[{idx}].loras[{lora_idx}].scale ({}) must be in range [0.0, 2.0]",
+                        lora.scale
+                    )));
+                }
+                if !lora.path.ends_with(".safetensors") && !lora.path.starts_with("camera-control:")
+                {
+                    return Err(MoldError::Validation(format!(
+                        "stages[{idx}].loras[{lora_idx}].path must be a .safetensors file or camera-control preset"
+                    )));
+                }
             }
             if !stage.references.is_empty() {
                 return Err(MoldError::Validation(format!(
@@ -1580,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn normalise_rejects_reserved_loras_field() {
+    fn normalise_accepts_valid_per_stage_loras() {
         let mut req = auto_expand_request("a", 97, 97, 25, None);
         req.stages = vec![ChainStage {
             prompt: "x".into(),
@@ -1598,8 +1617,52 @@ mod tests {
             }],
             references: vec![],
         }];
-        let err = req.normalise().unwrap_err().to_string();
-        assert!(err.contains("reserved for sub-project B"), "got: {err}");
+        let normalised = req.normalise().unwrap();
+        assert_eq!(normalised.stages[0].loras[0].path, "x.safetensors");
+        let metadata = normalised.stitched_output_metadata(OutputFormat::Mp4, 97, None);
+        assert_eq!(
+            metadata.chain.unwrap().stages[0].loras,
+            normalised.stages[0].loras
+        );
+    }
+
+    #[test]
+    fn normalise_validates_per_stage_loras() {
+        let base = auto_expand_request("a", 97, 97, 25, None)
+            .normalise()
+            .unwrap();
+
+        let mut invalid_path = base.clone();
+        invalid_path.stages[0].loras = vec![LoraSpec {
+            path: "camera.bin".into(),
+            scale: 1.0,
+            name: None,
+        }];
+        let err = invalid_path.normalise().unwrap_err().to_string();
+        assert!(
+            err.contains("safetensors file or camera-control"),
+            "got: {err}"
+        );
+
+        let mut invalid_scale = base.clone();
+        invalid_scale.stages[0].loras = vec![LoraSpec {
+            path: "camera-control:dolly-in".into(),
+            scale: 2.1,
+            name: Some("Dolly in".into()),
+        }];
+        let err = invalid_scale.normalise().unwrap_err().to_string();
+        assert!(err.contains("must be in range [0.0, 2.0]"), "got: {err}");
+
+        let mut too_many = base;
+        too_many.stages[0].loras = (0..5)
+            .map(|idx| LoraSpec {
+                path: format!("{idx}.safetensors"),
+                scale: 1.0,
+                name: None,
+            })
+            .collect();
+        let err = too_many.normalise().unwrap_err().to_string();
+        assert!(err.contains("four-LoRA stack limit"), "got: {err}");
     }
 
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {

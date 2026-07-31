@@ -100,6 +100,38 @@ describe("PalettePanel", () => {
     expect(wrapper.find(".ms-palette__empty").text()).toBe("Nothing here");
   });
 
+  it("renders a row's trailing hint and omits it when absent", () => {
+    const wrapper = make({
+      items: [
+        {
+          id: "model-sdxl",
+          section: "Model",
+          label: "Use sdxl",
+          hint: "on bender",
+        },
+        { id: "open-library", section: "Go", label: "Open library" },
+      ],
+    });
+    const rows = wrapper.findAll("[role=option]");
+    expect(rows[0]!.find(".ms-palette__hint").text()).toBe("on bender");
+    expect(rows[1]!.find(".ms-palette__hint").exists()).toBe(false);
+  });
+
+  it("announces a slow source instead of flashing 'no matches'", () => {
+    const wrapper = make({ items: [], busy: true, emptyText: "Nothing here" });
+    expect(wrapper.find(".ms-palette__empty").exists()).toBe(false);
+    const busy = wrapper.find(".ms-palette__busy");
+    expect(busy.text()).toBe("Searching models…");
+    expect(busy.attributes("role")).toBe("status");
+    expect(busy.attributes("aria-live")).toBe("polite");
+  });
+
+  it("keeps the busy line below results that already landed", () => {
+    const wrapper = make({ busy: true });
+    expect(wrapper.findAll("[role=option]")).toHaveLength(3);
+    expect(wrapper.find(".ms-palette__busy").exists()).toBe(true);
+  });
+
   it("points aria-activedescendant at the highlighted option", async () => {
     const wrapper = make();
     const input = wrapper.find("input");

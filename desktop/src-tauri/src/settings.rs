@@ -249,7 +249,7 @@ pub struct AppSettings {
     pub update_channel: UpdateChannel,
     /// Remote hosts the app has connected to, most recent first.
     pub saved_hosts: Vec<SavedHost>,
-    /// Additional hosts (beyond the primary connection) to reconnect at boot.
+    /// Remembered hosts explicitly enabled for boot reconnect and active routing.
     pub connected_host_ids: Vec<String>,
     /// Sticky generation-target host id; `None` routes automatically.
     pub generate_target_host: Option<String>,

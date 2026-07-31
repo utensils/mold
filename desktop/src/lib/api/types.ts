@@ -324,6 +324,17 @@ export interface Ltx2ControlAdapterInfo {
   download_sha256: string;
 }
 
+export interface Ltx2CameraControlInfo {
+  id: string;
+  label: string;
+  size_bytes: number;
+  installed: boolean;
+  download_model: string;
+  download_repo: string;
+  download_filename: string;
+  download_sha256: string;
+}
+
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
 export type ProgressEvent =
   | { type: "queued"; position: number; id?: string }

@@ -11,7 +11,7 @@
  * Advanced SheetPanel. Reset clears advanced fields only — the prompt, model,
  * shape, resolution, detail and seed survive.
  */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -27,6 +27,7 @@ import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
+  Ltx2CameraControlInfo,
   LoraSelection,
   ModelInfoExtended,
   OutputFormat,
@@ -40,6 +41,10 @@ import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
+import {
+  cameraMotionMode,
+  isCameraMotionPreset,
+} from "@studio/lib/cameraMotion";
 
 const props = withDefaults(
   defineProps<{
@@ -92,6 +97,49 @@ const activeSequenceIndex = computed(() =>
   activeSequenceClip.value
     ? draft.clips.findIndex((clip) => clip.id === activeSequenceClip.value?.id)
     : -1,
+);
+const sequenceCameraControls = ref<Ltx2CameraControlInfo[]>([]);
+const sequenceCameraControlsLoaded = ref(false);
+let cameraControlsEpoch = 0;
+watch(
+  [sequenceMode, () => props.family, () => props.modelValue.model],
+  async () => {
+    const epoch = ++cameraControlsEpoch;
+    sequenceCameraControls.value = [];
+    sequenceCameraControlsLoaded.value = false;
+    if (
+      !sequenceMode.value ||
+      props.family !== "ltx2" ||
+      !props.modelValue.model
+    )
+      return;
+    try {
+      const response = await fetch(
+        `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.modelValue.model)}`,
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const options = (await response.json()) as Ltx2CameraControlInfo[];
+      if (epoch !== cameraControlsEpoch) return;
+      sequenceCameraControls.value = options;
+      sequenceCameraControlsLoaded.value = true;
+      for (const clip of draft.clips) {
+        const camera = clip.cameraControl;
+        if (
+          camera &&
+          isCameraMotionPreset(camera) &&
+          !options.some((option) => option.id === camera)
+        ) {
+          clip.cameraControl = null;
+        }
+      }
+    } catch {
+      // The custom-path escape hatch remains usable while the host recovers.
+      if (epoch === cameraControlsEpoch) {
+        sequenceCameraControlsLoaded.value = false;
+      }
+    }
+  },
+  { immediate: true },
 );
 const overlayOpen = computed(() => props.mobile && props.open);
 const { onKeydown } = useOverlayFocus(overlayOpen, host, () => emit("close"));
@@ -260,7 +308,10 @@ function resetAdvanced() {
   if (sequenceMode.value) {
     draft.openingImage = null;
     draft.enableAudio = false;
-    for (const clip of draft.clips) clip.negativePrompt = "";
+    for (const clip of draft.clips) {
+      clip.negativePrompt = "";
+      clip.cameraControl = null;
+    }
     return;
   }
   patch({
@@ -289,6 +340,17 @@ function resetAdvanced() {
     spatialUpscale: null,
     temporalUpscale: null,
   });
+}
+
+function setSequenceCameraMode(mode: string) {
+  const clip = activeSequenceClip.value;
+  if (!clip) return;
+  if (mode === "custom") {
+    if (cameraMotionMode(clip.cameraControl) !== "custom")
+      clip.cameraControl = "";
+  } else {
+    clip.cameraControl = mode || null;
+  }
 }
 </script>
 
@@ -369,6 +431,64 @@ function resetAdvanced() {
           >
             Remove opening image
           </button>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="activeSequenceClip && family === 'ltx2'"
+          icon="video"
+          :title="`Clip ${activeSequenceIndex + 1} camera motion`"
+          :summary="
+            sequenceCameraControls.find(
+              (control) => control.id === activeSequenceClip?.cameraControl,
+            )?.label ??
+            activeSequenceClip.cameraControl ??
+            'None'
+          "
+          :open="true"
+          :header-interactive="false"
+          data-test="sequence-section-camera"
+        >
+          <select
+            class="adv__input"
+            data-test="sequence-camera-motion"
+            aria-label="Active clip camera motion"
+            :value="cameraMotionMode(activeSequenceClip.cameraControl)"
+            @change="
+              setSequenceCameraMode(($event.target as HTMLSelectElement).value)
+            "
+          >
+            <option value="">None</option>
+            <option
+              v-for="control in sequenceCameraControls"
+              :key="control.id"
+              :value="control.id"
+            >
+              {{ control.label
+              }}{{ control.installed ? "" : " · downloads on first use" }}
+            </option>
+            <option value="custom">Custom LoRA path…</option>
+          </select>
+          <input
+            v-if="
+              cameraMotionMode(activeSequenceClip.cameraControl) === 'custom'
+            "
+            v-model="activeSequenceClip.cameraControl"
+            class="adv__input adv__camera-path"
+            data-test="sequence-camera-motion-custom"
+            aria-label="Active clip camera motion LoRA path"
+            placeholder="/path/to/lora.safetensors"
+          />
+          <p
+            v-if="
+              sequenceCameraControlsLoaded &&
+              sequenceCameraControls.length === 0
+            "
+            class="adv__hint"
+            data-test="sequence-camera-motion-19b-hint"
+          >
+            Built-in camera motions are available for LTX-2 19B only. This model
+            accepts a custom LoRA path.
+          </p>
         </AccordionSection>
 
         <AccordionSection
@@ -899,6 +1019,9 @@ function resetAdvanced() {
 }
 .adv__field {
   margin-bottom: 14px;
+}
+.adv__camera-path {
+  margin-top: 9px;
 }
 .adv__field:last-child {
   margin-bottom: 0;

@@ -1192,8 +1192,10 @@ pub(crate) fn preparation_authority_fingerprint(
 /// Execution-plan resolution runs in the scheduler coordinator and must only
 /// perform metadata checks plus cache lookups for normal prepared jobs. The
 /// caller is responsible for invoking this function through
-/// `tokio::task::spawn_blocking`, because hashing and header probing a
-/// multi-gigabyte checkpoint are blocking file I/O and CPU work.
+/// `tokio::task::spawn_blocking`, because unverified artifacts still require
+/// blocking content hashing and every artifact requires header probing.
+/// Verified downloads reuse their attested digest marker instead of rereading
+/// multi-gigabyte checkpoint bodies.
 pub(crate) fn warm_execution_equivalence_cache(
     config: &Config,
     request: &GenerateRequest,
@@ -1453,7 +1455,20 @@ fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLor
         .into_iter()
         .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
         .map(|lora| {
-            let path = PathBuf::from(lora.path);
+            let path = lora
+                .path
+                .strip_prefix("camera-control:")
+                .and_then(|id| mold_core::ltx2_camera::resolve_camera_control_preset(id).ok())
+                .and_then(|preset| {
+                    let manifest = mold_core::manifest::find_manifest(preset.download_model)?;
+                    let file = manifest.files.first()?;
+                    Some(
+                        config
+                            .resolved_models_dir()
+                            .join(mold_core::manifest::storage_path(manifest, file)),
+                    )
+                })
+                .unwrap_or_else(|| PathBuf::from(lora.path));
             PlannedLora {
                 content_fingerprint: fingerprint_path(&path),
                 path,
@@ -2946,6 +2961,13 @@ fn artifact_facts_path_with_policy(path: &Path, cache_only: bool) -> ArtifactFac
 }
 
 fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<EquivalenceContentIdentity> {
+    // Pull completion writes this marker only after hashing the complete
+    // artifact, and model discovery already treats it as the installed-byte
+    // authority. Reusing it keeps an authoritative placement preview from
+    // synchronously rereading tens of gigabytes before the job can queue.
+    if let Some(digest) = verified_sha256_marker_digest(path) {
+        return Ok(EquivalenceContentIdentity::Sha256(digest));
+    }
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
@@ -2960,6 +2982,14 @@ fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<Equivalenc
         "{:x}",
         hash.finalize()
     )))
+}
+
+fn verified_sha256_marker_digest(path: &Path) -> Option<String> {
+    let marker = mold_core::download::sha256_marker_path(path);
+    let digest = std::fs::read_to_string(marker).ok()?;
+    let digest = digest.trim();
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| digest.to_ascii_lowercase())
 }
 
 fn unknown_equivalence_content(
@@ -3836,6 +3866,35 @@ mod tests {
     }
 
     #[test]
+    fn camera_control_alias_plans_the_verified_manifest_path() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let mut config = config(root.path(), "ltx2", None);
+        config.models_dir = root.path().display().to_string();
+        let preset = mold_core::ltx2_camera::resolve_camera_control_preset("dolly-in").unwrap();
+        let manifest = mold_core::manifest::find_manifest(preset.download_model).unwrap();
+        let file = manifest.files.first().unwrap();
+        let expected = root
+            .path()
+            .join(mold_core::manifest::storage_path(manifest, file));
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"camera").unwrap();
+
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: "camera-control:dolly-in".into(),
+            scale: 1.0,
+        }]);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_eq!(plan.effective_loras[0].path, expected);
+        assert!(plan.components.contains_key(&ComponentRole::Lora(0)));
+    }
+
+    #[test]
     fn semantic_encoder_roles_preserve_sparse_and_mixed_topologies() {
         let root = TempDir::new().unwrap();
         for name in [
@@ -4309,6 +4368,21 @@ mod tests {
         set_file_mtime(&path, original_mtime).unwrap();
 
         assert_ne!(before, fingerprint_path(&path));
+    }
+
+    #[test]
+    fn verified_digest_marker_is_the_artifact_content_identity() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("weights.safetensors");
+        std::fs::write(&path, b"already verified model bytes").unwrap();
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        mold_core::download::write_sha256_marker(&path, digest).unwrap();
+
+        assert_eq!(
+            hash_equivalence_artifact_contents(&path).unwrap(),
+            EquivalenceContentIdentity::Sha256(digest.to_string()),
+            "placement preparation should trust the digest attested by the download verifier"
+        );
     }
 
     #[test]

@@ -1,4 +1,10 @@
 import { theme, themeFamily } from "./theme";
+import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "./hostRouting";
+import {
+  buildInstallModelCommands,
+  buildUseModelCommands,
+  type SearchableCatalogEntry,
+} from "@studio/lib/modelSearch";
 import type { ModelInfoExtended } from "../types";
 
 /*
@@ -6,13 +12,22 @@ import type { ModelInfoExtended } from "../types";
  * a `run` thunk so they unit-test without a Vue runtime: navigation, model
  * selection, and downloads flow through the injected `CommandContext`, while
  * the Theme commands mutate the shared `lib/theme` refs directly.
+ *
+ * Model rows are the one place the registry reaches for shared policy: what a
+ * model row says and which machine it points at is `@studio/lib/modelSearch`
+ * so web and desktop cannot drift on it.
  */
+
+/** Target sentinels that mean "let the router pick a machine". */
+const AUTO_TARGET_IDS = [AUTO_TARGET_ID, CAPABLE_TARGET_ID] as const;
 
 export interface Command {
   id: string;
   /** Short uppercase group label (spec voice: table headers UPPERCASE). */
   section: string;
   label: string;
+  /** Trailing meta — which machine holds a model, or why it isn't here yet. */
+  hint?: string;
   keywords?: string[];
   run: () => void;
 }
@@ -20,8 +35,11 @@ export interface Command {
 export interface CommandContext {
   /** Navigate to a route path. */
   go: (path: string) => void;
-  /** Select a model for the next generation and open Create. */
-  runModel: (name: string) => void;
+  /** Select a model for the next generation and open Create. `switchToHostId`
+   * repins the generation target first, for a model the pinned machine lacks. */
+  runModel: (name: string, switchToHostId?: string | null) => void;
+  /** Queue a pull for a model no reachable machine has yet. */
+  installModel: (modelId: string, displayName: string) => void;
   /** Open the downloads center. */
   openDownloads: () => void;
   /** Start a fresh print on Create. */
@@ -104,19 +122,54 @@ const GO: Array<{
   },
 ];
 
-/** Installed models become "Run <name>" commands, loaded lazily on open. */
+export interface ModelCommandOptions {
+  /** Machines known to hold a model on disk, in preference order. */
+  ownersFor?: (name: string) => readonly string[];
+  /** The pinned generation target, or an `auto` / `capable` sentinel. */
+  targetHostId?: string | null;
+  hostLabel?: (hostId: string) => string;
+}
+
+/** Installed models become "Use <name>" commands, loaded lazily on open. */
 export function modelCommands(
   models: readonly ModelInfoExtended[],
   ctx: CommandContext,
+  options: ModelCommandOptions = {},
 ): Command[] {
-  return models
-    .filter((m) => m.downloaded)
-    .map((m) => ({
-      id: `model-${m.name}`,
-      section: "Model",
-      label: `Run ${m.name}`,
-      run: () => ctx.runModel(m.name),
-    }));
+  return buildUseModelCommands(
+    models.filter((m) => m.downloaded),
+    {
+      ownersFor: options.ownersFor ?? (() => []),
+      targetHostId: options.targetHostId ?? null,
+      autoTargetIds: AUTO_TARGET_IDS,
+      ...(options.hostLabel ? { hostLabel: options.hostLabel } : {}),
+    },
+  ).map((cmd) => ({
+    id: cmd.id,
+    section: "Model",
+    label: cmd.label,
+    hint: cmd.hint,
+    keywords: cmd.keywords,
+    run: () => ctx.runModel(cmd.model, cmd.switchToHostId),
+  }));
+}
+
+/** Live catalog hits nobody has yet become "Install <name>" commands. */
+export function catalogCommands(
+  entries: readonly SearchableCatalogEntry[],
+  ctx: CommandContext,
+  options: { installedNames?: Iterable<string> } = {},
+): Command[] {
+  return buildInstallModelCommands(entries, {
+    installedNames: options.installedNames ?? [],
+  }).map((cmd) => ({
+    id: cmd.id,
+    section: "Install",
+    label: cmd.label,
+    hint: cmd.hint,
+    keywords: cmd.keywords,
+    run: () => ctx.installModel(cmd.model, cmd.displayName),
+  }));
 }
 
 /** The fixed commands: navigation, quick actions, and theme controls. */

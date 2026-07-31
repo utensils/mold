@@ -11,10 +11,12 @@ import type { GenerateForm } from "../lib/generateForm";
 import {
   inlineGenerationMediaBytes,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+  MOBILE_MEDIA_BUDGET_ERROR,
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -38,8 +40,15 @@ const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const isQwenEdit = computed(() => caps.value.sourceImageMode === "qwen-edit");
 const error = ref("");
 const maskOpen = ref(false);
+const sourcePickerOpen = ref(false);
+const sourcePickerMaxBytes = computed(() =>
+  Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
+      inlineGenerationMediaBytes(props.form, "sourceImage"),
+  ),
+);
 
-const sourceInput = ref<HTMLInputElement | null>(null);
 const editInput = ref<HTMLInputElement | null>(null);
 const maskInput = ref<HTMLInputElement | null>(null);
 const controlInput = ref<HTMLInputElement | null>(null);
@@ -190,12 +199,12 @@ async function readImages(
   }
 }
 
-async function pickSource(event: Event): Promise<void> {
-  const picked = (await readImages(event, false, "sourceImage"))[0];
-  if (!picked) return;
-  props.form.sourceImage = picked.b64;
-  props.form.sourceImageName = picked.file.name || null;
+function pickSource(image: MobilePickedImage): void {
+  error.value = "";
+  props.form.sourceImage = image.base64;
+  props.form.sourceImageName = image.filename || null;
   props.form.sourceFit = { mode: "lanczos-resize" };
+  sourcePickerOpen.value = false;
 }
 
 async function pickEditImages(event: Event): Promise<void> {
@@ -379,24 +388,15 @@ function applyMask(mask: string): void {
 
     <fieldset v-else class="mobile-source-controls" data-test="mobile-source-controls">
       <legend class="mobile-source-legend">Source</legend>
-      <input
-        ref="sourceInput"
-        hidden
-        type="file"
-        accept="image/png,image/jpeg"
-        data-test="mobile-source-input"
-        tabindex="-1"
-        @change="pickSource"
-      />
 
       <button
         v-if="!form.sourceImage"
         type="button"
         class="secondary-button mobile-source-pick"
         data-test="mobile-source-add"
-        @click="sourceInput?.click()"
+        @click="sourcePickerOpen = true"
       >
-        Choose photo
+        Choose source image
       </button>
       <template v-else>
         <figure class="mobile-source-preview-wrap">
@@ -413,7 +413,7 @@ function applyMask(mask: string): void {
             type="button"
             class="secondary-button"
             data-test="mobile-source-replace"
-            @click="sourceInput?.click()"
+            @click="sourcePickerOpen = true"
           >
             Replace photo
           </button>
@@ -628,6 +628,16 @@ function applyMask(mask: string): void {
       :initial-mask="form.maskImage"
       @apply="applyMask"
       @close="maskOpen = false"
+    />
+    <MobileImagePickerSheet
+      v-if="!isQwenEdit"
+      :open="sourcePickerOpen"
+      :target="target"
+      title="Source image"
+      :max-bytes="sourcePickerMaxBytes"
+      :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
+      @pick="pickSource"
+      @close="sourcePickerOpen = false"
     />
   </template>
 </template>

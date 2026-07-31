@@ -282,13 +282,6 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.temporalUpscale = null;
     form.audioFile = null;
     form.cameraControl = null;
-  } else if (m.name.includes("ltx-2.3")) {
-    // Camera-motion presets are published for 19B only; on LTX-2.3 buildRequest
-    // silently drops a preset value. Switching within the ltx2 family keeps the
-    // advanced-video block above from clearing it, so drop a stale preset here
-    // (a custom `.safetensors` path stays valid on 2.3).
-    const cam = form.cameraControl?.trim();
-    if (cam && !cam.endsWith(".safetensors")) form.cameraControl = null;
   }
 }
 
@@ -332,14 +325,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // Camera motion rides the ordinary loras[] stack (mirrors the CLI's
   // --camera-control, run.rs): presets ship as the `camera-control:<preset>`
   // virtual alias the server resolves; explicit `.safetensors` paths pass
-  // through raw. LTX-2 only — and presets are published for 19B only, so
-  // they're skipped for LTX-2.3 models (the CLI errors there; a custom path
-  // remains valid on 2.3).
+  // through raw. The host-provided capability list is the compatibility
+  // authority; the serializer never guesses from a public model id.
   const cameraControl = form.cameraControl?.trim();
   if (caps.supportsAdvancedVideo && cameraControl) {
     if (cameraControl.endsWith(".safetensors")) {
       loras.push({ path: cameraControl, scale: 1.0 });
-    } else if (!form.model.includes("ltx-2.3")) {
+    } else {
       loras.push({ path: `camera-control:${cameraControl}`, scale: 1.0 });
     }
   }

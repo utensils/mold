@@ -941,6 +941,7 @@ describe("CreatePage layout and behavior", () => {
     const draft = enterSequenceMode();
     draft.clips[0]!.prompt = "the opening";
     draft.clips[1]!.prompt = "the landing";
+    draft.clips[1]!.cameraControl = "dolly-in";
     // Turn the inspector's knobs WHILE in sequence mode — the old
     // ScriptComposer kept private copies that silently ignored these.
     const form = useGenerateForm();
@@ -966,7 +967,16 @@ describe("CreatePage layout and behavior", () => {
         output_format: "mp4",
         stages: [
           expect.objectContaining({ prompt: "the opening" }),
-          expect.objectContaining({ prompt: "the landing" }),
+          expect.objectContaining({
+            prompt: "the landing",
+            loras: [
+              {
+                path: "camera-control:dolly-in",
+                scale: 1,
+                name: "Dolly in",
+              },
+            ],
+          }),
         ],
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),

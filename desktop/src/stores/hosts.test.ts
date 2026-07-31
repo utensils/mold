@@ -248,7 +248,7 @@ describe("hosts store", () => {
     expect(extra).toMatchObject({ status: "ready", apiKey: "host-key", primary: false });
   });
 
-  it("tries every saved host at boot even when the legacy reconnect set is empty", async () => {
+  it("keeps explicitly disconnected saved hosts out of boot reconnects", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [] }));
     secretGet.mockResolvedValue("host-key");
     testRemoteHost.mockResolvedValue({ ok: true, version: "0.17.0", error: null });
@@ -256,8 +256,8 @@ describe("hosts store", () => {
     const hosts = useHostsStore();
     await hosts.init();
 
-    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "host-key");
-    expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({ status: "ready" });
+    expect(testRemoteHost).not.toHaveBeenCalledWith(hal.url, "host-key");
+    expect(hosts.all.find((host) => host.id === hal.id)).toBeUndefined();
   });
 
   it("reconnects the whole remembered host set at boot, local primary first", async () => {
@@ -275,7 +275,7 @@ describe("hosts store", () => {
     const hosts = useHostsStore();
     await hosts.init();
 
-    // The built-in engine is always the primary; every remembered host follows.
+    // The built-in engine is always the primary; every connected host follows.
     expect(hosts.primaryHost).toMatchObject({ id: "local", primary: true });
     expect(hosts.all.map((host) => host.id)).toEqual(["local", hal.id, studio.id]);
     expect(hosts.all.find((h) => h.id === studio.id)).toMatchObject({
@@ -300,7 +300,7 @@ describe("hosts store", () => {
     const hosts = useHostsStore();
     await hosts.init();
     expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
-    expect(useToastStore().items.some((t) => t.message.includes("hal9000"))).toBe(true);
+    expect(useToastStore().items.some((t) => t.message.includes("hal9000"))).toBe(false);
   });
 
   it("connect() adds a host and persists it for the next boot", async () => {
@@ -1556,9 +1556,9 @@ describe("hosts store", () => {
     expect(final.savedHosts.find((h: SavedHost) => h.id === hal.id)?.name).toBe("render box");
   });
 
-  it("reconcile keeps the preferred live row when saved aliases both reconnect", async () => {
-    // Every saved address is attempted at boot. Reconcile still collapses
-    // aliases to the more recently used slug once instance identity arrives.
+  it("reconcile keeps the explicitly connected route when saved aliases collapse", async () => {
+    // Only the IP alias is connected. Reconcile keeps that live route while
+    // collapsing persistence to the preferred, more recently used slug.
     const ip: SavedHost = {
       id: "192-168-1-114-7680",
       name: null,
@@ -1586,7 +1586,7 @@ describe("hosts store", () => {
     await hosts.init();
     await hosts.refresh();
     const row = hosts.all.find((h) => h.id === hal.id);
-    expect(row).toMatchObject({ status: "ready", baseUrl: hal.url });
+    expect(row).toMatchObject({ status: "ready", baseUrl: ip.url });
     expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.connectedHostIds).toEqual([hal.id]);

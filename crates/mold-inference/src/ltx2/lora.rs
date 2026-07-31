@@ -5,12 +5,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CameraControlPreset {
-    pub(crate) repo: &'static str,
-    pub(crate) filename: &'static str,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct LinearLoraAdapter {
     pub(crate) a: Tensor,
@@ -178,39 +172,10 @@ pub(crate) fn normalize_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .unwrap_or_default()
 }
 
-pub(crate) fn camera_control_preset(name: &str) -> Option<CameraControlPreset> {
-    let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
-    match normalized.as_str() {
-        "dolly-in" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In",
-            filename: "ltx-2-19b-lora-camera-control-dolly-in.safetensors",
-        }),
-        "dolly-left" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left",
-            filename: "ltx-2-19b-lora-camera-control-dolly-left.safetensors",
-        }),
-        "dolly-out" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out",
-            filename: "ltx-2-19b-lora-camera-control-dolly-out.safetensors",
-        }),
-        "dolly-right" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right",
-            filename: "ltx-2-19b-lora-camera-control-dolly-right.safetensors",
-        }),
-        "jib-down" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down",
-            filename: "ltx-2-19b-lora-camera-control-jib-down.safetensors",
-        }),
-        "jib-up" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up",
-            filename: "ltx-2-19b-lora-camera-control-jib-up.safetensors",
-        }),
-        "static" => Some(CameraControlPreset {
-            repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Static",
-            filename: "ltx-2-19b-lora-camera-control-static.safetensors",
-        }),
-        _ => None,
-    }
+pub(crate) fn camera_control_preset(
+    name: &str,
+) -> Option<&'static mold_core::ltx2_camera::Ltx2CameraControlPreset> {
+    mold_core::ltx2_camera::resolve_camera_control_preset(name).ok()
 }
 
 pub(crate) fn resolve_camera_control_preset_path(model_name: &str, name: &str) -> Result<PathBuf> {
@@ -220,16 +185,13 @@ pub(crate) fn resolve_camera_control_preset_path(model_name: &str, name: &str) -
         );
     }
 
-    let preset = camera_control_preset(name).ok_or_else(|| {
-        anyhow!(
-            "unknown camera-control preset '{name}' (expected one of: dolly-in, dolly-left, dolly-out, dolly-right, jib-down, jib-up, static)"
-        )
-    })?;
+    let preset =
+        mold_core::ltx2_camera::resolve_camera_control_preset(name).map_err(anyhow::Error::msg)?;
 
     mold_core::download::download_single_file_sync(
-        preset.repo,
-        preset.filename,
-        Some("shared/ltx2-camera-control"),
+        preset.hf_repo,
+        preset.hf_filename,
+        Some(preset.download_model),
     )
     .map_err(|err| anyhow!("failed to download camera-control preset '{name}': {err}"))
 }
@@ -335,7 +297,7 @@ mod tests {
     fn camera_control_preset_aliases_are_supported() {
         let preset = camera_control_preset("dolly-in").unwrap();
         assert_eq!(
-            preset.filename,
+            preset.hf_filename,
             "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
         );
         assert!(camera_control_preset("unknown").is_none());

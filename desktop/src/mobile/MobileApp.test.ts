@@ -87,6 +87,7 @@ vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
 });
 
 import MobileApp from "./MobileApp.vue";
+import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
@@ -1148,14 +1149,10 @@ describe("MobileApp generation queue", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
-    const sourceInput = wrapper.get("[data-test='mobile-source-input']");
-    Object.defineProperty(sourceInput.element, "files", {
-      configurable: true,
-      value: [new File(["source"], "source.png", { type: "image/png" })],
-    });
-    await sourceInput.trigger("change");
-    await flushPromises();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await wrapper.get("[data-test='mobile-source-add']").trigger("click");
+    wrapper
+      .getComponent(MobileImagePickerSheet)
+      .vm.$emit("pick", { filename: "source.png", base64: btoa("source") });
     await flushPromises();
     await vi.waitFor(() =>
       expect(wrapper?.find("[data-test='mobile-source-preview']").exists()).toBe(true),
@@ -4611,5 +4608,24 @@ describe("MobileApp machines telemetry", () => {
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
     expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
+  });
+
+  it("disconnects without forgetting and reconnects only on request", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await wrapper.get("[data-test='host-detail-disconnect']").trigger("click");
+    await flushPromises();
+
+    let saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    expect(saved[0]).toMatchObject({ connected: false });
+    expect(wrapper.get("[data-test='mobile-host-detail'] .host-chip").text()).toBe("disconnected");
+    expect(wrapper.find("[data-test='host-detail-reconnect']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='host-detail-reconnect']").trigger("click");
+    await flushPromises();
+    saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    expect(saved[0]).toMatchObject({ connected: true });
   });
 });

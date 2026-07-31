@@ -5,12 +5,25 @@ import Chip from "@ui/components/Chip.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
+import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import type { PickedImage } from "../../lib/generateForm";
+import type { Ltx2CameraControlInfo } from "../../lib/api/types";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 
-const props = withDefaults(defineProps<{ chainLimits?: ChainLimits | null }>(), {
-  chainLimits: null,
-});
+const props = withDefaults(
+  defineProps<{
+    chainLimits?: ChainLimits | null;
+    cameraControlsEnabled?: boolean;
+    cameraControls?: Ltx2CameraControlInfo[];
+    cameraControlsLoaded?: boolean;
+  }>(),
+  {
+    chainLimits: null,
+    cameraControlsEnabled: false,
+    cameraControls: () => [],
+    cameraControlsLoaded: false,
+  },
+);
 
 const draft = useSequenceDraftStore();
 const pickerOpen = ref(false);
@@ -24,6 +37,7 @@ const activeCount = computed(
   () =>
     Number(Boolean(draft.openingImage)) +
     Number(Boolean(activeClip.value?.negativePrompt.trim())) +
+    Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)) +
     Number(draft.enableAudio),
 );
 
@@ -42,6 +56,16 @@ function addNegative(word: string) {
   clip.negativePrompt = current ? `${current}, ${word}` : word;
 }
 
+function setCameraMode(mode: string) {
+  const clip = activeClip.value;
+  if (!clip) return;
+  if (mode === "custom") {
+    if (cameraMotionMode(clip.cameraControl) !== "custom") clip.cameraControl = "";
+  } else {
+    clip.cameraControl = mode || null;
+  }
+}
+
 function onPickImage(images: PickedImage[]) {
   const image = images[0];
   pickerOpen.value = false;
@@ -52,7 +76,10 @@ function onPickImage(images: PickedImage[]) {
 function reset() {
   draft.openingImage = null;
   draft.enableAudio = false;
-  for (const clip of draft.clips) clip.negativePrompt = "";
+  for (const clip of draft.clips) {
+    clip.negativePrompt = "";
+    clip.cameraControl = null;
+  }
 }
 </script>
 
@@ -129,6 +156,46 @@ function reset() {
       </AccordionSection>
 
       <AccordionSection
+        v-if="activeClip && cameraControlsEnabled"
+        icon="video"
+        :title="`Clip ${activeIndex + 1} camera motion`"
+        :summary="
+          cameraControls.find((control) => control.id === activeClip?.cameraControl)?.label ??
+          activeClip.cameraControl ??
+          'None'
+        "
+        :open="true"
+        :header-interactive="false"
+        data-test="sequence-section-camera"
+      >
+        <select
+          class="ms-input"
+          data-test="sequence-camera-motion"
+          aria-label="Active clip camera motion"
+          :value="cameraMotionMode(activeClip.cameraControl)"
+          @change="setCameraMode(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">None</option>
+          <option v-for="control in cameraControls" :key="control.id" :value="control.id">
+            {{ control.label }}{{ control.installed ? "" : " · downloads on first use" }}
+          </option>
+          <option value="custom">Custom LoRA path…</option>
+        </select>
+        <input
+          v-if="cameraMotionMode(activeClip.cameraControl) === 'custom'"
+          v-model="activeClip.cameraControl"
+          class="ms-input ms-camera-path"
+          data-test="sequence-camera-motion-custom"
+          aria-label="Active clip camera motion LoRA path"
+          placeholder="/path/to/lora.safetensors"
+        />
+        <p v-if="cameraControlsLoaded && cameraControls.length === 0" class="ms-hint">
+          Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA
+          path.
+        </p>
+      </AccordionSection>
+
+      <AccordionSection
         v-if="props.chainLimits?.supports_audio"
         icon="video"
         title="Sequence audio"
@@ -159,6 +226,9 @@ function reset() {
 </template>
 
 <style scoped>
+.ms-adv {
+  padding-top: 10px;
+}
 .ms-adv__toolbar,
 .ms-switch-row {
   display: flex;
@@ -212,6 +282,25 @@ function reset() {
   background: var(--bath);
   color: var(--rebate);
   padding: 9px 10px;
+}
+.ms-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 36px;
+  border: 1px solid var(--ce);
+  border-radius: 8px;
+  background: var(--bath);
+  color: var(--rebate);
+  padding: 8px 10px;
+}
+.ms-camera-path,
+.ms-hint {
+  margin-top: 9px;
+}
+.ms-hint {
+  color: var(--ink-3);
+  font-size: 10px;
+  line-height: 1.45;
 }
 .ms-chips {
   display: flex;

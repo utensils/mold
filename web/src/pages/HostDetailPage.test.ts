@@ -11,7 +11,13 @@ import type {
   QueueEntry,
   ResourceSnapshot,
 } from "../types";
-import { addHost, getHost, updateHost } from "../lib/hostRegistry";
+import {
+  addHost,
+  getHost,
+  getKnownHost,
+  setHostConnected,
+  updateHost,
+} from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
@@ -757,6 +763,24 @@ describe("HostDetailPage — queue", () => {
 });
 
 describe("HostDetailPage — saved host actions", () => {
+  it("renders a disconnected machine as remembered and only offers reconnect", async () => {
+    setHostConnected(routeHolder.id, false);
+    const w = await mountDetail();
+
+    expect(w.find('[data-test="detail-not-found"]').exists()).toBe(false);
+    expect(w.get('[data-test="machine-detail-title"]').text()).toBe("Studio");
+    expect(w.find('[data-test="detail-offline"]').exists()).toBe(false);
+    expect(w.find('[data-test="detail-disconnect"]').exists()).toBe(false);
+    expect(w.find('[data-test="detail-reconnect"]').exists()).toBe(true);
+
+    await w.get('[data-test="detail-reconnect"]').trigger("click");
+    await nextTick();
+
+    expect(getKnownHost(routeHolder.id)?.connected).toBe(true);
+    expect(w.find('[data-test="detail-disconnect"]').exists()).toBe(true);
+    expect(w.find('[data-test="detail-reconnect"]').exists()).toBe(false);
+  });
+
   it("renames and forgets a remote machine", async () => {
     const w = await mountDetail();
     await w.get('[data-test="detail-rename"]').trigger("click");

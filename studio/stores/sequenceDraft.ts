@@ -110,6 +110,13 @@ function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
   }));
 }
 
+function normalizePersistedClip(clip: PersistedClip): SequenceClipForm {
+  return {
+    ...clip,
+    cameraControl: clip.cameraControl ?? null,
+  };
+}
+
 const OPENING_MEDIA_ID = "sequence-opening-image";
 
 function readJson<T>(key: string): T | null {
@@ -189,7 +196,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
 
   function applyPersisted(saved: PersistedDraftV1) {
     output.value = saved.output;
-    clips.splice(0, clips.length, ...saved.clips.map((clip) => ({ ...clip })));
+    clips.splice(0, clips.length, ...saved.clips.map(normalizePersistedClip));
     openingImage.value = saved.openingImage ?? null;
     enableAudio.value = saved.enableAudio;
     lastSingleModel.value = saved.lastSingleModel ?? null;

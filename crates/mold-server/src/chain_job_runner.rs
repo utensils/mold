@@ -2500,12 +2500,20 @@ pub(crate) fn amend_candidate_request(
 /// Chain-level invalidation first: a changed seed/steps/guidance/fps/
 /// motion_tail_frames, or enable_audio flipping OFF→ON, dirties everything
 /// (ON→OFF preserves — finalize just ignores sidecars). Otherwise the prefix
-/// compares `(prompt, frames, negative_prompt, source_image bytes, effective
-/// per-stage seed, uses_carry)` where `uses_carry = idx > 0 && transition ==
+/// compares `(prompt, frames, negative_prompt, source_image bytes, LoRA stack,
+/// effective per-stage seed, uses_carry)` where `uses_carry = idx > 0 && transition ==
 /// Smooth`: Cut↔Fade toggles and fade_frames edits are finalize-only under
 /// raw segments and do NOT break the prefix, while Smooth↔(Cut|Fade) changes
 /// the rendered pixels and does.
 pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> u32 {
+    let same_lora_stack = |old: &ChainStage, new: &ChainStage| {
+        old.loras.len() == new.loras.len()
+            && old
+                .loras
+                .iter()
+                .zip(&new.loras)
+                .all(|(old, new)| old.path == new.path && old.scale == new.scale)
+    };
     let old_audio = old.enable_audio.unwrap_or(false);
     let new_audio = new.enable_audio.unwrap_or(false);
     if old.seed != new.seed
@@ -2527,6 +2535,7 @@ pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> 
             || old_stage.frames != new_stage.frames
             || old_stage.negative_prompt != new_stage.negative_prompt
             || old_stage.source_image != new_stage.source_image
+            || !same_lora_stack(old_stage, new_stage)
             || effective_stage_seed(old_base, old_stage.seed_offset)
                 != effective_stage_seed(new_base, new_stage.seed_offset)
             || old_carry != new_carry
@@ -3372,7 +3381,16 @@ fn build_stage_generate_request(
         keyframes: None,
         pipeline: None,
         ic_lora_control: None,
-        loras: None,
+        loras: (!stage.loras.is_empty()).then(|| {
+            stage
+                .loras
+                .iter()
+                .map(|lora| mold_core::LoraWeight {
+                    path: lora.path.clone(),
+                    scale: lora.scale,
+                })
+                .collect()
+        }),
         retake_range: None,
         spatial_upscale: None,
         temporal_upscale: None,
@@ -3810,7 +3828,7 @@ fn now_ms_i64() -> i64 {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
-    use mold_core::chain::{ChainStage, TransitionMode};
+    use mold_core::chain::{ChainStage, LoraSpec, TransitionMode};
     use mold_core::types::OutputFormat;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -5717,6 +5735,26 @@ mod tests {
         new.stages[2].seed_offset = Some(7);
         assert_eq!(preserved_stage_prefix(&base, &new), 2, "seed_offset edit");
 
+        // A LoRA change alters rendered pixels and invalidates from that clip.
+        let mut new = base.clone();
+        new.stages[1].loras = vec![LoraSpec {
+            path: "camera-control:dolly-in".into(),
+            scale: 1.0,
+            name: Some("Dolly in".into()),
+        }];
+        assert_eq!(preserved_stage_prefix(&base, &new), 1, "LoRA edit");
+
+        // Display-only LoRA names do not change rendered pixels.
+        let mut old = base.clone();
+        old.stages[1].loras = vec![LoraSpec {
+            path: "camera-control:dolly-in".into(),
+            scale: 1.0,
+            name: Some("Old label".into()),
+        }];
+        let mut new = old.clone();
+        new.stages[1].loras[0].name = Some("New label".into());
+        assert_eq!(preserved_stage_prefix(&old, &new), 3, "LoRA label edit");
+
         // Appending clips preserves every old stage.
         let mut new = base.clone();
         new.stages.push(stage("stage 3", TransitionMode::Cut));
@@ -5768,6 +5806,31 @@ mod tests {
         let mut new = base.clone();
         new.enable_audio = Some(true);
         assert_eq!(preserved_stage_prefix(&base, &new), 0, "audio off→on");
+    }
+
+    #[test]
+    fn durable_stage_request_carries_the_ordered_lora_stack() {
+        let chain = request(vec![TransitionMode::Smooth]);
+        let mut clip = chain.stages[0].clone();
+        clip.loras = vec![
+            LoraSpec {
+                path: "camera-control:jib-up".into(),
+                scale: 1.0,
+                name: Some("Jib up".into()),
+            },
+            LoraSpec {
+                path: "/models/style.safetensors".into(),
+                scale: 0.4,
+                name: None,
+            },
+        ];
+        let request = build_stage_generate_request(&clip, &chain, 42, 0);
+        let loras = request.loras.expect("stage LoRAs must reach durable work");
+        assert_eq!(loras.len(), 2);
+        assert_eq!(loras[0].path, "camera-control:jib-up");
+        assert_eq!(loras[0].scale, 1.0);
+        assert_eq!(loras[1].path, "/models/style.safetensors");
+        assert_eq!(loras[1].scale, 0.4);
     }
 
     #[test]

@@ -22,7 +22,8 @@ describe("camera motion presets", () => {
     expect(isCameraMotionPreset("jib-up")).toBe(true);
     expect(isCameraMotionPreset("/models/camera.safetensors")).toBe(false);
     expect(cameraMotionMode(null)).toBe("");
-    expect(cameraMotionMode("")).toBe("");
+    expect(cameraMotionMode("")).toBe("custom");
+    expect(cameraMotionMode("   ")).toBe("custom");
     expect(cameraMotionMode("jib-up")).toBe("jib-up");
     expect(cameraMotionMode("/models/camera.safetensors")).toBe("custom");
   });
