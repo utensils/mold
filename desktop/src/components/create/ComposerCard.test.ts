@@ -33,6 +33,7 @@ function mountComposer(form: GenerateForm, overrides: Record<string, unknown> = 
       preparedBlocked: false,
       hasPrepared: false,
       chainReject: false,
+      submitting: false,
       buttonLabel: "Generate",
       estimateRequest: null,
       estimateTarget: null,
@@ -77,6 +78,11 @@ describe("ComposerCard", () => {
     ).toBeDefined();
     expect(
       mountComposer(baseForm(), { hasPrepared: true })
+        .get("[data-test='generate-button']")
+        .attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      mountComposer(baseForm(), { submitting: true })
         .get("[data-test='generate-button']")
         .attributes("disabled"),
     ).toBeDefined();

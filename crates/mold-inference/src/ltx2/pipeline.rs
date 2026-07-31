@@ -480,15 +480,6 @@ impl Ltx2Engine {
         }
     }
 
-    fn load_runtime_session_on_device(
-        &self,
-        plan: &Ltx2GeneratePlan,
-        device: Device,
-    ) -> Result<Ltx2RuntimeSession> {
-        let prompt_device = resolve_prompt_encoder_device(&device, self.gpu_ordinal);
-        self.load_runtime_session_with_devices(plan, device, prompt_device)
-    }
-
     fn load_runtime_session_with_devices(
         &self,
         plan: &Ltx2GeneratePlan,
@@ -529,32 +520,42 @@ impl Ltx2Engine {
         }
     }
 
+    fn runtime_device_refs(
+        &self,
+    ) -> (
+        Option<mold_core::types::DeviceRef>,
+        Option<mold_core::types::DeviceRef>,
+    ) {
+        ltx2_runtime_device_refs(self.pending_placement.as_ref())
+    }
+
     fn create_runtime_session(&self, plan: &Ltx2GeneratePlan) -> Result<Ltx2RuntimeSession> {
         let backend = Ltx2Backend::detect();
         backend.ensure_supported()?;
 
-        // Honor Tier 1 `text_encoders` override for the Gemma prompt encoder.
-        // Auto falls back to whatever `native_device_for_backend(backend)` picks
-        // (CUDA when available, else CPU). Explicit Cpu/Gpu skips that auto path.
-        let tier1 = self
-            .pending_placement
-            .as_ref()
-            .map(|p| p.text_encoders.clone());
-        let device = crate::device::resolve_device(tier1.clone(), || {
-            self.native_device_for_backend(backend)
-        })?;
+        // The scheduler leases the transformer/VAE device independently from
+        // Gemma. Never let a CPU text-encoder placement move image-to-video
+        // conditioning or denoising off that leased accelerator.
+        let (runtime_ref, prompt_ref) = self.runtime_device_refs();
+        let device =
+            crate::device::resolve_device(runtime_ref, || self.native_device_for_backend(backend))?;
         if device.is_cuda() {
             configure_native_ltx2_cuda_device(&device)?;
         }
+        let prompt_device = crate::device::resolve_device(prompt_ref.clone(), || {
+            Ok(resolve_prompt_encoder_device(&device, self.gpu_ordinal))
+        })?;
         // Only auto CUDA placement should retry on OOM — if the user explicitly
         // pinned the encoder to a GPU, surface the OOM rather than silently
         // rewriting their request.
-        let override_is_auto = matches!(tier1, None | Some(mold_core::types::DeviceRef::Auto));
-        match self.load_runtime_session_on_device(plan, device.clone()) {
+        let override_is_auto = matches!(prompt_ref, None | Some(mold_core::types::DeviceRef::Auto));
+        let prompt_device_is_cpu = prompt_device.is_cpu();
+        match self.load_runtime_session_with_devices(plan, device.clone(), prompt_device) {
             Ok(runtime) => Ok(runtime),
             Err(err)
                 if matches!(backend, Ltx2Backend::Cuda)
                     && override_is_auto
+                    && !prompt_device_is_cpu
                     && Self::is_oom_error(&err) =>
             {
                 self.info(
@@ -1081,6 +1082,19 @@ impl InferenceEngine for Ltx2Engine {
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         Some(self)
     }
+}
+
+fn ltx2_runtime_device_refs(
+    placement: Option<&mold_core::types::DevicePlacement>,
+) -> (
+    Option<mold_core::types::DeviceRef>,
+    Option<mold_core::types::DeviceRef>,
+) {
+    let runtime = placement
+        .and_then(|placement| placement.advanced.as_ref())
+        .map(|advanced| advanced.transformer.clone());
+    let prompt = placement.map(|placement| placement.text_encoders.clone());
+    (runtime, prompt)
 }
 
 /// Resolve the device for the LTX-2 Gemma 3 12B prompt encoder given the
@@ -2041,6 +2055,43 @@ mod tests {
         let (transformer, prompt) = prompt_encoder_oom_retry_placement(&7usize);
         assert_eq!(transformer, 7);
         assert_eq!(prompt, crate::device::LtxGemmaPlacement::Cpu);
+    }
+
+    #[test]
+    fn cpu_text_placement_keeps_ltx2_runtime_on_leased_device() {
+        let placement = mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Cpu,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::types::DeviceRef::device("cuda:0"),
+                vae: mold_core::types::DeviceRef::device("cuda:0"),
+                ..Default::default()
+            }),
+        };
+
+        let (runtime, prompt) = ltx2_runtime_device_refs(Some(&placement));
+
+        assert_eq!(
+            runtime,
+            Some(mold_core::types::DeviceRef::device("cuda:0")),
+            "scheduler-materialized CPU text placement must not move image-to-video VAE work off the leased GPU",
+        );
+        assert_eq!(prompt, Some(mold_core::types::DeviceRef::Cpu));
+    }
+
+    #[test]
+    fn legacy_cpu_text_override_does_not_become_runtime_placement() {
+        let placement = mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Cpu,
+            advanced: None,
+        };
+
+        let (runtime, prompt) = ltx2_runtime_device_refs(Some(&placement));
+
+        assert_eq!(
+            runtime, None,
+            "without an explicit transformer placement the runtime must retain its CUDA-first backend selection",
+        );
+        assert_eq!(prompt, Some(mold_core::types::DeviceRef::Cpu));
     }
 
     /// `MOLD_LTX2_GEMMA_DEVICE=cpu` pins the encoder to CPU even when the
