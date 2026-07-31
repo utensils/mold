@@ -413,6 +413,44 @@ pub(crate) mod nvml_source {
 #[cfg(feature = "nvml")]
 pub(crate) use nvml_source::NvmlSource;
 
+#[cfg(any(feature = "nvml", test))]
+pub(crate) fn nonzero_process_vram(bytes: Option<u64>) -> Option<u64> {
+    bytes.filter(|bytes| *bytes > 0)
+}
+
+/// Fresh process-attributed VRAM for one runtime CUDA device.
+///
+/// Cache load deltas are global before/after measurements and may become stale
+/// after an engine drops components. Hot-cache admission therefore clamps any
+/// claimed reusable footprint to NVML's current accounting for this process.
+/// Missing or zero attribution is ambiguous in PID namespaces, WSL2, and MIG:
+/// it can mean "unreportable" rather than "unused". Return `None` in that
+/// case so callers do not turn telemetry absence into an authoritative zero.
+#[cfg(feature = "nvml")]
+pub(crate) fn current_process_vram_bytes(
+    gpu: &mold_inference::device::DiscoveredGpu,
+) -> Option<u64> {
+    if gpu.backend != mold_core::GpuBackend::Cuda {
+        return None;
+    }
+    let target = TelemetryTarget::from_discovered(gpu);
+    nonzero_process_vram(
+        NvmlSource::try_new()
+            .ok()?
+            .snapshot_visible(std::process::id(), std::slice::from_ref(&target))
+            .into_iter()
+            .find(|snapshot| snapshot.ordinal == gpu.ordinal)
+            .and_then(|snapshot| snapshot.vram_used_by_mold),
+    )
+}
+
+#[cfg(not(feature = "nvml"))]
+pub(crate) fn current_process_vram_bytes(
+    _gpu: &mold_inference::device::DiscoveredGpu,
+) -> Option<u64> {
+    None
+}
+
 use mold_core::{GpuBackend, GpuSnapshot};
 
 pub(crate) fn resolve_nvidia_smi() -> &'static str {
