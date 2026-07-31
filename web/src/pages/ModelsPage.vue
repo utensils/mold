@@ -14,14 +14,19 @@ import SegmentedControl, {
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog, type ModelsTab } from "../composables/useCatalog";
+import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import CatalogSidebar from "../components/CatalogSidebar.vue";
 import CatalogTopbar from "../components/CatalogTopbar.vue";
 import CatalogCardGrid from "../components/CatalogCardGrid.vue";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
-import type { CatalogKind } from "../types";
+import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
+import { toast } from "../lib/toasts";
+import { modelDisplayName } from "@studio/lib/modelDisplay";
+import type { CatalogKind, ModelInfoExtended } from "../types";
 
 const cat = useCatalog();
+const installTargets = useModelInstallTargets();
 const route = useRoute();
 watch(
   () => route.query.tab,
@@ -75,6 +80,22 @@ const filteredInstalled = computed(() => {
 
 function clearInstalledSearch() {
   installedQuery.value = "";
+}
+
+/** Send an already-installed model to a connected machine that lacks it. */
+async function installElsewhere(model: ModelInfoExtended) {
+  const choice = await installTargets.chooseInstallTarget({
+    modelId: model.name,
+    displayName: modelDisplayName(model),
+    ownedByOrigin: true,
+  });
+  if (choice.kind === "cancelled") return;
+  try {
+    await installTargets.startDownloadOn(choice.target, model.name);
+    toast("success", installTargets.queuedMessage(choice.target));
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  }
 }
 
 onMounted(() => {
@@ -173,6 +194,7 @@ onMounted(() => {
           :key="model.name"
           :model="model"
           @open="cat.openInstalledDetail(model)"
+          @install="installElsewhere(model)"
         />
       </div>
     </section>
@@ -196,6 +218,9 @@ onMounted(() => {
     </section>
 
     <ModelDetailDrawer />
+    <!-- One picker for the whole workspace: Discover cards, installed rows and
+         the detail drawer all resolve their target through it. -->
+    <ModelInstallTargetDialog />
   </div>
 </template>
 

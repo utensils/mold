@@ -88,6 +88,11 @@ export interface HostRouting {
   /** True once every listed host's `/api/models` has settled — the empty-state
    * gate, so a slow remote can't make Create flash "nothing installed". */
   modelsSettled: Ref<boolean>;
+  /** Ids of the machines known to hold `name` on disk. */
+  modelOwnerIds: (name: string) => string[];
+  /** True once this machine's `/api/models` has actually been read. Anything
+   * else must never be described as missing a model — we haven't looked. */
+  inventoryKnown: (hostId: string) => boolean;
   /** Resolve the concrete dispatch route for a model, or null if unreachable. */
   resolve: (model: string | null) => HostRoute | null;
   /** Resolve through each host's read-only authoritative scheduler preview. */
@@ -162,6 +167,9 @@ const entries = ref<HostEntry[]>([]);
 const telemetry = ref<Record<string, HostTelemetry>>({});
 const modelsByHost = ref<ModelsByHost>({});
 const settledHostIds = ref<string[]>([]);
+/** Hosts whose `/api/models` actually came back. A blipped host keeps its last
+ * good list, but one that has never answered is unknown, not empty. */
+const inventoryHostIds = ref<string[]>([]);
 const modelsSettled = ref(false);
 const rawTargetId = ref<string>("");
 const pollGenerations = new Map<string, number>();
@@ -358,6 +366,9 @@ async function pollHost(entry: HostEntry): Promise<void> {
   }
   if (models.status === "fulfilled") {
     modelsByHost.value = { ...modelsByHost.value, [entry.id]: models.value };
+    if (!inventoryHostIds.value.includes(entry.id)) {
+      inventoryHostIds.value = [...inventoryHostIds.value, entry.id];
+    }
   } else if (!modelsByHost.value[entry.id]) {
     // Keep the last good list for a host that blipped; only seed an empty one.
     modelsByHost.value = { ...modelsByHost.value, [entry.id]: [] };
@@ -414,6 +425,10 @@ function setTarget(id: string): void {
 /** Hosts that hold `model` downloaded — the model-aware routing input. */
 function hostsForModel(model: string | null): string[] {
   return model ? hostIdsForModel(modelsByHost.value, model) : [];
+}
+
+function inventoryKnown(hostId: string): boolean {
+  return inventoryHostIds.value.includes(hostId);
 }
 
 function resolve(model: string | null): HostRoute | null {
@@ -833,6 +848,8 @@ export function useHostRouting(): HostRouting {
     multiHost: computed(() => hosts.value.length > 1),
     targetModels,
     modelsSettled,
+    modelOwnerIds: hostsForModel,
+    inventoryKnown,
     resolve,
     resolveFeasible,
     revalidateFeasible,
@@ -855,6 +872,7 @@ export const __testing__ = {
     telemetry.value = {};
     modelsByHost.value = {};
     settledHostIds.value = [];
+    inventoryHostIds.value = [];
     modelsSettled.value = false;
     rawTargetId.value = "";
     pollGenerations.clear();

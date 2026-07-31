@@ -25,6 +25,7 @@ vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
 import InstalledTab from "./InstalledTab.vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
@@ -196,6 +197,73 @@ describe("InstalledTab model info drawer", () => {
     wrapper.unmount();
   });
 
+  it("offers an install on a ready machine that is missing the model", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "studio-7680",
+      label: "Studio GPU",
+      url: "http://studio:7680",
+      apiKey: "studio-key",
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const hostModels = useHostModelsStore();
+    for (const id of ["local", "studio-7680"]) {
+      hostModels.byHost[id] = { entries: [], fetchedAt: Date.now(), error: null };
+    }
+
+    const wrapper = mount(InstalledTab, {
+      attachTo: document.body,
+      // On the studio box only — this device does not have it.
+      props: { entries: [{ ...model(), hostIds: ["studio-7680"] }] },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='install-elsewhere']").trigger("click");
+    await flushPromises();
+
+    const dialog = document.body.querySelector<HTMLElement>(
+      "[data-test='download-target-dialog']",
+    )!;
+    expect(dialog.textContent).toContain("Choose where to install");
+    dialog.querySelector<HTMLButtonElement>("[data-test='download-target-local']")!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith("sdxl-base:fp16", undefined, false);
+    wrapper.unmount();
+  });
+
+  it("hides the install action once every ready machine has the model", async () => {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    useHostModelsStore().byHost["local"] = {
+      entries: [],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    const wrapper = mount(InstalledTab, {
+      props: { entries: [{ ...model(), hostIds: ["local"] }] },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='install-elsewhere']").exists()).toBe(false);
+  });
+
   it("does not reroute repair when the only owning host is offline", async () => {
     setActivePinia(createPinia());
     useHostsStore().extras.push({
@@ -218,7 +286,7 @@ describe("InstalledTab model info drawer", () => {
     expect(startCatalogDownload).not.toHaveBeenCalled();
     expect(
       useToastStore().items.some(
-        (toast) => toast.kind === "error" && toast.message.includes("online owning host"),
+        (toast) => toast.kind === "error" && toast.message.includes("No online machine"),
       ),
     ).toBe(true);
   });

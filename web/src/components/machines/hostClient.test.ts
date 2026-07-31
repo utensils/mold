@@ -3,6 +3,7 @@ import { nextTick, ref } from "vue";
 import {
   cancelQueueJob,
   hostCapabilities,
+  hostModelDownload,
   hostDiscoveryPeers,
   hostDownloads,
   hostStatus,
@@ -132,6 +133,53 @@ describe("hostClient auth + requests", () => {
     const listing = await hostDownloads(remote);
     expect(listing.active).toBeNull();
     expect(listing.queued).toEqual([]);
+  });
+
+  it("starts a catalog download on the chosen host with its key header", async () => {
+    fetchMock.mockResolvedValueOnce(ok({ model: "cv:1", queued: 2 }));
+    const result = await hostModelDownload(remote, "cv:1/2");
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(
+      "http://192.168.1.20:7680/api/catalog/cv%3A1%2F2/download",
+    );
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "sekret",
+    });
+    expect(result).toMatchObject({ queued: 2 });
+  });
+
+  it("sends a manifest model name to /api/downloads, which is the only route that accepts it", async () => {
+    // `/api/catalog/:id/download` answers 400 "id must be `cv:` or `hf:`
+    // prefixed" for a plain manifest name, and the installed shelf is full of
+    // them — so the id shape, not the caller, picks the endpoint.
+    fetchMock.mockResolvedValueOnce(ok({ status: "created", id: "job-1" }));
+    const result = await hostModelDownload(remote, "flux-schnell:q8");
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://192.168.1.20:7680/api/downloads");
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "sekret",
+      "content-type": "application/json",
+    });
+    expect((init as RequestInit).body).toBe(
+      JSON.stringify({ model: "flux-schnell:q8" }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it("surfaces a rejected catalog download instead of reporting success", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => "unknown catalog entry",
+      json: async () => ({}),
+    });
+    await expect(hostModelDownload(remote, "cv:1")).rejects.toThrow(
+      /unknown catalog entry/,
+    );
   });
 });
 

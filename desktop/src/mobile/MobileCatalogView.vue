@@ -23,7 +23,6 @@ import {
 import {
   buildDownloadContents,
   canDownloadEntry,
-  catalogActionLabel,
   downloadContentsTotalBytes,
   installedModelToEntry,
   mergeCatalogSummaryDetail,
@@ -36,6 +35,11 @@ import {
 } from "../lib/catalogFilters";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
+import {
+  planModelInstall,
+  type ModelInstallAction,
+  type ModelInstallPlan,
+} from "@studio/lib/modelInstallTargets";
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
@@ -168,18 +172,30 @@ const downloadHosts = computed(() =>
   props.hosts.filter((host) => host.online || host.id === props.selectedHostId),
 );
 
-/** Repair is meaningful only on a host that already owns the collapsed
- * installed row. Keep unreachable owners out of the action list, while the
- * currently selected host remains eligible during its reachability probe. */
-function repairHosts(entry: MobileCatalogEntry): MobileHost[] {
-  const ownerIds = new Set(entry.hostIds ?? []);
-  return downloadHosts.value.filter((host) => ownerIds.has(host.id));
+/** Machines known to hold this row on disk. A merged installed row carries
+ * every owner in `hostIds`; a live catalog row's `installed` flag is only the
+ * browsed host's answer, so that host stands in as the sole known owner. */
+function ownerHostIds(entry: MobileCatalogEntry): string[] {
+  const ids = entry.hostIds ?? [];
+  if (ids.length > 0) return ids;
+  return entry.installed ? [props.selectedHostId] : [];
 }
 
-const targetHosts = computed(() => {
+/** A row is a merge of every connected machine, so "installed" means installed
+ * SOMEWHERE. An install therefore stays on offer until every reachable machine
+ * owns the model, at which point the only remaining action is a repair. */
+function installPlan(entry: MobileCatalogEntry): ModelInstallPlan<MobileHost> {
+  return planModelInstall(downloadHosts.value, ownerHostIds(entry));
+}
+
+const targetPlan = computed<ModelInstallPlan<MobileHost> | null>(() => {
   const entry = targetEntry.value;
-  return entry?.installed ? repairHosts(entry) : downloadHosts.value;
+  return entry ? installPlan(entry) : null;
 });
+
+function targetActionLabel(action: ModelInstallAction): string {
+  return action === "repair" ? "Repair · already installed" : "Install";
+}
 
 const installedEntries = computed<MobileCatalogEntry[]>(() => {
   const byName = new Map<string, { model: ModelEntry; hostIds: string[]; hostLabels: string[] }>();
@@ -519,8 +535,19 @@ function pullStatus(entry: MobileCatalogEntry, hostId?: string): MobilePullStatu
   return null;
 }
 
+/** In-flight state wins; otherwise the plan decides whether this is still a
+ * pull (some machine lacks it) or has degraded to a repair. */
 function pullButtonLabel(entry: MobileCatalogEntry): string {
-  return pullStatus(entry)?.label ?? catalogPullLabel(catalogSizeInfo(entry));
+  const status = pullStatus(entry);
+  if (status) return status.label;
+  return installPlan(entry).label === "Repair"
+    ? "Repair"
+    : catalogPullLabel(catalogSizeInfo(entry));
+}
+
+/** What sending `entry` to `host` does there, for announcements. */
+function hostActionLabel(entry: MobileCatalogEntry, host: MobileHost): "Pull" | "Repair" {
+  return ownerHostIds(entry).includes(host.id) ? "Repair" : "Pull";
 }
 
 function owningHost(entry: MobileCatalogEntry): MobileHost | null {
@@ -756,9 +783,9 @@ async function cancelDownload(row: DownloadRow): Promise<void> {
 }
 
 function requestPull(entry: MobileCatalogEntry): void {
-  const candidates = entry.installed ? repairHosts(entry) : downloadHosts.value;
-  if (entry.installed && candidates.length === 0) {
-    announce("No online owning host is available to repair this model.", true);
+  const candidates = installPlan(entry).targets;
+  if (candidates.length === 0 && ownerHostIds(entry).length > 0) {
+    announce("No reachable machine is available for this model right now.", true);
     return;
   }
   if (candidates.length > 1) {
@@ -771,7 +798,7 @@ function requestPull(entry: MobileCatalogEntry): void {
     });
     return;
   }
-  const host = candidates[0] ?? selectedHost.value;
+  const host = candidates[0]?.host ?? selectedHost.value;
   if (host) void pullTo(entry, host);
 }
 
@@ -786,13 +813,13 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
       return;
     }
     if (result.kind !== "started") return;
-    announce(`${catalogActionLabel(entry)}ing ${entryTitle(entry)} on ${host.name}.`);
+    announce(`${hostActionLabel(entry, host)}ing ${entryTitle(entry)} on ${host.name}.`);
   } catch (cause) {
     const alreadyQueued = cause instanceof ApiError && cause.status === 409;
     announce(
       alreadyQueued
         ? `${entryTitle(entry)} is already queued on ${host.name}.`
-        : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entryTitle(entry)} on ${host.name}: ${errorMessage(cause, host.name)}`,
+        : `Could not ${hostActionLabel(entry, host).toLowerCase()} ${entryTitle(entry)} on ${host.name}: ${errorMessage(cause, host.name)}`,
       !alreadyQueued,
     );
   }
@@ -1352,18 +1379,23 @@ onBeforeUnmount(() => {
               </span>
             </span>
           </button>
-          <span v-if="entry.installed" class="mobile-catalog-installed">Installed</span>
-          <button
-            v-else
-            type="button"
-            class="mobile-catalog-pull"
-            :disabled="downloadHosts.length <= 1 && Boolean(pullStatus(entry))"
-            :aria-busy="Boolean(pullStatus(entry))"
-            :data-pull-state="pullStatus(entry)?.phase"
-            @click="requestPull(entry)"
-          >
-            {{ pullButtonLabel(entry) }}
-          </button>
+          <span class="mobile-catalog-card-actions">
+            <span v-if="entry.installed" class="mobile-catalog-installed">Installed</span>
+            <!-- Installed here is not installed everywhere: keep the action
+                 whenever a reachable machine is still missing this model. -->
+            <button
+              v-if="!entry.installed || installPlan(entry).canInstall"
+              type="button"
+              class="mobile-catalog-pull"
+              :disabled="downloadHosts.length <= 1 && Boolean(pullStatus(entry))"
+              :aria-busy="Boolean(pullStatus(entry))"
+              :data-pull-state="pullStatus(entry)?.phase"
+              :aria-label="`${pullButtonLabel(entry)} ${entry.display_name ?? entry.name}`"
+              @click="requestPull(entry)"
+            >
+              {{ pullButtonLabel(entry) }}
+            </button>
+          </span>
         </li>
       </ul>
 
@@ -1631,7 +1663,7 @@ onBeforeUnmount(() => {
             :data-pull-state="pullStatus(detailEntry)?.phase"
             @click="requestPull(detailEntry)"
           >
-            {{ pullStatus(detailEntry)?.label ?? catalogActionLabel(mergedDetail) }}
+            {{ pullStatus(detailEntry)?.label ?? installPlan(detailEntry).label }}
             <template v-if="!pullStatus(detailEntry) && detailDownloadTotal.bytes != null">
               · {{ detailTotalLabel() }}</template
             >
@@ -1653,16 +1685,17 @@ onBeforeUnmount(() => {
           <header>
             <div>
               <h2 id="mobile-catalog-target-title">
-                {{ targetEntry.installed ? "Choose where to repair" : "Choose where to download" }}
+                {{ targetPlan?.canInstall ? "Choose where to install" : "Choose where to repair" }}
               </h2>
               <p>
-                <template v-if="targetEntry.installed">
-                  Only missing or damaged files for
-                  {{ targetEntry.display_name ?? targetEntry.name }} will be fetched.
+                <template v-if="targetPlan?.canInstall">
+                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
+                  will be stored on the machine you pick; machines that already have it are repaired
+                  instead.
                 </template>
                 <template v-else>
-                  {{ targetEntry.display_name ?? targetEntry.name }} and its required components
-                  will be stored on the selected host.
+                  Only missing or damaged files for
+                  {{ targetEntry.display_name ?? targetEntry.name }} will be fetched.
                 </template>
               </p>
             </div>
@@ -1677,24 +1710,30 @@ onBeforeUnmount(() => {
           </header>
           <div class="mobile-catalog-target-list">
             <button
-              v-for="host in targetHosts"
-              :key="host.id"
+              v-for="target in targetPlan?.targets ?? []"
+              :key="target.host.id"
               type="button"
-              :disabled="Boolean(pullStatus(targetEntry, host.id))"
-              :aria-busy="Boolean(pullStatus(targetEntry, host.id))"
-              :data-pull-state="pullStatus(targetEntry, host.id)?.phase"
-              @click="pullTo(targetEntry, host)"
+              data-test="mobile-catalog-target-option"
+              :data-action="target.action"
+              :disabled="Boolean(pullStatus(targetEntry, target.host.id))"
+              :aria-busy="Boolean(pullStatus(targetEntry, target.host.id))"
+              :data-pull-state="pullStatus(targetEntry, target.host.id)?.phase"
+              :aria-label="`${targetActionLabel(target.action)} on ${target.host.name}`"
+              @click="pullTo(targetEntry, target.host)"
             >
               <span>
-                <strong>{{ host.name }}</strong>
-                <small>{{ host.baseUrl }}</small>
+                <strong>{{ target.host.name }}</strong>
+                <small>{{ target.host.baseUrl }}</small>
+                <small class="mobile-catalog-target-action">{{
+                  targetActionLabel(target.action)
+                }}</small>
               </span>
               <span>
                 {{
-                  pullStatus(targetEntry, host.id)?.label ??
-                  (host.id === selectedHostId ? "Current" : "")
+                  pullStatus(targetEntry, target.host.id)?.label ??
+                  (target.host.id === selectedHostId ? "Current" : "")
                 }}
-                <template v-if="!pullStatus(targetEntry, host.id)"> ›</template>
+                <template v-if="!pullStatus(targetEntry, target.host.id)"> ›</template>
               </span>
             </button>
           </div>

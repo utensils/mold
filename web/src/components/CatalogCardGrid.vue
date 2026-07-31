@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useCatalog } from "../composables/useCatalog";
+import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { toast } from "../lib/toasts";
+import type { CatalogEntryWire } from "../types";
 import CatalogCard from "./CatalogCard.vue";
 
 const cat = useCatalog();
+const installTargets = useModelInstallTargets();
 const sentinel = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 
@@ -41,10 +44,18 @@ function openCard(id: string) {
   void cat.openDetail(id);
 }
 
-async function pullCard(id: string) {
+// A model can be installed here and missing on the next machine, so the pull
+// resolves a target first: one candidate acts straight away, several ask.
+async function pullCard(entry: CatalogEntryWire) {
+  const choice = await installTargets.chooseInstallTarget({
+    modelId: entry.id,
+    displayName: entry.name,
+    ownedByOrigin: entry.installed,
+  });
+  if (choice.kind === "cancelled") return;
   try {
-    await cat.startDownload(id);
-    toast("success", "Download queued");
+    await installTargets.startDownloadOn(choice.target, entry.id);
+    toast("success", installTargets.queuedMessage(choice.target));
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));
   }
@@ -110,7 +121,7 @@ async function pullCard(id: string) {
           :entry="entry"
           :layout="cat.layout.value"
           @open="openCard(entry.id)"
-          @pull="pullCard(entry.id)"
+          @pull="pullCard(entry)"
         />
       </div>
 

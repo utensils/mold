@@ -1089,6 +1089,126 @@ describe("MobileCatalogView", () => {
     expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.render, false);
   });
 
+  it("still offers an install for a model installed only on another machine", async () => {
+    // The merged row is "installed" because Render Box has it — Studio does not,
+    // so an install must stay reachable from this row.
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse(
+            target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+          ),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    searchCatalog.mockResolvedValue(searchResponse([]));
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const installedCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+    // Where it already lives stays visible.
+    expect(installedCard.get(".mobile-catalog-installed").text()).toBe("Installed");
+    expect(installedCard.text()).toContain("Render Box");
+
+    const pullButton = installedCard.get(".mobile-catalog-pull");
+    expect(pullButton.text()).toContain("Pull");
+    expect(pullButton.text()).not.toContain("Repair");
+
+    await pullButton.trigger("click");
+    await flushPromises();
+
+    const picker = document.querySelector<HTMLElement>(
+      "[data-test='mobile-catalog-target-sheet']",
+    )!;
+    expect(picker.textContent).toContain("Choose where to install");
+    const options = [
+      ...picker.querySelectorAll<HTMLButtonElement>("[data-test='mobile-catalog-target-option']"),
+    ];
+    // Install targets lead; the owner is offered as a repair.
+    expect(options.map((option) => option.dataset.action)).toEqual(["install", "repair"]);
+    expect(options[0]!.textContent).toContain("Studio");
+    expect(options[0]!.textContent).toContain("Install");
+    expect(options[1]!.textContent).toContain("Render Box");
+    expect(options[1]!.textContent).toContain("Repair");
+
+    options[0]!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.studio, false);
+    expect(document.body.textContent).toContain("on Studio");
+    expect(document.body.textContent).toContain("Pulling");
+  });
+
+  it("offers the install from the detail sheet of a model missing on this machine", async () => {
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse(
+            target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+          ),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    searchCatalog.mockResolvedValue(searchResponse([]));
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const installedCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+    await installedCard.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const detailAction = document.querySelector<HTMLButtonElement>(
+      ".mobile-catalog-detail-action button",
+    )!;
+    expect(detailAction.textContent).toContain("Pull");
+    expect(detailAction.textContent).not.toContain("Repair");
+
+    detailAction.click();
+    await flushPromises();
+    const options = document.querySelectorAll<HTMLButtonElement>(
+      "[data-test='mobile-catalog-target-option']",
+    );
+    expect([...options].map((option) => option.dataset.action)).toEqual(["install", "repair"]);
+    options[0]!.click();
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.studio, false);
+  });
+
+  it("degrades to Repair only when every reachable machine already owns the model", async () => {
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const installedCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+    // Nothing left to install anywhere, so the row keeps its plain chip.
+    expect(installedCard.find(".mobile-catalog-pull").exists()).toBe(false);
+
+    await installedCard.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    const detailAction = document.querySelector<HTMLButtonElement>(
+      ".mobile-catalog-detail-action button",
+    )!;
+    expect(detailAction.textContent).toContain("Repair");
+
+    detailAction.click();
+    await flushPromises();
+    const picker = document.querySelector<HTMLElement>(
+      "[data-test='mobile-catalog-target-sheet']",
+    )!;
+    expect(picker.textContent).toContain("Choose where to repair");
+    const options = [
+      ...picker.querySelectorAll<HTMLButtonElement>("[data-test='mobile-catalog-target-option']"),
+    ];
+    expect(options.map((option) => option.dataset.action)).toEqual(["repair", "repair"]);
+  });
+
   it("segmented control swaps shelves and remembers the Discover sub-source", async () => {
     wrapper = mountCatalog();
     await flushPromises();
