@@ -134,6 +134,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            guidance_overrides: None,
             prompt: "p".into(),
             negative_prompt: None,
             original_prompt: None,

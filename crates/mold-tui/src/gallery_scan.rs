@@ -484,6 +484,7 @@ mod tests {
 
     fn meta(prompt: &str, model: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            guidance_overrides: None,
             prompt: prompt.to_string(),
             negative_prompt: None,
             original_prompt: None,

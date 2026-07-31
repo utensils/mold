@@ -655,6 +655,11 @@ impl ChainRequest {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            // Sequences render every clip through the chain stage path, which
+            // keeps the pipeline's own guider constants. There is no chain
+            // wire field to carry an override, so recording one here would
+            // claim a setting the render never used.
+            guidance_overrides: None,
             placement: self.placement.clone(),
         }
     }

@@ -6,8 +6,8 @@ use mold_core::manifest::{
 };
 use mold_core::{
     parse_device_ref_str, AdvancedPlacement, Config, DevicePlacement, KeyframeCondition,
-    LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat, Scheduler,
-    TimeRange,
+    LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
+    OutputFormat, Scheduler, TimeRange,
 };
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -389,6 +389,55 @@ fn parse_temporal_upscale(value: Option<Ltx2TemporalUpscaleArg>) -> Option<Ltx2T
     value.map(|Ltx2TemporalUpscaleArg::X2| Ltx2TemporalUpscale::X2)
 }
 
+/// Raw `--stg-scale` / `--stg-blocks` / … flags, grouped so `run` keeps one
+/// parameter per feature rather than five more positional arguments.
+#[derive(Debug, Default, Clone)]
+pub struct GuidanceFlags {
+    pub stg_scale: Option<f64>,
+    pub stg_blocks: Option<String>,
+    pub rescale_scale: Option<f64>,
+    pub modality_scale: Option<f64>,
+    pub skip_step: Option<u32>,
+}
+
+impl GuidanceFlags {
+    /// Build the wire overrides, or `None` when the user passed no guidance
+    /// flag at all — an absent field is what preserves the pipeline default,
+    /// so an empty object must never reach the server.
+    fn into_overrides(self) -> Result<Option<Ltx2GuidanceOverrides>> {
+        let stg_blocks = self
+            .stg_blocks
+            .as_deref()
+            .map(parse_stg_blocks)
+            .transpose()?;
+        Ok(Ltx2GuidanceOverrides {
+            stg_scale: self.stg_scale,
+            stg_blocks,
+            rescale_scale: self.rescale_scale,
+            modality_scale: self.modality_scale,
+            skip_step: self.skip_step,
+        }
+        .into_option())
+    }
+}
+
+fn parse_stg_blocks(value: &str) -> Result<Vec<u32>> {
+    let blocks = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry.parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("--stg-blocks takes comma-separated block indices, got '{entry}'")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if blocks.is_empty() {
+        anyhow::bail!("--stg-blocks must list at least one transformer block index");
+    }
+    Ok(blocks)
+}
+
 fn parse_retake_range(value: Option<String>) -> Result<Option<TimeRange>> {
     value
         .map(|value| {
@@ -536,6 +585,7 @@ pub async fn run(
     retake: Option<String>,
     spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
     temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
+    guidance_flags: GuidanceFlags,
     camera_control: Option<String>,
     host: Option<String>,
     format: OutputFormat,
@@ -659,6 +709,7 @@ pub async fn run(
     let retake_range = parse_retake_range(retake)?;
     let spatial_upscale = parse_spatial_upscale(spatial_upscale);
     let temporal_upscale = parse_temporal_upscale(temporal_upscale);
+    let guidance_overrides = guidance_flags.into_overrides()?;
 
     // If no prompt from args, try reading from stdin (supports piping)
     // When --image - is used, stdin is consumed for the image, so prompt must come from args.
@@ -927,6 +978,7 @@ pub async fn run(
             retake_range,
             spatial_upscale,
             temporal_upscale,
+            guidance_overrides,
         },
         host,
         format,
@@ -1784,5 +1836,50 @@ mod tests {
                 "run model completions should not include utility model '{name}'"
             );
         }
+    }
+
+    #[test]
+    fn guidance_flags_without_any_value_stay_absent() {
+        assert!(super::GuidanceFlags::default()
+            .into_overrides()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn guidance_flags_carry_only_the_flags_that_were_passed() {
+        let overrides = super::GuidanceFlags {
+            stg_scale: Some(1.5),
+            stg_blocks: Some(" 28, 29 ".to_string()),
+            ..super::GuidanceFlags::default()
+        }
+        .into_overrides()
+        .unwrap()
+        .expect("a passed flag produces overrides");
+
+        assert_eq!(overrides.stg_scale, Some(1.5));
+        assert_eq!(overrides.stg_blocks, Some(vec![28, 29]));
+        assert_eq!(overrides.rescale_scale, None);
+        assert_eq!(overrides.modality_scale, None);
+        assert_eq!(overrides.skip_step, None);
+    }
+
+    #[test]
+    fn guidance_flags_reject_unparsable_block_lists() {
+        let err = super::GuidanceFlags {
+            stg_blocks: Some("28,twenty-nine".to_string()),
+            ..super::GuidanceFlags::default()
+        }
+        .into_overrides()
+        .unwrap_err();
+        assert!(err.to_string().contains("--stg-blocks"), "got: {err}");
+
+        let err = super::GuidanceFlags {
+            stg_blocks: Some(" , ".to_string()),
+            ..super::GuidanceFlags::default()
+        }
+        .into_overrides()
+        .unwrap_err();
+        assert!(err.to_string().contains("at least one"), "got: {err}");
     }
 }

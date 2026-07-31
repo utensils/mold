@@ -2686,6 +2686,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             model: model.to_string(),

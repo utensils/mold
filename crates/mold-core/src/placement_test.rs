@@ -117,6 +117,7 @@ fn advanced_placement_defaults_to_auto_pair() {
 fn generate_request_placement_round_trips() {
     use super::GenerateRequest;
     let req = GenerateRequest {
+        guidance_overrides: None,
         prompt: "a cat".into(),
         negative_prompt: None,
         model: "flux-dev:q4".into(),

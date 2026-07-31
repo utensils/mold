@@ -1,5 +1,9 @@
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
+import type {
+  Ltx2GuidanceOverrides,
+  Ltx2GuidanceOverridesState,
+} from "@studio/lib/guidanceOverrides";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
@@ -81,6 +85,7 @@ export interface OutputMetadata {
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
+  guidance_overrides?: Ltx2GuidanceOverrides | null;
   frames?: number | null;
   fps?: number | null;
   version: string;
@@ -240,6 +245,7 @@ export interface GenerateRequestWire {
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
+  guidance_overrides?: Ltx2GuidanceOverrides | null;
 }
 
 export interface ModelDefaults {
@@ -682,6 +688,14 @@ export const LORA_CAPABLE_FAMILIES = [
   "z-image",
 ] as const;
 
+/** Advanced overrides for the LTX-2 multimodal guider, and their form-side
+ * mirror. Both shapes and every parse/serialize rule live in `@studio` so
+ * each surface reads the same contract. */
+export type {
+  Ltx2GuidanceOverrides,
+  Ltx2GuidanceOverridesState,
+} from "@studio/lib/guidanceOverrides";
+
 export interface GenerateFormState {
   version: 3;
   prompt: string;
@@ -727,6 +741,11 @@ export interface GenerateFormState {
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
+  /** Advanced LTX-2 guider overrides. Every entry is null/empty until the
+   * user touches it, which is what keeps the request free of an override
+   * object and the render on its pipeline defaults. Optional because saved
+   * templates predate the field and are restored verbatim. */
+  guidanceOverrides?: Ltx2GuidanceOverridesState;
   /** LTX-2 camera preset id or an explicit .safetensors LoRA path. */
   cameraControl: string | null;
   placement: DevicePlacement | null;

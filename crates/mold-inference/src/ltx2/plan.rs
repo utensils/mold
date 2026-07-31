@@ -1,4 +1,6 @@
-use mold_core::{LoraWeight, Ltx2SpatialUpscale, Ltx2TemporalUpscale, TimeRange};
+use mold_core::{
+    LoraWeight, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, Ltx2TemporalUpscale, TimeRange,
+};
 
 use super::conditioning::StagedConditioning;
 use super::execution::Ltx2ExecutionGraph;
@@ -59,4 +61,7 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) retake_range: Option<TimeRange>,
     pub(crate) spatial_upscale: Option<Ltx2SpatialUpscale>,
     pub(crate) temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Request-level overrides for the multimodal guider. `None` (and any
+    /// unset field) keeps the per-(pipeline, stage) constants.
+    pub(crate) guidance_overrides: Option<Ltx2GuidanceOverrides>,
 }

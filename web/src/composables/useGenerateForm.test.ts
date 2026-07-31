@@ -691,6 +691,30 @@ describe("useGenerateForm", () => {
     expect(wire.temporal_upscale).toBe("x2");
   });
 
+  it("omits guidance overrides until one is set", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "ltx-2-19b-distilled:fp8",
+      modelFamily: "ltx2",
+    });
+
+    expect(form.toRequest().guidance_overrides).toBeUndefined();
+
+    form.state.value.guidanceOverrides = {
+      stgScale: 1.5,
+      stgBlocks: "28, 29",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: 2,
+    };
+
+    expect(form.toRequest().guidance_overrides).toEqual({
+      stg_scale: 1.5,
+      stg_blocks: [28, 29],
+      skip_step: 2,
+    });
+  });
+
   it("serializes CFG++ only for SD3-family models", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {

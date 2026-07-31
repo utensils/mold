@@ -452,6 +452,7 @@ impl Ltx2Engine {
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
+            guidance_overrides: req.guidance_overrides.clone(),
         })
     }
 
@@ -1441,6 +1442,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),
@@ -1545,6 +1547,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: model.to_string(),
@@ -1601,6 +1604,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "ltx-2.3-22b-distilled:fp8".to_string(),
@@ -1830,6 +1834,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "ltx-2-19b-distilled:fp8".to_string(),

@@ -44,6 +44,11 @@ import {
 } from "@studio/lib/sourceResolution";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
 import {
+  guidanceOverrideCount,
+  guidanceOverridesError,
+  guidanceOverridesFromWire,
+} from "@studio/lib/guidanceOverrides";
+import {
   defaultClipFrames,
   friendlySequenceError,
   modelsForOutput,
@@ -1562,7 +1567,8 @@ const advCount = computed(() =>
             form.state.value.keyframes.length > 0 ||
             form.state.value.retakeRange != null ||
             form.state.value.spatialUpscale != null ||
-            form.state.value.temporalUpscale != null),
+            form.state.value.temporalUpscale != null ||
+            guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
       }),
 );
 
@@ -1880,6 +1886,17 @@ function validateSubmit(): boolean {
       showAdvanced.value = true;
       return false;
     }
+  }
+  // A value the wire cannot carry — an unparsable block list, a fractional
+  // skip stride — would otherwise be dropped on the way out, quietly
+  // rendering with the pipeline's own constants.
+  const guidanceError = guidanceOverridesError(
+    form.state.value.guidanceOverrides,
+  );
+  if (guidanceError) {
+    composerError.value = guidanceError;
+    showAdvanced.value = true;
+    return false;
   }
   return true;
 }
@@ -2563,6 +2580,9 @@ function openJob(job: Job) {
   form.state.value.retakeRange = request.retake_range ?? null;
   form.state.value.spatialUpscale = request.spatial_upscale ?? null;
   form.state.value.temporalUpscale = request.temporal_upscale ?? null;
+  form.state.value.guidanceOverrides = guidanceOverridesFromWire(
+    request.guidance_overrides,
+  );
 }
 
 function closeDrawer() {

@@ -407,6 +407,10 @@ pub struct GenerateRequest {
     /// Optional temporal latent upscaling mode for LTX-2 pipelines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Optional overrides for the LTX-2 multimodal guider. Absent fields keep
+    /// the per-pipeline defaults, so omitting this preserves existing outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
     /// Optional per-component device placement override. `None` preserves
     /// the engine's VRAM-aware auto-placement end-to-end. See §3 of the
     /// 2026-04-19 model-ui-overhaul design doc.
@@ -512,6 +516,65 @@ pub enum Ltx2SpatialUpscale {
 #[serde(rename_all = "kebab-case")]
 pub enum Ltx2TemporalUpscale {
     X2,
+}
+
+/// Advanced overrides for the LTX-2 multimodal guider.
+///
+/// LTX-2 pipelines pin spatiotemporal-guidance (STG), CFG-rescale, modality,
+/// and guidance-skip constants per (pipeline, stage). Every field here is
+/// optional and replaces exactly one of those constants for one request; an
+/// absent field keeps the pipeline default, so a request without overrides is
+/// byte-identical to one made before this contract existed.
+///
+/// Overrides apply only to guiders a pipeline already runs. A pipeline that
+/// deliberately disables a guider entirely (LTX-2's `a2-vid` audio guider)
+/// stays disabled — overrides tune guidance, they never switch it on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Ltx2GuidanceOverrides {
+    /// Spatiotemporal guidance scale. `0.0` disables the perturbed pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1.0)]
+    pub stg_scale: Option<f64>,
+    /// Transformer block indices perturbed for STG. Must be within the
+    /// selected checkpoint's transformer depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stg_blocks: Option<Vec<u32>>,
+    /// CFG-rescale factor (`0.0` = no rescale, `1.0` = full std matching).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 0.7)]
+    pub rescale_scale: Option<f64>,
+    /// Cross-modality (audio ↔ video) guidance scale. `1.0` disables the
+    /// isolated-modality pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 3.0)]
+    pub modality_scale: Option<f64>,
+    /// Guidance skip stride. `0` applies guidance on every step; `n` applies
+    /// it on every `n + 1`-th step and takes the conditional prediction
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 0)]
+    pub skip_step: Option<u32>,
+}
+
+impl Ltx2GuidanceOverrides {
+    /// Maximum accepted STG / modality scale. Well past any useful setting;
+    /// the point is to reject nonsense (and NaN) rather than to tune.
+    pub const MAX_SCALE: f64 = 10.0;
+    /// Maximum accepted guidance skip stride.
+    pub const MAX_SKIP_STEP: u32 = 8;
+
+    /// True when no field is set — the request carries no override at all and
+    /// callers can drop it rather than serialize an empty object.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `Some(self)` when at least one field is set, `None` otherwise. Clients
+    /// building a request from a form use this so untouched controls never
+    /// widen the request payload.
+    pub fn into_option(self) -> Option<Self> {
+        (!self.is_empty()).then_some(self)
+    }
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -733,6 +796,8 @@ pub struct OutputMetadata {
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -828,6 +893,7 @@ impl OutputMetadata {
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
+            guidance_overrides: req.guidance_overrides.clone(),
             frames: req.frames,
             fps: req.fps,
             chain_job_id: None,
@@ -2491,6 +2557,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat on Mars".to_string(),
             negative_prompt: None,
             model: "flux-schnell".to_string(),
@@ -2679,6 +2746,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, low quality".to_string()),
             model: "sd15:fp16".to_string(),
@@ -2734,6 +2802,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -2786,6 +2855,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "flux-schnell:q8".to_string(),
@@ -2853,6 +2923,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "flux-dev:q8".to_string(),
@@ -2970,6 +3041,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, ugly".to_string()),
             model: "sd15:fp16".to_string(),
@@ -3022,6 +3094,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "sd15:fp16".to_string(),
@@ -3077,6 +3150,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "video".to_string(),
             negative_prompt: Some("blur".to_string()),
             model: "ltx-2.3-22b-distilled:fp8".to_string(),
@@ -3530,6 +3604,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -3588,6 +3663,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "qwen-image-edit-2511:q4".to_string(),
@@ -3659,6 +3735,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -3715,6 +3792,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -3830,6 +3908,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),

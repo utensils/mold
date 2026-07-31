@@ -498,6 +498,7 @@ fn build_request(
     });
 
     GenerateRequest {
+        guidance_overrides: None,
         prompt: prompt.to_string(),
         negative_prompt: negative_prompt.clone(),
         model: params.model.clone(),

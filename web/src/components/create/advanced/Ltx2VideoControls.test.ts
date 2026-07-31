@@ -288,4 +288,96 @@ describe("Ltx2VideoControls", () => {
     await wrapper.get("[data-test='ltx2-keyframe-remove']").trigger("click");
     expect(lastPatch(wrapper).keyframes).toEqual([]);
   });
+
+  it("leaves guidance overrides absent until a control is used", async () => {
+    const wrapper = factory();
+    const stg = wrapper.get("[data-test='ltx2-stg-scale']");
+    expect((stg.element as HTMLInputElement).value).toBe("");
+    expect(wrapper.find("[data-test='ltx2-guidance-count']").exists()).toBe(
+      false,
+    );
+
+    (stg.element as HTMLInputElement).value = "1.5";
+    await stg.trigger("input");
+    expect(lastPatch(wrapper).guidanceOverrides).toMatchObject({
+      stgScale: 1.5,
+      rescaleScale: null,
+    });
+  });
+
+  it("clears one override back to the pipeline default", async () => {
+    const wrapper = factory({
+      guidanceOverrides: {
+        stgScale: 1.5,
+        stgBlocks: "",
+        rescaleScale: null,
+        modalityScale: null,
+        skipStep: null,
+      },
+    });
+    expect(wrapper.get("[data-test='ltx2-guidance-count']").text()).toBe("1");
+
+    const stg = wrapper.get("[data-test='ltx2-stg-scale']");
+    (stg.element as HTMLInputElement).value = "";
+    await stg.trigger("input");
+    expect(lastPatch(wrapper).guidanceOverrides?.stgScale).toBeNull();
+  });
+
+  it("reports an unusable STG block list inline", async () => {
+    const wrapper = factory({
+      guidanceOverrides: {
+        stgScale: null,
+        stgBlocks: "28,twenty-nine",
+        rescaleScale: null,
+        modalityScale: null,
+        skipStep: null,
+      },
+    });
+    expect(wrapper.get("[data-test='ltx2-stg-blocks-error']").text()).toContain(
+      "not a block index",
+    );
+  });
+
+  it("resets every override at once", async () => {
+    const wrapper = factory({
+      guidanceOverrides: {
+        stgScale: 1.5,
+        stgBlocks: "29",
+        rescaleScale: 0.5,
+        modalityScale: 2,
+        skipStep: 1,
+      },
+    });
+    await wrapper.get("[data-test='ltx2-guidance-reset']").trigger("click");
+    expect(lastPatch(wrapper).guidanceOverrides).toEqual({
+      stgScale: null,
+      stgBlocks: "",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: null,
+    });
+  });
+
+  it("reports a fractional skip stride inline", async () => {
+    const wrapper = factory({
+      guidanceOverrides: {
+        stgScale: null,
+        stgBlocks: "",
+        rescaleScale: null,
+        modalityScale: null,
+        skipStep: 1.5,
+      },
+    });
+    expect(
+      wrapper.get("[data-test='ltx2-guidance-skip-step-error']").text(),
+    ).toContain("whole number");
+  });
+
+  it("renders without the field for templates saved before it existed", () => {
+    const wrapper = factory({ guidanceOverrides: undefined });
+    expect(
+      (wrapper.get("[data-test='ltx2-stg-scale']").element as HTMLInputElement)
+        .value,
+    ).toBe("");
+  });
 });

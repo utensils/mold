@@ -273,11 +273,24 @@ mold run ltx-2-19b-distilled:fp8 "a canyon flyover" \
 
 # Camera-control preset
 mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
+
+# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2vid)
+mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
+  --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
 ```
 
 **Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 
-**Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`
+**Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`, `--stg-scale`, `--stg-blocks`, `--rescale-scale`, `--modality-scale`, `--guidance-skip-step`
+
+The five guidance flags (wire: an additive optional `guidance_overrides`
+object) each replace one per-(pipeline, stage) guider constant. Omitting a flag
+keeps its constant, so an unflagged request reproduces earlier outputs exactly.
+They are read only by pipelines that run the multimodal guider — `two-stage`,
+`two-stage-hq`, `keyframe`, `a2vid` — never enable a guider a pipeline
+deliberately disables (`a2vid` audio), and are ignored by chained/sequence
+renders, which say so instead of pretending the flag landed. Non-LTX-2
+families and out-of-range values are rejected with HTTP 422.
 
 Community LTX-2 checkpoints can be video-only even when their transformer and
 video VAE are complete. Mold inspects the installed safetensors for both the

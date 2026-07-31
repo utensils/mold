@@ -168,6 +168,48 @@ mold run ltx-2.3-22b-distilled:fp8 \
   --format mp4
 ```
 
+## Advanced guidance controls
+
+LTX-2's multimodal guider takes more than the base guidance scale. Each
+pipeline ships tuned constants for spatiotemporal guidance (STG), CFG-rescale,
+audio/video cross-modality guidance, and a guidance skip stride; the flags
+below override one constant each for a single request. Anything you leave
+unset keeps the pipeline's own value, so an unflagged render is bit-for-bit
+what it was before these flags existed.
+
+| Flag                   | Default                                                 | What it does                                                                                                     |
+| ---------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--stg-scale`          | `1.0` (two-stage, keyframe, a2vid) · `0` (two-stage HQ) | Strength of the perturbed-attention pass. Higher adds motion structure and detail; too high destabilizes motion. |
+| `--stg-blocks`         | `29` on LTX-2 19B · `28` on LTX-2.3 22B                 | Which transformer blocks the perturbed pass skips. Earlier blocks perturb harder. Comma-separated, up to 8.      |
+| `--rescale-scale`      | `0.7` (two-stage, keyframe, a2vid) · `0.45`/`1.0` (HQ)  | CFG-rescale between 0 and 1. Raise it when strong guidance washes out contrast.                                  |
+| `--modality-scale`     | `3.0`                                                   | Audio ↔ video cross-modality guidance. `1.0` turns the isolated-modality pass off.                               |
+| `--guidance-skip-step` | `0` (every step)                                        | With `n`, guidance is applied every `n + 1` steps and the conditional prediction is taken otherwise.             |
+
+```bash
+# Softer STG on an earlier block, with a stronger rescale
+mold run ltx-2-19b-distilled:fp8 \
+  "handheld shot through a night market" \
+  --pipeline two-stage \
+  --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9 \
+  --format mp4
+```
+
+Three limits are worth knowing before you reach for these:
+
+- **Only pipelines that run the multimodal guider read them.** That is
+  `two-stage`, `two-stage-hq`, `keyframe`, and `a2vid`. The `distilled`,
+  `one-stage`, `ic-lora`, and `retake` pipelines pin guidance to their own
+  path and the overrides are inert there.
+- **They never switch a guider on.** `a2vid` runs audio positive-only by
+  design; an override tunes the video guider and leaves the audio guider off
+  rather than buying an extra transformer pass you did not ask for.
+- **Sequences ignore them.** Chain stages render through their own pipeline
+  constants, so `mold run` warns and continues when a guidance flag meets a
+  chained request.
+
+Enabling STG or cross-modality guidance where the pipeline had it off adds a
+forward pass per denoise step: expect a slower render and more VRAM.
+
 ## Chained video output
 
 The LTX-2 distilled pipeline maxes out at 97 pixel frames per clip (13 latent
@@ -247,7 +289,10 @@ at the head stays intact.
 
 The rest of the LTX-2 surface — `--image`, `--audio-file`, `--lora`,
 `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, and so on —
-applies to chain renders the same way it applies to single-clip renders. An
+applies to chain renders the same way it applies to single-clip renders. The
+exception is the advanced guidance overrides above: chain stages keep their
+pipeline's guider constants, and `mold run` says so rather than pretending the
+flags landed. An
 `--image` supplied on the CLI lands on `stages[0]` and is carried forward by
 the motion-tail latents from there.
 

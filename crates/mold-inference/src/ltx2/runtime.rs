@@ -57,7 +57,7 @@ use crate::vae_tiling::is_cuda_oom;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
 };
-use mold_core::{LoraWeight, Ltx2SpatialUpscale, TimeRange};
+use mold_core::{LoraWeight, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
 pub const LTX2_AUDIO_LATENT_CHANNELS: usize = 8;
@@ -1130,17 +1130,24 @@ fn multimodal_guider_requires_unconditional_context(params: &MultiModalGuiderPar
     (params.cfg_scale - 1.0).abs() > f64::EPSILON
 }
 
-fn stage_multimodal_guider_params(
+/// The transformer block STG perturbs by default, which differs between the
+/// 22B and 19B stacks because their depths differ.
+fn default_stg_block(plan: &Ltx2GeneratePlan) -> usize {
+    if plan.preset.name == "ltx-2.3-22b" {
+        28
+    } else {
+        29
+    }
+}
+
+/// Per-(pipeline, stage) guider constants, before any request override.
+fn stage_multimodal_guider_defaults(
     plan: &Ltx2GeneratePlan,
     stage_index: usize,
 ) -> Option<(MultiModalGuiderParams, MultiModalGuiderParams)> {
     match (plan.pipeline, stage_index) {
         (PipelineKind::A2Vid, 0) => {
-            let stg_block = if plan.preset.name == "ltx-2.3-22b" {
-                28
-            } else {
-                29
-            };
+            let stg_block = default_stg_block(plan);
             Some((
                 MultiModalGuiderParams {
                     cfg_scale: 3.0,
@@ -1154,11 +1161,7 @@ fn stage_multimodal_guider_params(
             ))
         }
         (PipelineKind::TwoStage | PipelineKind::Keyframe, 0) => {
-            let stg_block = if plan.preset.name == "ltx-2.3-22b" {
-                28
-            } else {
-                29
-            };
+            let stg_block = default_stg_block(plan);
             Some((
                 MultiModalGuiderParams {
                     cfg_scale: 3.0,
@@ -1200,6 +1203,70 @@ fn stage_multimodal_guider_params(
     }
 }
 
+/// Apply the request's guidance overrides to one guider.
+///
+/// A guider the pipeline left at [`MultiModalGuiderParams::default`] is
+/// switched off on purpose (LTX-2's `a2-vid` audio guider), so overrides skip
+/// it — tuning guidance must never turn on a pass that costs another forward
+/// through the transformer. When an override enables STG on a stage that ships
+/// with it off, the block list falls back to the preset's default block so the
+/// perturbed pass has something to perturb.
+fn apply_guidance_overrides(
+    plan: &Ltx2GeneratePlan,
+    params: &mut MultiModalGuiderParams,
+    overrides: &Ltx2GuidanceOverrides,
+) -> Result<()> {
+    if *params == MultiModalGuiderParams::default() {
+        return Ok(());
+    }
+    if let Some(stg_scale) = overrides.stg_scale {
+        params.stg_scale = stg_scale;
+    }
+    if let Some(blocks) = &overrides.stg_blocks {
+        let depth = plan.preset.transformer.num_layers;
+        for block in blocks {
+            let block = *block as usize;
+            if block >= depth {
+                anyhow::bail!(
+                    "guidance_overrides.stg_blocks contains block {block}, but {} has {depth} transformer blocks (0-{})",
+                    plan.preset.name,
+                    depth.saturating_sub(1)
+                );
+            }
+        }
+        params.stg_blocks = blocks.iter().map(|block| *block as usize).collect();
+    }
+    if let Some(rescale_scale) = overrides.rescale_scale {
+        params.rescale_scale = rescale_scale;
+    }
+    if let Some(modality_scale) = overrides.modality_scale {
+        params.modality_scale = modality_scale;
+    }
+    if let Some(skip_step) = overrides.skip_step {
+        params.skip_step = skip_step as usize;
+    }
+    if params.stg_scale != 0.0 && params.stg_blocks.is_empty() {
+        params.stg_blocks = vec![default_stg_block(plan)];
+    }
+    Ok(())
+}
+
+fn stage_multimodal_guider_params(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+) -> Result<Option<(MultiModalGuiderParams, MultiModalGuiderParams)>> {
+    let Some((mut video_params, mut audio_params)) =
+        stage_multimodal_guider_defaults(plan, stage_index)
+    else {
+        return Ok(None);
+    };
+    if let Some(overrides) = &plan.guidance_overrides {
+        apply_guidance_overrides(plan, &mut video_params, overrides)?;
+        apply_guidance_overrides(plan, &mut audio_params, overrides)?;
+    }
+    Ok(Some((video_params, audio_params)))
+}
+
 fn prompt_requires_unconditional_context(plan: &Ltx2GeneratePlan) -> Result<bool> {
     if ltx_debug_enabled() || ltx_debug_compare_uncond_enabled() {
         return Ok(true);
@@ -1224,7 +1291,7 @@ fn stage_requires_unconditional_context(
         return Ok(true);
     }
     Ok(
-        stage_multimodal_guider_params(plan, stage_index).is_some_and(
+        stage_multimodal_guider_params(plan, stage_index)?.is_some_and(
             |(video_params, audio_params)| {
                 multimodal_guider_requires_unconditional_context(&video_params)
                     || multimodal_guider_requires_unconditional_context(&audio_params)
@@ -1373,7 +1440,7 @@ fn prepare_stage_context(
         sampler_mode: stage_sampler_mode(plan, stage_index)?,
         sigmas_no_terminal: stage_sigmas_no_terminal(plan, stage_index, device)?,
         loras: stage_lora_stack(plan, stage_index)?,
-        multimodal_guidance: stage_multimodal_guider_params(plan, stage_index),
+        multimodal_guidance: stage_multimodal_guider_params(plan, stage_index)?,
         requires_unconditional_context: stage_requires_unconditional_context(plan, stage_index)?,
     })
 }
@@ -5471,6 +5538,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: model.to_string(),
@@ -5733,6 +5801,7 @@ mod tests {
             loras.len(),
         );
         Ltx2GeneratePlan {
+            guidance_overrides: None,
             pipeline: PipelineKind::Distilled,
             preset,
             checkpoint_is_distilled: req.model.contains("distilled"),
@@ -7341,13 +7410,167 @@ mod tests {
         plan.pipeline = PipelineKind::A2Vid;
         rebuild_execution_graph(&mut plan, &req);
 
-        let (_video_params, audio_params) =
-            super::stage_multimodal_guider_params(&plan, 0).unwrap();
+        let (_video_params, audio_params) = super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             audio_params,
             crate::ltx2::guidance::MultiModalGuiderParams::default()
         );
+    }
+
+    fn two_stage_plan_with_overrides(
+        model: &str,
+        overrides: Option<mold_core::Ltx2GuidanceOverrides>,
+    ) -> Ltx2GeneratePlan {
+        let mut req = req(model, OutputFormat::Mp4, Some(false));
+        req.guidance_overrides = overrides.clone();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.guidance_overrides = overrides;
+        rebuild_execution_graph(&mut plan, &req);
+        plan
+    }
+
+    #[test]
+    fn guidance_overrides_absent_keeps_pipeline_constants() {
+        let plan = two_stage_plan_with_overrides("ltx-2-19b-distilled:fp8", None);
+
+        let (video_params, audio_params) = super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            video_params,
+            crate::ltx2::guidance::MultiModalGuiderParams {
+                cfg_scale: 3.0,
+                stg_scale: 1.0,
+                stg_blocks: vec![29],
+                rescale_scale: 0.7,
+                modality_scale: 3.0,
+                skip_step: 0,
+            }
+        );
+        assert_eq!(audio_params.cfg_scale, 7.0);
+    }
+
+    #[test]
+    fn guidance_overrides_replace_only_the_fields_they_set() {
+        let plan = two_stage_plan_with_overrides(
+            "ltx-2-19b-distilled:fp8",
+            Some(mold_core::Ltx2GuidanceOverrides {
+                stg_scale: Some(2.5),
+                stg_blocks: Some(vec![14, 15]),
+                skip_step: Some(2),
+                ..mold_core::Ltx2GuidanceOverrides::default()
+            }),
+        );
+
+        let (video_params, audio_params) = super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(video_params.stg_scale, 2.5);
+        assert_eq!(video_params.stg_blocks, vec![14, 15]);
+        assert_eq!(video_params.skip_step, 2);
+        // Untouched fields keep the pipeline's constants, and base guidance
+        // stays with the existing `guidance` request field.
+        assert_eq!(video_params.rescale_scale, 0.7);
+        assert_eq!(video_params.modality_scale, 3.0);
+        assert_eq!(video_params.cfg_scale, 3.0);
+        assert_eq!(audio_params.cfg_scale, 7.0);
+        assert_eq!(audio_params.stg_scale, 2.5);
+    }
+
+    #[test]
+    fn guidance_overrides_never_enable_a_disabled_guider() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.audio_file = Some(b"RIFFtestWAVEfmt ".to_vec());
+        let overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(2.0),
+            modality_scale: Some(4.0),
+            ..mold_core::Ltx2GuidanceOverrides::default()
+        };
+        req.guidance_overrides = Some(overrides.clone());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::A2Vid;
+        plan.guidance_overrides = Some(overrides);
+        rebuild_execution_graph(&mut plan, &req);
+
+        let (video_params, audio_params) = super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(video_params.stg_scale, 2.0);
+        // a2-vid runs audio positive-only on purpose; an override must not
+        // buy the request an extra transformer pass it never asked for.
+        assert_eq!(
+            audio_params,
+            crate::ltx2::guidance::MultiModalGuiderParams::default()
+        );
+    }
+
+    #[test]
+    fn guidance_overrides_enabling_stg_fall_back_to_the_preset_block() {
+        let mut req = req("ltx-2.3-22b-dev:fp8", OutputFormat::Mp4, Some(false));
+        let overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(1.0),
+            ..mold_core::Ltx2GuidanceOverrides::default()
+        };
+        req.guidance_overrides = Some(overrides.clone());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        // two-stage-hq ships with STG off and no block list.
+        plan.pipeline = PipelineKind::TwoStageHq;
+        plan.guidance_overrides = Some(overrides);
+        rebuild_execution_graph(&mut plan, &req);
+
+        let (video_params, _audio_params) = super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(video_params.stg_scale, 1.0);
+        assert_eq!(video_params.stg_blocks, vec![28]);
+    }
+
+    #[test]
+    fn guidance_overrides_reject_blocks_deeper_than_the_checkpoint() {
+        let plan = two_stage_plan_with_overrides(
+            "ltx-2-19b-distilled:fp8",
+            Some(mold_core::Ltx2GuidanceOverrides {
+                stg_blocks: Some(vec![60]),
+                ..mold_core::Ltx2GuidanceOverrides::default()
+            }),
+        );
+
+        let err = super::stage_multimodal_guider_params(&plan, 0).unwrap_err();
+
+        assert!(err.to_string().contains("transformer blocks"), "got: {err}");
+    }
+
+    #[test]
+    fn guidance_overrides_are_inert_for_pipelines_without_multimodal_guidance() {
+        let mut plan = two_stage_plan_with_overrides(
+            "ltx-2-19b-distilled:fp8",
+            Some(mold_core::Ltx2GuidanceOverrides {
+                stg_scale: Some(2.0),
+                ..mold_core::Ltx2GuidanceOverrides::default()
+            }),
+        );
+        plan.pipeline = PipelineKind::Distilled;
+
+        assert!(super::stage_multimodal_guider_params(&plan, 0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

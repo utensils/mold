@@ -1207,6 +1207,7 @@ mod tests {
         loras: Option<Vec<mold_core::LoraWeight>>,
     ) -> mold_core::GenerateRequest {
         mold_core::GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "sd15".to_string(),
