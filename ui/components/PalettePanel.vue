@@ -18,8 +18,11 @@ const props = withDefaults(
     query: string;
     items: readonly PaletteItem[];
     emptyText?: string;
+    /** A slower source (the live model catalog) is still resolving. */
+    busy?: boolean;
+    busyText?: string;
   }>(),
-  { emptyText: "No matches" },
+  { emptyText: "No matches", busy: false, busyText: "Searching models…" },
 );
 
 const emit = defineEmits<{
@@ -127,9 +130,18 @@ function optionId(index: number) {
         >
           <span class="ms-palette__section">{{ item.section }}</span>
           <span class="ms-palette__label">{{ item.label }}</span>
+          <span v-if="item.hint" class="ms-palette__hint">{{ item.hint }}</span>
           <Icon class="ms-palette__arrow" name="arrow-right" :size="14" />
         </button>
-        <div v-if="items.length === 0" class="ms-palette__empty">
+        <div
+          v-if="busy"
+          class="ms-palette__busy"
+          role="status"
+          aria-live="polite"
+        >
+          {{ busyText }}
+        </div>
+        <div v-else-if="items.length === 0" class="ms-palette__empty">
           {{ emptyText }}
         </div>
       </div>
@@ -247,12 +259,37 @@ function optionId(index: number) {
 .ms-palette__label {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13.5px;
+}
+
+.ms-palette__hint {
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
 }
 
 .ms-palette__arrow {
   flex: 0 0 auto;
   color: var(--ce);
+}
+
+.ms-palette__busy {
+  padding: 14px;
+  text-align: center;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .ms-palette__empty {

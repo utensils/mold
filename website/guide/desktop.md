@@ -204,7 +204,13 @@ surface powers it, so anything the app does maps to a documented endpoint.
   About credits core contributors James Brink and Jeffrey Dilley in both the
   Settings workspace and the native app menu.
 - **Command palette** — **Cmd/Ctrl+K** for navigation, actions, model search, and
-  prompt-history search in one field.
+  prompt-history search in one field. Model search covers the whole fleet: a
+  model this machine has reads **Use `<name>`**, one that only another machine
+  has reads **Use `<name>` · on `<machine>`** and repins generation there when
+  you pick it, and a model nobody has yet appears from the live catalog as
+  **Install `<name>` · not installed** and queues the pull. The palette picks
+  the install target itself and names it in the toast — open **Models** when you
+  want to choose the machine explicitly.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
   window decorations, macOS overlay chrome, and background notifications on
   generation, chain, and pull completion. macOS uses UserNotifications so a

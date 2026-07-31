@@ -85,6 +85,10 @@ export interface HostRouting {
   /** Models available where a job would land: the target host's list, or the
    * union across ready hosts under Auto / Most capable. */
   targetModels: ComputedRef<ModelInfoExtended[]>;
+  /** Every downloaded model across ready machines, regardless of the pinned
+   * target — the ⌘K palette searches the whole fleet, not just where the next
+   * job would land, because choosing a model may repin the target. */
+  installedModels: ComputedRef<ModelInfoExtended[]>;
   /** True once every listed host's `/api/models` has settled — the empty-state
    * gate, so a slow remote can't make Create flash "nothing installed". */
   modelsSettled: Ref<boolean>;
@@ -245,6 +249,21 @@ const targetModels = computed<ModelInfoExtended[]>(() => {
     ? readyHostIds.value
     : hosts.value.map((h) => h.id);
   return unionModels(modelsByHost.value, ids);
+});
+
+/** Every model any reachable machine holds — the ⌘K palette's search corpus.
+ * Unlike `targetModels` this deliberately ignores the pinned target: the
+ * palette's whole point is that picking a model can move the target.
+ *
+ * Before the first poll nothing is ready yet, so machines still connecting
+ * stand in — but an errored one never does, even though its last inventory is
+ * still cached. Offering a model no reachable machine can run would let the
+ * palette repin generation to an unavailable owner. */
+const installedModels = computed<ModelInfoExtended[]>(() => {
+  const ids = readyHostIds.value.length
+    ? readyHostIds.value
+    : hosts.value.filter((h) => h.status !== "error").map((h) => h.id);
+  return unionModels(modelsByHost.value, ids).filter((m) => m.downloaded);
 });
 
 function gpuFrom(
@@ -847,6 +866,7 @@ export function useHostRouting(): HostRouting {
     setTarget,
     multiHost: computed(() => hosts.value.length > 1),
     targetModels,
+    installedModels,
     modelsSettled,
     modelOwnerIds: hostsForModel,
     inventoryKnown,
