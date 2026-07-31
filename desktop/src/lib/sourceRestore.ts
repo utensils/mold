@@ -10,6 +10,9 @@
  *   2. A gallery filename match, fetched from the print's own origin host —
  *      covers picks from any connected host's gallery.
  *
+ * Qwen Image Edit records an ordered hash list instead of `source_image`.
+ * Desktop resolves every still-available entry from the same content stash.
+ *
  * Old prints without either key are silently skipped; a failed attempt on a
  * keyed print is the caller's cue to toast.
  */
@@ -30,7 +33,11 @@ export interface RestoredSource {
 
 /** Whether a restore is even attemptable — old prints have no keys. */
 export function metadataReferencesSource(meta: OutputMetadata): boolean {
-  return Boolean(meta.source_image_sha256 || meta.source_image_name);
+  return Boolean(
+    meta.source_image_sha256 ||
+    meta.source_image_name ||
+    (meta.edit_image_sha256s?.length ?? 0) > 0,
+  );
 }
 
 export async function restoreSourceImage(
@@ -48,6 +55,24 @@ export async function restoreSourceImage(
     if (fromGallery) return { base64: fromGallery, filename: name };
   }
   return null;
+}
+
+export async function restoreEditImages(
+  meta: OutputMetadata,
+  deps: SourceRestoreDeps,
+): Promise<{ images: string[]; missing: number }> {
+  const resolved = await Promise.all(
+    (meta.edit_image_sha256s ?? []).map((sha256) => deps.stashGet(sha256).catch(() => null)),
+  );
+  // Index 0 is the edit Target. Never collapse a missing target away and
+  // accidentally promote a later Reference into that load-bearing role.
+  if (resolved.length > 0 && !resolved[0]) {
+    return { images: [], missing: resolved.filter((image) => !image).length };
+  }
+  return {
+    images: resolved.filter((image): image is string => Boolean(image)),
+    missing: resolved.filter((image) => !image).length,
+  };
 }
 
 /**

@@ -14,6 +14,7 @@ pub struct ImportedSourceImage {
     base64: String,
     width: u32,
     height: u32,
+    sha256: String,
     metadata: Option<mold_core::OutputMetadata>,
 }
 
@@ -58,11 +59,18 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
         return Err("Drop an image no larger than 64 MiB.".into());
     }
     let metadata = mold_db::metadata_io::read_embedded(path, format);
+    let sha256 = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        format!("{:x}", hasher.finalize())
+    };
     Ok(ImportedSourceImage {
         filename,
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         width,
         height,
+        sha256,
         metadata,
     })
 }
@@ -70,9 +78,22 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
 /// Read an OS-dropped still and its embedded Mold generation metadata. The
 /// command validates the file's decoded format instead of trusting its suffix.
 #[tauri::command]
-pub async fn import_source_image(path: String) -> Result<ImportedSourceImage, String> {
+pub async fn import_source_image(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ImportedSourceImage, String> {
+    let source_path = std::path::PathBuf::from(path);
+    let app_for_task = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        import_source_image_from_path(std::path::Path::new(&path))
+        let imported = import_source_image_from_path(&source_path)?;
+        // Path provenance is a best-effort restore aid; a read-only app-data
+        // directory must not prevent the image from being attached now.
+        let _ = crate::source_stash::remember_source_path(
+            &app_for_task,
+            &imported.sha256,
+            &source_path,
+        );
+        Ok(imported)
     })
     .await
     .map_err(|error| error.to_string())?

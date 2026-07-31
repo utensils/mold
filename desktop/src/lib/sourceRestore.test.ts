@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { metadataReferencesSource, restoreSourceImage, sha256HexOfBase64 } from "./sourceRestore";
+import {
+  metadataReferencesSource,
+  restoreEditImages,
+  restoreSourceImage,
+  sha256HexOfBase64,
+} from "./sourceRestore";
 import type { OutputMetadata } from "./api/types";
 
 const baseMeta: OutputMetadata = {
@@ -69,6 +74,41 @@ describe("metadataReferencesSource", () => {
     expect(metadataReferencesSource({ ...baseMeta, source_image_sha256: "a".repeat(64) })).toBe(
       true,
     );
+    expect(metadataReferencesSource({ ...baseMeta, edit_image_sha256s: ["a".repeat(64)] })).toBe(
+      true,
+    );
+  });
+});
+
+describe("restoreEditImages", () => {
+  it("restores Qwen edit images from the local stash in their recorded order", async () => {
+    const stashGet = vi.fn().mockResolvedValueOnce("TARGET").mockResolvedValueOnce("REFERENCE");
+    await expect(
+      restoreEditImages(
+        { ...baseMeta, edit_image_sha256s: ["a".repeat(64), "b".repeat(64)] },
+        { stashGet, galleryLookup: vi.fn() },
+      ),
+    ).resolves.toEqual({ images: ["TARGET", "REFERENCE"], missing: 0 });
+  });
+
+  it("restores the target and every still-available reference", async () => {
+    const stashGet = vi.fn().mockResolvedValueOnce("TARGET").mockResolvedValueOnce(null);
+    await expect(
+      restoreEditImages(
+        { ...baseMeta, edit_image_sha256s: ["a".repeat(64), "b".repeat(64)] },
+        { stashGet, galleryLookup: vi.fn() },
+      ),
+    ).resolves.toEqual({ images: ["TARGET"], missing: 1 });
+  });
+
+  it("never promotes a reference into the Target role when the target is missing", async () => {
+    const stashGet = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce("REFERENCE");
+    await expect(
+      restoreEditImages(
+        { ...baseMeta, edit_image_sha256s: ["a".repeat(64), "b".repeat(64)] },
+        { stashGet, galleryLookup: vi.fn() },
+      ),
+    ).resolves.toEqual({ images: [], missing: 1 });
   });
 });
 

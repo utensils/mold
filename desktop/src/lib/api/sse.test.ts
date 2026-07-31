@@ -87,4 +87,37 @@ describe("sseStream", () => {
       expect(fetchEventSource).toHaveBeenCalledTimes(1);
     });
   }
+
+  it("preserves a structured server validation message on an SSE HTTP error", async () => {
+    fetchEventSource.mockImplementation(
+      async (_url: string, options: { onopen: (response: Response) => Promise<void> }) => {
+        await options.onopen(
+          new Response(
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              error: "Qwen Image Edit needs at least one image. Add a Target image and try again.",
+            }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          ),
+        );
+      },
+    );
+    const onClose = vi.fn();
+
+    await sseStream("/api/generate/stream", {
+      method: "POST",
+      body: {},
+      signal: new AbortController().signal,
+      onEvent: vi.fn(),
+      onClose,
+      retry: false,
+      target: { baseUrl: "http://plato", apiKey: null },
+    });
+
+    expect(onClose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "Qwen Image Edit needs at least one image. Add a Target image and try again.",
+      }),
+    );
+  });
 });

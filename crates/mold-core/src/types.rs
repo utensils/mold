@@ -692,6 +692,11 @@ pub struct OutputMetadata {
     /// names and hashes only, never image payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image_sha256: Option<String>,
+    /// SHA-256 (hex) of each Qwen Image Edit input, in request order. Clients
+    /// can restore locally available inputs without persisting image payloads
+    /// or private filesystem paths in gallery metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_image_sha256s: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -790,6 +795,19 @@ impl OutputMetadata {
                 let mut hasher = Sha256::new();
                 hasher.update(bytes);
                 format!("{:x}", hasher.finalize())
+            }),
+            edit_image_sha256s: req.edit_images.as_ref().and_then(|images| {
+                (!images.is_empty()).then(|| {
+                    images
+                        .iter()
+                        .map(|bytes| {
+                            use sha2::{Digest, Sha256};
+                            let mut hasher = Sha256::new();
+                            hasher.update(bytes);
+                            format!("{:x}", hasher.finalize())
+                        })
+                        .collect()
+                })
             }),
             scheduler,
             output_format: req.output_format,
@@ -2914,6 +2932,39 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.source_image_name, None);
         assert_eq!(legacy.source_image_sha256, None);
+    }
+
+    #[test]
+    fn output_metadata_records_qwen_edit_image_hashes_in_order() {
+        let req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "edit",
+            "model": "qwen-image-edit:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "seed": 7,
+            "edit_images": ["dGFyZ2V0", "cmVmZXJlbmNl"]
+        }))
+        .unwrap();
+
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        let expected = req
+            .edit_images
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|bytes| {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                format!("{:x}", hasher.finalize())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            metadata.edit_image_sha256s.as_deref(),
+            Some(expected.as_slice())
+        );
     }
 
     #[test]

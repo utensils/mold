@@ -51,6 +51,11 @@ export interface OutputMetadata {
   generation_width?: number | null;
   generation_height?: number | null;
   strength?: number | null;
+  /** Source-image provenance supplied by newer servers. */
+  source_image_name?: string | null;
+  source_image_sha256?: string | null;
+  /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
+  edit_image_sha256s?: string[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */

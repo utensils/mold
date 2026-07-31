@@ -775,6 +775,7 @@ mod tests {
             strength: None,
             source_image_name: None,
             source_image_sha256: None,
+            edit_image_sha256s: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
@@ -4813,6 +4814,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_stream_qwen_edit_without_image_returns_actionable_422() {
+        let app = app_with(MockEngine::ready());
+        let body = serde_json::json!({
+            "prompt": "make the coat blue",
+            "model": "qwen-image-edit:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "batch_size": 1,
+            "output_format": "png"
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert_eq!(
+            body["error"],
+            "Qwen Image Edit needs at least one image. Add a Target image and try again."
+        );
+    }
+
+    #[tokio::test]
     async fn generate_zero_width_returns_422() {
         let app = app_with(MockEngine::ready());
         let body = generate_body("a cat", 0, 768);
@@ -7010,6 +7042,7 @@ mod tests {
             strength: None,
             source_image_name: None,
             source_image_sha256: None,
+            edit_image_sha256s: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
@@ -7910,6 +7943,7 @@ mod tests {
             strength: None,
             source_image_name: None,
             source_image_sha256: None,
+            edit_image_sha256s: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,

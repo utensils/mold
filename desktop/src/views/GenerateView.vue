@@ -111,8 +111,10 @@ import { randomSeed } from "../stores/generation";
 import type { GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   metadataReferencesSource,
+  restoreEditImages,
   restoreSourceImage,
   sha256HexOfBase64,
+  type SourceRestoreDeps,
 } from "../lib/sourceRestore";
 import { isMissingModelError } from "../lib/generateErrors";
 import { copyableError, describeTransportError } from "../lib/api/errors";
@@ -2152,11 +2154,13 @@ async function generate() {
       }
       route = finalizedRoute;
     }
-    // Stash the exact source bytes by sha (the hash the server records as
-    // source_image_sha256) so Reuse settings can restore uploads and fitted
-    // sources later. Fire-and-forget — never blocks the submit.
-    if (request.source_image) {
-      const sourceB64 = request.source_image;
+    // Stash exact img2img/Qwen-edit bytes by the hashes the server records so
+    // Reuse settings can restore local files and fitted sources later.
+    // Fire-and-forget — never blocks the submit.
+    for (const sourceB64 of [
+      ...(request.source_image ? [request.source_image] : []),
+      ...(request.edit_images ?? []),
+    ]) {
       void sha256HexOfBase64(sourceB64)
         .then((sha) => ipc.sourceStashPut(sha, sourceB64))
         .catch(() => {});
@@ -2339,9 +2343,11 @@ function applyPrefill() {
  */
 async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
-  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
+  if (!caps.value.supportsImg2img) return;
+  const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
+  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
   const modelAtStart = form.model;
-  const restored = await restoreSourceImage(metadata, {
+  const deps: SourceRestoreDeps = {
     stashGet: (sha) => ipc.sourceStashGet(sha),
     galleryLookup: async (filename) => {
       await hostGallery.fetchAll().catch(() => {});
@@ -2357,19 +2363,34 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       const res = await (target ? apiFetchTo(target, path) : apiFetch(path));
       return blobToBase64(await res.blob());
     },
-  });
+  };
+  const editRestore = qwenEdit ? await restoreEditImages(metadata, deps) : null;
+  const restored = qwenEdit ? null : await restoreSourceImage(metadata, deps);
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
   // this restore was superseded: a newer prefill or ⌘N bumped the epoch, the
   // user attached their own source, the model changed under us, or the new
   // family can't take an image at all.
-  if (epoch !== restoreEpoch || form.sourceImage || form.model !== modelAtStart) return;
-  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
-  if (restored) {
+  if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
+  if (!caps.value.supportsImg2img) return;
+  if (qwenEdit ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
+  if (qwenEdit && caps.value.sourceImageMode === "qwen-edit" && editRestore?.images.length) {
+    form.imageAttachments = editRestore.images;
+    if (editRestore.missing > 0) {
+      toasts.push(
+        `Restored ${editRestore.images.length} source ${
+          editRestore.images.length === 1 ? "image" : "images"
+        }; ${editRestore.missing} ${editRestore.missing === 1 ? "is" : "are"} no longer available.`,
+        "error",
+      );
+    }
+  } else if (!qwenEdit && caps.value.sourceImageMode === "single" && restored) {
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
   } else {
     toasts.push(
-      "Couldn't restore the source image — the original file wasn't found on any connected host.",
+      qwenEdit
+        ? "Couldn't restore the edit images — the original local files are no longer available."
+        : "Couldn't restore the source image — the original file wasn't found on any connected host.",
       "error",
     );
   }

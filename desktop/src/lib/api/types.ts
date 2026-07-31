@@ -423,6 +423,8 @@ export interface OutputMetadata {
   /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
    * for Reuse-settings source restore (additive; newer servers only). */
   source_image_sha256?: string | null;
+  /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
+  edit_image_sha256s?: string[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
