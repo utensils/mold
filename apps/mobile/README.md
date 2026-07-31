@@ -62,6 +62,12 @@ pushed screen opened from the header.
   additive `guidance_overrides` contract (STG scale/blocks, CFG rescale,
   modality scale, and skip stride), validates before queueing, counts the group
   in its badge, and keeps empty fields absent so pipeline defaults remain exact.
+  **Continue a video** appears only when the selected model advertises additive
+  `supports_extend`, so a host that predates continuation shows nothing rather
+  than offering a request it would reject. The attached clip counts toward the
+  combined mobile request-media budget, the overlap picker offers only valid
+  `8k+1` values below the clip length, and the sheet states how many new frames
+  the continuation appends before it is queued.
   Source-fit and Upscale then fit preprocessing use a per-Create-form cache, so
   unchanged Batch siblings and repeat submissions share one host upscale and
   fitted source while keeping the editable original intact. When the host

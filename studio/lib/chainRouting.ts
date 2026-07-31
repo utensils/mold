@@ -9,10 +9,7 @@
  * fits comfortably on one consumer GPU.
  */
 
-import {
-  ltx2MaxFramesAtFps,
-  maxFramesForFamilyAtFps,
-} from "./videoBudget";
+import { ltx2MaxFramesAtFps, maxFramesForFamilyAtFps } from "./videoBudget";
 
 export const LTX2_DEFAULT_CLIP_FRAMES = 97;
 export const MAX_CHAIN_STAGES = 16;
@@ -109,7 +106,8 @@ export function decideChainRouting(
     // ceiling; only fall back to the routing default when the family
     // publishes none.
     const cap =
-      maxFramesForFamilyAtFps(normalizedFamily, fps) ?? LTX2_DEFAULT_CLIP_FRAMES;
+      maxFramesForFamilyAtFps(normalizedFamily, fps) ??
+      LTX2_DEFAULT_CLIP_FRAMES;
     if (frames <= cap) return { kind: "single" };
     return {
       kind: "reject",

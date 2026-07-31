@@ -109,6 +109,9 @@ function defaultForm(): GenerateFormState {
     audioFilePath: "",
     sourceVideo: null,
     sourceVideoPath: "",
+    extendVideo: null,
+    extendVideoPath: "",
+    extendOverlapFrames: null,
     keyframes: [],
     pipeline: null,
     icLoraControl: null,
@@ -144,6 +147,7 @@ export function sanitizePersistedForm(
       : null,
     audioFile: state.audioFile ? stripMediaBytes(state.audioFile) : null,
     sourceVideo: state.sourceVideo ? stripMediaBytes(state.sourceVideo) : null,
+    extendVideo: state.extendVideo ? stripMediaBytes(state.extendVideo) : null,
     keyframes: state.keyframes.map((k) => ({
       ...k,
       image: stripMediaBytes(k.image),
@@ -205,6 +209,9 @@ function modelDefaultsPatch(
     next.audioFilePath = "";
     next.sourceVideo = null;
     next.sourceVideoPath = "";
+    next.extendVideo = null;
+    next.extendVideoPath = "";
+    next.extendOverlapFrames = null;
     next.keyframes = [];
     next.pipeline = null;
     next.icLoraControl = null;
@@ -317,6 +324,8 @@ export function applyMetadataToForm(
     enableAudio: metadata.enable_audio ?? next.enableAudio,
     audioFilePath: metadata.audio_file_path ?? "",
     sourceVideoPath: metadata.source_video_path ?? "",
+    extendVideoPath: metadata.extend_video_path ?? "",
+    extendOverlapFrames: metadata.extend_overlap_frames ?? null,
     pipeline: metadata.pipeline ?? null,
     icLoraControl: metadata.ic_lora_control ?? null,
     retakeRange: metadata.retake_range ?? null,
@@ -331,6 +340,7 @@ export function applyMetadataToForm(
     controlImage: null,
     audioFile: null,
     sourceVideo: null,
+    extendVideo: null,
     keyframes: [],
   };
 }
@@ -355,6 +365,7 @@ function ensureDraftIds(state: GenerateFormState) {
   state.controlImage = ensure(state.controlImage);
   state.audioFile = ensure(state.audioFile);
   state.sourceVideo = ensure(state.sourceVideo);
+  state.extendVideo = ensure(state.extendVideo);
   state.keyframes = state.keyframes.map((k) => ({
     ...k,
     image: ensure(k.image)!,
@@ -368,6 +379,7 @@ function mediaFromState(state: GenerateFormState) {
     state.controlImage,
     state.audioFile,
     state.sourceVideo,
+    state.extendVideo,
     ...state.keyframes.map((k) => k.image),
   ].filter((m): m is NonNullable<typeof m> => Boolean(m?.base64));
 }
@@ -585,6 +597,7 @@ export function useGenerateForm(): UseGenerateForm {
       const upscaleModel = s.upscaleModel.trim();
       const audioPath = s.audioFilePath.trim();
       const sourceVideoPath = s.sourceVideoPath.trim();
+      const extendVideoPath = s.extendVideoPath.trim();
       const family = selectedFamily(s);
       const ltx2 = family === "ltx2" || family === "ltx-2";
       const cameraControl = s.cameraControl?.trim();
@@ -663,6 +676,16 @@ export function useGenerateForm(): UseGenerateForm {
               source_video_path: s.sourceVideo
                 ? undefined
                 : sourceVideoPath || undefined,
+              extend_video: s.extendVideo?.base64 ?? undefined,
+              extend_video_path: s.extendVideo
+                ? undefined
+                : extendVideoPath || undefined,
+              // Only travels with a video to continue; the server rejects a
+              // bare overlap, and omitting it takes the server's default.
+              extend_overlap_frames:
+                (s.extendVideo || extendVideoPath) && s.extendOverlapFrames
+                  ? s.extendOverlapFrames
+                  : undefined,
               keyframes: s.keyframes.length
                 ? s.keyframes.map((k) => ({
                     frame: k.frame,

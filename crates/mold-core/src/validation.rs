@@ -51,6 +51,15 @@ pub const LTX2_MAX_FRAMES_ABSOLUTE: u32 = LTX2_MAX_RUNTIME_SECONDS * 30 + 4;
 /// duration budget (currently `ltx-video`).
 pub const MAX_FRAMES_GLOBAL: u32 = 257;
 
+/// Default pixel-frame overlap for `extend_video`, matching the chain
+/// motion-tail default so an extend seam and a sequence seam behave the same.
+/// 17 pixel frames is three LTX-2 latent frames under the VAE's 8x causal
+/// temporal compression.
+pub const DEFAULT_EXTEND_OVERLAP_FRAMES: u32 = 17;
+
+/// Inline `extend_video` payloads share the source-video body budget.
+pub const MAX_INLINE_EXTEND_VIDEO_BYTES: usize = MAX_INLINE_SOURCE_VIDEO_BYTES;
+
 /// Upper bound for a requested STG block index. The deepest LTX-2 transformer
 /// mold runs has 48 layers; the ceiling is loose on purpose because the exact
 /// depth is a property of the resolved checkpoint, which validation does not
@@ -399,6 +408,83 @@ fn validate_guidance_overrides(overrides: &Ltx2GuidanceOverrides) -> Result<(), 
     Ok(())
 }
 
+/// Admission rules for `extend_video` / `extend_video_path`.
+///
+/// Extend reuses the chain motion-tail machinery, so it inherits the same two
+/// hard constraints: the overlap has to land on the LTX-2 VAE's `8k+1` causal
+/// temporal grid to re-encode cleanly, and it has to be strictly shorter than
+/// the rendered clip or the continuation contributes no new frames at all.
+fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), String> {
+    if let Some(video) = &req.extend_video {
+        require_ltx2_family(family, "extend_video")?;
+        if req.extend_video_path.is_some() {
+            return Err("extend_video_path cannot be combined with extend_video".to_string());
+        }
+        if video.is_empty() {
+            return Err("extend_video must not be empty".to_string());
+        }
+        validate_inline_media_size(video, "extend_video", MAX_INLINE_EXTEND_VIDEO_BYTES)?;
+    }
+    if let Some(path) = &req.extend_video_path {
+        require_ltx2_family(family, "extend_video_path")?;
+        if path.trim().is_empty() {
+            return Err("extend_video_path must not be empty".to_string());
+        }
+    }
+
+    if !req.is_extend() {
+        if req.extend_overlap_frames.is_some() {
+            return Err(
+                "extend_overlap_frames requires extend_video or extend_video_path".to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    // Extend continues one clip's motion; a reference video conditions a fresh
+    // render. Accepting both would leave two competing sources of truth for
+    // what the first frames should look like.
+    if req.source_video.is_some() || req.source_video_path.is_some() {
+        return Err(
+            "extend_video cannot be combined with source_video; extend continues an existing \
+             clip, while source_video is reference conditioning for a fresh render"
+                .to_string(),
+        );
+    }
+    if req.source_image.is_some() {
+        return Err(
+            "extend_video cannot be combined with source_image; the continuation's first frames \
+             are pinned by the source video's tail"
+                .to_string(),
+        );
+    }
+    if req.keyframes.is_some() {
+        return Err("extend_video cannot be combined with keyframes".to_string());
+    }
+
+    let overlap = req.effective_extend_overlap_frames();
+    if overlap == 0 {
+        return Err(
+            "extend_overlap_frames must be >= 1 so the continuation has motion context".to_string(),
+        );
+    }
+    if overlap % 8 != 1 {
+        return Err(format!(
+            "extend_overlap_frames ({overlap}) must be 8k+1 (1, 9, 17, 25, …) so the carryover \
+             frames re-encode cleanly through the LTX-2 video VAE's 8x causal grid"
+        ));
+    }
+    if let Some(frames) = req.frames {
+        if overlap >= frames {
+            return Err(format!(
+                "extend_overlap_frames ({overlap}) must be strictly less than frames ({frames}) \
+                 so the continuation adds at least one new frame"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), String> {
     match family {
         Some("ltx2") => Ok(()),
@@ -686,6 +772,7 @@ pub fn validate_generate_request_with_family(
             return Err("source_video_path must not be empty".to_string());
         }
     }
+    validate_extend(req, family)?;
     // Only enforce the LTX-2 family gate when audio is actually requested
     // (`Some(true)`). The web form serializes its tri-state checkbox as
     // `Some(false)` when the user has explicitly turned audio off — which
@@ -995,6 +1082,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -1562,6 +1652,166 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("8n+1"), "got: {err}");
         assert!(err.contains("LTX-Video / LTX-2"), "got: {err}");
+    }
+
+    fn extend_req() -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(24);
+        req.frames = Some(97);
+        req.extend_video = Some(vec![0, 0, 0, 0x20, b'f', b't', b'y', b'p']);
+        req
+    }
+
+    #[test]
+    fn extend_accepts_a_video_with_the_default_overlap() {
+        let req = extend_req();
+        assert!(validate_generate_request(&req).is_ok());
+        assert!(req.is_extend());
+        assert_eq!(
+            req.effective_extend_overlap_frames(),
+            DEFAULT_EXTEND_OVERLAP_FRAMES
+        );
+        // 97 rendered frames minus the 17-frame overlap that reproduces the
+        // source tail = 80 genuinely new frames appended.
+        assert_eq!(req.extend_new_frames(), Some(80));
+    }
+
+    #[test]
+    fn extend_is_ltx2_only() {
+        let mut req = extend_req();
+        req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("extend_video"), "got: {err}");
+    }
+
+    #[test]
+    fn extend_rejects_both_inline_bytes_and_a_path() {
+        let mut req = extend_req();
+        req.extend_video_path = Some("/srv/mold/clip.mp4".to_string());
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("cannot be combined"), "got: {err}");
+    }
+
+    #[test]
+    fn extend_rejects_empty_payloads() {
+        let mut req = extend_req();
+        req.extend_video = Some(Vec::new());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("must not be empty"));
+
+        let mut req = extend_req();
+        req.extend_video = None;
+        req.extend_video_path = Some("   ".to_string());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("must not be empty"));
+    }
+
+    /// The overlap re-encodes through the VAE's 8x causal temporal grid, so an
+    /// off-grid value would not map onto whole latent slots.
+    #[test]
+    fn extend_overlap_must_sit_on_the_latent_grid() {
+        let mut req = extend_req();
+        req.extend_overlap_frames = Some(12);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("8k+1"), "got: {err}");
+
+        for overlap in [1u32, 9, 17, 25] {
+            let mut req = extend_req();
+            req.extend_overlap_frames = Some(overlap);
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "{overlap} is on the 8k+1 grid",
+            );
+        }
+    }
+
+    /// An overlap at or above the clip length means every rendered frame
+    /// reproduces the source and the continuation adds nothing.
+    #[test]
+    fn extend_overlap_must_leave_room_for_new_frames() {
+        let mut req = extend_req();
+        req.frames = Some(25);
+        req.extend_overlap_frames = Some(25);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("strictly less than"), "got: {err}");
+
+        req.extend_overlap_frames = Some(17);
+        assert!(validate_generate_request(&req).is_ok());
+        assert_eq!(req.extend_new_frames(), Some(8));
+    }
+
+    #[test]
+    fn extend_overlap_requires_a_video_to_extend() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(97);
+        req.extend_overlap_frames = Some(17);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("requires extend_video"), "got: {err}");
+    }
+
+    /// Extend continues one clip's motion; the other conditioning inputs each
+    /// claim authority over the same opening frames.
+    #[test]
+    fn extend_rejects_competing_conditioning_inputs() {
+        let mut req = extend_req();
+        req.source_video = Some(vec![1, 2, 3]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("source_video"));
+
+        let mut req = extend_req();
+        req.source_image = Some(png_bytes());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("source_image"));
+
+        let mut req = extend_req();
+        req.keyframes = Some(vec![KeyframeCondition {
+            frame: 0,
+            image: png_bytes(),
+        }]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("keyframes"));
+    }
+
+    /// An extend clip is an ordinary render, so it is bound by the same
+    /// duration budget as any other single request.
+    #[test]
+    fn extend_respects_the_temporal_budget() {
+        let mut req = extend_req();
+        req.frames = Some(481);
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.frames = Some(489);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("RoPE"), "got: {err}");
+    }
+
+    /// Extend provenance must reach saved metadata, and must not appear on
+    /// ordinary renders where it would read as a continuation that never was.
+    #[test]
+    fn extend_provenance_reaches_output_metadata() {
+        let mut req = extend_req();
+        req.extend_video = None;
+        req.extend_video_path = Some("/srv/mold/clip.mp4".to_string());
+        req.extend_overlap_frames = Some(25);
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(
+            metadata.extend_video_path.as_deref(),
+            Some("/srv/mold/clip.mp4")
+        );
+        assert_eq!(metadata.extend_overlap_frames, Some(25));
+
+        let plain = crate::OutputMetadata::from_generate_request(&valid_req(), 7, None, "test");
+        assert_eq!(plain.extend_video_path, None);
+        assert_eq!(plain.extend_overlap_frames, None);
     }
 
     /// The RoPE temporal axis is expressed in *seconds* (`rope.rs`'s

@@ -213,6 +213,12 @@ pub struct Ltx2Options {
     pub enable_audio: Option<bool>,
     pub audio_file: Option<Vec<u8>>,
     pub source_video: Option<Vec<u8>>,
+    /// Existing video to continue. Makes the request a continuation: the
+    /// delivered output is this clip followed by the newly rendered frames.
+    pub extend_video: Option<Vec<u8>>,
+    /// Pixel-frame overlap the continuation conditions on. `None` uses the
+    /// shared chain motion-tail default.
+    pub extend_overlap_frames: Option<u32>,
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub pipeline: Option<Ltx2PipelineMode>,
     pub ic_lora_control: Option<String>,
@@ -273,6 +279,8 @@ pub async fn run(
         enable_audio,
         audio_file,
         source_video,
+        extend_video,
+        extend_overlap_frames,
         keyframes,
         pipeline,
         ic_lora_control,
@@ -514,6 +522,9 @@ pub async fn run(
         audio_file_path: None,
         source_video,
         source_video_path: None,
+        extend_video,
+        extend_video_path: None,
+        extend_overlap_frames,
         keyframes,
         pipeline,
         ic_lora_control,

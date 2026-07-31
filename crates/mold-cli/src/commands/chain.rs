@@ -985,7 +985,14 @@ mod tests {
 
     #[test]
     fn routing_single_clip_under_cap() {
-        let d = decide_chain_routing(Some(97), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4, 24);
+        let d = decide_chain_routing(
+            Some(97),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+        );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
@@ -997,7 +1004,14 @@ mod tests {
 
     #[test]
     fn routing_chain_over_cap_ltx2_distilled() {
-        let d = decide_chain_routing(Some(200), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4, 24);
+        let d = decide_chain_routing(
+            Some(200),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+        );
         assert_eq!(
             d,
             ChainRoutingDecision::Chain {
@@ -1143,7 +1157,14 @@ mod tests {
 
     #[test]
     fn routing_motion_tail_at_clip_frames_rejects() {
-        let d = decide_chain_routing(Some(200), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 97, 24);
+        let d = decide_chain_routing(
+            Some(200),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            97,
+            24,
+        );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
 

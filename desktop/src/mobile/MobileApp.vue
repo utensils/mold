@@ -3668,6 +3668,7 @@ onBeforeUnmount(() => {
               <MobileGenerateParameters
                 :form="form"
                 :upscalers="upscalers"
+                :selected-model="selectedGenerationModel"
                 :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
                 :control-adapters="controlAdapters"
                 :camera-controls="cameraControls"

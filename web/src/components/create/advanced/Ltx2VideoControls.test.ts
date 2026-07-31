@@ -18,9 +18,14 @@ function baseForm(
 function factory(
   overrides: Partial<GenerateFormState> = {},
   audioOutputSupported = true,
+  extra: { canExtend?: boolean; extendDefaultOverlapFrames?: number } = {},
 ) {
   return mount(Ltx2VideoControls, {
-    props: { modelValue: baseForm(overrides), audioOutputSupported },
+    props: {
+      modelValue: baseForm(overrides),
+      audioOutputSupported,
+      ...extra,
+    },
   });
 }
 
@@ -379,5 +384,101 @@ describe("Ltx2VideoControls", () => {
       (wrapper.get("[data-test='ltx2-stg-scale']").element as HTMLInputElement)
         .value,
     ).toBe("");
+  });
+});
+
+describe("Ltx2VideoControls — continue a video", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => [] }),
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  // A host that predates continuation omits the capability, so rendering the
+  // control would only let the user build a request the host rejects.
+  it("stays hidden until the host advertises continuation", () => {
+    expect(factory().find("[data-test='ltx2-extend']").exists()).toBe(false);
+    expect(
+      factory({}, true, { canExtend: true })
+        .find("[data-test='ltx2-extend']")
+        .exists(),
+    ).toBe(true);
+  });
+
+  it("only shows the overlap control once a video is attached", async () => {
+    const wrapper = factory({}, true, { canExtend: true });
+    expect(wrapper.find("[data-test='ltx2-extend-overlap']").exists()).toBe(
+      false,
+    );
+
+    await wrapper
+      .get("[data-test='ltx2-extend-path']")
+      .setValue("/srv/mold/clip.mp4");
+    await wrapper.setProps({ modelValue: lastPatch(wrapper) });
+    expect(wrapper.find("[data-test='ltx2-extend-overlap']").exists()).toBe(
+      true,
+    );
+  });
+
+  it("reports how many frames the continuation actually appends", async () => {
+    const wrapper = factory({ frames: 97 }, true, { canExtend: true });
+    await wrapper
+      .get("[data-test='ltx2-extend-path']")
+      .setValue("/srv/mold/clip.mp4");
+    await wrapper.setProps({ modelValue: lastPatch(wrapper) });
+
+    // 97 rendered frames minus the 17-frame overlap that re-renders the tail.
+    expect(wrapper.get("[data-test='ltx2-extend-summary']").text()).toContain(
+      "80 new frames",
+    );
+  });
+
+  it("explains a conflicting source image before the request is sent", async () => {
+    const wrapper = factory(
+      {
+        frames: 97,
+        imageAttachments: [
+          {
+            base64: "AAAA",
+            filename: "a.png",
+            mime: "image/png",
+          },
+        ] as GenerateFormState["imageAttachments"],
+      },
+      true,
+      { canExtend: true },
+    );
+    await wrapper
+      .get("[data-test='ltx2-extend-path']")
+      .setValue("/srv/mold/clip.mp4");
+    await wrapper.setProps({ modelValue: lastPatch(wrapper) });
+
+    expect(wrapper.get("[data-test='ltx2-extend-error']").text()).toContain(
+      "source image",
+    );
+  });
+
+  // Clearing must also drop the overlap: a value valid for the old clip can be
+  // invalid for the next one, and a stale number would silently ride along.
+  it("resets the overlap when the attached video is removed", async () => {
+    const wrapper = factory({ frames: 97 }, true, { canExtend: true });
+    await wrapper.setProps({
+      modelValue: {
+        ...baseForm({ frames: 97 }),
+        extendVideo: {
+          base64: "AAAA",
+          filename: "clip.mp4",
+          mime: "video/mp4",
+        } as GenerateFormState["extendVideo"],
+        extendOverlapFrames: 33,
+      },
+    });
+
+    await wrapper.get("[data-test='ltx2-extend-clear']").trigger("click");
+    const next = lastPatch(wrapper);
+    expect(next.extendVideo).toBeNull();
+    expect(next.extendOverlapFrames).toBeNull();
   });
 });

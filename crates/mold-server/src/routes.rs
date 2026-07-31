@@ -1004,7 +1004,10 @@ pub(crate) async fn resolve_server_local_media_paths(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
-    if request.audio_file_path.is_none() && request.source_video_path.is_none() {
+    if request.audio_file_path.is_none()
+        && request.source_video_path.is_none()
+        && request.extend_video_path.is_none()
+    {
         return Ok(());
     }
 
@@ -1018,6 +1021,11 @@ pub(crate) async fn resolve_server_local_media_paths(
         let resolved = mold_core::resolve_server_media_path(path, &roots)
             .map_err(|e| ApiError::validation(format!("source_video_path: {e}")))?;
         request.source_video_path = Some(resolved.to_string_lossy().to_string());
+    }
+    if let Some(path) = request.extend_video_path.as_deref() {
+        let resolved = mold_core::resolve_server_media_path(path, &roots)
+            .map_err(|e| ApiError::validation(format!("extend_video_path: {e}")))?;
+        request.extend_video_path = Some(resolved.to_string_lossy().to_string());
     }
 
     Ok(())

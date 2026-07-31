@@ -1022,6 +1022,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
@@ -1058,6 +1060,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1084,6 +1088,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1110,6 +1116,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
         ];
         let embed = format_model_list(&models);

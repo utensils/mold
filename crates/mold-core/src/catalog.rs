@@ -95,6 +95,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: Some(manifest.family == "ltx2"),
+            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
 
@@ -114,6 +116,7 @@ pub fn build_model_catalog(
             .unwrap_or_else(|| "flux".to_string());
         let (max_pixels, recommended_dimensions, dimension_alignment) =
             resolution_defaults(&family);
+        let is_ltx2 = family == "ltx2";
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -156,6 +159,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: Some(is_ltx2),
+            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
 
@@ -411,6 +416,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             }
         }
 

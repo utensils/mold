@@ -265,7 +265,14 @@ mod tests {
         assert_eq!(fallback.frames_per_clip_cap, 484);
 
         // ltx-video has no duration budget to advertise.
-        let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", 0, None, Some(30));
+        let video = compute_limits(
+            "ltx-video-0.9.6:bf16",
+            "ltx-video",
+            "bf16",
+            0,
+            None,
+            Some(30),
+        );
         assert_eq!(video.frames_per_clip_runtime_seconds, None);
         assert_eq!(video.frames_per_clip_cap, 97);
     }
@@ -334,7 +341,14 @@ mod tests {
     fn compute_limits_for_ltx_video_has_no_audio() {
         // LTX-Video is video-only; the SPA must hide the audio toggle and the
         // chain endpoint will reject `enable_audio: true` upstream regardless.
-        let lim = compute_limits("ltx-video-0.9.7-distilled:fp8", "ltx-video", "fp8", 0, None, None);
+        let lim = compute_limits(
+            "ltx-video-0.9.7-distilled:fp8",
+            "ltx-video",
+            "fp8",
+            0,
+            None,
+            None,
+        );
         assert!(
             !lim.supports_audio,
             "ltx-video has no audio path — toggle must stay off",

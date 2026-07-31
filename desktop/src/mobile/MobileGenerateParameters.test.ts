@@ -46,6 +46,7 @@ function mountParameters(
   audioOutputSupported = true,
   controlAdapters: Ltx2ControlAdapterInfo[] = [],
   cameraControls: Ltx2CameraControlInfo[] = [cameraControl],
+  selectedModel: ModelEntry | null = null,
 ): { wrapper: VueWrapper; form: GenerateForm } {
   const form = reactive(initial) as GenerateForm;
   const Harness = defineComponent({
@@ -55,9 +56,10 @@ function mountParameters(
       cameraControls,
       controlAdapters,
       form,
+      selectedModel,
       upscalers,
     }),
-    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" :camera-controls="cameraControls" camera-controls-loaded />`,
+    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :selected-model="selectedModel" :audio-output-supported="audioOutputSupported" :control-adapters="controlAdapters" :camera-controls="cameraControls" camera-controls-loaded />`,
   });
   return { wrapper: mount(Harness), form };
 }
@@ -419,5 +421,63 @@ describe("MobileGenerateParameters", () => {
 
     await wrapper.get("[data-test='mobile-ltx2-stg-blocks']").setValue("28, 29");
     expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
+  });
+});
+
+describe("MobileGenerateParameters — continue a video", () => {
+  const extendModel = {
+    name: "ltx-2-19b-distilled:fp8",
+    family: "ltx2",
+    supports_extend: true,
+    extend_default_overlap_frames: 17,
+  } as ModelEntry;
+
+  // The LTX-2 advanced block is collapsed until it holds a value, so open it
+  // explicitly before asking whether the control is present.
+  async function openAdvanced(wrapper: VueWrapper): Promise<void> {
+    await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
+  }
+
+  // A host that predates continuation omits `supports_extend`, so showing the
+  // control would only let the user build a request the host rejects.
+  it("stays hidden until the selected model advertises continuation", async () => {
+    const legacy = mountParameters(formFor("ltx2", "ltx-2-19b-distilled:fp8"));
+    await openAdvanced(legacy.wrapper);
+    expect(legacy.wrapper.find("[data-test='mobile-ltx2-extend-video']").exists()).toBe(false);
+
+    const capable = mountParameters(
+      formFor("ltx2", "ltx-2-19b-distilled:fp8"),
+      [],
+      true,
+      [],
+      [cameraControl],
+      extendModel,
+    );
+    await openAdvanced(capable.wrapper);
+    expect(capable.wrapper.find("[data-test='mobile-ltx2-extend-video']").exists()).toBe(true);
+  });
+
+  it("reports how many frames the continuation appends", () => {
+    const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+
+    // 97 rendered frames minus the 17 that re-render the source tail.
+    expect(wrapper.get("[data-test='mobile-ltx2-extend-summary']").text()).toContain(
+      "80 new frames",
+    );
+  });
+
+  it("resets the overlap when the attached video is cleared", async () => {
+    const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.extendOverlapFrames = 33;
+    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+
+    await wrapper.get("[data-test='mobile-ltx2-extend-clear']").trigger("click");
+    expect(form.extendVideo).toBeNull();
+    expect(form.extendOverlapFrames).toBeNull();
   });
 });

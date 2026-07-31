@@ -130,6 +130,7 @@ import {
   type FeasibilityResult,
 } from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
+import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -1030,6 +1031,14 @@ const currentFamily = computed(
 
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(currentFamily.value),
+);
+
+// Continuation rides the selected model's own `/api/models` row, which the
+// Create surface already holds. A host that predates extend omits the field,
+// so the control stays hidden instead of producing a rejected request.
+const canExtend = computed(() => canOfferExtend(currentModel.value));
+const extendDefaultOverlapFrames = computed(() =>
+  serverExtendOverlapDefault(currentModel.value),
 );
 
 const supportsChain = computed(() => {
@@ -3168,6 +3177,8 @@ onBeforeUnmount(() => {
           :placement-gpus="gpuListForPlacement"
           :models="models"
           :audio-output-supported="currentModel?.supports_audio !== false"
+          :can-extend="canExtend"
+          :extend-default-overlap-frames="extendDefaultOverlapFrames"
           :output="sequenceMode ? 'sequence' : 'single'"
           :sequence-supports-audio="
             currentFamily === 'ltx2' && currentModel?.supports_audio !== false
@@ -3193,6 +3204,8 @@ onBeforeUnmount(() => {
         :placement-gpus="gpuListForPlacement"
         :models="models"
         :audio-output-supported="currentModel?.supports_audio !== false"
+        :can-extend="canExtend"
+        :extend-default-overlap-frames="extendDefaultOverlapFrames"
         :output="sequenceMode ? 'sequence' : 'single'"
         :sequence-supports-audio="
           currentFamily === 'ltx2' && currentModel?.supports_audio !== false

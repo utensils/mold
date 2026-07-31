@@ -641,6 +641,13 @@ fn installed_catalog_models(
             nsfw: sidecar.nsfw,
             supports_audio: (sidecar.family == "ltx2")
                 .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
+            // Continuation reuses the chain motion-tail handoff, which the
+            // whole ltx2 family implements — unlike audio, it does not depend
+            // on optional checkpoint assets.
+            supports_extend: Some(sidecar.family == "ltx2"),
+            extend_default_overlap_frames: Some(
+                mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
+            ),
         });
     }
     out
@@ -3711,6 +3718,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,

@@ -699,6 +699,22 @@ Examples:
         #[arg(long, help_heading = "Video", value_hint = ValueHint::FilePath)]
         video: Option<String>,
 
+        /// Continue an existing video. The output is that clip followed by
+        /// newly generated frames; --frames sets the rendered continuation
+        /// length, of which --extend-overlap reproduces the source tail.
+        #[arg(
+            long,
+            help_heading = "Video",
+            value_hint = ValueHint::FilePath,
+            conflicts_with_all = ["video", "image", "keyframe"],
+        )]
+        extend: Option<String>,
+
+        /// Pixel frames of the source tail used as motion context for --extend.
+        /// Must be 8k+1 and strictly less than --frames.
+        #[arg(long, help_heading = "Video", value_name = "N", requires = "extend")]
+        extend_overlap: Option<u32>,
+
         /// Keyframe conditioning in the form <frame:path>. Repeat for multiple keyframes.
         #[arg(long, help_heading = "Video")]
         keyframe: Vec<String>,
@@ -1588,6 +1604,8 @@ async fn run() -> anyhow::Result<()> {
             no_audio,
             audio_file,
             video,
+            extend,
+            extend_overlap,
             keyframe,
             pipeline,
             ic_lora_control,
@@ -1731,6 +1749,8 @@ async fn run() -> anyhow::Result<()> {
                 no_audio,
                 audio_file,
                 video,
+                extend,
+                extend_overlap,
                 keyframe,
                 pipeline,
                 ic_lora_control,
