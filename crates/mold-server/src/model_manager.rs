@@ -1326,6 +1326,7 @@ pub(crate) async fn ensure_model_ready(
                     paths,
                     hint,
                     request_has_lora,
+                    false,
                 ),
                 None => mold_inference::LoadStrategy::Eager,
             };
@@ -1602,6 +1603,7 @@ async fn create_and_load_engine(
         &paths,
         hint,
         request_has_lora,
+        false,
     );
     if load_strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(

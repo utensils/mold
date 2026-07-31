@@ -528,6 +528,96 @@ fn shared_quantized_fallback<'a, T>(
         .or_else(|| variants.last())
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AutoQwen3SelectionKey {
+    models_root: PathBuf,
+    cache_subdir: String,
+}
+
+static AUTO_QWEN3_SELECTIONS: OnceLock<Mutex<HashMap<AutoQwen3SelectionKey, String>>> =
+    OnceLock::new();
+
+fn auto_qwen3_selections() -> &'static Mutex<HashMap<AutoQwen3SelectionKey, String>> {
+    AUTO_QWEN3_SELECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Select one auto Qwen3 variant per storage root and encoder size.
+///
+/// The largest already-cached variant wins even when it does not fit the
+/// current GPU snapshot; execution planning can place that stable dependency
+/// on CPU. If no variant is cached, admission remembers its first
+/// capacity-based choice before starting the download so concurrent or later
+/// jobs join the same artifact instead of accumulating q3/iq4/q6 variants as
+/// free VRAM fluctuates. Read-only previews may observe an admission choice but
+/// never establish one.
+fn select_auto_qwen3_variant_with_cache<'a>(
+    models_root: &Path,
+    cache_subdir: &str,
+    variants: &'a [mold_core::manifest::Qwen3Variant],
+    devices: &[DeviceFact],
+    persist_selection: bool,
+    is_cached: impl Fn(&mold_core::manifest::Qwen3Variant) -> bool,
+) -> Option<&'a mold_core::manifest::Qwen3Variant> {
+    let key = AutoQwen3SelectionKey {
+        models_root: normalized_download_root(models_root)
+            .unwrap_or_else(|_| models_root.to_path_buf()),
+        cache_subdir: cache_subdir.to_string(),
+    };
+
+    if let Some(cached) = variants.iter().find(|variant| is_cached(variant)) {
+        if persist_selection {
+            auto_qwen3_selections()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(key, cached.tag.to_string());
+        }
+        return Some(cached);
+    }
+
+    let mut selections = auto_qwen3_selections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(selected) = selections
+        .get(&key)
+        .and_then(|tag| variants.iter().find(|variant| variant.tag == tag))
+    {
+        return Some(selected);
+    }
+
+    let selected = shared_quantized_fallback(variants, devices, |variant| {
+        (variant.tag, variant.size_bytes)
+    })?;
+    if persist_selection {
+        selections.insert(key, selected.tag.to_string());
+    }
+    Some(selected)
+}
+
+fn select_auto_qwen3_variant<'a>(
+    models_root: &Path,
+    cache_subdir: &str,
+    variants: &'a [mold_core::manifest::Qwen3Variant],
+    devices: &[DeviceFact],
+    persist_selection: bool,
+) -> Option<&'a mold_core::manifest::Qwen3Variant> {
+    select_auto_qwen3_variant_with_cache(
+        models_root,
+        cache_subdir,
+        variants,
+        devices,
+        persist_selection,
+        |variant| {
+            mold_core::download::cached_file_path_existing_only(
+                models_root,
+                variant.hf_repo,
+                variant.hf_filename,
+                Some(cache_subdir),
+            )
+            .is_some()
+        },
+    )
+}
+
 fn registry_quantization(tag: &str) -> Option<crate::execution_plan::QuantizationVariant> {
     use crate::execution_plan::QuantizationVariant;
     match tag {
@@ -937,22 +1027,44 @@ async fn prepare_inputs_for_devices(
     if devices.is_empty() {
         return Err("request placement has no eligible schedulable device".into());
     }
+    let models_root = config.resolved_models_dir();
     let shared_t5_tag = shared_quantized_fallback(
         mold_core::manifest::known_t5_variants(),
         &devices,
         |variant| (variant.tag, variant.size_bytes),
     )
     .map(|variant| variant.tag.to_string());
-    let qwen3_8b = flux2_uses_qwen3_8b(&request.model, &paths);
+    let qwen3_family = matches!(
+        family.as_str(),
+        "z-image" | "flux2" | "flux.2" | "flux2-klein"
+    );
+    let qwen3_auto = base
+        .qwen3_variant
+        .as_deref()
+        .is_none_or(|value| value.is_empty() || value == "auto");
+    let qwen3_8b = qwen3_family && flux2_uses_qwen3_8b(&request.model, &paths);
     let qwen3_variants = if qwen3_8b {
         mold_core::manifest::known_qwen3_8b_variants()
     } else {
         mold_core::manifest::known_qwen3_variants()
     };
-    let shared_qwen3_tag = shared_quantized_fallback(qwen3_variants, &devices, |variant| {
-        (variant.tag, variant.size_bytes)
-    })
-    .map(|variant| variant.tag.to_string());
+    let qwen3_cache_subdir = if qwen3_8b {
+        "shared/qwen3-8b-gguf"
+    } else {
+        "shared/qwen3-gguf"
+    };
+    let shared_qwen3_tag = (qwen3_family && qwen3_auto)
+        .then(|| {
+            select_auto_qwen3_variant(
+                &models_root,
+                qwen3_cache_subdir,
+                qwen3_variants,
+                &devices,
+                policy == DependencyMaterializationPolicy::Admission,
+            )
+        })
+        .flatten()
+        .map(|variant| variant.tag.to_string());
     let capacity_sensitive = match family.as_str() {
         "flux"
         | "sd3"
@@ -977,7 +1089,6 @@ async fn prepare_inputs_for_devices(
 
     let mut by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
-    let models_root = config.resolved_models_dir();
     let dependency_context = DependencyContext {
         state,
         models_root: &models_root,
@@ -1990,5 +2101,113 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn auto_qwen3_prefers_largest_cached_variant_over_vram_churn() {
+        let root = TempDir::new().unwrap();
+        let variants = mold_core::manifest::known_qwen3_8b_variants();
+        let devices = vec![DeviceFact {
+            id: "cuda:0".to_string(),
+            ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 9_000_000_000,
+        }];
+
+        let selected = select_auto_qwen3_variant_with_cache(
+            root.path(),
+            "shared/qwen3-8b-gguf",
+            variants,
+            &devices,
+            true,
+            |variant| variant.tag == "q8",
+        )
+        .unwrap();
+
+        assert_eq!(selected.tag, "q8");
+        assert!(
+            selected.size_bytes + ENCODER_DEPENDENCY_HEADROOM_BYTES
+                > devices[0].available_vram_bytes,
+            "the cached choice should remain stable and let planning move it to CPU"
+        );
+    }
+
+    #[test]
+    fn auto_qwen3_admission_sticks_before_download_finishes() {
+        let root = TempDir::new().unwrap();
+        let variants = mold_core::manifest::known_qwen3_8b_variants();
+        let pressured = vec![DeviceFact {
+            id: "cuda:0".to_string(),
+            ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 6_400_000_000,
+        }];
+        let recovered = vec![DeviceFact {
+            available_vram_bytes: 9_000_000_000,
+            ..pressured[0].clone()
+        }];
+
+        let first = select_auto_qwen3_variant_with_cache(
+            root.path(),
+            "shared/qwen3-8b-gguf",
+            variants,
+            &pressured,
+            true,
+            |_| false,
+        )
+        .unwrap();
+        let second = select_auto_qwen3_variant_with_cache(
+            root.path(),
+            "shared/qwen3-8b-gguf",
+            variants,
+            &recovered,
+            true,
+            |_| false,
+        )
+        .unwrap();
+
+        assert_eq!(first.tag, "q3");
+        assert_eq!(second.tag, first.tag);
+    }
+
+    #[test]
+    fn auto_qwen3_preview_does_not_establish_sticky_state() {
+        let root = TempDir::new().unwrap();
+        let variants = mold_core::manifest::known_qwen3_8b_variants();
+        let pressured = vec![DeviceFact {
+            id: "cuda:0".to_string(),
+            ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 6_400_000_000,
+        }];
+        let recovered = vec![DeviceFact {
+            available_vram_bytes: 9_000_000_000,
+            ..pressured[0].clone()
+        }];
+
+        let preview = select_auto_qwen3_variant_with_cache(
+            root.path(),
+            "shared/qwen3-8b-gguf",
+            variants,
+            &pressured,
+            false,
+            |_| false,
+        )
+        .unwrap();
+        let admission = select_auto_qwen3_variant_with_cache(
+            root.path(),
+            "shared/qwen3-8b-gguf",
+            variants,
+            &recovered,
+            true,
+            |_| false,
+        )
+        .unwrap();
+
+        assert_eq!(preview.tag, "q3");
+        assert_eq!(admission.tag, "q6");
     }
 }
