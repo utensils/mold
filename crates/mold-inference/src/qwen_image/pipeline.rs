@@ -1495,6 +1495,29 @@ impl QwenImageEngine {
         usage: Qwen2TextEncoderUsage,
         preference: Option<&str>,
     ) -> Result<ResolvedQwen2TextEncoder> {
+        self.resolve_text_encoder_source_with_preference_using(
+            gpu_device,
+            free_vram,
+            usage,
+            preference,
+            crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path,
+        )
+    }
+
+    fn resolve_text_encoder_source_with_preference_using<F>(
+        &self,
+        gpu_device: &Device,
+        free_vram: u64,
+        usage: Qwen2TextEncoderUsage,
+        preference: Option<&str>,
+        resolve_gguf: F,
+    ) -> Result<ResolvedQwen2TextEncoder>
+    where
+        F: FnOnce(
+            &ProgressReporter,
+            &mold_core::manifest::Qwen2VlVariant,
+        ) -> Result<std::path::PathBuf>,
+    {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let bf16_size_bytes = self
@@ -1505,39 +1528,18 @@ impl QwenImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        if self.is_edit_family() {
-            let mut resolved = Self::choose_text_encoder_source(
-                preference,
-                is_cuda,
-                is_metal,
-                free_vram,
-                bf16_size_bytes,
-                Qwen2TextEncoderUsage::Resident,
-            )?;
-            resolved.vision_paths = self.base.paths.text_encoder_files.clone();
-            if resolved.is_gguf {
-                let variant = mold_core::manifest::find_qwen2_vl_variant(&resolved.variant_label)
-                    .ok_or_else(|| {
-                    anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
-                })?;
-                resolved.paths = vec![
-                    crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
-                        &self.base.progress,
-                        variant,
-                    )?,
-                ];
-            } else {
-                resolved.paths = self.base.paths.text_encoder_files.clone();
-            }
-            return Ok(resolved);
-        }
+        let is_edit_family = self.is_edit_family();
         let mut resolved = Self::choose_text_encoder_source(
             preference,
             is_cuda,
             is_metal,
             free_vram,
             bf16_size_bytes,
-            usage,
+            if is_edit_family {
+                Qwen2TextEncoderUsage::Resident
+            } else {
+                usage
+            },
         )?;
 
         if resolved.is_gguf {
@@ -1545,16 +1547,19 @@ impl QwenImageEngine {
                 .ok_or_else(|| {
                     anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
                 })?;
-            resolved.paths = vec![
-                crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
-                    &self.base.progress,
-                    variant,
-                )?,
-            ];
+            resolved.paths = vec![resolve_gguf(&self.base.progress, variant)?];
         } else {
             resolved.paths = self.base.paths.text_encoder_files.clone();
         }
-        resolved.vision_paths = vec![];
+        resolved.vision_paths = if is_edit_family {
+            self.base.paths.text_encoder_files.clone()
+        } else {
+            vec![]
+        };
+
+        if is_edit_family {
+            return Ok(resolved);
+        }
 
         match preference {
             Some(tag) if tag != "auto" && tag != "bf16" => self.base.progress.info(&format!(
@@ -3988,6 +3993,7 @@ mod tests {
         let tokenizer = touch(&dir, "tokenizer.json");
         let mut paths = qwen_image_model_paths(transformer, vec![], vae, Some(tokenizer));
         paths.text_encoder_files = vec![touch(&dir, "text-encoder-00001-of-00004.safetensors")];
+        let quantized_text_encoder = touch(&dir, "text-encoder-q4.gguf");
         let engine = QwenImageEngine::new(
             "qwen-image-edit-2511:q4".to_string(),
             paths,
@@ -4008,15 +4014,20 @@ mod tests {
         assert!(!resolved.vision_paths.is_empty());
 
         let resolved = engine
-            .resolve_text_encoder_source_with_preference(
+            .resolve_text_encoder_source_with_preference_using(
                 &Device::Cpu,
                 0,
                 Qwen2TextEncoderUsage::Sequential,
                 Some("q4"),
+                |_, variant| {
+                    assert_eq!(variant.tag, "q4");
+                    Ok(quantized_text_encoder.clone())
+                },
             )
             .unwrap();
         assert!(resolved.is_gguf);
         assert_eq!(resolved.variant_label, "q4");
+        assert_eq!(resolved.paths, [quantized_text_encoder]);
         assert_eq!(resolved.vision_paths.len(), 1);
 
         let resolved = engine

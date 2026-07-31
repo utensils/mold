@@ -2858,6 +2858,12 @@ mod tests {
             true,
             None,
         );
+        let hidden_size = encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b().hidden_size;
+        let cap_feats = Tensor::zeros((1, 1, hidden_size), DType::F32, &Device::Cpu).unwrap();
+        engine.prompt_cache.lock().unwrap().insert(
+            prompt_text_key("a cat"),
+            CachedTensor::from_tensor(&cap_feats).unwrap(),
+        );
         let req = GenerateRequest {
             prompt: "a cat".to_string(),
             negative_prompt: None,
