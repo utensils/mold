@@ -1,6 +1,6 @@
 //! Unit tests for the resources module.
 
-use crate::resources::{ResourceBroadcaster, TelemetryTarget};
+use crate::resources::{nonzero_process_vram, ResourceBroadcaster, TelemetryTarget};
 use mold_core::{GpuBackend, GpuSnapshot, RamSnapshot, ResourceSnapshot};
 use mold_inference::device::CudaDeviceKind;
 
@@ -27,6 +27,13 @@ fn fake_snapshot() -> ResourceSnapshot {
         },
         cpu: None,
     }
+}
+
+#[test]
+fn zero_process_vram_is_ambiguous_not_authoritative() {
+    assert_eq!(nonzero_process_vram(None), None);
+    assert_eq!(nonzero_process_vram(Some(0)), None);
+    assert_eq!(nonzero_process_vram(Some(6 << 30)), Some(6 << 30));
 }
 
 #[tokio::test]

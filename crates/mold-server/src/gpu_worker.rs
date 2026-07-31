@@ -144,6 +144,7 @@ impl PlannedEngineMode {
 #[derive(Clone, Copy)]
 struct PlannedLoadContract<'a> {
     mode: PlannedEngineMode,
+    predicted_vram_peak_bytes: u64,
     execution_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
@@ -2503,6 +2504,7 @@ fn process_job_with_sink(
     let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
     let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
         mode: PlannedEngineMode::from_plan(plan),
+        predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
         request: &job.request,
         engine_paths: &plan.engine_paths,
@@ -3046,30 +3048,45 @@ fn finish_generation_success(
 /// a fresh load into the context between our reclaim and the actual load.
 fn preflight_memory_guard_with_eviction(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
     hint: Option<crate::model_manager::ActivationHint>,
+    planned_peak_bytes: Option<u64>,
 ) -> Result<(), crate::routes::ApiError> {
+    if let Some(predicted_peak_bytes) = planned_peak_bytes {
+        return preflight_planned_memory_guard_with_eviction(
+            cache_lock,
+            cache_key,
+            model_name,
+            ordinal,
+            predicted_peak_bytes,
+            hint,
+            None,
+        );
+    }
+
     loop {
         let active_vram = cache_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_vram_bytes();
-        let err = match crate::model_manager::preflight_memory_guard(
+        let guard = crate::model_manager::preflight_memory_guard(
             model_name,
             paths,
             active_vram,
             ordinal,
             hint,
-        ) {
+        );
+        let err = match guard {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
 
         let evicted = {
             let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
-            cache.evict_lru_parked_except(Some(model_name))
+            cache.evict_lru_parked_except(Some(cache_key))
         };
         let Some((evicted_name, engine)) = evicted else {
             return Err(err);
@@ -3082,6 +3099,88 @@ fn preflight_memory_guard_with_eviction(
         );
         // Drop outside the cache lock — `cuMemFree` and safetensor unmap
         // can block other cache users during the drop.
+        drop(engine);
+
+        #[cfg(feature = "cuda")]
+        device::post_drop_free_vram_bytes(ordinal).map_err(device_memory_api_error)?;
+    }
+}
+
+fn planned_active_vram_credit(measured_active_vram: u64, credit_cap: Option<u64>) -> u64 {
+    credit_cap.map_or(measured_active_vram, |cap| measured_active_vram.min(cap))
+}
+
+/// Revalidate an admitted plan against fresh physical pressure, surrendering
+/// parked cache entries before failing. Swap paths may provisionally count the
+/// active cache measurement because their post-drop sample is authoritative.
+/// Hot-cache paths cap that measurement at fresh process-attributed VRAM so a
+/// stale/global load delta cannot become fictitious reusable capacity.
+fn preflight_planned_memory_guard_with_eviction(
+    cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
+    model_name: &str,
+    ordinal: usize,
+    predicted_peak_bytes: u64,
+    hint: Option<crate::model_manager::ActivationHint>,
+    active_vram_credit_cap: Option<u64>,
+) -> Result<(), crate::routes::ApiError> {
+    preflight_planned_memory_guard_with_eviction_using(
+        cache_lock,
+        cache_key,
+        model_name,
+        ordinal,
+        active_vram_credit_cap,
+        |active_vram| {
+            crate::memory_preflight::preflight_planned_memory_guard(
+                model_name,
+                predicted_peak_bytes,
+                active_vram,
+                ordinal,
+                hint,
+            )
+        },
+    )
+}
+
+fn preflight_planned_memory_guard_with_eviction_using(
+    cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    cache_key: &str,
+    model_name: &str,
+    ordinal: usize,
+    active_vram_credit_cap: Option<u64>,
+    mut guard: impl FnMut(u64) -> Result<(), crate::routes::ApiError>,
+) -> Result<(), crate::routes::ApiError> {
+    loop {
+        let measured_active_vram = cache_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_vram_bytes();
+        let active_vram = planned_active_vram_credit(measured_active_vram, active_vram_credit_cap);
+        let err = match guard(active_vram) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+        // An attributed cap marks an unchanged hot-cache engine. Parked
+        // entries have already unloaded GPU weights, so destroying the warm
+        // set cannot create credible capacity for this request.
+        if active_vram_credit_cap.is_some() {
+            return Err(err);
+        }
+
+        let evicted = {
+            let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
+            cache.evict_lru_parked_except(Some(cache_key))
+        };
+        let Some((evicted_name, engine)) = evicted else {
+            return Err(err);
+        };
+        tracing::info!(
+            gpu = ordinal,
+            target_model = %model_name,
+            evicted_model = %evicted_name,
+            "evicting LRU parked entry to preserve admitted execution plan"
+        );
         drop(engine);
 
         #[cfg(feature = "cuda")]
@@ -3191,6 +3290,7 @@ fn ensure_model_ready_sync_inner(
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<ModelLoadDisposition> {
     let planned_mode = planned_load.map(|planned| planned.mode);
+    let planned_peak_bytes = planned_load.map(|planned| planned.predicted_vram_peak_bytes);
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
@@ -3212,12 +3312,37 @@ fn ensure_model_ready_sync_inner(
         )
     });
 
-    // Already loaded?
-    if let Some(entry) = cache.get(cache_key) {
-        if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
-            cache.touch(cache_key);
-            return Ok(ModelLoadDisposition::Unchanged);
+    // Already loaded? A matching engine avoids reconstruction, but an
+    // admitted request can have a different activation peak and physical
+    // pressure can change after admission. Recheck the frozen demand before
+    // returning the hot-cache hit.
+    let unchanged_cached = cache.get(cache_key).is_some_and(|entry| {
+        entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction
+    });
+    if unchanged_cached {
+        cache.touch(cache_key);
+        drop(cache);
+        if let Some(predicted_peak_bytes) = planned_peak_bytes {
+            if let Some(process_vram) = crate::resources::current_process_vram_bytes(&worker.gpu) {
+                preflight_planned_memory_guard_with_eviction(
+                    &worker.model_cache,
+                    cache_key,
+                    model_name,
+                    worker.gpu.ordinal,
+                    predicted_peak_bytes,
+                    hint,
+                    Some(process_vram),
+                )
+                .map_err(|e| anyhow::anyhow!(e.error))?;
+            } else {
+                tracing::debug!(
+                    gpu = worker.gpu.ordinal,
+                    model = %model_name,
+                    "process-attributed VRAM unavailable or ambiguous; retaining scheduler grant authority for hot-cache hit"
+                );
+            }
         }
+        return Ok(ModelLoadDisposition::Unchanged);
     }
 
     // Check if we have it cached but not on GPU (Parked).
@@ -3248,9 +3373,11 @@ fn ensure_model_ready_sync_inner(
             preflight_memory_guard_with_eviction(
                 &worker.model_cache,
                 cache_key,
+                model_name,
                 paths,
                 worker.gpu.ordinal,
                 hint,
+                planned_peak_bytes,
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -3263,12 +3390,22 @@ fn ensure_model_ready_sync_inner(
             }
         }
         if let Some(ref paths) = preflight_paths {
-            crate::memory_preflight::preflight_memory_guard_after_drop(
-                model_name,
-                paths,
-                worker.gpu.ordinal,
-                hint,
-            )
+            match planned_peak_bytes {
+                Some(predicted_peak_bytes) => {
+                    crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                        model_name,
+                        predicted_peak_bytes,
+                        worker.gpu.ordinal,
+                        hint,
+                    )
+                }
+                None => crate::memory_preflight::preflight_memory_guard_after_drop(
+                    model_name,
+                    paths,
+                    worker.gpu.ordinal,
+                    hint,
+                ),
+            }
             .map_err(|e| anyhow::anyhow!(e.error))?;
         } else {
             #[cfg(feature = "cuda")]
@@ -3474,9 +3611,11 @@ fn ensure_model_ready_sync_inner(
     preflight_memory_guard_with_eviction(
         &worker.model_cache,
         model_name,
+        model_name,
         &paths,
         worker.gpu.ordinal,
         hint,
+        planned_peak_bytes,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
@@ -3487,12 +3626,22 @@ fn ensure_model_ready_sync_inner(
             worker.set_resident_model(None);
         }
     }
-    crate::memory_preflight::preflight_memory_guard_after_drop(
-        model_name,
-        &paths,
-        worker.gpu.ordinal,
-        hint,
-    )
+    match planned_peak_bytes {
+        Some(predicted_peak_bytes) => {
+            crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                model_name,
+                predicted_peak_bytes,
+                worker.gpu.ordinal,
+                hint,
+            )
+        }
+        None => crate::memory_preflight::preflight_memory_guard_after_drop(
+            model_name,
+            &paths,
+            worker.gpu.ordinal,
+            hint,
+        ),
+    }
     .map_err(|e| anyhow::anyhow!(e.error))?;
     let load_strategy = if let Some(mode) = planned_mode {
         mode.load_strategy
@@ -3987,6 +4136,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
         load.hint,
         Some(PlannedLoadContract {
             mode: PlannedEngineMode::from_plan(load.plan),
+            predicted_vram_peak_bytes: load.plan.predicted_vram_peak_bytes,
             execution_fingerprint: &load.plan.execution_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
@@ -4260,6 +4410,105 @@ mod tests {
             configured.configured_execution_fingerprint(),
             Some("plan-fingerprint")
         );
+    }
+
+    #[test]
+    fn hot_cached_planned_engine_rechecks_pressure_before_unchanged_return() {
+        let source = include_str!("gpu_worker.rs");
+        let hot_cache_path = source
+            .split("// Already loaded?")
+            .nth(1)
+            .expect("hot-cache path must exist")
+            .split("// Check if we have it cached but not on GPU")
+            .next()
+            .expect("hot-cache path must have a bounded section");
+        let recheck = hot_cache_path
+            .find("preflight_planned_memory_guard_with_eviction(")
+            .expect("planned hot-cache hits must recheck fresh physical pressure");
+        let unchanged = hot_cache_path
+            .find("return Ok(ModelLoadDisposition::Unchanged)")
+            .expect("hot-cache path must retain its unchanged disposition");
+
+        assert!(
+            recheck < unchanged,
+            "fresh physical-pressure recheck must precede the hot-cache return"
+        );
+        assert!(
+            hot_cache_path.contains("current_process_vram_bytes(&worker.gpu)"),
+            "hot-cache credit must be clamped by fresh Mold-process attribution"
+        );
+        assert!(
+            hot_cache_path.contains("if let Some(process_vram)"),
+            "ambiguous attribution must retain scheduler authority instead of becoming zero credit"
+        );
+    }
+
+    #[test]
+    fn active_vram_credit_clamps_an_inflated_load_delta() {
+        let stale_global_load_delta = 16 << 30;
+
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, Some(6 << 30)),
+            6 << 30,
+            "fresh process attribution bounds a stale cache measurement"
+        );
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, Some(0)),
+            0,
+            "an explicit zero cap grants no credit; ambiguous attribution never calls this path"
+        );
+        assert_eq!(
+            planned_active_vram_credit(stale_global_load_delta, None),
+            stale_global_load_delta,
+            "swap paths may provisionally count active memory because they recheck after drop"
+        );
+    }
+
+    #[test]
+    fn hot_cache_guard_propagates_pressure_with_attributed_credit_cap() {
+        struct LoadedEngine;
+        impl InferenceEngine for LoadedEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!()
+            }
+            fn model_name(&self) -> &str {
+                "hot-cache"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let cache = std::sync::Mutex::new(ModelCache::new(2));
+        cache.lock().unwrap().insert_loaded(
+            "hot-cache".to_string(),
+            Box::new(LoadedEngine),
+            16 << 30,
+        );
+        let observed_credit = Arc::new(Mutex::new(None));
+        let observed = observed_credit.clone();
+
+        let error = preflight_planned_memory_guard_with_eviction_using(
+            &cache,
+            "hot-cache",
+            "display-model",
+            0,
+            Some(6 << 30),
+            move |credit| {
+                *observed.lock().unwrap() = Some(credit);
+                Err(crate::routes::ApiError::insufficient_memory(
+                    "injected fresh-pressure rejection",
+                ))
+            },
+        )
+        .expect_err("a hot-cache guard failure must reach the owner path");
+
+        assert_eq!(*observed_credit.lock().unwrap(), Some(6 << 30));
+        assert!(error.error.contains("injected fresh-pressure rejection"));
+        assert!(cache.lock().unwrap().contains("hot-cache"));
     }
 
     #[test]
