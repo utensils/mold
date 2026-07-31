@@ -41,6 +41,22 @@ function asTransition(v: unknown): SequenceTransition | undefined {
   return v === "smooth" || v === "cut" || v === "fade" ? v : undefined;
 }
 
+function loras(
+  value: unknown,
+): Array<{ path: string; scale: number; name?: string | null }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows = value.flatMap((raw) => {
+    if (raw == null || typeof raw !== "object") return [];
+    const row = raw as Record<string, unknown>;
+    const path = str(row.path);
+    const scale = num(row.scale);
+    if (!path || scale === undefined) return [];
+    const name = str(row.name);
+    return [{ path, scale, ...(name ? { name } : {}) }];
+  });
+  return rows.length ? rows : undefined;
+}
+
 /**
  * Read a server-echoed chain script into the studio `ChainScript` shape.
  * Returns `null` when the payload carries nothing editable (absent script,
@@ -75,6 +91,8 @@ export function normalizeServerChainScript(raw: unknown): ChainScript | null {
     if (image !== undefined) stage.source_image_b64 = image;
     const seedOffset = seedString(s.seed_offset);
     if (seedOffset !== undefined) stage.seed_offset = seedOffset;
+    const stageLoras = loras(s.loras);
+    if (stageLoras) stage.loras = stageLoras;
     return stage;
   });
 

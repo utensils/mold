@@ -109,6 +109,34 @@ describe("buildChainRequest", () => {
     expect(req.stages[0]?.source_image).toBe("QUJD");
     expect(req.stages[1]?.source_image).toBeUndefined();
   });
+
+  it("serializes a distinct camera motion LoRA on each clip", () => {
+    const req = buildChainRequest(
+      shared(),
+      [
+        clip({ cameraControl: "dolly-in" }),
+        clip({
+          prompt: "b",
+          cameraControl: "/models/camera/custom.safetensors",
+        }),
+      ],
+      { motionTailFrames: 17, enableAudio: false },
+    );
+    expect(req.stages[0]?.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        scale: 1,
+        name: "Dolly in",
+      },
+    ]);
+    expect(req.stages[1]?.loras).toEqual([
+      {
+        path: "/models/camera/custom.safetensors",
+        scale: 1,
+        name: "Camera motion",
+      },
+    ]);
+  });
 });
 
 describe("script round-trip", () => {
@@ -126,7 +154,18 @@ describe("script round-trip", () => {
         enable_audio: true,
       },
       stages: [
-        { prompt: "opening", frames: 97, source_image_b64: "QUJD" },
+        {
+          prompt: "opening",
+          frames: 97,
+          source_image_b64: "QUJD",
+          loras: [
+            {
+              path: "camera-control:dolly-left",
+              scale: 1,
+              name: "Dolly left",
+            },
+          ],
+        },
         { prompt: "landing", frames: 33, transition: "fade", fade_frames: 8 },
       ],
     };
@@ -136,6 +175,7 @@ describe("script round-trip", () => {
     expect(loaded.clips[0]?.prompt).toBe("opening");
     expect(loaded.clips[0]?.frames).toBe(97);
     expect(loaded.clips[1]?.transition).toBe("fade");
+    expect(loaded.clips[0]?.cameraControl).toBe("dolly-left");
     expect(loaded.clips[1]?.fadeFrames).toBe(8);
     expect(loaded.openingImage?.base64).toBe("QUJD");
     expect(loaded.enableAudio).toBe(true);
@@ -152,6 +192,7 @@ describe("script round-trip", () => {
     expect(back.stages[1]?.transition).toBe("fade");
     expect(back.stages[1]?.fade_frames).toBe(8);
     expect(back.stages[0]?.source_image_b64).toBe("QUJD");
+    expect(back.stages[0]?.loras?.[0]?.path).toBe("camera-control:dolly-left");
   });
 
   it("recovers source dimensions from script media without adding wire fields", () => {
@@ -221,6 +262,14 @@ describe("stageInvalidation", () => {
     const current = baseline.map((c) => ({ ...c }));
     const middle = current[1];
     if (middle) middle.prompt = "two, revised";
+    const p = plan(current);
+    expect(p.firstDirtyStage).toBe(1);
+    expect(p.perClip).toEqual(["cached", "rerender", "rerender"]);
+  });
+
+  it("treats a per-clip camera motion change as a pixel change", () => {
+    const current = baseline.map((c) => ({ ...c }));
+    current[1]!.cameraControl = "jib-up";
     const p = plan(current);
     expect(p.firstDirtyStage).toBe(1);
     expect(p.perClip).toEqual(["cached", "rerender", "rerender"]);

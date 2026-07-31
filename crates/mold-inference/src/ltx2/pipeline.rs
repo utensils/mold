@@ -371,7 +371,9 @@ impl Ltx2Engine {
     }
 
     #[allow(dead_code)]
-    fn camera_control_preset(name: &str) -> Option<lora::CameraControlPreset> {
+    fn camera_control_preset(
+        name: &str,
+    ) -> Option<&'static mold_core::ltx2_camera::Ltx2CameraControlPreset> {
         lora::camera_control_preset(name)
     }
 
@@ -1793,7 +1795,7 @@ mod tests {
     fn camera_control_preset_aliases_are_supported() {
         let preset = Ltx2Engine::camera_control_preset("dolly-in").unwrap();
         assert_eq!(
-            preset.filename,
+            preset.hf_filename,
             "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
         );
         assert!(Ltx2Engine::camera_control_preset("unknown").is_none());

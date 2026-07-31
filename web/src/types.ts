@@ -435,6 +435,7 @@ export interface ChainStageWire {
   seed_offset?: number | null;
   transition?: "smooth" | "cut" | "fade";
   fade_frames?: number | null;
+  loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
 
 export interface ChainRequestWire {
@@ -745,6 +746,17 @@ export interface Ltx2ControlAdapterInfo {
   id: string;
   label: string;
   guide: string;
+  size_bytes: number;
+  installed: boolean;
+  download_model: string;
+  download_repo: string;
+  download_filename: string;
+  download_sha256: string;
+}
+
+export interface Ltx2CameraControlInfo {
+  id: string;
+  label: string;
   size_bytes: number;
   installed: boolean;
   download_model: string;

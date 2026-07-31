@@ -31,14 +31,8 @@ fn rejects_over_max_stages() {
 }
 
 #[test]
-fn rejects_reserved_loras() {
-    run_validate(&TestEnv::new(), "reserved_loras.toml")
-        .failure()
-        .stderr(
-            predicate::str::contains("loras")
-                .or(predicate::str::contains("sub-project B"))
-                .or(predicate::str::contains("reserved")),
-        );
+fn accepts_stage_loras() {
+    run_validate(&TestEnv::new(), "stage_loras.toml").success();
 }
 
 #[test]

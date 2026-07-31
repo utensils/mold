@@ -16,6 +16,8 @@ pub mod expand_prompts;
 pub mod format;
 pub mod install_error;
 pub mod lambda;
+pub mod ltx2_camera;
+pub use ltx2_camera::Ltx2CameraControlInfo;
 pub mod ltx2_control;
 pub use ltx2_control::Ltx2ControlAdapterInfo;
 pub mod manifest;

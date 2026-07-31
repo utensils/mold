@@ -36,6 +36,17 @@ vi.mock("../../api", () => ({
   })),
 }));
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    }),
+  );
+});
+afterEach(() => vi.unstubAllGlobals());
+
 function baseForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
@@ -84,6 +95,46 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(wrapper.find("[data-test='section-lora']").exists()).toBe(false);
     expect(wrapper.find("[data-test='section-output']").exists()).toBe(false);
     expect(wrapper.find("[data-test='section-video']").exists()).toBe(false);
+  });
+
+  it("edits and resets camera motion on the active clip", async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          id: "dolly-in",
+          label: "Dolly in",
+          size_bytes: 327_309_208,
+          installed: false,
+          download_model: "ltx2-camera-control-dolly-in-19b",
+          download_repo: "Lightricks/camera",
+          download_filename: "dolly-in.safetensors",
+          download_sha256: "a".repeat(64),
+        },
+      ],
+    } as Response);
+    const wrapper = factory(
+      "ltx2",
+      { model: "ltx-2-19b-distilled:fp8" },
+      { output: "sequence" },
+    );
+    const draft = useSequenceDraftStore();
+    draft.clips[1]!.cameraControl = "jib-up";
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='sequence-camera-motion']").findAll("option"),
+      ).toHaveLength(3),
+    );
+    expect(draft.clips[1]?.cameraControl).toBeNull();
+    await wrapper
+      .get("[data-test='sequence-camera-motion']")
+      .setValue("dolly-in");
+    expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
+    expect(
+      wrapper.get("[data-test='sequence-camera-motion']").text(),
+    ).toContain("downloads on first use");
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    expect(draft.clips[0]?.cameraControl).toBeNull();
   });
 });
 

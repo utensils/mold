@@ -87,6 +87,7 @@ pub async fn create_chain_job(
             "durable chain jobs currently require output_format = mp4; legacy /api/generate/chain may request gif/webp/apng via the shim",
         ));
     }
+    crate::routes::materialize_chain_camera_controls(&state, &authority.config, &req).await?;
     let job_id = uuid::Uuid::new_v4().to_string();
     let jobs_root = jobs_root()?;
     let model = req.model.clone();
@@ -489,6 +490,16 @@ pub async fn amend_chain_job(
             &validation_config,
             &mut candidate,
         )?;
+        let candidate = candidate
+            .normalise()
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        if candidate.output_format != mold_core::OutputFormat::Mp4 {
+            return Err(ApiError::validation(
+                "durable chain jobs currently require output_format = mp4",
+            ));
+        }
+        crate::routes::materialize_chain_camera_controls(&state, &validation_config, &candidate)
+            .await?;
         if candidate.motion_tail_frames != motion_tail_before {
             req.motion_tail_frames = Some(candidate.motion_tail_frames);
         }

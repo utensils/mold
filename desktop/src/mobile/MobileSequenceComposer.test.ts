@@ -7,6 +7,7 @@ import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { ModelEntry } from "../lib/api/types";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
+import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 
 installMemoryLocalStorage();
@@ -27,6 +28,18 @@ const ltx2: ModelEntry = {
 };
 
 const ltxVideo: ModelEntry = { ...ltx2, name: "ltx-video:bf16", family: "ltx-video" };
+const cameraControls = [
+  {
+    id: "dolly-in",
+    label: "Dolly in",
+    size_bytes: 327_309_208,
+    installed: false,
+    download_model: "ltx2-camera-control-dolly-in-19b",
+    download_repo: "Lightricks/camera",
+    download_filename: "dolly-in.safetensors",
+    download_sha256: "a".repeat(64),
+  },
+];
 
 const limits: ChainLimits = {
   model: ltx2.name,
@@ -52,6 +65,8 @@ function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
       fps: 24,
       submitting: false,
       error: "",
+      cameraControls,
+      cameraControlsLoaded: true,
       ...props,
     },
   });
@@ -76,6 +91,18 @@ afterEach(() => {
 });
 
 describe("MobileSequenceComposer clips", () => {
+  it("stores and resets camera motion on the active clip", async () => {
+    const draft = useSequenceDraftStore();
+    mountComposer();
+    await wrapper!.get("[data-test='mobile-sequence-open-advanced']").trigger("click");
+    const select = wrapper!.get("[data-test='mobile-sequence-camera-motion']");
+    expect(select.text()).toContain("downloads on first use");
+    await select.setValue("dolly-in");
+    expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
+    wrapper!.getComponent(MobileAdvancedSheet).vm.$emit("reset");
+    expect(draft.clips[0]?.cameraControl).toBeNull();
+  });
+
   it("renders the shared draft's clips instead of private component state", async () => {
     const draft = useSequenceDraftStore();
     draft.clips[0]!.prompt = "a paper boat";

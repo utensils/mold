@@ -245,11 +245,11 @@ describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
     expect(buildRequest(form).loras).toBeUndefined();
   });
 
-  it("skips presets for LTX-2.3 models (no published camera LoRAs) but keeps custom paths", () => {
+  it("serializes host-vetted presets without guessing compatibility from the public model id", () => {
     const form = ltx2Form();
     form.model = "ltx-2.3-22b-distilled:fp8";
     form.cameraControl = "dolly-in";
-    expect(buildRequest(form).loras).toBeUndefined();
+    expect(buildRequest(form).loras).toEqual([{ path: "camera-control:dolly-in", scale: 1.0 }]);
     form.cameraControl = "/loras/dolly.safetensors";
     expect(buildRequest(form).loras).toEqual([{ path: "/loras/dolly.safetensors", scale: 1.0 }]);
   });
@@ -268,14 +268,12 @@ describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
     expect(form.cameraControl).toBeNull();
   });
 
-  it("clears a stale preset when switching from 19B to LTX-2.3 (buildRequest would drop it)", () => {
-    // Presets are published for 19B only; on LTX-2.3 buildRequest silently
-    // drops a preset value. Clear it on the model switch so the UI matches.
+  it("does not guess camera compatibility while model defaults change", () => {
     const form = ltx2Form();
     form.model = "ltx-2-19b:fp8";
     form.cameraControl = "dolly-in";
     applyModelDefaults(form, { ...ltx2Model(), name: "ltx-2.3-22b-distilled:fp8", family: "ltx2" });
-    expect(form.cameraControl).toBeNull();
+    expect(form.cameraControl).toBe("dolly-in");
   });
 
   it("keeps a custom .safetensors path when switching into LTX-2.3 (still valid there)", () => {

@@ -20,6 +20,7 @@ export interface ChainStageWire {
   seed_offset?: number | null;
   transition?: SequenceTransition;
   fade_frames?: number | null;
+  loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
 
 export interface ChainRequestWire {
@@ -55,6 +56,7 @@ export interface ChainStageMetadata {
   transition: SequenceTransition;
   fade_frames?: number | null;
   seed?: string | null;
+  loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
 
 /** Structured multi-clip provenance block on `OutputMetadata` (additive;
@@ -87,6 +89,7 @@ export interface ChainScriptStage {
   source_image_path?: string | null;
   source_image_b64?: string | null;
   seed_offset?: string | null;
+  loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
 
 export interface ChainScript {

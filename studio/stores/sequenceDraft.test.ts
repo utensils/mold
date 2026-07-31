@@ -45,7 +45,10 @@ describe("sequence draft store", () => {
     expect(store.clips).toHaveLength(2);
 
     const first = store.clips[0];
-    if (first) first.prompt = "a kingfisher waits";
+    if (first) {
+      first.prompt = "a kingfisher waits";
+      first.cameraControl = "dolly-in";
+    }
     vi.advanceTimersByTime(1000);
 
     const raw = localStorage.getItem(SEQUENCE_DRAFT_KEY);
@@ -53,12 +56,40 @@ describe("sequence draft store", () => {
     const saved = JSON.parse(raw!);
     expect(saved.version).toBe(1);
     expect(saved.clips[0].prompt).toBe("a kingfisher waits");
+    expect(saved.clips[0].cameraControl).toBe("dolly-in");
 
     // A brand-new store (new session) restores the prompt — the desktop
     // prompt-loss regression: clip prompts must survive unmount/reload.
     const next = freshStore();
     next.hydrate();
     expect(next.clips[0]?.prompt).toBe("a kingfisher waits");
+    expect(next.clips[0]?.cameraControl).toBe("dolly-in");
+  });
+
+  it("normalizes pre-camera drafts to an explicit empty selection", () => {
+    localStorage.setItem(
+      SEQUENCE_DRAFT_KEY,
+      JSON.stringify({
+        version: 1,
+        output: "sequence",
+        clips: [
+          {
+            id: "old",
+            prompt: "legacy",
+            frames: 97,
+            transition: "smooth",
+            fadeFrames: 8,
+            negativePrompt: "",
+            sourceImage: null,
+          },
+        ],
+        enableAudio: false,
+        lastSingleModel: null,
+      }),
+    );
+    const store = freshStore();
+    store.hydrate();
+    expect(store.clips[0]?.cameraControl).toBeNull();
   });
 
   it("restores the sequence-level opening image from quota-safe media storage", async () => {

@@ -395,7 +395,16 @@ fn build_stage_generate_request(
         keyframes: None,
         pipeline: None,
         ic_lora_control: None,
-        loras: None,
+        loras: (!stage.loras.is_empty()).then(|| {
+            stage
+                .loras
+                .iter()
+                .map(|lora| mold_core::LoraWeight {
+                    path: lora.path.clone(),
+                    scale: lora.scale,
+                })
+                .collect()
+        }),
         retake_range: None,
         spatial_upscale: None,
         temporal_upscale: None,
@@ -408,7 +417,7 @@ mod tests {
     use super::*;
 
     use image::Rgb;
-    use mold_core::chain::{ChainStage, TransitionMode};
+    use mold_core::chain::{ChainStage, LoraSpec, TransitionMode};
 
     /// Deterministic fake renderer for orchestrator tests. Records every
     /// call so assertions can inspect the per-stage request shape, emits
@@ -565,6 +574,31 @@ mod tests {
             source_image: None,
             enable_audio: None,
         }
+    }
+
+    #[test]
+    fn stage_request_carries_the_ordered_lora_stack() {
+        let mut clip = stage("camera move", 97);
+        clip.loras = vec![
+            LoraSpec {
+                path: "camera-control:dolly-in".into(),
+                scale: 1.0,
+                name: Some("Dolly in".into()),
+            },
+            LoraSpec {
+                path: "/models/style.safetensors".into(),
+                scale: 0.6,
+                name: None,
+            },
+        ];
+        let chain = chain_req(vec![clip.clone()], 17);
+        let request = build_stage_generate_request(&clip, &chain, 42, 0);
+        let loras = request.loras.expect("stage LoRAs must reach inference");
+        assert_eq!(loras.len(), 2);
+        assert_eq!(loras[0].path, "camera-control:dolly-in");
+        assert_eq!(loras[0].scale, 1.0);
+        assert_eq!(loras[1].path, "/models/style.safetensors");
+        assert_eq!(loras[1].scale, 0.6);
     }
 
     #[test]

@@ -130,6 +130,7 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         .normalise()
         .map_err(|e| ApiError::validation(e.to_string()))?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    crate::routes::materialize_chain_camera_controls(state, &authority.config, &req).await?;
 
     let original_format = req.output_format;
     req.output_format = OutputFormat::Mp4;
@@ -713,6 +714,22 @@ pub async fn validate_chain(
             ));
         }
     }
+    let mut generate = req.synthetic_generate_request(
+        mold_core::OutputFormat::Mp4,
+        req.estimated_total_frames(),
+        req.fps,
+    );
+    generate.loras = Some(
+        req.stages
+            .iter()
+            .flat_map(|stage| stage.loras.iter())
+            .map(|lora| mold_core::LoraWeight {
+                path: lora.path.clone(),
+                scale: lora.scale,
+            })
+            .collect(),
+    );
+    crate::routes::plan_builtin_ltx2_camera_controls(&state, &generate).await?;
 
     Ok(Json(ChainValidationResponse::from_normalized(
         &req, warnings,
