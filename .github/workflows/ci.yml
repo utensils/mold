@@ -111,6 +111,8 @@ jobs:
               - 'website/deployment/nixos.md'
               - 'website/guide/installation.md'
               - '.github/workflows/desktop-distribution.yml'
+              - '.github/workflows/desktop.yml'
+              - '.github/workflows/ios.yml'
               - '.github/workflows/release.yml'
               - 'scripts/release/**'
               - 'scripts/verify-cuda-release-binary.sh'
