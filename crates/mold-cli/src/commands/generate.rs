@@ -321,12 +321,14 @@ pub async fn run(
     // other video families error fast rather than silently over-producing.
     {
         use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
+        let routing_fps = effective_fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
         let decision = decide_chain_routing(
             effective_frames,
             family.as_deref(),
             model,
             clip_frames,
             motion_tail,
+            routing_fps,
         );
         match decision {
             ChainRoutingDecision::SingleClip => {
@@ -339,7 +341,15 @@ pub async fn run(
                 clip_frames: cf,
                 motion_tail: mt,
             } => {
-                warn_if_clamped(clip_frames, super::chain::LTX2_DISTILLED_CLIP_CAP);
+                warn_if_clamped(
+                    clip_frames,
+                    family
+                        .as_deref()
+                        .and_then(|family| {
+                            mold_core::validation::max_frames_for_family_at_fps(family, routing_fps)
+                        })
+                        .unwrap_or(super::chain::LTX2_DEFAULT_CLIP_FRAMES),
+                );
                 let (eff_w, eff_h) = effective_dimensions(
                     &config,
                     &model_cfg,

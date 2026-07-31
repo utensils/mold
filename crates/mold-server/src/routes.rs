@@ -4059,7 +4059,8 @@ fn expand_capabilities(
     path = "/api/capabilities/chain-limits",
     tag = "server",
     params(
-        ("model" = String, Query, description = "Model name (e.g. ltx-2-19b-distilled:fp8)")
+        ("model" = String, Query, description = "Model name (e.g. ltx-2-19b-distilled:fp8)"),
+        ("fps" = Option<u32>, Query, description = "fps the clips will render at. LTX-2's per-clip cap is a runtime duration, so the returned cap moves with this; defaults to the model's own default fps."),
     ),
     responses(
         (status = 200, description = "Chain limits for the requested model",
@@ -4084,7 +4085,7 @@ async fn capabilities_chain_limits(
     };
 
     let resolved = mold_core::manifest::resolve_model_name(&raw_model);
-    let (family, quant, supports_audio, default_frames) =
+    let (family, quant, supports_audio, default_frames, default_fps) =
         if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
             let quant = resolved
                 .split_once(':')
@@ -4092,13 +4093,14 @@ async fn capabilities_chain_limits(
                 .unwrap_or_default();
             let family = manifest.family.clone();
             let supports_audio = crate::chain_limits::family_supports_audio(&family);
-            let default_frames = state
-                .config
-                .read()
-                .await
-                .resolved_model_config(&resolved)
-                .effective_frames();
-            (family, quant, supports_audio, default_frames)
+            let model_config = state.config.read().await.resolved_model_config(&resolved);
+            (
+                family,
+                quant,
+                supports_audio,
+                model_config.effective_frames(),
+                model_config.effective_fps(),
+            )
         } else {
             // Installed live-catalog models retain opaque `cv:` / `hf:` ids and
             // therefore cannot be found in the built-in manifest. Resolve them
@@ -4121,6 +4123,7 @@ async fn capabilities_chain_limits(
                 String::new(),
                 supports_audio,
                 entry.defaults.default_frames,
+                entry.defaults.default_fps,
             )
         };
 
@@ -4128,9 +4131,16 @@ async fn capabilities_chain_limits(
         return (StatusCode::NOT_FOUND, "model is not chain-capable\n").into_response();
     }
 
+    // An explicit `?fps=` wins so a client editing the fps control can ask for
+    // the cap it will actually be held to; otherwise use the model's default.
+    let fps = params
+        .get("fps")
+        .and_then(|value| value.parse::<u32>().ok())
+        .or(default_fps);
+
     // TODO(sub-project D): pass live free VRAM from AppState.
     let mut limits =
-        crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0, default_frames);
+        crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0, default_frames, fps);
     limits.supports_audio = supports_audio;
     Json(limits).into_response()
 }

@@ -1055,16 +1055,37 @@ stop hardcoding a frame count that ignores the selected checkpoint:
 | ---------------- | ------------------------------------------------------------------------------------------------------------- |
 | `default_frames` | Default frame count for one clip. LTX-2 defaults to 97, LTX-Video to its shipped 25.                          |
 | `default_fps`    | Default frames per second.                                                                                    |
-| `max_frames`     | Ceiling for a single request **without** temporal upscaling — 153 for LTX-2's RoPE budget, 257 for LTX-Video. |
+| `max_frames`     | Ceiling for a single request **at `default_fps`** — 484 for LTX-2 at 24 fps, 257 for LTX-Video.               |
+| `max_runtime_seconds` | Present when the family's real ceiling is a duration rather than a frame count (LTX-2: 20). Recompute `max_frames` at another fps as `max_runtime_seconds · fps + 4`. |
+| `max_frames_absolute` | fps-independent frame guard paired with `max_runtime_seconds` (LTX-2: 604).                              |
 | `frame_step`     | Valid frame counts are `k · frame_step + 1`; 8 for the LTX families.                                          |
 
-All four are additive and omitted entirely on image models — clients must
+::: tip LTX-2's ceiling is a duration, not a frame count
+The LTX-2 checkpoints ship `pos_embed_max_pos = 20`, and the temporal RoPE axis
+is normalized in **seconds** (the pixel-frame coordinate is divided by fps
+before `max_pos` normalization). So the budget is 20 seconds of runtime — 484
+frames at 24 fps, but only 124 at 6 fps. Clients that let the user change fps
+must recompute `max_frames` from `max_runtime_seconds`; treating the advertised
+scalar as fixed will be wrong in both directions.
+
+`--temporal-upscale x2` does **not** extend this budget: it halves the stage-1
+frame count *and* the stage-1 fps, so stage 1 renders the same runtime at half
+the frame rate.
+:::
+
+All of these are additive and omitted entirely on image models — clients must
 treat their absence as "not a video model" rather than substituting a
 constant. They come from the same manifest defaults and validator constants
-the server enforces, and the server-side validator stays authoritative;
-clients with temporal-upscale support keep their own doubling math on top of
-`max_frames`. `GET /api/capabilities/chain-limits?model=<name>` reports
-`frames_per_clip_recommended` from the same per-model default.
+the server enforces, and the server-side validator stays authoritative.
+
+`GET /api/capabilities/chain-limits?model=<name>&fps=<n>` reports
+`frames_per_clip_recommended` from the same per-model default, and its
+`frames_per_clip_cap` follows the same duration budget: a chain clip is
+denoised as one generation, so it is bound by exactly the single-request
+ceiling. The response echoes the `fps` it was computed at and, for families
+with a duration budget, `frames_per_clip_runtime_seconds`. Pass `fps` when the
+user is editing that control so the advertised cap matches what the server will
+hold the request to.
 
 ## `/api/status`
 

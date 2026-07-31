@@ -317,7 +317,10 @@ describe("AdvancedSettings — video (LTX-2)", () => {
   it("shows the reject message for a non-chainable model over budget", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
-    form.frames = 241;
+    // 489 frames is past even the single-clip 20s budget at 24 fps, so a
+    // non-chainable model has nowhere to route it. (241 frames is now a valid
+    // single clip — the ceiling is a duration, not a flat 97.)
+    form.frames = 489;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.get("[data-test='chain-reject']").text()).toContain(

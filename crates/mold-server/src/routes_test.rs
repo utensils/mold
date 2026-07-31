@@ -8969,7 +8969,9 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert_eq!(limits["frames_per_clip_cap"], 484);
+        assert_eq!(limits["fps"], 24);
+        assert_eq!(limits["frames_per_clip_runtime_seconds"], 20);
         assert_eq!(limits["max_stages"], 16);
         assert!(limits["transition_modes"]
             .as_array()
@@ -9003,6 +9005,10 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert!(
+            limits.get("frames_per_clip_runtime_seconds").is_none(),
+            "ltx-video publishes a flat frame ceiling, not a duration budget",
+        );
         assert_eq!(
             limits["frames_per_clip_recommended"], 25,
             "LTX-Video manifests declare frames: 25",
@@ -9049,7 +9055,11 @@ mod tests {
             .expect("an ltx2 model should be listed");
         assert_eq!(ltx2["default_frames"], 97);
         assert_eq!(ltx2["default_fps"], 24);
-        assert_eq!(ltx2["max_frames"], 153);
+        assert_eq!(
+            ltx2["max_frames"], 484,
+            "the 20s temporal RoPE budget at the model's own 24 fps default",
+        );
+        assert_eq!(ltx2["max_runtime_seconds"], 20);
         assert_eq!(ltx2["frame_step"], 8);
 
         let flux = models
@@ -9145,7 +9155,7 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
-        assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert_eq!(limits["frames_per_clip_cap"], 484);
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",

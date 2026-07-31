@@ -598,7 +598,16 @@ fn installed_catalog_models(
                 default_guidance: guidance,
                 default_frames: frames,
                 default_fps: fps,
-                max_frames: mold_core::validation::max_frames_for_family(&sidecar.family),
+                max_frames: mold_core::validation::max_frames_for_family_at_fps(
+                    &sidecar.family,
+                    fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
+                ),
+                max_runtime_seconds: mold_core::validation::max_runtime_seconds_for_family(
+                    &sidecar.family,
+                ),
+                max_frames_absolute: mold_core::validation::max_frames_absolute_for_family(
+                    &sidecar.family,
+                ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
                 max_pixels: Some(mold_core::validation::MAX_PIXELS),
                 recommended_dimensions: mold_core::validation::recommended_dimensions(
@@ -2169,7 +2178,12 @@ mod tests {
         // family runtime defaults and the family constraint helpers.
         assert_eq!(video_only[0].defaults.default_frames, Some(97));
         assert_eq!(video_only[0].defaults.default_fps, Some(24));
-        assert_eq!(video_only[0].defaults.max_frames, Some(153));
+        assert_eq!(
+            video_only[0].defaults.max_frames,
+            Some(484),
+            "the 20s LTX-2 temporal budget at the sidecar's 24 fps default",
+        );
+        assert_eq!(video_only[0].defaults.max_runtime_seconds, Some(20));
         assert_eq!(video_only[0].defaults.frame_step, Some(8));
 
         write_safetensors_with_keys(

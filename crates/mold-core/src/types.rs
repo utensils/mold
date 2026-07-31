@@ -1019,13 +1019,28 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 24)]
     pub default_fps: Option<u32>,
-    /// Maximum frames a single request may ask for WITHOUT temporal
-    /// upscaling (additive; absent for image models). Clients with
-    /// temporal-upscale support keep their own doubling math; the server
+    /// Maximum frames a single request may ask for at `default_fps`
+    /// (additive; absent for image models). For families whose ceiling is a
+    /// duration — see `max_runtime_seconds` — this scalar moves with fps, so
+    /// clients that let the user change fps should recompute it from
+    /// `max_runtime_seconds` rather than treat it as fixed. The server
     /// validator remains authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(example = 153)]
+    #[schema(example = 484)]
     pub max_frames: Option<u32>,
+    /// Single-request runtime ceiling in seconds, when the family's real limit
+    /// is a duration rather than a frame count (additive; currently LTX-2 /
+    /// LTX-2.3, whose temporal RoPE budget is expressed in seconds). Clients
+    /// derive `max_frames` at an arbitrary fps as
+    /// `max_runtime_seconds * fps + 4`, clamped to `max_frames_absolute`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 20)]
+    pub max_runtime_seconds: Option<u32>,
+    /// Hard frame ceiling that applies regardless of fps (additive). Present
+    /// alongside `max_runtime_seconds`; a resource guard, not a model limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 604)]
+    pub max_frames_absolute: Option<u32>,
     /// Valid frame counts are `k * frame_step + 1` (additive; absent for
     /// image models). 8 for the LTX families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1195,20 +1210,23 @@ mod model_defaults_frame_tests {
         let video = ModelDefaults {
             default_frames: Some(97),
             default_fps: Some(24),
-            max_frames: Some(153),
+            max_frames: Some(484),
+            max_runtime_seconds: Some(20),
             frame_step: Some(8),
             ..parsed
         };
         let out = serde_json::to_value(&video).unwrap();
         assert_eq!(out["default_frames"], 97);
         assert_eq!(out["default_fps"], 24);
-        assert_eq!(out["max_frames"], 153);
+        assert_eq!(out["max_frames"], 484);
+        assert_eq!(out["max_runtime_seconds"], 20);
         assert_eq!(out["frame_step"], 8);
 
         let back: ModelDefaults = serde_json::from_value(out).unwrap();
         assert_eq!(back.default_frames, Some(97));
         assert_eq!(back.default_fps, Some(24));
-        assert_eq!(back.max_frames, Some(153));
+        assert_eq!(back.max_frames, Some(484));
+        assert_eq!(back.max_runtime_seconds, Some(20));
         assert_eq!(back.frame_step, Some(8));
     }
 }

@@ -24,13 +24,31 @@ pub fn family_supports_lora(family: &str) -> bool {
     LORA_CAPABLE_FAMILIES.contains(&family)
 }
 
-/// Maximum pixel-frame count for LTX-2 / LTX-2.3. Derived from the checkpoint's
-/// `positional_embedding_max_pos[0] = 20` temporal RoPE budget and the 8x VAE
-/// temporal compression: `(20 - 1) * 8 + 1 = 153`. Exceeding this overflows the
-/// RoPE normalization and collapses output into random-color noise.
-pub const LTX2_MAX_FRAMES: u32 = 153;
+/// Temporal RoPE budget for LTX-2 / LTX-2.3, **in seconds of video runtime**.
+///
+/// The checkpoints ship `pos_embed_max_pos = 20`, and both upstream `ltx_core`
+/// and mold's own RoPE path convert the temporal axis to *seconds* before
+/// normalizing by it: `ltx2/model/rope.rs`'s `scale_video_time_to_seconds`
+/// divides the pixel-frame coordinate by the request's fps. So `20` bounds
+/// twenty seconds of runtime, not twenty latent frames — which is exactly the
+/// ~20 s single-generation duration Lightricks advertises for LTX-2.3.
+pub const LTX2_MAX_RUNTIME_SECONDS: u32 = 20;
 
-/// Global frame ceiling applied to every video request regardless of family.
+/// fps assumed for LTX-2 when a caller must name a frame ceiling without a
+/// request in hand (the `/api/models` scalar fallback, and requests that leave
+/// `fps` unset for the server to fill in). Matches the manifest default.
+pub const LTX2_DEFAULT_FPS: u32 = 24;
+
+/// Absolute pixel-frame ceiling for LTX-2 regardless of fps.
+///
+/// This is a resource guard, not a model limit: the seconds budget alone would
+/// admit 2404 frames at the maximum allowed 120 fps, which no current GPU can
+/// denoise in one pass. 604 is `LTX2_MAX_RUNTIME_SECONDS` at 30 fps — the point
+/// where a practical frame budget meets the model's real duration budget.
+pub const LTX2_MAX_FRAMES_ABSOLUTE: u32 = LTX2_MAX_RUNTIME_SECONDS * 30 + 4;
+
+/// Global frame ceiling for video families that do not publish their own
+/// duration budget (currently `ltx-video`).
 pub const MAX_FRAMES_GLOBAL: u32 = 257;
 
 /// Upper bound for a requested STG block index. The deepest LTX-2 transformer
@@ -43,15 +61,50 @@ pub const MAX_STG_BLOCK_INDEX: u32 = 64;
 /// deepens the perturbed pass; upstream configurations use one or two.
 pub const MAX_STG_BLOCKS: usize = 8;
 
-/// Per-family single-request frame ceiling WITHOUT temporal upscaling — the
-/// value `/api/models` advertises as `max_frames`. Must stay in agreement
-/// with `validate_generate_request`'s rejections, which consume this helper.
-pub fn max_frames_for_family(family: &str) -> Option<u32> {
+/// Largest pixel-frame count whose final RoPE token still lands inside the
+/// LTX-2 temporal budget at `fps`.
+///
+/// After the causal first-frame fix, latent frame `k` spans pixel bounds
+/// `[8k - 7, 8k + 1]`, so the midpoint the RoPE grid actually sees is
+/// `(8k - 3) / fps` seconds. `F` pixel frames on the `8n + 1` grid put the last
+/// latent at `k = (F - 1) / 8`, giving a midpoint of `(F - 4) / fps`. Requiring
+/// that to stay within the budget yields `F <= seconds * fps + 4`.
+pub fn ltx2_max_frames_at_fps(fps: u32) -> u32 {
+    LTX2_MAX_RUNTIME_SECONDS
+        .saturating_mul(fps.max(1))
+        .saturating_add(4)
+        .min(LTX2_MAX_FRAMES_ABSOLUTE)
+}
+
+/// Per-family single-request frame ceiling at `fps` — the value `/api/models`
+/// advertises as `max_frames`. Must stay in agreement with
+/// `validate_generate_request`'s rejections, which consume this helper.
+///
+/// LTX-2's ceiling is a duration, so it moves with fps; every other video
+/// family reports the flat global ceiling.
+pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
     match family {
-        "ltx2" => Some(LTX2_MAX_FRAMES),
+        "ltx2" => Some(ltx2_max_frames_at_fps(fps)),
         "ltx-video" => Some(MAX_FRAMES_GLOBAL),
         _ => None,
     }
+}
+
+/// `max_frames_for_family_at_fps` at each family's default fps, for callers
+/// that have no per-model fps to hand.
+pub fn max_frames_for_family(family: &str) -> Option<u32> {
+    max_frames_for_family_at_fps(family, LTX2_DEFAULT_FPS)
+}
+
+/// Single-request runtime ceiling in seconds for families whose real limit is
+/// a duration. `None` means the family's ceiling is a plain frame count.
+pub fn max_runtime_seconds_for_family(family: &str) -> Option<u32> {
+    (family == "ltx2").then_some(LTX2_MAX_RUNTIME_SECONDS)
+}
+
+/// fps-independent frame guard, paired with `max_runtime_seconds_for_family`.
+pub fn max_frames_absolute_for_family(family: &str) -> Option<u32> {
+    (family == "ltx2").then_some(LTX2_MAX_FRAMES_ABSOLUTE)
 }
 
 /// Frame-count grid for a family: valid counts are `k * step + 1`. The value
@@ -548,6 +601,14 @@ pub fn validate_generate_request_with_family(
             validate_lora_weight(lora, "loras")?;
         }
     }
+    if let Some(fps) = req.fps {
+        if fps == 0 {
+            return Err("fps must be >= 1".to_string());
+        }
+        if fps > 120 {
+            return Err(format!("fps ({fps}) must be <= 120"));
+        }
+    }
     // Video frame validation
     if let Some(frames) = req.frames {
         if frames == 0 {
@@ -560,35 +621,34 @@ pub fn validate_generate_request_with_family(
                 ));
             }
         }
-        if frames > MAX_FRAMES_GLOBAL {
-            return Err(format!("frames ({frames}) must be <= {MAX_FRAMES_GLOBAL}"));
-        }
-        // LTX-2 transformers ship `positional_embedding_max_pos: [20, 2048, 2048]`
-        // — exceeding 20 latent frames wraps RoPE into an untrained region and
-        // collapses output into rainbow/static noise. The 8x VAE temporal
-        // compression gives max pixel frames = (20 - 1) * 8 + 1 = 153 for
-        // single-pass runs. `--temporal-upscale x2` halves the stage-1 frame
-        // count (see `derive_stage1_render_shape`), so the transformer only
-        // denoises `(frames - 1) / 2 + 1` pixel frames; effective cap doubles.
+        // LTX-2's ceiling is a duration (see `LTX2_MAX_RUNTIME_SECONDS`), so it
+        // is derived per request from fps instead of the flat global ceiling.
         if matches!(family, Some("ltx2")) {
-            let stage1_frames = match req.temporal_upscale {
-                Some(crate::Ltx2TemporalUpscale::X2) => frames.saturating_sub(1) / 2 + 1,
-                None => frames,
+            let fps = req.fps.unwrap_or(LTX2_DEFAULT_FPS).max(1);
+            // `derive_stage1_render_shape` halves BOTH the frame count and the
+            // fps for `--temporal-upscale x2`, so stage 1 renders the same
+            // runtime at half the frame rate. Mirror that: temporal upscaling
+            // buys temporal resolution, never extra duration.
+            let (stage1_frames, stage1_fps) = match req.temporal_upscale {
+                Some(crate::Ltx2TemporalUpscale::X2) => {
+                    (frames.saturating_sub(1) / 2 + 1, (fps / 2).max(1))
+                }
+                None => (frames, fps),
             };
-            if stage1_frames > LTX2_MAX_FRAMES {
+            let stage1_cap = ltx2_max_frames_at_fps(stage1_fps);
+            if stage1_frames > stage1_cap {
+                let delivered_cap = match req.temporal_upscale {
+                    Some(crate::Ltx2TemporalUpscale::X2) => (stage1_cap - 1) * 2 + 1,
+                    None => stage1_cap,
+                };
                 return Err(format!(
-                    "frames ({frames}) must be <= {LTX2_MAX_FRAMES} for LTX-2 / LTX-2.3 (temporal RoPE budget); \
-                     pass --temporal-upscale x2 to double the effective frame ceiling"
+                    "frames ({frames}) exceeds the LTX-2 / LTX-2.3 temporal RoPE budget of \
+                     {LTX2_MAX_RUNTIME_SECONDS}s: at {fps} fps the ceiling is {delivered_cap} frames. \
+                     Raise --fps, lower --frames, or render the shot as a multi-clip sequence"
                 ));
             }
-        }
-    }
-    if let Some(fps) = req.fps {
-        if fps == 0 {
-            return Err("fps must be >= 1".to_string());
-        }
-        if fps > 120 {
-            return Err(format!("fps ({fps}) must be <= 120"));
+        } else if frames > MAX_FRAMES_GLOBAL {
+            return Err(format!("frames ({frames}) must be <= {MAX_FRAMES_GLOBAL}"));
         }
     }
     if let Some(keyframes) = &req.keyframes {
@@ -1504,12 +1564,40 @@ mod tests {
         assert!(err.contains("LTX-Video / LTX-2"), "got: {err}");
     }
 
+    /// The RoPE temporal axis is expressed in *seconds* (`rope.rs`'s
+    /// `scale_video_time_to_seconds` divides the pixel-frame coordinate by fps
+    /// before `max_pos` normalization), so the ceiling is a duration and must
+    /// scale with fps rather than sit at a fixed frame count.
+    #[test]
+    fn ltx2_frame_ceiling_tracks_fps() {
+        // Latent k spans pixel [8k-7, 8k+1] after the causal fix, so F frames
+        // put the last RoPE midpoint at (F-4)/fps seconds: F = 20*fps + 4.
+        assert_eq!(ltx2_max_frames_at_fps(24), 484);
+        assert_eq!(ltx2_max_frames_at_fps(25), 504);
+        assert_eq!(ltx2_max_frames_at_fps(12), 244);
+        assert_eq!(ltx2_max_frames_at_fps(8), 164);
+        // Low fps is *tighter* than the old flat 153: 6 fps only buys 20s of
+        // runtime, which the previous constant silently over-admitted.
+        assert_eq!(ltx2_max_frames_at_fps(6), 124);
+        // The absolute resource guard binds before the seconds budget does at
+        // high frame rates.
+        assert_eq!(ltx2_max_frames_at_fps(60), LTX2_MAX_FRAMES_ABSOLUTE);
+        assert_eq!(ltx2_max_frames_at_fps(120), LTX2_MAX_FRAMES_ABSOLUTE);
+        // fps=0 is rejected elsewhere; the helper must not divide by zero.
+        assert_eq!(ltx2_max_frames_at_fps(0), ltx2_max_frames_at_fps(1));
+    }
+
     /// The helper values are what /api/models advertises as max_frames /
     /// frame_step; they must agree with what the validator enforces so the
     /// wire contract can't drift from the actual rejection rules.
     #[test]
     fn frame_constraint_helpers_match_validator_behavior() {
-        assert_eq!(max_frames_for_family("ltx2"), Some(LTX2_MAX_FRAMES));
+        assert_eq!(
+            max_frames_for_family("ltx2"),
+            Some(ltx2_max_frames_at_fps(LTX2_DEFAULT_FPS))
+        );
+        assert_eq!(max_frames_for_family_at_fps("ltx2", 12), Some(244));
+        assert_eq!(max_frames_for_family_at_fps("ltx-video", 12), Some(257));
         assert_eq!(max_frames_for_family("ltx-video"), Some(257));
         assert_eq!(max_frames_for_family("flux"), None);
         assert_eq!(max_frames_for_family("sdxl"), None);
@@ -1527,12 +1615,14 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains(&cap.to_string()), "got: {err}");
 
-        // Same agreement for the ltx2 no-temporal-upscale ceiling.
-        let cap = max_frames_for_family("ltx2").unwrap();
+        // Same agreement for the ltx2 ceiling, which is fps-dependent, so the
+        // request has to name the fps the helper was asked about.
+        let cap = max_frames_for_family_at_fps("ltx2", 12).unwrap();
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(cap + 8);
+        req.fps = Some(12);
+        req.frames = Some(249); // first 8n+1 value past the 244-frame cap
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains(&cap.to_string()), "got: {err}");
     }
@@ -1542,8 +1632,29 @@ mod tests {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(LTX2_MAX_FRAMES); // 153 pixel frames → 20 latent frames
+        req.fps = Some(24);
+        // 481 = 20s at 24 fps on the 8n+1 grid (484 is the exact ceiling).
+        req.frames = Some(481);
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    /// The old flat 153 was a floor, not a ceiling, at the default frame rate:
+    /// LTX-2.3 advertises ~20s single-shot generation and the checkpoint budget
+    /// agrees. Frame counts that used to be rejected out of hand must pass.
+    #[test]
+    fn ltx2_frames_over_the_old_flat_cap_are_accepted_within_the_duration_budget() {
+        for frames in [161u32, 193, 257, 401] {
+            let mut req = valid_req();
+            req.model = "ltx-2-19b-distilled:fp8".to_string();
+            req.output_format = Some(OutputFormat::Mp4);
+            req.fps = Some(24);
+            req.frames = Some(frames);
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "{frames} frames at 24 fps is {:.1}s, inside the {LTX2_MAX_RUNTIME_SECONDS}s budget",
+                frames as f64 / 24.0,
+            );
+        }
     }
 
     #[test]
@@ -1551,31 +1662,44 @@ mod tests {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(161); // 161 pixel frames → 21 latent frames > 20-frame RoPE max
+        req.fps = Some(24);
+        req.frames = Some(489); // 20.2s at 24 fps — one grid step past the budget
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("161"), "got: {err}");
-        assert!(err.contains(&LTX2_MAX_FRAMES.to_string()), "got: {err}");
+        assert!(err.contains("489"), "got: {err}");
+        assert!(err.contains("484"), "got: {err}");
         assert!(err.contains("RoPE"), "got: {err}");
     }
 
+    /// The same frame count can be inside or outside the budget depending on
+    /// fps — this is the whole point of deriving the ceiling instead of fixing
+    /// it. 193 frames is 8s at 24 fps but 32s at 6 fps.
     #[test]
-    fn ltx2_19b_reported_repro_frames_over_rope_budget_rejected() {
+    fn ltx2_frame_budget_is_a_duration_not_a_frame_count() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(193); // matches #226 repro: (193-1)/8+1 = 25 latent > 20
+        req.frames = Some(193);
+
+        req.fps = Some(24);
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.fps = Some(6);
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains(&LTX2_MAX_FRAMES.to_string()), "got: {err}");
+        assert!(err.contains("124"), "got: {err}");
     }
 
     #[test]
-    fn ltx2_3_frames_over_rope_budget_rejected() {
+    fn ltx2_absolute_frame_guard_binds_above_thirty_fps() {
         let mut req = valid_req();
         req.model = "ltx-2.3-22b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(193);
+        req.fps = Some(120);
+        req.frames = Some(609); // first 8n+1 value past the 604-frame guard
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains(&LTX2_MAX_FRAMES.to_string()), "got: {err}");
+        assert!(
+            err.contains(&LTX2_MAX_FRAMES_ABSOLUTE.to_string()),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1583,43 +1707,41 @@ mod tests {
         let mut req = valid_req();
         req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(161); // above LTX2_MAX_FRAMES but under the generic 257 ceiling
+        req.frames = Some(161);
         assert!(validate_generate_request(&req).is_ok());
     }
 
+    /// `ltx-video` keeps the flat global ceiling; only `ltx2` publishes a
+    /// duration budget, so the two families must not share a cap.
     #[test]
-    fn ltx2_temporal_upscale_x2_doubles_the_effective_frame_ceiling() {
+    fn ltx_video_keeps_the_flat_global_ceiling() {
+        let mut req = valid_req();
+        req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(30);
+        req.frames = Some(MAX_FRAMES_GLOBAL + 8);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains(&MAX_FRAMES_GLOBAL.to_string()), "got: {err}");
+    }
+
+    /// `derive_stage1_render_shape` halves the frame count *and* the fps, so an
+    /// x2 temporal upscale renders the same runtime — it never buys duration.
+    #[test]
+    fn ltx2_temporal_upscale_x2_does_not_extend_the_duration_budget() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(257); // stage-1 = (257-1)/2+1 = 129 → 17 latent frames, fits
+        req.fps = Some(24);
         req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+
+        // stage 1 = (481-1)/2+1 = 241 frames at 12 fps, ceiling 244 → fits.
+        req.frames = Some(481);
         assert!(validate_generate_request(&req).is_ok());
-    }
 
-    #[test]
-    fn ltx2_temporal_upscale_x2_still_respects_generic_frame_ceiling() {
-        let mut req = valid_req();
-        req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = Some(OutputFormat::Mp4);
-        // With x2 temporal upscale, the 20-latent RoPE cap no longer binds
-        // before the existing generic frame ceiling. Keep that ceiling explicit.
-        req.frames = Some(289);
-        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+        // 20.4s of runtime is over budget with or without temporal upscaling.
+        req.frames = Some(497);
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("257"), "got: {err}");
-    }
-
-    #[test]
-    fn ltx2_temporal_upscale_x2_over_generic_limit_reports_generic_limit() {
-        let mut req = valid_req();
-        req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = Some(OutputFormat::Mp4);
-        req.frames = Some(313); // x2 stage-1 would exceed RoPE too, but 257 is the first gate.
-        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
-        let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("257"), "got: {err}");
-        assert!(!err.contains("--temporal-upscale"), "got: {err}");
+        assert!(err.contains("RoPE"), "got: {err}");
     }
 
     #[test]
