@@ -102,6 +102,11 @@ describe("mobile advanced sheet", () => {
     expect(Number(reset?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
   });
 
+  it("uses the mobile utility font token for the guidance count badge", () => {
+    const count = css.match(/\.mobile-generate-inline-count\s*\{([^}]*)\}/s);
+    expect(count?.[1]).toMatch(/font-family:\s*var\(--font-utility\)\s*;/);
+  });
+
   it("keeps four primary tabs and gives Settings a full-size header control", () => {
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
     const settingsControls = css.match(

@@ -47,7 +47,10 @@ export function unsupportedAutoChainFields(req: GenerateRequest): AutoChainUnsup
   if (req.retake_range) unsupported.push("retake_range");
   if (req.spatial_upscale) unsupported.push("spatial_upscale");
   if (req.temporal_upscale) unsupported.push("temporal_upscale");
-  if (req.guidance_overrides && Object.keys(req.guidance_overrides).length > 0) {
+  const hasGuidanceOverride = Object.values(req.guidance_overrides ?? {}).some((value) =>
+    Array.isArray(value) ? value.length > 0 : value !== null && value !== undefined,
+  );
+  if (hasGuidanceOverride) {
     unsupported.push("guidance_overrides");
   }
   return unsupported;

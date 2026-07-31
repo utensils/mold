@@ -336,4 +336,26 @@ describe("automatic chain request projection", () => {
       }),
     ).toEqual(["loras"]);
   });
+
+  it("does not report guidance overrides when every wire value is unset", () => {
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        guidance_overrides: {
+          stg_scale: null,
+          stg_blocks: [],
+          rescale_scale: null,
+          modality_scale: null,
+          skip_step: null,
+        },
+      }),
+    ).toEqual(["negative_prompt"]);
+
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        guidance_overrides: { stg_scale: 0 },
+      }),
+    ).toEqual(["negative_prompt", "guidance_overrides"]);
+  });
 });

@@ -1641,7 +1641,7 @@ button.mobile-generate-disclosure {
   padding: 0 6px;
   border: 1px solid var(--control-edge);
   border-radius: var(--radius-pill);
-  font-family: var(--font-mono);
+  font-family: var(--font-utility);
   font-size: var(--text-data);
 }
 
