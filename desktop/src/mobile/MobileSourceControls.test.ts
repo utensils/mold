@@ -2,8 +2,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelEntry } from "../lib/api/types";
+import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
+import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 
 const { fetchCatalogInstalled } = vi.hoisted(() => ({
   fetchCatalogInstalled: vi.fn(),
@@ -67,17 +69,12 @@ describe("MobileSourceControls", () => {
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
   });
 
-  it("accepts a PNG source and exposes preview, strength, fit, replace, and remove", async () => {
+  it("exposes preview, strength, fit, replace, and remove for a source image", async () => {
     const form = formFor("sdxl");
+    form.sourceImage = "cGhvdG8=";
+    form.sourceImageName = "photo.jpg";
     const wrapper = mount(MobileSourceControls, { props: { form } });
 
-    const sourceInput = wrapper.get("[data-test='mobile-source-input']");
-    expect(sourceInput.attributes("accept")).toBe("image/png,image/jpeg");
-    await chooseFiles(wrapper, "[data-test='mobile-source-input']", [
-      new File(["photo"], "photo.jpg", { type: "image/jpeg" }),
-    ]);
-
-    await vi.waitFor(() => expect(form.sourceImage).not.toBeNull());
     expect(form.sourceImage).toBe("cGhvdG8=");
     expect(form.sourceImageName).toBe("photo.jpg");
     expect(wrapper.get("[data-test='mobile-source-preview']").attributes("src")).toContain(
@@ -98,18 +95,37 @@ describe("MobileSourceControls", () => {
     expect(form.sourceImageName).toBeNull();
   });
 
-  it("rejects non-PNG/JPEG photos with an associated alert", async () => {
-    const form = formFor("sdxl");
-    const wrapper = mount(MobileSourceControls, { props: { form } });
+  it("offers the selected machine's gallery for a single source image", async () => {
+    const form = formFor("sd15");
+    form.controlImage = btoa("control");
+    const target = { baseUrl: "http://halcyon:7680", apiKey: "remote-key" };
+    const wrapper = mount(MobileSourceControls, {
+      props: { form, target },
+      global: { stubs: { MobileImagePickerSheet: true } },
+    });
 
-    await chooseFiles(wrapper, "[data-test='mobile-source-input']", [
-      new File(["photo"], "photo.webp", { type: "image/webp" }),
+    await chooseFiles(wrapper, "[data-test='mobile-control-input']", [
+      new File(["not-an-image"], "control.txt", { type: "text/plain" }),
     ]);
+    expect(wrapper.get("[data-test='mobile-source-error']").text()).toContain("Only PNG or JPEG");
 
-    expect(form.sourceImage).toBeNull();
-    const alert = wrapper.get("[data-test='mobile-source-error']");
-    expect(alert.attributes("role")).toBe("alert");
-    expect(alert.text()).toContain("PNG or JPEG");
+    await wrapper.get("[data-test='mobile-source-add']").trigger("click");
+    const picker = wrapper.getComponent(MobileImagePickerSheet);
+    expect(picker.props()).toMatchObject({
+      open: true,
+      target,
+      title: "Source image",
+      maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - 7,
+    });
+
+    picker.vm.$emit("pick", { filename: "gallery-print.png", base64: "R0FMTEVSWQ==" });
+    await flushPromises();
+
+    expect(form.sourceImage).toBe("R0FMTEVSWQ==");
+    expect(form.sourceImageName).toBe("gallery-print.png");
+    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(picker.props("open")).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-error']").exists()).toBe(false);
   });
 
   it("uses the first upscaler for upscale-then-fit and omits repaint for maskless video", async () => {
