@@ -42,6 +42,7 @@ import {
   getGenerateTargetId,
   getHost,
   removeHost,
+  setHostConnected,
   setGenerateTargetId,
   updateHost,
 } from "../lib/hostRegistry";
@@ -60,6 +61,8 @@ const host = computed(() => {
   return getHost(hostId.value);
 });
 const isOrigin = computed(() => hostId.value === ORIGIN_HOST_ID);
+const disconnected = computed(() => host.value?.connected === false);
+const liveHost = computed(() => (disconnected.value ? null : host.value));
 const hostName = ref(host.value?.name ?? "");
 
 const caps = ref<HostCapabilities | null>(null);
@@ -70,7 +73,7 @@ const models = ref<ModelInfoExtended[]>([]);
 const downloads = ref<DownloadJobWire[]>([]);
 const targetId = ref(getGenerateTargetId());
 
-const poll = useHostPoll(host, { withResources: true, intervalMs: 4000 });
+const poll = useHostPoll(liveHost, { withResources: true, intervalMs: 4000 });
 
 const online = computed(() => poll.online.value);
 const loading = computed(() => poll.loading.value);
@@ -351,6 +354,24 @@ async function forgetMachine() {
   await router.push("/machines");
 }
 
+async function disconnectMachine() {
+  if (!host.value || isOrigin.value) return;
+  setHostConnected(hostId.value, false);
+  if (isTarget.value) {
+    setGenerateTargetId(ORIGIN_HOST_ID);
+    targetId.value = ORIGIN_HOST_ID;
+  }
+  stopHostSession();
+  toast("success", `${hostName.value} disconnected.`);
+  await router.push("/machines");
+}
+
+function reconnectMachine() {
+  if (!host.value || isOrigin.value) return;
+  setHostConnected(hostId.value, true);
+  toast("success", `${hostName.value} reconnected.`);
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -377,7 +398,7 @@ function stopHostSession() {
 
 function startHostSession() {
   stopHostSession();
-  const entry = host.value;
+  const entry = liveHost.value;
   const epoch = sessionEpoch;
   caps.value = null;
   queue.value = [];
@@ -478,6 +499,24 @@ onBeforeUnmount(() => {
           @click="renameMachine"
         >
           Rename
+        </button>
+        <button
+          v-if="!isOrigin"
+          type="button"
+          class="md-action"
+          data-test="detail-disconnect"
+          @click="disconnectMachine"
+        >
+          Disconnect
+        </button>
+        <button
+          v-if="!isOrigin && disconnected"
+          type="button"
+          class="md-action"
+          data-test="detail-reconnect"
+          @click="reconnectMachine"
+        >
+          Reconnect
         </button>
         <button
           v-if="!isOrigin"

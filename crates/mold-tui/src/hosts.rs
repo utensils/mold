@@ -50,6 +50,14 @@ pub(crate) struct HostEntry {
     /// Last-seen `/api/status.instance_id`, used to dedupe re-adds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
+    /// Explicit lifecycle state. Missing in older registry JSON means
+    /// connected so upgrades preserve prior behavior.
+    #[serde(default = "default_connected")]
+    pub connected: bool,
+}
+
+fn default_connected() -> bool {
+    true
 }
 
 impl HostEntry {
@@ -137,9 +145,9 @@ impl HostRegistry {
         self.hosts.iter().find(|h| h.id == id)
     }
 
-    /// Every machine this instance knows about, local first. The local
-    /// entry is synthetic (empty URL — it is not an HTTP target); the
-    /// future multi-host Library merge iterates this list directly.
+    /// Every connected machine, local first. The local entry is synthetic
+    /// (empty URL — it is not an HTTP target); disconnected registry rows
+    /// stay remembered but are deliberately absent from active operations.
     pub fn all(&self) -> Vec<HostEntry> {
         let mut out = Vec::with_capacity(self.hosts.len() + 1);
         out.push(HostEntry {
@@ -147,8 +155,9 @@ impl HostRegistry {
             url: String::new(),
             name: Some(local_display_name().to_string()),
             instance_id: None,
+            connected: true,
         });
-        out.extend(self.hosts.iter().cloned());
+        out.extend(self.hosts.iter().filter(|host| host.connected).cloned());
         out
     }
 }
@@ -591,7 +600,12 @@ impl MachinesState {
     pub fn target_for_selected(&self, current: &GenTarget) -> GenTarget {
         let picked = match self.selected_row() {
             MachineRowId::Local => GenTarget::Local,
-            MachineRowId::Host(id) => GenTarget::Host(id),
+            MachineRowId::Host(id) => {
+                if self.registry.get(&id).is_some_and(|host| !host.connected) {
+                    return current.clone();
+                }
+                GenTarget::Host(id)
+            }
         };
         if picked == *current {
             GenTarget::Auto
@@ -618,10 +632,16 @@ impl MachinesState {
         self.last_poll = Some(std::time::Instant::now());
         let mut plan = PollPlan::default();
         if machines_active {
-            plan.status_hosts = self.registry.hosts.clone();
-            plan.queue_host = self.selected_host().cloned();
+            plan.status_hosts = self
+                .registry
+                .hosts
+                .iter()
+                .filter(|host| host.connected)
+                .cloned()
+                .collect();
+            plan.queue_host = self.selected_host().filter(|host| host.connected).cloned();
         } else if let GenTarget::Host(id) = target {
-            if let Some(entry) = self.registry.get(id) {
+            if let Some(entry) = self.registry.get(id).filter(|host| host.connected) {
                 plan.status_hosts.push(entry.clone());
             }
         }
@@ -692,6 +712,29 @@ impl MachinesState {
         }
     }
 
+    /// Toggle a remembered host in or out of every active mix. Returns the
+    /// new connected state; the saved API key and registry row are untouched.
+    pub fn toggle_connection(&mut self, id: &str) -> Option<bool> {
+        let host = self.registry.hosts.iter_mut().find(|host| host.id == id)?;
+        host.connected = !host.connected;
+        let connected = host.connected;
+        self.registry.save();
+        self.statuses.remove(id);
+        self.devices.remove(id);
+        self.capabilities.remove(id);
+        self.device_feedback.remove(id);
+        if self
+            .queue
+            .as_ref()
+            .is_some_and(|(host_id, _)| host_id == id)
+        {
+            self.queue = None;
+            self.queue_selected = 0;
+        }
+        self.force_poll();
+        Some(connected)
+    }
+
     /// Finish a successful connect test: dedupe, register, persist, save
     /// the key, and select the new row. Returns the new host id.
     pub fn complete_connect(
@@ -706,6 +749,7 @@ impl MachinesState {
             url: url.to_string(),
             name: status.hostname.clone(),
             instance_id: status.instance_id.clone(),
+            connected: true,
         };
         self.registry.add(entry)?;
         self.registry.save();
@@ -1005,6 +1049,7 @@ mod tests {
             url: url.to_string(),
             name: None,
             instance_id: None,
+            connected: true,
         }
     }
 
@@ -1074,6 +1119,7 @@ mod tests {
                 url: "http://bender:7680".into(),
                 name: Some("bender".into()),
                 instance_id: Some("uuid-b".into()),
+                connected: true,
             })
             .unwrap();
             reg.save();
@@ -1104,6 +1150,7 @@ mod tests {
             url: "http://hal9000:7680".into(),
             name: Some("hal9000".into()),
             instance_id: Some("uuid-a".into()),
+            connected: true,
         })
         .unwrap();
 
@@ -1114,6 +1161,7 @@ mod tests {
                 url: "http://192.168.1.5:7680".into(),
                 name: None,
                 instance_id: Some("uuid-a".into()),
+                connected: true,
             })
             .unwrap_err();
         assert_eq!(
@@ -1142,6 +1190,34 @@ mod tests {
         assert_eq!(all[0].id, LOCAL_HOST_ID);
         assert_eq!(all[0].name.as_deref(), Some(local_display_name()));
         assert_eq!(all[1].id, "hal9000-7680");
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn disconnected_host_stays_remembered_but_out_of_active_work() {
+        with_isolated_env(|_home| {
+            let mut st = MachinesState::default();
+            st.registry
+                .add(entry("hal9000-7680", "http://hal9000:7680"))
+                .unwrap();
+            st.registry.save();
+
+            assert_eq!(st.toggle_connection("hal9000-7680"), Some(false));
+            assert_eq!(st.registry.hosts.len(), 1);
+            assert!(st
+                .registry
+                .all()
+                .iter()
+                .all(|host| host.id != "hal9000-7680"));
+            assert!(st.poll_plan(true, &GenTarget::Auto).status_hosts.is_empty());
+            assert!(!HostRegistry::load().get("hal9000-7680").unwrap().connected);
+
+            assert_eq!(st.toggle_connection("hal9000-7680"), Some(true));
+            assert_eq!(
+                st.poll_plan(true, &GenTarget::Auto).status_hosts[0].id,
+                "hal9000-7680"
+            );
+        });
     }
 
     // ── generation target ───────────────────────────────────────
@@ -1429,6 +1505,7 @@ mod tests {
             url: format!("http://{address}"),
             name: Some("Test host".into()),
             instance_id: None,
+            connected: true,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         set_host_device_enabled(entry, accepted.id.clone(), true, tx).await;

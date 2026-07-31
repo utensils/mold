@@ -17,14 +17,15 @@ import {
   HOSTS_CHANGED_EVENT,
   HOSTS_STORAGE_KEY,
   ORIGIN_HOST_ID,
-  listHosts,
+  listKnownHosts,
+  setHostConnected,
   type HostEntry,
 } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
 
 const router = useRouter();
 const route = useRoute();
-const hosts = ref<HostEntry[]>(listHosts());
+const hosts = ref<HostEntry[]>(listKnownHosts());
 const connectOpen = ref(false);
 watch(
   () => route.query.add,
@@ -35,7 +36,7 @@ watch(
 );
 
 function refreshHosts() {
-  hosts.value = listHosts();
+  hosts.value = listKnownHosts();
 }
 
 function onStorage(event: StorageEvent) {
@@ -59,6 +60,11 @@ function openDetail(id: string) {
 function onAdded(host: HostEntry) {
   refreshHosts();
   toast("success", `${host.name} connected.`);
+}
+
+function reconnect(id: string) {
+  const host = setHostConnected(id, true);
+  if (host) toast("success", `${host.name} reconnected.`);
 }
 </script>
 
@@ -89,6 +95,7 @@ function onAdded(host: HostEntry) {
         :host="host"
         :primary="host.id === ORIGIN_HOST_ID"
         @open="openDetail"
+        @reconnect="reconnect"
       />
 
       <CardSurface dashed>

@@ -287,7 +287,7 @@ pub(crate) fn scan_sources(
             .unwrap_or_else(|| GalleryOrigin::remote_from_url(url));
         candidates.push(origin);
     }
-    for host in &registry.hosts {
+    for host in registry.hosts.iter().filter(|host| host.connected) {
         candidates.push(GalleryOrigin::from_host_entry(host));
     }
 
@@ -564,6 +564,7 @@ mod tests {
             url: url.to_string(),
             name: Some(id.split('-').next().unwrap_or(id).to_string()),
             instance_id: None,
+            connected: true,
         }
     }
 

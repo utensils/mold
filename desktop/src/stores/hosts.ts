@@ -34,7 +34,6 @@ import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
-import { useToastStore } from "./toasts";
 
 const POLL_INTERVAL_MS = 10_000;
 const MAX_SAVED_HOSTS = 8;
@@ -306,7 +305,7 @@ export const useHostsStore = defineStore("hosts", {
     },
   },
   actions: {
-    /** Reconnect every remembered extra host. Never blocks or fails the boot. */
+    /** Reconnect every explicitly connected extra host. Never blocks or fails the boot. */
     async init() {
       if (this.initialized || this.initializing) return;
       this.initializing = true;
@@ -315,15 +314,10 @@ export const useHostsStore = defineStore("hosts", {
         for (const saved of settings.savedHosts) {
           if (saved.name) this.names[saved.id] = saved.name;
         }
-        // A saved host is a remembered host: always attempt it on launch.
-        // `connectedHostIds` remains readable for older settings migrations,
-        // but is no longer allowed to suppress a valid saved entry.
-        // Preserve the legacy reconnect order for existing users, then append
-        // any remembered host that was missing from that older marker list.
-        const reconnectOrder = [
-          ...new Set([...settings.connectedHostIds, ...settings.savedHosts.map((host) => host.id)]),
-        ];
-        const candidates = reconnectOrder
+        // Remembering and connecting are intentionally separate. A host that
+        // was explicitly disconnected stays out of routing, polling, gallery
+        // merges, and downloads until the user reconnects it.
+        const candidates = [...new Set(settings.connectedHostIds)]
           .map((id) => settings.savedHosts.find((host) => host.id === id))
           .filter((saved): saved is SavedHost => Boolean(saved))
           .filter((saved) => !this.extras.some((host) => host.id === saved.id));
@@ -355,10 +349,9 @@ export const useHostsStore = defineStore("hosts", {
             } else {
               live.status = "error";
               live.error = test.error;
-              useToastStore().push(
-                `Couldn't reach ${live.label} — it stays listed for reconnect.`,
-                "error",
-              );
+              // Boot probes are intentionally quiet. The Machines status row
+              // is sufficient; an offline server must not create a startup
+              // notification every time the app launches.
             }
           }),
         );

@@ -3529,6 +3529,20 @@ impl App {
                 self.target = self.machines.target_for_selected(&self.target);
                 self.target.save();
             }
+            Action::MachinesToggleConnection if self.active_view == View::Machines => {
+                if let crate::hosts::MachineRowId::Host(id) = self.machines.selected_row() {
+                    if let Some(connected) = self.machines.toggle_connection(&id) {
+                        self.gallery.dirty = true;
+                        if !connected && self.target == crate::hosts::GenTarget::Host(id) {
+                            self.target = crate::hosts::GenTarget::Auto;
+                            self.target.save();
+                        }
+                        if connected {
+                            self.tick_host_polling();
+                        }
+                    }
+                }
+            }
             Action::MachinesForget if self.active_view == View::Machines => {
                 if let crate::hosts::MachineRowId::Host(id) = self.machines.selected_row() {
                     let name = self
@@ -11969,6 +11983,7 @@ mod tests {
             url: format!("http://{id}:7680"),
             name: Some(id.to_string()),
             instance_id: None,
+            connected: true,
         }
     }
 
@@ -12191,6 +12206,30 @@ mod tests {
                 crate::hosts::GenTarget::Auto,
                 "a forgotten target host must fall back to Auto"
             );
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn machines_disconnect_persists_and_resets_target_without_forgetting() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Machines;
+            app.machines
+                .registry
+                .add(machines_test_host("hal9000"))
+                .unwrap();
+            app.machines.select_next();
+            app.target = crate::hosts::GenTarget::Host("hal9000".into());
+
+            app.dispatch_action(Action::MachinesToggleConnection);
+            let host = app.machines.registry.get("hal9000").unwrap();
+            assert!(!host.connected);
+            assert_eq!(app.target, crate::hosts::GenTarget::Auto);
+            assert_eq!(app.machines.registry.hosts.len(), 1);
+
+            app.dispatch_action(Action::MachinesToggleConnection);
+            assert!(app.machines.registry.get("hal9000").unwrap().connected);
         });
     }
 

@@ -261,8 +261,9 @@ const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
 const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current build");
 const hosts = ref<MobileHost[]>(loadHosts());
-const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? hosts.value[0]?.id ?? "");
-const catalogHostId = ref(selectedHostId.value || hosts.value[0]?.id || "");
+const connectedHosts = computed(() => hosts.value.filter((host) => host.connected !== false));
+const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? connectedHosts.value[0]?.id ?? "");
+const catalogHostId = ref(selectedHostId.value || connectedHosts.value[0]?.id || "");
 const catalogFilterIntent = ref<CatalogFilterIntent | null>(null);
 let catalogIntentToken = 0;
 const hostDetailId = ref("");
@@ -456,7 +457,9 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
   };
 }
 
-const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
+const selectedHost = computed(() =>
+  connectedHosts.value.find((host) => host.id === selectedHostId.value),
+);
 const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
 const selectedPrintIndex = computed(() => {
   const selected = selectedPrint.value;
@@ -1004,7 +1007,12 @@ function routeForMobileHost(host: MobileHost): HostRoute {
 function loadHosts(): MobileHost[] {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as MobileHost[];
-    return raw.map((host) => ({ ...host, apiKey: "", online: false }));
+    return raw.map((host) => ({
+      ...host,
+      connected: host.connected !== false,
+      apiKey: "",
+      online: false,
+    }));
   } catch {
     return [];
   }
@@ -1051,6 +1059,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       hostname: status.hostname ?? undefined,
       version: status.version,
       instanceId,
+      connected: true,
       online: true,
     };
     if (existing) Object.assign(existing, saved);
@@ -1087,6 +1096,7 @@ async function discoverHosts(): Promise<void> {
 }
 
 async function selectHost(id: string): Promise<void> {
+  if (!connectedHosts.value.some((host) => host.id === id)) return;
   selectedHostId.value = id;
   await refreshModels();
 }
@@ -1147,7 +1157,32 @@ async function probeHost(host: MobileHost): Promise<void> {
 }
 
 function probeHosts(): void {
-  for (const host of hosts.value) void probeHost(host);
+  for (const host of connectedHosts.value) void probeHost(host);
+}
+
+function disconnectHost(id: string): void {
+  cancelHostProbe(id);
+  const host = hosts.value.find((candidate) => candidate.id === id);
+  if (!host) return;
+  host.connected = false;
+  host.online = false;
+  delete hostTelemetry[id];
+  if (selectedHostId.value === id) {
+    selectedHostId.value = connectedHosts.value[0]?.id ?? "";
+    models.value = [];
+    modelsHostId.value = "";
+    void refreshModels();
+  }
+  if (catalogHostId.value === id) catalogHostId.value = connectedHosts.value[0]?.id ?? "";
+  persistHosts();
+}
+
+function reconnectHost(id: string): void {
+  const host = hosts.value.find((candidate) => candidate.id === id);
+  if (!host) return;
+  host.connected = true;
+  persistHosts();
+  void probeHost(host);
 }
 
 function removeHost(id: string): void {
@@ -1157,24 +1192,24 @@ function removeHost(id: string): void {
   if (hostDetailId.value === id) hostDetailId.value = "";
   hosts.value = hosts.value.filter((host) => host.id !== id);
   if (removedSelectedHost) {
-    selectedHostId.value = hosts.value[0]?.id ?? "";
+    selectedHostId.value = connectedHosts.value[0]?.id ?? "";
     models.value = [];
     modelsHostId.value = "";
     void refreshModels();
   }
-  if (removedCatalogHost) catalogHostId.value = hosts.value[0]?.id ?? "";
+  if (removedCatalogHost) catalogHostId.value = connectedHosts.value[0]?.id ?? "";
   persistHosts();
   void invoke("keychain_delete_api_key", { hostId: id });
 }
 
 function selectCatalogHost(id: string): void {
-  if (hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
+  if (connectedHosts.value.some((host) => host.id === id)) catalogHostId.value = id;
 }
 
 function openCatalog(id?: string, intent?: Omit<CatalogFilterIntent, "token">): void {
-  if (id && hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
-  else if (!hosts.value.some((host) => host.id === catalogHostId.value)) {
-    catalogHostId.value = selectedHostId.value || hosts.value[0]?.id || "";
+  if (id && connectedHosts.value.some((host) => host.id === id)) catalogHostId.value = id;
+  else if (!connectedHosts.value.some((host) => host.id === catalogHostId.value)) {
+    catalogHostId.value = selectedHostId.value || connectedHosts.value[0]?.id || "";
   }
   hostDetailId.value = "";
   if (intent) catalogFilterIntent.value = { ...intent, token: ++catalogIntentToken };
@@ -1470,6 +1505,10 @@ function recoverMobileSequence(): void {
   }
   if (!saved?.hostId || !saved.jobId) return;
   const host = hosts.value.find((candidate) => candidate.id === saved!.hostId);
+  if (host?.connected === false) {
+    sequenceError.value = `Reconnect ${host.name} in Machines to resume this saved sequence.`;
+    return;
+  }
   if (
     !host ||
     host.baseUrl !== saved.baseUrl ||
@@ -2719,7 +2758,7 @@ async function performGalleryRefresh(): Promise<void> {
   gallery.value = [];
   for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
   const results = await Promise.allSettled(
-    hosts.value.map(async (host) => {
+    connectedHosts.value.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const prints = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
       return prints.map((print) => ({
@@ -3178,7 +3217,7 @@ onMounted(async () => {
   if (selectedHost.value) {
     await Promise.all([
       refreshModels(),
-      ...hosts.value
+      ...connectedHosts.value
         .filter((host) => host.id !== selectedHostId.value)
         .map((host) => probeHost(host)),
     ]);
@@ -3269,7 +3308,7 @@ onBeforeUnmount(() => {
         <template v-else>
           <h1 class="section-title">Create</h1>
           <p class="section-note">Develop on {{ selectedHost.name }}</p>
-          <label v-if="hosts.length > 1" class="field">
+          <label v-if="connectedHosts.length > 1" class="field">
             <span>Host</span>
             <select
               class="control"
@@ -3277,7 +3316,7 @@ onBeforeUnmount(() => {
               data-test="mobile-generate-host"
               @change="selectHost(($event.target as HTMLSelectElement).value)"
             >
-              <option v-for="host in hosts" :key="host.id" :value="host.id">
+              <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
                 {{ host.name }}{{ host.online ? "" : " · offline" }}
               </option>
             </select>
@@ -3877,7 +3916,7 @@ onBeforeUnmount(() => {
               {{
                 gallerySelectMode
                   ? `${gallerySelection.size} selected`
-                  : "Prints from every saved host · Tap Select for multiple"
+                  : "Prints from every connected host · Tap Select for multiple"
               }}
             </p>
           </div>
@@ -4008,6 +4047,8 @@ onBeforeUnmount(() => {
           @back="hostDetailId = ''"
           @select="selectHost"
           @rename="renameHost"
+          @disconnect="disconnectHost"
+          @reconnect="reconnectHost"
           @forget="removeHost"
           @catalog="openCatalog"
           @status="updateHostStatus"
@@ -4083,9 +4124,16 @@ onBeforeUnmount(() => {
                   <span class="host-url">{{ host.baseUrl }}</span>
                 </span>
                 <span class="host-row-state">
-                  <span class="status-dot" :class="host.online ? 'is-ready' : 'is-error'" />
+                  <span
+                    class="status-dot"
+                    :class="host.connected !== false ? (host.online ? 'is-ready' : 'is-error') : ''"
+                  />
                   <span class="host-chip">{{
-                    host.online ? `v${host.version ?? ""}` : "offline"
+                    host.connected === false
+                      ? "disconnected"
+                      : host.online
+                        ? `v${host.version ?? ""}`
+                        : "offline"
                   }}</span>
                   <span aria-hidden="true">›</span>
                 </span>
@@ -4111,10 +4159,16 @@ onBeforeUnmount(() => {
               <button
                 class="secondary-button"
                 type="button"
-                :disabled="host.id === selectedHostId"
+                :disabled="host.connected === false || host.id === selectedHostId"
                 @click="selectHost(host.id)"
               >
-                {{ host.id === selectedHostId ? "Active" : "Use host" }}
+                {{
+                  host.connected === false
+                    ? "Disconnected"
+                    : host.id === selectedHostId
+                      ? "Active"
+                      : "Use host"
+                }}
               </button>
             </div>
           </div>
@@ -4124,7 +4178,7 @@ onBeforeUnmount(() => {
       <KeepAlive>
         <MobileCatalogView
           v-if="!settingsOpen && tab === 'catalog'"
-          :hosts="hosts"
+          :hosts="connectedHosts"
           :selected-host-id="catalogHostId"
           :filter-intent="catalogFilterIntent"
           @select-host="selectCatalogHost"

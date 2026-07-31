@@ -16,12 +16,19 @@ import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
 import type { HostEntry } from "../../lib/hostRegistry";
 
 const props = defineProps<{ host: HostEntry; primary?: boolean }>();
-const emit = defineEmits<{ open: [id: string] }>();
+const emit = defineEmits<{ open: [id: string]; reconnect: [id: string] }>();
 
-const poll = useHostPoll(computed(() => props.host));
+const disconnected = computed(() => props.host.connected === false);
+const poll = useHostPoll(
+  computed(() => (disconnected.value ? null : props.host)),
+);
 
-const showSkeleton = computed(() => poll.loading.value && !poll.status.value);
-const offline = computed(() => !showSkeleton.value && !poll.online.value);
+const showSkeleton = computed(
+  () => !disconnected.value && poll.loading.value && !poll.status.value,
+);
+const offline = computed(
+  () => !disconnected.value && !showSkeleton.value && !poll.online.value,
+);
 const dotState = computed<"online" | "offline" | "unknown">(() => {
   if (showSkeleton.value) return "unknown";
   return poll.online.value ? "online" : "offline";
@@ -74,6 +81,7 @@ const lastSeenLabel = computed(() => {
 });
 
 function open() {
+  if (disconnected.value) return;
   emit("open", props.host.id);
 }
 
@@ -87,6 +95,11 @@ function onKey(event: KeyboardEvent) {
 function retry(event: Event) {
   event.stopPropagation();
   void poll.refresh();
+}
+
+function reconnect(event: Event) {
+  event.stopPropagation();
+  emit("reconnect", props.host.id);
 }
 </script>
 
@@ -113,7 +126,22 @@ function retry(event: Event) {
       </div>
       <div class="hc__gpu" data-test="host-gpu">{{ gpuLine }}</div>
 
-      <template v-if="offline">
+      <template v-if="disconnected">
+        <div class="hc__offline">
+          <span class="hc__offline-text" data-test="host-disconnected"
+            >disconnected</span
+          >
+          <button
+            type="button"
+            class="hc__retry"
+            data-test="host-reconnect"
+            @click="reconnect"
+          >
+            Connect
+          </button>
+        </div>
+      </template>
+      <template v-else-if="offline">
         <div class="hc__offline">
           <span class="hc__offline-text" data-test="host-offline">
             {{ lastSeenLabel }}

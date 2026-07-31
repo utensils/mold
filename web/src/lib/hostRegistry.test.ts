@@ -6,11 +6,13 @@ import {
   getGenerateTargetId,
   hostIdFromUrl,
   listHosts,
+  listKnownHosts,
   listStoredHosts,
   normalizeHostAddress,
   originHost,
   removeHost,
   setGenerateTargetId,
+  setHostConnected,
   updateHost,
 } from "./hostRegistry";
 
@@ -121,6 +123,21 @@ describe("CRUD", () => {
     const entry = addHost({ url: "box.local", name: "Box" });
     removeHost(entry.id);
     expect(listStoredHosts()).toHaveLength(0);
+  });
+
+  it("keeps a disconnected host remembered but out of the active mix", () => {
+    const entry = addHost({ url: "box.local", name: "Box", apiKey: "secret" });
+    setHostConnected(entry.id, false);
+    expect(listHosts().map((host) => host.id)).not.toContain(entry.id);
+    expect(listKnownHosts().find((host) => host.id === entry.id)).toMatchObject(
+      {
+        connected: false,
+        apiKey: "secret",
+      },
+    );
+
+    setHostConnected(entry.id, true);
+    expect(listHosts().map((host) => host.id)).toContain(entry.id);
   });
 });
 
