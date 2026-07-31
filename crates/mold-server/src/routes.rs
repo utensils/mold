@@ -248,6 +248,7 @@ use crate::queue::clean_error_message;
         mold_core::GenerateRequest,
         mold_core::Ltx2ControlAdapterInfo,
         mold_core::Ltx2CameraControlInfo,
+        mold_core::Ltx2GuidanceOverrides,
         mold_core::GenerateResponse,
         mold_core::GenerationPlacementPreviewRequest,
         mold_core::GenerationPlacementPreview,

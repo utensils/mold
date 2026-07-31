@@ -215,6 +215,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     let enable_audio = if is_ltx2 { params.audio } else { None };
 
     GenerateRequest {
+        guidance_overrides: None,
         prompt: params.prompt.to_string(),
         negative_prompt: params.negative_prompt.map(|s| s.to_string()),
         model: params.model.to_string(),

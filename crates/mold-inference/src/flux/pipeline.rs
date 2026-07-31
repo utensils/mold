@@ -3140,6 +3140,7 @@ mod tests {
         plural: Option<Vec<LoraWeight>>,
     ) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: String::new(),
             negative_prompt: None,
             model: "flux-dev".to_string(),

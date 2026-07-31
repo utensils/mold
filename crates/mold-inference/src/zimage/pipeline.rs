@@ -2865,6 +2865,7 @@ mod tests {
             CachedTensor::from_tensor(&cap_feats).unwrap(),
         );
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             model: "z-image-turbo:bf16".to_string(),

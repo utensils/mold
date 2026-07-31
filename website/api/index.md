@@ -311,6 +311,7 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
   "retake_range": { "start_seconds": 1.5, "end_seconds": 3.5 },
   "spatial_upscale": "x2",
   "temporal_upscale": "x2",
+  "guidance_overrides": { "stg_scale": 1.5, "stg_blocks": [28, 29] },
   "placement": { "text_encoders": { "kind": "cpu" } },
   "cfg_plus": true,
   "embed_metadata": true,
@@ -334,23 +335,35 @@ multiple parents or independent prepared siblings.
 
 Important fields:
 
-| Field                                               | Purpose                                                                                                                                                           |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `source_image`, `mask_image`                        | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                                          |
-| `edit_images`                                       | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                                         |
-| `control_image`, `control_model`, `control_scale`   | SD1.5 ControlNet conditioning                                                                                                                                     |
-| `lora`, `loras`                                     | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                                     |
-| `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                                      |
-| `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                  |
-| `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                             |
-| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`)                  |
-| `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`. |
-| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                              |
-| `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                                 |
-| `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                                            |
-| `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                                           |
-| `batch_id`, `batch_index`, `batch_count`            | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                          |
-| `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                                 |
+| Field                                               | Purpose                                                                                                                                                                 |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source_image`, `mask_image`                        | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                                                |
+| `edit_images`                                       | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                                               |
+| `control_image`, `control_model`, `control_scale`   | SD1.5 ControlNet conditioning                                                                                                                                           |
+| `lora`, `loras`                                     | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                                           |
+| `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                                            |
+| `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                        |
+| `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                                   |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`)                        |
+| `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`.       |
+| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                                    |
+| `guidance_overrides`                                | Additive LTX-2 multimodal-guider overrides: `stg_scale`, `stg_blocks[]`, `rescale_scale`, `modality_scale`, `skip_step`. Each omitted field keeps the pipeline default. |
+| `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                                       |
+| `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                                                  |
+| `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                                                 |
+| `batch_id`, `batch_index`, `batch_count`            | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                                |
+| `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                                       |
+
+`guidance_overrides` is optional and every field inside it is optional. An
+absent field keeps the engine's per-(pipeline, stage) constant, so a request
+without the object reproduces pre-override outputs exactly. The server rejects
+the object for non-LTX-2 families and bounds each value (`rescale_scale` is
+`0..=1`; `stg_scale` and `modality_scale` are `0..=10`; `skip_step` is `0..=8`;
+`stg_blocks` holds up to 8 distinct in-range indices) with HTTP 422 before any
+queue work. Only pipelines that run the multimodal guider (`two-stage`,
+`two-stage-hq`, `keyframe`, `a2vid`) read the overrides, and a guider the
+pipeline disables entirely stays disabled. Accepted values are recorded in
+gallery metadata under the same key.
 
 When `upscale_model` is set, the server gallery retains both artifacts as
 `-original` and `-upscaled` files. The SSE `complete` event returns the

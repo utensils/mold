@@ -681,6 +681,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
     let legacy_metadata = OutputMetadata {
+        guidance_overrides: None,
         model: row.get(7)?,
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
@@ -823,6 +824,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            guidance_overrides: None,
             prompt: "a cat".into(),
             negative_prompt: Some("blurry".into()),
             original_prompt: None,

@@ -170,6 +170,7 @@ mod tests {
 
     fn req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: model.to_string(),

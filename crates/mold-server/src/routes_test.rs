@@ -758,6 +758,7 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            guidance_overrides: None,
             prompt: prompt.into(),
             negative_prompt: None,
             original_prompt: None,
@@ -1027,6 +1028,67 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not compatible with LTX-2 19B distilled"));
+    }
+
+    #[tokio::test]
+    async fn guidance_overrides_are_rejected_for_non_ltx2_models() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "test",
+                            "model": "flux-dev:q4",
+                            "width": 512,
+                            "height": 512,
+                            "steps": 4,
+                            "guidance": 3.0,
+                            "batch_size": 1,
+                            "guidance_overrides": { "stg_scale": 1.5 }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("guidance_overrides"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn guidance_overrides_out_of_range_are_rejected_before_queue_work() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "test",
+                            "model": "ltx-2-19b-distilled:fp8",
+                            "width": 960,
+                            "height": 576,
+                            "steps": 8,
+                            "guidance": 3.0,
+                            "batch_size": 1,
+                            "output_format": "mp4",
+                            "guidance_overrides": { "rescale_scale": 2.0 }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await;
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("rescale_scale"), "got: {error}");
     }
 
     // ── /api/status ──────────────────────────────────────────────────────────
@@ -7126,6 +7188,7 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            guidance_overrides: None,
             prompt: "from db".into(),
             negative_prompt: None,
             original_prompt: None,
@@ -8027,6 +8090,7 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            guidance_overrides: None,
             prompt: "doomed".into(),
             negative_prompt: None,
             original_prompt: None,

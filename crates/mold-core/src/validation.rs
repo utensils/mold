@@ -1,5 +1,6 @@
 use crate::{
-    GenerateRequest, KeyframeCondition, LoraWeight, Ltx2PipelineMode, OutputFormat, UpscaleRequest,
+    GenerateRequest, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode,
+    OutputFormat, UpscaleRequest,
 };
 
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
@@ -31,6 +32,16 @@ pub const LTX2_MAX_FRAMES: u32 = 153;
 
 /// Global frame ceiling applied to every video request regardless of family.
 pub const MAX_FRAMES_GLOBAL: u32 = 257;
+
+/// Upper bound for a requested STG block index. The deepest LTX-2 transformer
+/// mold runs has 48 layers; the ceiling is loose on purpose because the exact
+/// depth is a property of the resolved checkpoint, which validation does not
+/// have. The engine rejects an index the loaded transformer does not have.
+pub const MAX_STG_BLOCK_INDEX: u32 = 64;
+
+/// Maximum number of simultaneously perturbed STG blocks. Every extra block
+/// deepens the perturbed pass; upstream configurations use one or two.
+pub const MAX_STG_BLOCKS: usize = 8;
 
 /// Per-family single-request frame ceiling WITHOUT temporal upscaling — the
 /// value `/api/models` advertises as `max_frames`. Must stay in agreement
@@ -254,6 +265,84 @@ fn validate_keyframes(
         }
     }
 
+    Ok(())
+}
+
+/// Bounds-check the LTX-2 multimodal guider overrides.
+///
+/// These are advanced quality/motion knobs, so the ranges are deliberately
+/// generous — the job here is to reject values that cannot mean anything
+/// (NaN, negatives, block indices no checkpoint has) before a request reaches
+/// the queue, not to police taste. The engine re-checks `stg_blocks` against
+/// the resolved checkpoint's transformer depth, which validation cannot know.
+fn validate_guidance_overrides(overrides: &Ltx2GuidanceOverrides) -> Result<(), String> {
+    if overrides.is_empty() {
+        return Err(
+            "guidance_overrides must set at least one field; omit it to keep pipeline defaults"
+                .to_string(),
+        );
+    }
+    let bounded = |value: Option<f64>, name: &str, max: f64| -> Result<(), String> {
+        match value {
+            Some(value) if !value.is_finite() => Err(format!("{name} must be a finite number")),
+            Some(value) if !(0.0..=max).contains(&value) => {
+                Err(format!("{name} ({value}) must be between 0.0 and {max}"))
+            }
+            _ => Ok(()),
+        }
+    };
+    bounded(
+        overrides.stg_scale,
+        "guidance_overrides.stg_scale",
+        Ltx2GuidanceOverrides::MAX_SCALE,
+    )?;
+    bounded(
+        overrides.modality_scale,
+        "guidance_overrides.modality_scale",
+        Ltx2GuidanceOverrides::MAX_SCALE,
+    )?;
+    // Rescale is an interpolation factor between the guided prediction and
+    // its std-matched form, so anything outside 0..=1 is meaningless.
+    bounded(
+        overrides.rescale_scale,
+        "guidance_overrides.rescale_scale",
+        1.0,
+    )?;
+    if let Some(skip_step) = overrides.skip_step {
+        if skip_step > Ltx2GuidanceOverrides::MAX_SKIP_STEP {
+            return Err(format!(
+                "guidance_overrides.skip_step ({skip_step}) must be <= {}",
+                Ltx2GuidanceOverrides::MAX_SKIP_STEP
+            ));
+        }
+    }
+    if let Some(blocks) = &overrides.stg_blocks {
+        if blocks.is_empty() {
+            return Err(
+                "guidance_overrides.stg_blocks must not be empty; omit it to keep the pipeline default block"
+                    .to_string(),
+            );
+        }
+        if blocks.len() > MAX_STG_BLOCKS {
+            return Err(format!(
+                "guidance_overrides.stg_blocks lists {} blocks; at most {MAX_STG_BLOCKS} are supported",
+                blocks.len()
+            ));
+        }
+        for (index, block) in blocks.iter().enumerate() {
+            if *block >= MAX_STG_BLOCK_INDEX {
+                return Err(format!(
+                    "guidance_overrides.stg_blocks[{index}] ({block}) exceeds the deepest supported transformer block ({})",
+                    MAX_STG_BLOCK_INDEX - 1
+                ));
+            }
+            if blocks[..index].contains(block) {
+                return Err(format!(
+                    "guidance_overrides.stg_blocks[{index}] ({block}) is listed more than once"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -557,6 +646,10 @@ pub fn validate_generate_request_with_family(
     if req.pipeline.is_some() {
         require_ltx2_family(family, "pipeline")?;
     }
+    if let Some(overrides) = &req.guidance_overrides {
+        require_ltx2_family(family, "guidance_overrides")?;
+        validate_guidance_overrides(overrides)?;
+    }
     if let Some(control) = req.ic_lora_control.as_deref() {
         require_ltx2_family(family, "ic_lora_control")?;
         if control.trim().is_empty() {
@@ -805,6 +898,7 @@ mod tests {
 
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            guidance_overrides: None,
             prompt: "a red apple".to_string(),
             negative_prompt: None,
             model: "test-model".to_string(),
@@ -1118,6 +1212,112 @@ mod tests {
         ]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("unknown model family"), "got: {err}");
+    }
+
+    fn ltx2_req_with_overrides(overrides: Ltx2GuidanceOverrides) -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(17);
+        req.guidance_overrides = Some(overrides);
+        req
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_accept_upstream_ranges() {
+        validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_scale: Some(1.5),
+            stg_blocks: Some(vec![28, 29]),
+            rescale_scale: Some(0.7),
+            modality_scale: Some(3.0),
+            skip_step: Some(2),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_are_family_gated() {
+        let mut req = valid_req();
+        req.guidance_overrides = Some(Ltx2GuidanceOverrides {
+            stg_scale: Some(1.0),
+            ..Ltx2GuidanceOverrides::default()
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("guidance_overrides"), "got: {err}");
+        assert!(err.contains("LTX-2"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_reject_empty_objects() {
+        let err =
+            validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides::default()))
+                .unwrap_err();
+        assert!(err.contains("at least one field"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_reject_out_of_range_scales() {
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_scale: Some(-0.5),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("stg_scale"), "got: {err}");
+
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_scale: Some(f64::NAN),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("finite"), "got: {err}");
+
+        // Rescale is an interpolation factor, so its ceiling is 1.0 even
+        // though the other scales accept much larger values.
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            rescale_scale: Some(1.5),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("rescale_scale"), "got: {err}");
+        validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            modality_scale: Some(1.5),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_reject_unusable_stg_blocks() {
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_blocks: Some(Vec::new()),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_blocks: Some(vec![MAX_STG_BLOCK_INDEX]),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("deepest supported"), "got: {err}");
+
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            stg_blocks: Some(vec![29, 29]),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_guidance_overrides_bound_the_skip_stride() {
+        let err = validate_generate_request(&ltx2_req_with_overrides(Ltx2GuidanceOverrides {
+            skip_step: Some(Ltx2GuidanceOverrides::MAX_SKIP_STEP + 1),
+            ..Ltx2GuidanceOverrides::default()
+        }))
+        .unwrap_err();
+        assert!(err.contains("skip_step"), "got: {err}");
     }
 
     #[test]

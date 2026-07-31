@@ -25,6 +25,11 @@ import {
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
 import { defaultVideoFps } from "@studio/lib/sequence";
+import {
+  emptyGuidanceOverrides,
+  guidanceOverridesFromWire,
+  guidanceOverridesToWire,
+} from "@studio/lib/guidanceOverrides";
 
 /** The prompt actually sent to the server: the textarea content composed with
  * the active style preset (the shared kit substitutes a "{prompt}" template,
@@ -110,6 +115,7 @@ function defaultForm(): GenerateFormState {
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    guidanceOverrides: emptyGuidanceOverrides(),
     cameraControl: null,
     placement: null,
     loras: [],
@@ -205,6 +211,7 @@ function modelDefaultsPatch(
     next.retakeRange = null;
     next.spatialUpscale = null;
     next.temporalUpscale = null;
+    next.guidanceOverrides = emptyGuidanceOverrides();
     next.cameraControl = null;
   }
   if (capabilities.sourceImageMode === "qwen-edit") {
@@ -315,6 +322,7 @@ export function applyMetadataToForm(
     retakeRange: metadata.retake_range ?? null,
     spatialUpscale: metadata.spatial_upscale ?? null,
     temporalUpscale: metadata.temporal_upscale ?? null,
+    guidanceOverrides: guidanceOverridesFromWire(metadata.guidance_overrides),
     frames: metadata.frames ?? null,
     fps: metadata.fps ?? null,
     outputFormat: outputFormat ?? next.outputFormat,
@@ -666,6 +674,7 @@ export function useGenerateForm(): UseGenerateForm {
               retake_range: s.retakeRange ?? undefined,
               spatial_upscale: s.spatialUpscale ?? undefined,
               temporal_upscale: s.temporalUpscale ?? undefined,
+              guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
             }
           : {}),
       };

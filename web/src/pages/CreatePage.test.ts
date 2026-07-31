@@ -742,6 +742,27 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.text()).toContain("Mask image needs a source image.");
   });
 
+  it("blocks submission on an STG block list it cannot parse", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.guidanceOverrides = {
+      stgScale: 1.5,
+      stgBlocks: "28,twenty-nine",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: null,
+    };
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("STG blocks:");
+  });
+
   it("submits Qwen edit images without sending stale mask state", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

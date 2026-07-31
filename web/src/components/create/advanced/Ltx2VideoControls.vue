@@ -16,6 +16,7 @@ import type {
   GenerateFormState,
   Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
+  Ltx2GuidanceOverridesState,
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
@@ -27,6 +28,13 @@ import {
   cameraMotionMode,
   isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
+import {
+  emptyGuidanceOverrides,
+  guidanceOverrideCount,
+  stgBlocksError,
+  MAX_GUIDANCE_SCALE,
+  MAX_GUIDANCE_SKIP_STEP,
+} from "@studio/lib/guidanceOverrides";
 
 const props = withDefaults(
   defineProps<{
@@ -238,6 +246,31 @@ function setRetakeEnd(raw: string) {
       end_seconds: Number(raw) || 1,
     },
   });
+}
+
+// ── Guidance overrides ────────────────────────────────────────────────
+// Each control writes null when cleared, because the engine keeps its
+// per-pipeline constant only while the field is absent from the request.
+// A template saved before this control existed restores without the field,
+// so every read goes through one defaulted view of it.
+const guidance = computed<Ltx2GuidanceOverridesState>(
+  () => props.modelValue.guidanceOverrides ?? emptyGuidanceOverrides(),
+);
+function setGuidance(next: Partial<Ltx2GuidanceOverridesState>) {
+  patch({ guidanceOverrides: { ...guidance.value, ...next } });
+}
+function numberOrNull(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+const stgBlocksMessage = computed(() =>
+  stgBlocksError(guidance.value.stgBlocks),
+);
+const guidanceCount = computed(() => guidanceOverrideCount(guidance.value));
+function resetGuidance() {
+  patch({ guidanceOverrides: emptyGuidanceOverrides() });
 }
 
 // ── Keyframe editor ───────────────────────────────────────────────────
@@ -491,6 +524,138 @@ function removeKeyframe(index: number) {
       />
     </div>
 
+    <div class="ltx2__field">
+      <div class="ltx2__keyhead">
+        <label class="ltx2__label">
+          Guidance overrides
+          <span
+            v-if="guidanceCount"
+            class="ltx2__count"
+            data-test="ltx2-guidance-count"
+            >{{ guidanceCount }}</span
+          >
+        </label>
+        <button
+          v-if="guidanceCount"
+          type="button"
+          class="ltx2__reset"
+          data-test="ltx2-guidance-reset"
+          @click="resetGuidance"
+        >
+          Reset
+        </button>
+      </div>
+      <p class="ltx2__hint">
+        Empty keeps this checkpoint's pipeline defaults. Only two-stage,
+        two-stage HQ, keyframe, and a2vid renders use these.
+      </p>
+      <div class="ltx2__pair">
+        <label class="ltx2__sublabel">
+          STG scale
+          <input
+            class="ltx2__input"
+            type="number"
+            step="0.1"
+            min="0"
+            :max="MAX_GUIDANCE_SCALE"
+            placeholder="Default"
+            data-test="ltx2-stg-scale"
+            :value="guidance.stgScale ?? ''"
+            @input="
+              setGuidance({
+                stgScale: numberOrNull(
+                  ($event.target as HTMLInputElement).value,
+                ),
+              })
+            "
+          />
+        </label>
+        <label class="ltx2__sublabel">
+          STG blocks
+          <input
+            class="ltx2__input"
+            type="text"
+            inputmode="numeric"
+            placeholder="e.g. 28, 29"
+            data-test="ltx2-stg-blocks"
+            :value="guidance.stgBlocks"
+            @input="
+              setGuidance({
+                stgBlocks: ($event.target as HTMLInputElement).value,
+              })
+            "
+          />
+        </label>
+      </div>
+      <p
+        v-if="stgBlocksMessage"
+        class="ltx2__error"
+        data-test="ltx2-stg-blocks-error"
+      >
+        {{ stgBlocksMessage }}
+      </p>
+      <div class="ltx2__pair ltx2__pair--spaced">
+        <label class="ltx2__sublabel">
+          CFG rescale
+          <input
+            class="ltx2__input"
+            type="number"
+            step="0.05"
+            min="0"
+            max="1"
+            placeholder="Default"
+            data-test="ltx2-rescale-scale"
+            :value="guidance.rescaleScale ?? ''"
+            @input="
+              setGuidance({
+                rescaleScale: numberOrNull(
+                  ($event.target as HTMLInputElement).value,
+                ),
+              })
+            "
+          />
+        </label>
+        <label class="ltx2__sublabel">
+          Modality scale
+          <input
+            class="ltx2__input"
+            type="number"
+            step="0.1"
+            min="0"
+            :max="MAX_GUIDANCE_SCALE"
+            placeholder="Default"
+            data-test="ltx2-modality-scale"
+            :value="guidance.modalityScale ?? ''"
+            @input="
+              setGuidance({
+                modalityScale: numberOrNull(
+                  ($event.target as HTMLInputElement).value,
+                ),
+              })
+            "
+          />
+        </label>
+      </div>
+      <label class="ltx2__sublabel ltx2__sublabel--spaced">
+        Guidance skip stride
+        <input
+          class="ltx2__input"
+          type="number"
+          step="1"
+          min="0"
+          :max="MAX_GUIDANCE_SKIP_STEP"
+          placeholder="Every step"
+          data-test="ltx2-guidance-skip-step"
+          :value="guidance.skipStep ?? ''"
+          @input="
+            setGuidance({
+              skipStep: numberOrNull(($event.target as HTMLInputElement).value),
+            })
+          "
+        />
+      </label>
+    </div>
+
     <div class="ltx2__field ltx2__field--last">
       <div class="ltx2__keyhead">
         <label class="ltx2__label">Keyframes</label>
@@ -657,5 +822,44 @@ function removeKeyframe(index: number) {
 }
 .ltx2__keyframe-input {
   height: 34px;
+}
+.ltx2__count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bench);
+  border: 1px solid var(--ce);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ltx2__reset {
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+.ltx2__sublabel {
+  display: block;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.ltx2__sublabel .ltx2__input {
+  margin-top: 6px;
+}
+.ltx2__sublabel--spaced {
+  margin-top: 8px;
+}
+.ltx2__pair--spaced {
+  margin-top: 8px;
+}
+.ltx2__error {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--stop);
 }
 </style>
