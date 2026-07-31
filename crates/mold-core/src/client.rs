@@ -288,7 +288,7 @@ impl MoldClient {
 
         if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+            return Err(MoldError::Validation(api_error_detail(&body)).into());
         }
 
         if resp.status().is_client_error() || resp.status().is_server_error() {
@@ -409,7 +409,7 @@ impl MoldClient {
         }
         if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+            return Err(MoldError::Validation(api_error_detail(&body)).into());
         }
         if resp.status().is_client_error() || resp.status().is_server_error() {
             let status = resp.status();
@@ -450,7 +450,7 @@ impl MoldClient {
         }
         if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+            return Err(MoldError::Validation(api_error_detail(&body)).into());
         }
         if resp.status().is_client_error() || resp.status().is_server_error() {
             let status = resp.status();
@@ -986,7 +986,7 @@ impl MoldClient {
 
         if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+            return Err(MoldError::Validation(api_error_detail(&body)).into());
         }
 
         if resp.status().is_client_error() || resp.status().is_server_error() {
@@ -1079,6 +1079,21 @@ async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::
         anyhow::bail!("server error {status}: {body}");
     }
     Ok(resp)
+}
+
+fn api_error_detail(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .or_else(|| value.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| body.trim().to_string())
 }
 
 fn lora_family_for_model_filter(model: &str) -> Option<String> {
@@ -1690,6 +1705,20 @@ mod tests {
         assert_eq!(
             lora_family_for_model_filter("qwen-image-edit-2511:q4"),
             Some("qwen-image".to_string())
+        );
+    }
+
+    #[test]
+    fn api_error_detail_extracts_actionable_server_json() {
+        assert_eq!(
+            api_error_detail(
+                r#"{"error":"Qwen Image Edit needs a Target image.","code":"VALIDATION_ERROR"}"#
+            ),
+            "Qwen Image Edit needs a Target image."
+        );
+        assert_eq!(
+            api_error_detail("plain validation failure"),
+            "plain validation failure"
         );
     }
 

@@ -376,7 +376,10 @@ pub fn validate_generate_request_with_family(
     }
     if family == Some("qwen-image-edit") {
         if req.edit_images.as_ref().is_none_or(Vec::is_empty) {
-            return Err("qwen-image-edit requires edit_images to be provided".to_string());
+            return Err(
+                "Qwen Image Edit needs at least one image. Add a Target image and try again."
+                    .to_string(),
+            );
         }
         if req.batch_size != 1 {
             return Err("qwen-image-edit only supports batch_size = 1".to_string());
@@ -1597,7 +1600,10 @@ mod tests {
         let mut req = valid_req();
         req.model = "qwen-image-edit:q4".to_string();
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("requires edit_images"), "got: {err}");
+        assert_eq!(
+            err,
+            "Qwen Image Edit needs at least one image. Add a Target image and try again."
+        );
     }
 
     #[test]

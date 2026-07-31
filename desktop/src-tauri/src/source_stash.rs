@@ -15,6 +15,9 @@
 use std::path::{Path, PathBuf};
 
 const STASH_DIR: &str = "source-stash";
+const SOURCE_PATHS_DIR: &str = "source-paths";
+const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SOURCE_PATHS: usize = 256;
 /// Upper bound on stashed sources; least-recently-used pruned past this. At
 /// the 1–10 MB typical source size this caps the stash around 64–640 MB.
 const MAX_STASH_FILES: usize = 64;
@@ -45,6 +48,74 @@ fn stash_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join(STASH_DIR);
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     Ok(dir)
+}
+
+fn source_paths_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join(SOURCE_PATHS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+/// Remember where a native desktop picker/drop found these exact bytes. The
+/// path stays local to this app and is keyed by content hash; it is never sent
+/// to a server or embedded in gallery metadata.
+pub(crate) fn remember_source_path(
+    app: &tauri::AppHandle,
+    sha256: &str,
+    path: &Path,
+) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if !is_valid_sha256_hex(sha256) {
+        return Err("invalid sha256 key".to_string());
+    }
+    let dir = source_paths_dir(app)?;
+    let destination = dir.join(sha256);
+    let tmp = dir.join(format!("{sha256}.tmp"));
+    std::fs::write(&tmp, path.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, destination).map_err(|error| error.to_string())?;
+    prune_oldest(&dir, MAX_SOURCE_PATHS);
+    Ok(())
+}
+
+fn remembered_source_read(dir: &Path, sha256: &str) -> Result<Option<Vec<u8>>, String> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let pointer = dir.join(sha256);
+    let path_bytes = match std::fs::read(&pointer) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes));
+    let mut bytes = Vec::new();
+    let read_result = std::fs::File::open(path).and_then(|file| {
+        use std::io::Read;
+        file.take(MAX_SOURCE_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+    });
+    match read_result {
+        Ok(_) if bytes.len() as u64 <= MAX_SOURCE_IMAGE_BYTES => {}
+        Ok(_) => {
+            let _ = std::fs::remove_file(pointer);
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::remove_file(pointer);
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    if sha256_hex(&bytes) != sha256 {
+        let _ = std::fs::remove_file(pointer);
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 /// Remove oldest-by-mtime entries until at most `keep` remain. A concurrent
@@ -155,10 +226,14 @@ pub async fn source_stash_get(
         return Err("invalid sha256 key".to_string());
     }
     let dir = stash_dir(&app)?;
+    let source_paths = source_paths_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         use base64::Engine;
-        Ok(stash_read(&dir, &sha256)?
-            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)))
+        let bytes = match stash_read(&dir, &sha256)? {
+            Some(bytes) => Some(bytes),
+            None => remembered_source_read(&source_paths, &sha256)?,
+        };
+        Ok(bytes.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -221,6 +296,28 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec![format!("{:064}", 3), format!("{:064}", 4)]);
+    }
+
+    #[test]
+    fn remembered_source_reloads_only_while_the_original_bytes_still_match() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("pointer dir");
+        let source_dir = tempfile::tempdir().expect("source dir");
+        let source = source_dir.path().join("target.png");
+        let bytes = b"target bytes";
+        std::fs::write(&source, bytes).unwrap();
+        let sha = sha256_hex(bytes);
+        std::fs::write(dir.path().join(&sha), source.as_os_str().as_bytes()).unwrap();
+
+        assert_eq!(
+            remembered_source_read(dir.path(), &sha).unwrap(),
+            Some(bytes.to_vec())
+        );
+
+        std::fs::write(&source, b"changed").unwrap();
+        assert_eq!(remembered_source_read(dir.path(), &sha).unwrap(), None);
+        assert!(!dir.path().join(sha).exists());
     }
 
     #[test]

@@ -2344,6 +2344,7 @@ mod tests {
                 strength: None,
                 source_image_name: None,
                 source_image_sha256: None,
+                edit_image_sha256s: None,
                 scheduler: None,
                 output_format: Some(OutputFormat::Png),
                 cfg_plus: None,

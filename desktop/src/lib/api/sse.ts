@@ -26,6 +26,31 @@ export interface StreamOptions {
   target?: ApiTarget;
 }
 
+async function responseError(response: Response): Promise<Error> {
+  const fallback = `SSE request failed with HTTP ${response.status}`;
+  let body: unknown;
+  try {
+    body = await response.clone().json();
+  } catch {
+    try {
+      const text = (await response.clone().text()).trim();
+      if (text) return Object.assign(new Error(text), { status: response.status });
+    } catch {
+      // Keep the status fallback when an intermediary supplies no readable body.
+    }
+  }
+  if (typeof body === "object" && body !== null) {
+    const record = body as Record<string, unknown>;
+    const detail =
+      (typeof record.error === "string" && record.error.trim()) ||
+      (typeof record.message === "string" && record.message.trim());
+    if (detail) {
+      return Object.assign(new Error(detail), { status: response.status, body });
+    }
+  }
+  return Object.assign(new Error(fallback), { status: response.status, body });
+}
+
 export async function sseStream(path: string, options: StreamOptions): Promise<void> {
   const target = options.target ?? currentTarget();
   const headers = apiHeaders(target, options.headers);
@@ -46,12 +71,9 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
       ...(body !== undefined ? { body } : {}),
       signal: options.signal,
       openWhenHidden: true,
-      onopen(response) {
+      async onopen(response) {
         if (!response.ok) {
-          const error = Object.assign(
-            new Error(`SSE request failed with HTTP ${response.status}`),
-            { status: response.status },
-          );
+          const error = await responseError(response);
           options.onOpenError?.(error);
           throw error;
         }

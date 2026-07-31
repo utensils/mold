@@ -38,6 +38,7 @@ impl VideoMetadata {
             strength: None,
             source_image_name: None,
             source_image_sha256: None,
+            edit_image_sha256s: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Apng),
             cfg_plus: None,
