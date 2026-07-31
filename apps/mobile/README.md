@@ -58,7 +58,10 @@ pushed screen opened from the header.
   advanced-only Reset.
   For LTX-2 checkpoints, the sheet honors additive `supports_audio` model
   metadata: video-only community checkpoints disable generated audio with an
-  explanation while source-image video remains available.
+  explanation while source-image video remains available. It also exposes the
+  additive `guidance_overrides` contract (STG scale/blocks, CFG rescale,
+  modality scale, and skip stride), validates before queueing, counts the group
+  in its badge, and keeps empty fields absent so pipeline defaults remain exact.
   Source-fit and Upscale then fit preprocessing use a per-Create-form cache, so
   unchanged Batch siblings and repeat submissions share one host upscale and
   fitted source while keeping the editable original intact. When the host

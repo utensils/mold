@@ -68,7 +68,8 @@ The mobile composer includes:
 - scheduler, CFG++, steps, guidance, output format, and post-generation
   upscaling where the selected family supports them;
 - validated video frames/FPS, audio, camera motion, source media, keyframes,
-  retake, and LTX-2 pipeline/spatial/temporal controls;
+  retake, LTX-2 pipeline/spatial/temporal controls, and optional STG,
+  CFG-rescale, modality-scale, and guidance-skip overrides;
 - an **Output** field (One shot | Sequence) above the model field that turns
   the composer into a multi-clip sequence; and
 - a host-aware memory estimate before submission.
@@ -76,6 +77,10 @@ The mobile composer includes:
 For video-only LTX-2 community checkpoints, **Generate audio** is disabled with
 an explanation when the connected server reports that the installed files lack
 an audio VAE or vocoder. Source-image video generation remains available.
+Empty guidance-override fields preserve the pipeline defaults. Invalid block
+lists or numeric ranges stay in the Advanced sheet with inline feedback and
+cannot queue a request; **Reset advanced**, templates, and Library reuse share
+the same saved override state as desktop.
 
 Choose resolution through orientation, proportionally drawn aspect-ratio
 tiles, a resolution tier, or explicit custom dimensions. Seed has separate

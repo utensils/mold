@@ -217,6 +217,7 @@ describe("pruneRequestForFamily", () => {
       retake_range: { start_seconds: 0, end_seconds: 1 },
       spatial_upscale: "x2",
       temporal_upscale: "x2",
+      guidance_overrides: { stg_scale: 1.25, stg_blocks: [28, 29] },
     };
     // ltx-video is a video family but NOT ltx2 → advanced fields are pruned.
     const pruned = pruneRequestForFamily(advanced, "ltx-video");
@@ -226,8 +227,10 @@ describe("pruneRequestForFamily", () => {
     expect(pruned.retake_range).toBeUndefined();
     expect(pruned.spatial_upscale).toBeUndefined();
     expect(pruned.temporal_upscale).toBeUndefined();
+    expect(pruned.guidance_overrides).toBeUndefined();
     // flux (still image) also prunes them.
     expect(pruneRequestForFamily(advanced, "flux").pipeline).toBeUndefined();
+    expect(pruneRequestForFamily(advanced, "flux").guidance_overrides).toBeUndefined();
   });
 
   it("keeps LTX-2 advanced video fields for ltx2", () => {
@@ -238,12 +241,14 @@ describe("pruneRequestForFamily", () => {
       pipeline: "keyframe",
       spatial_upscale: "x1-5",
       temporal_upscale: "x2",
+      guidance_overrides: { rescale_scale: 0.7, skip_step: 2 },
     };
     const pruned = pruneRequestForFamily(advanced, "ltx2");
     expect(pruned.source_video).toBe("VVVV");
     expect(pruned.keyframes).toEqual([{ frame: 8, image: "KKKK" }]);
     expect(pruned.pipeline).toBe("keyframe");
     expect(pruned.spatial_upscale).toBe("x1-5");
+    expect(pruned.guidance_overrides).toEqual({ rescale_scale: 0.7, skip_step: 2 });
   });
 });
 

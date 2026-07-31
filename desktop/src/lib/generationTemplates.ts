@@ -11,6 +11,7 @@
  */
 import type { GenerateForm } from "./generateForm";
 import { createUuid } from "@studio/lib/id";
+import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 
 /** Storage key — MUST differ from the web SPA's `mold.generation.templates.v1`. */
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.desktop.generation.templates.v1";
@@ -114,7 +115,13 @@ function parseTemplates(raw: string | null): GenerationTemplate[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isTemplate);
+    return parsed.filter(isTemplate).map((template) => ({
+      ...template,
+      form: {
+        ...template.form,
+        guidanceOverrides: template.form.guidanceOverrides ?? emptyGuidanceOverrides(),
+      },
+    }));
   } catch {
     return [];
   }

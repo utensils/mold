@@ -27,6 +27,12 @@ import {
 import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/sourceFit";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { findInstalledModel } from "./generateModels";
+import {
+  emptyGuidanceOverrides,
+  guidanceOverridesFromWire,
+  guidanceOverridesToWire,
+  type Ltx2GuidanceOverridesState,
+} from "@studio/lib/guidanceOverrides";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -114,6 +120,8 @@ export interface GenerateForm {
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
+  /** Optional LTX-2 guider overrides. Empty values preserve pipeline defaults. */
+  guidanceOverrides: Ltx2GuidanceOverridesState;
   /** Conditioning audio for the a2vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
   /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
@@ -166,6 +174,7 @@ export function newGenerateForm(): GenerateForm {
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    guidanceOverrides: emptyGuidanceOverrides(),
     audioFile: null,
     cameraControl: null,
     stylePreset: "",
@@ -196,6 +205,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
       image: { ...keyframe.image },
     })),
     retakeRange: form.retakeRange ? { ...form.retakeRange } : null,
+    guidanceOverrides: { ...form.guidanceOverrides },
     audioFile: form.audioFile ? { ...form.audioFile } : null,
   };
 }
@@ -280,6 +290,7 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.retakeRange = null;
     form.spatialUpscale = null;
     form.temporalUpscale = null;
+    form.guidanceOverrides = emptyGuidanceOverrides();
     form.audioFile = null;
     form.cameraControl = null;
   }
@@ -412,6 +423,8 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.retakeRange) req.retake_range = form.retakeRange;
     if (form.spatialUpscale) req.spatial_upscale = form.spatialUpscale;
     if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
+    const guidanceOverrides = guidanceOverridesToWire(form.guidanceOverrides);
+    if (guidanceOverrides) req.guidance_overrides = guidanceOverrides;
     // a2vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
     if (form.pipeline === "a2vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
@@ -508,6 +521,7 @@ export function applyMetadataToForm(
   form.retakeRange = metadata.retake_range ?? null;
   form.spatialUpscale = metadata.spatial_upscale ?? null;
   form.temporalUpscale = metadata.temporal_upscale ?? null;
+  form.guidanceOverrides = guidanceOverridesFromWire(metadata.guidance_overrides);
 
   // Output metadata never carries source/mask/control/video/audio bytes —
   // clear any stale attachment instead of silently pairing it with the print.
@@ -605,6 +619,7 @@ export function applyRequestToForm(
   form.retakeRange = request.retake_range ?? null;
   form.spatialUpscale = request.spatial_upscale ?? null;
   form.temporalUpscale = request.temporal_upscale ?? null;
+  form.guidanceOverrides = guidanceOverridesFromWire(request.guidance_overrides);
 }
 
 /**
