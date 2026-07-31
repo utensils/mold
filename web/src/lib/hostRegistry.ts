@@ -26,6 +26,9 @@ export interface HostEntry {
   apiKey?: string;
   /** Last-seen `/api/status.instance_id`, used to dedupe re-adds. */
   instanceId?: string;
+  /** False only after an explicit disconnect. Missing means connected for
+   *  compatibility with registries written by older Mold versions. */
+  connected?: boolean;
 }
 
 /** The serving origin, always the immutable primary host. */
@@ -87,6 +90,7 @@ function isHostEntry(value: unknown): value is HostEntry {
     typeof c.url === "string" &&
     (c.apiKey === undefined || typeof c.apiKey === "string") &&
     (c.instanceId === undefined || typeof c.instanceId === "string") &&
+    (c.connected === undefined || typeof c.connected === "boolean") &&
     c.id !== ORIGIN_HOST_ID
   );
 }
@@ -111,13 +115,26 @@ function writeStoredHosts(hosts: HostEntry[]): void {
   }
 }
 
-/** Every host the browser knows: the primary origin first, then remotes. */
+/** Every host currently in the active routing/polling mix. */
 export function listHosts(): HostEntry[] {
+  return [
+    originHost(),
+    ...listStoredHosts().filter((host) => host.connected !== false),
+  ];
+}
+
+/** Every remembered host, including explicitly disconnected remotes. */
+export function listKnownHosts(): HostEntry[] {
   return [originHost(), ...listStoredHosts()];
 }
 
 export function getHost(id: string): HostEntry | null {
   return listHosts().find((h) => h.id === id) ?? null;
+}
+
+/** A remembered host regardless of whether it is currently connected. */
+export function getKnownHost(id: string): HostEntry | null {
+  return listKnownHosts().find((h) => h.id === id) ?? null;
 }
 
 /**
@@ -159,6 +176,7 @@ export function addHost(input: AddHostInput): HostEntry {
     id: existing?.id ?? id,
     name,
     url,
+    connected: true,
   };
   if (input.apiKey) entry.apiKey = input.apiKey;
   else if (existing?.apiKey) entry.apiKey = existing.apiKey;
@@ -190,6 +208,14 @@ export function updateHost(
 export function removeHost(id: string): void {
   if (id === ORIGIN_HOST_ID) return;
   writeStoredHosts(listStoredHosts().filter((h) => h.id !== id));
+}
+
+/** Keep a host remembered while including/excluding it from every live mix. */
+export function setHostConnected(
+  id: string,
+  connected: boolean,
+): HostEntry | null {
+  return updateHost(id, { connected });
 }
 
 export const GENERATE_TARGET_STORAGE_KEY = "mold.web.generateTarget.v1";

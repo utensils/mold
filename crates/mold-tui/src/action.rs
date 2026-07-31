@@ -137,6 +137,8 @@ pub enum Action {
     MachinesConnect,
     /// Machines: set the selected row as the sticky generation target.
     MachinesSetTarget,
+    /// Machines: disconnect or reconnect the selected remembered host.
+    MachinesToggleConnection,
     /// Machines: forget the selected host (confirmed; deletes its API key).
     MachinesForget,
     /// Machines: refresh telemetry and queue for all hosts now.

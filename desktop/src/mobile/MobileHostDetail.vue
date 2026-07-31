@@ -43,6 +43,8 @@ const emit = defineEmits<{
   (event: "back"): void;
   (event: "select", id: string): void;
   (event: "rename", payload: { id: string; name: string }): void;
+  (event: "disconnect", id: string): void;
+  (event: "reconnect", id: string): void;
   (event: "forget", id: string): void;
   (event: "catalog", hostId: string): void;
   (event: "status", payload: { id: string; status: ServerStatus | null }): void;
@@ -327,6 +329,10 @@ async function loadHost(): Promise<void> {
   forgetPending.value = false;
   cancelConfirmId.value = null;
   cancellingQueueIds.value = new Set();
+  if (props.host.connected === false) {
+    loading.value = false;
+    return;
+  }
 
   try {
     const [nextStatus, models] = await Promise.all([
@@ -470,9 +476,13 @@ function downloadPercent(done: number, total: number): number {
   return total > 0 ? percent(done, total) : 0;
 }
 
-watch(() => [props.host.id, props.host.baseUrl, props.host.apiKey] as const, loadHost, {
-  immediate: true,
-});
+watch(
+  () => [props.host.id, props.host.baseUrl, props.host.apiKey, props.host.connected] as const,
+  loadHost,
+  {
+    immediate: true,
+  },
+);
 onBeforeUnmount(() => {
   loadEpoch += 1;
   stopLiveServices();
@@ -490,7 +500,13 @@ onBeforeUnmount(() => {
       >
         <span aria-hidden="true">‹</span> Hosts
       </button>
-      <span class="host-chip">{{ host.online ? `v${host.version ?? ""}` : "offline" }}</span>
+      <span class="host-chip">{{
+        host.connected === false
+          ? "disconnected"
+          : host.online
+            ? `v${host.version ?? ""}`
+            : "offline"
+      }}</span>
     </div>
 
     <div class="mobile-detail-title">
@@ -505,13 +521,31 @@ onBeforeUnmount(() => {
       <button
         class="secondary-button"
         type="button"
-        :disabled="active || !host.online"
+        :disabled="active || host.connected === false || !host.online"
         data-test="host-detail-select"
         @click="emit('select', host.id)"
       >
         {{ active ? "Used for generations" : "Use for generations" }}
       </button>
       <button class="secondary-button" type="button" @click="renaming = !renaming">Rename</button>
+      <button
+        v-if="host.connected !== false"
+        class="secondary-button"
+        type="button"
+        data-test="host-detail-disconnect"
+        @click="emit('disconnect', host.id)"
+      >
+        Disconnect
+      </button>
+      <button
+        v-else
+        class="secondary-button"
+        type="button"
+        data-test="host-detail-reconnect"
+        @click="emit('reconnect', host.id)"
+      >
+        Reconnect
+      </button>
     </div>
 
     <form v-if="renaming" class="mobile-inline-form" @submit.prevent="saveRename">
@@ -525,7 +559,10 @@ onBeforeUnmount(() => {
       </div>
     </form>
 
-    <p v-if="loading" class="status-line">Reading host…</p>
+    <p v-if="host.connected === false" class="status-line">
+      Disconnected. This host stays out of generation, Library, Models, and background checks.
+    </p>
+    <p v-else-if="loading" class="status-line">Reading host…</p>
     <div v-if="error" class="row-actions">
       <p class="status-line error-text" role="alert">{{ error }}</p>
       <button

@@ -19,6 +19,8 @@ export interface MobileHost {
   version: string | undefined;
   /** Stable server installation id, kept separate from the URL-based row id. */
   instanceId?: string | undefined;
+  /** False only after an explicit disconnect; the address and Keychain key remain. */
+  connected?: boolean;
   online: boolean;
 }
 
@@ -28,7 +30,7 @@ export function mobileHostTarget(host: MobileHost): ApiTarget {
 
 /** Exact authority fence for prepared work and placement previews. */
 export function mobileHostMatchesRoute(route: HostRoute, host: MobileHost | undefined): boolean {
-  if (!host || !host.online || host.id !== route.hostId) return false;
+  if (!host || host.connected === false || !host.online || host.id !== route.hostId) return false;
   const target = mobileHostTarget(host);
   return (
     target.baseUrl === route.target.baseUrl &&

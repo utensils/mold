@@ -103,6 +103,37 @@ describe("MachinesPage", () => {
     expect(poll.refresh).toHaveBeenCalled();
   });
 
+  it("shows a remembered disconnected host and reconnects it explicitly", async () => {
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-7680",
+          name: "Studio",
+          url: "http://studio:7680",
+          apiKey: "secret",
+          connected: false,
+        },
+      ]),
+    );
+    poll.loading.value = false;
+    const w = mountPage();
+    const card = w.findAll('[data-test="host-card"]')[1]!;
+    expect(w.get('[data-test="host-disconnected"]').text()).toBe(
+      "disconnected",
+    );
+    expect(card.attributes("role")).toBeUndefined();
+    expect(card.attributes("tabindex")).toBeUndefined();
+    expect(card.attributes("aria-label")).toBeUndefined();
+    await w.get('[data-test="host-reconnect"]').trigger("click");
+    expect(
+      JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0],
+    ).toMatchObject({
+      connected: true,
+      apiKey: "secret",
+    });
+  });
+
   it("opens the connect modal from the header button", async () => {
     const w = mountPage();
     expect(w.findComponent(ConnectModal).props("open")).toBe(false);

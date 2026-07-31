@@ -4612,4 +4612,23 @@ describe("MobileApp machines telemetry", () => {
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
     expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
   });
+
+  it("disconnects without forgetting and reconnects only on request", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await wrapper.get("[data-test='host-detail-disconnect']").trigger("click");
+    await flushPromises();
+
+    let saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    expect(saved[0]).toMatchObject({ connected: false });
+    expect(wrapper.get("[data-test='mobile-host-detail'] .host-chip").text()).toBe("disconnected");
+    expect(wrapper.find("[data-test='host-detail-reconnect']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='host-detail-reconnect']").trigger("click");
+    await flushPromises();
+    saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    expect(saved[0]).toMatchObject({ connected: true });
+  });
 });

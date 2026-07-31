@@ -130,10 +130,14 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
                 let name = entry
                     .map(|e| e.display_name())
                     .unwrap_or_else(|| id.clone());
-                let (color, label) = match st.statuses.get(id).map(|s| &s.health) {
-                    Some(HostHealth::Ready) => (theme.success, "ready"),
-                    Some(HostHealth::Offline(_)) => (theme.error, "offline"),
-                    _ => (theme.warning, "connecting…"),
+                let (color, label) = if entry.is_some_and(|host| !host.connected) {
+                    (theme.faint, "disconnected")
+                } else {
+                    match st.statuses.get(id).map(|s| &s.health) {
+                        Some(HostHealth::Ready) => (theme.success, "ready"),
+                        Some(HostHealth::Offline(_)) => (theme.error, "offline"),
+                        _ => (theme.warning, "connecting…"),
+                    }
                 };
                 let detail = host_detail_line(
                     entry.map(|e| e.url.as_str()).unwrap_or(""),
@@ -316,6 +320,18 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
     let st = &app.machines;
     let health = st.statuses.get(host_id).map(|s| &s.health);
     let status = st.statuses.get(host_id).and_then(|s| s.status.as_deref());
+    if st.registry.get(host_id).is_some_and(|host| !host.connected) {
+        lines.push(Line::from(Span::styled("disconnected", theme.dim())));
+        lines.push(Line::from(
+            "This machine is remembered but excluded from generation, Library, Models, and polling.",
+        ));
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "d Reconnect · f Forget",
+            theme.dim(),
+        )));
+        return;
+    }
 
     match (health, status) {
         (Some(HostHealth::Offline(reason)), _) => {
@@ -331,7 +347,7 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             }
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                "r Refresh · d Forget",
+                "d Disconnect · r Refresh · f Forget",
                 theme.dim(),
             )));
             return;
@@ -867,6 +883,7 @@ mod tests {
                 url: "http://hal9000:7680".into(),
                 name: None,
                 instance_id: None,
+                connected: true,
             })
             .unwrap();
         let rows = row_ids(&st);
