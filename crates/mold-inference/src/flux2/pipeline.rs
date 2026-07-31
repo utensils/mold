@@ -351,10 +351,11 @@ impl Flux2Engine {
         true
     }
 
-    fn uses_sequential_generate_path(&self) -> bool {
+    fn uses_sequential_generate_path(&self, req: &GenerateRequest) -> bool {
         self.base.load_strategy == LoadStrategy::Sequential
             || self.offload
             || !self.pending_loras.is_empty()
+            || req.source_image.is_some()
     }
 
     fn load_sequential_vae(
@@ -1382,7 +1383,7 @@ impl Flux2Engine {
             );
         }
         // Sequential mode: load-use-drop each component
-        if self.uses_sequential_generate_path() {
+        if self.uses_sequential_generate_path(req) {
             // A stale/mismatched eager plan must not leave its transformer,
             // VAE, or text encoder resident while the LoRA path constructs
             // staged replacements. Production planning selects Sequential for
@@ -1872,6 +1873,19 @@ mod tests {
         }
     }
 
+    fn test_generate_request() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux2-klein:bf16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn flux2_img2img_uses_minus_one_to_one_source_normalization() {
         assert_eq!(
@@ -1886,6 +1900,26 @@ mod tests {
             Flux2Engine::sequential_img2img_preencodes_source(),
             "sequential Flux.2 img2img must not keep the VAE resident while loading the transformer"
         );
+    }
+
+    #[test]
+    fn source_image_requires_sequential_generation_even_for_eager_engines() {
+        let dir = temp_test_dir("mold-flux2-source-sequential");
+        let engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        let mut req = test_generate_request();
+        req.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+
+        assert!(engine.uses_sequential_generate_path(&req));
+        req.source_image = None;
+        assert!(!engine.uses_sequential_generate_path(&req));
     }
 
     #[test]
@@ -2033,7 +2067,7 @@ mod tests {
         );
 
         assert!(
-            engine.uses_sequential_generate_path(),
+            engine.uses_sequential_generate_path(&test_generate_request()),
             "Flux.2 --offload requests must reach the engine and select the \
              staged generation path instead of being silently ignored"
         );

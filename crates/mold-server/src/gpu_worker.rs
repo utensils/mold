@@ -3114,6 +3114,7 @@ fn select_load_strategy_for_worker(
         paths,
         hint,
         request_has_lora,
+        false,
     );
     if strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(
