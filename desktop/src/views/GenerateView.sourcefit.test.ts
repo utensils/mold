@@ -1,8 +1,8 @@
 /**
  * Submit-path integration for the img2img source-fit policies: the view must
- * resolve the CONCRETE target host BEFORE preprocessing (so upscale-then-fit
- * runs the upscaler on the same host the generation routes to), apply the
- * preprocessed source/mask to the form, and only then build + submit.
+ * resolve the CONCRETE target host before host-bound upscale preprocessing,
+ * while local fit policies preprocess first so placement sees the finalized
+ * request exactly once.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
@@ -148,7 +148,15 @@ describe("GenerateView source-fit submit path", () => {
 
     mount(GenerateView, { shallow: true, attachTo: document.body });
     await flushPromises();
-    primeForm();
+    const form = primeForm();
+    // Let the model-change watcher settle before selecting the host-bound
+    // policy, matching the user's interaction order.
+    await flushPromises();
+    form.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x2plus:fp16",
+      fit: { mode: "pad-repaint" },
+    };
     useUiStore().generateTick++;
     await flushPromises();
 
@@ -173,6 +181,38 @@ describe("GenerateView source-fit submit path", () => {
     );
     expect(req.source_image).toBe("FIT");
     expect(req.mask_image).toBe("PADMASK");
+  });
+
+  it("preprocesses local fit policies before one finalized placement preview", async () => {
+    const hosts = setupMultiHost();
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");
+    const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    applySourceFitPreprocess.mockResolvedValue({
+      source: "FIT",
+      mask: "PADMASK",
+      changed: true,
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = primeForm();
+    form.sourceFit = { mode: "lanczos-resize" };
+    useUiStore().generateTick++;
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1);
+    expect(resolveFeasible).toHaveBeenCalledTimes(1);
+    expect(Math.min(...applySourceFitPreprocess.mock.invocationCallOrder)).toBeLessThan(
+      Math.min(...resolveFeasible.mock.invocationCallOrder),
+    );
+    expect(submitBatch).toHaveBeenCalledTimes(1);
+    expect(submitBatch.mock.calls[0]![0]).toMatchObject({
+      source_image: "FIT",
+      mask_image: "PADMASK",
+    });
   });
 
   it("passes the form's source, mask, policy, and target size to the preprocess", async () => {

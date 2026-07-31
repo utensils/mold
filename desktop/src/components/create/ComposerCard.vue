@@ -28,6 +28,7 @@ const props = withDefaults(
     preparedBlocked: boolean;
     hasPrepared: boolean;
     chainReject: boolean;
+    submitting: boolean;
     buttonLabel: string;
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
@@ -146,7 +147,7 @@ defineExpose({ focus, expand, record });
           type="button"
           data-test="generate-button"
           class="ms-composer__generate"
-          :disabled="!form.prompt.trim() || !form.model || chainReject || hasPrepared"
+          :disabled="!form.prompt.trim() || !form.model || chainReject || hasPrepared || submitting"
           @click="emit('generate')"
         >
           <Icon name="sparkle" :size="16" />

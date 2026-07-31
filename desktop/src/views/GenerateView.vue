@@ -392,6 +392,7 @@ const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
  */
 const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
+const submissionPlanning = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
 // Completion is detached from authoring once the store accepts a batch. Only
@@ -1379,9 +1380,12 @@ watch(
   { immediate: true },
 );
 
-const buttonLabel = computed(() =>
-  generation.pending.length > 0 ? `Generate (+${generation.pending.length} queued)` : "Generate",
-);
+const buttonLabel = computed(() => {
+  if (submissionPlanning.value) return "Planning…";
+  return generation.pending.length > 0
+    ? `Generate (+${generation.pending.length} queued)`
+    : "Generate";
+});
 
 const previewWidth = computed(() => job.value?.width ?? form.width);
 const previewHeight = computed(() => job.value?.height ?? form.height);
@@ -1971,8 +1975,26 @@ async function preprocessSourceFit(
   }
 }
 
+function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateForm>): boolean {
+  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  return (
+    draftCaps.supportsImg2img &&
+    draftCaps.sourceImageMode === "single" &&
+    Boolean(draft.sourceImage) &&
+    draft.sourceFit.mode === "upscale-then-fit" &&
+    Boolean(draft.sourceFit.upscalerModel)
+  );
+}
+
 async function generate() {
-  if (!form.prompt.trim() || !form.model || chainReject.value || preparedSubmitting.value) return;
+  if (
+    !form.prompt.trim() ||
+    !form.model ||
+    chainReject.value ||
+    preparedSubmitting.value ||
+    submissionPlanning.value
+  )
+    return;
   const prepared = preparedBatch.value;
   if (effectiveBatchSize.value > 1 && !prepared) {
     await expandForCurrentBatch();
@@ -2012,6 +2034,7 @@ async function generate() {
     : null;
   const submitToken = submissionGuard.begin();
   preparedSubmitting.value = preparedSubmission !== null;
+  submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
     const draftCaps = generationCapabilitiesForFamily(draft.family);
@@ -2036,9 +2059,18 @@ async function generate() {
     // With multiple live hosts — or a dead primary while another host can
     // serve — route the batch (sticky pick, Auto = least busy, or Most
     // capable) — model-aware, so hosts that already have the weights win.
-    // A pinned host that went away is an error, not a reroute. Resolved
-    // BEFORE source preprocessing so an upscale-then-fit cache miss hits the same host.
+    // A pinned host that went away is an error, not a reroute. Only
+    // upscale-then-fit needs a route before preprocessing; local fit policies
+    // can finalize the source first and avoid a duplicate placement preview.
     let route: HostRoute | null = preparedSubmission?.route ?? quickSubmission?.route ?? null;
+    const routeRequiredForPreprocessing = sourcePreprocessingNeedsRoute(draft);
+    let routeResolvedAgainstFinalRequest = false;
+    let sourcePreprocessed = false;
+    if (!route && !routeRequiredForPreprocessing) {
+      if (!(await preprocessSourceFit(null, draft))) return;
+      if (!submissionGuard.isCurrent(submitToken)) return;
+      sourcePreprocessed = true;
+    }
     const preliminaryRequest = buildRequest(draft);
     const preliminaryRouting = decideGenerateRequestRouting(preliminaryRequest, draft.family);
     if (preliminaryRouting.kind === "reject") {
@@ -2089,9 +2121,12 @@ async function generate() {
         return;
       }
       route = feasibility.route;
+      routeResolvedAgainstFinalRequest = sourcePreprocessed;
     }
-    if (!(await preprocessSourceFit(route, draft))) return;
-    if (!submissionGuard.isCurrent(submitToken)) return;
+    if (!sourcePreprocessed) {
+      if (!(await preprocessSourceFit(route, draft))) return;
+      if (!submissionGuard.isCurrent(submitToken)) return;
+    }
     if (preparedSubmission) {
       const current = preparedBatch.value;
       const unchanged =
@@ -2134,7 +2169,7 @@ async function generate() {
     }
     const finalizedPlanningRequest =
       chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
-    if (route) {
+    if (route && !routeResolvedAgainstFinalRequest) {
       const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch);
       const finalizedRoute = finalized.kind === "route" ? finalized.route : null;
       if (
@@ -2243,6 +2278,7 @@ async function generate() {
     });
   } finally {
     preparedSubmitting.value = false;
+    submissionPlanning.value = false;
   }
 }
 
@@ -2993,6 +3029,7 @@ onBeforeUnmount(() => {
             :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
             :has-prepared="!!preparedBatch"
             :chain-reject="chainReject"
+            :submitting="submissionPlanning"
             :button-label="buttonLabel"
             :estimate-request="estimateRequest"
             :estimate-target="estimateTarget"

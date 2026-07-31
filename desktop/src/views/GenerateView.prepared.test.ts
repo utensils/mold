@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { nextTick } from "vue";
 import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
@@ -213,6 +214,53 @@ describe("GenerateView prepared expansion batches", () => {
         .props("batch")
         .prompts.map((prompt: { text: string }) => prompt.text),
     ).toEqual(prompts);
+  });
+
+  it("acknowledges placement planning immediately and ignores duplicate submits", async () => {
+    useGenerateFormStore().form.batchSize = 1;
+    const preview = deferred<unknown>();
+    placementPreview.mockReset().mockImplementation(() => preview.promise);
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await nextTick();
+
+    const planningButton = wrapper.get('[data-test="generate-button"]');
+    expect(planningButton.text()).toContain("Planning…");
+    expect(planningButton.attributes("disabled")).toBeDefined();
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
+    await nextTick();
+    expect(placementPreview).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
+
+    preview.resolve({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "planned",
+      candidate: {
+        device_id: "cuda:0",
+        execution_fingerprint: "test",
+        predicted_start_after_ms: 0,
+        predicted_completion_after_ms: 100,
+        setup_ms: 0,
+        setup_kind: "warm",
+        estimate_confidence: "high",
+      },
+    });
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    const readyButton = wrapper.get('[data-test="generate-button"]');
+    expect(readyButton.text()).toContain("Generate");
+    expect(readyButton.text()).not.toContain("Planning");
+    expect(readyButton.attributes("disabled")).toBeUndefined();
   });
 
   it("runs exactly one finalized placement preview before submitting edited prepared prompts", async () => {
