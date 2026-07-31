@@ -3323,24 +3323,24 @@ fn ensure_model_ready_sync_inner(
         cache.touch(cache_key);
         drop(cache);
         if let Some(predicted_peak_bytes) = planned_peak_bytes {
-            let process_vram = crate::resources::current_process_vram_bytes(&worker.gpu);
-            if process_vram.is_none() {
+            if let Some(process_vram) = crate::resources::current_process_vram_bytes(&worker.gpu) {
+                preflight_planned_memory_guard_with_eviction(
+                    &worker.model_cache,
+                    cache_key,
+                    model_name,
+                    worker.gpu.ordinal,
+                    predicted_peak_bytes,
+                    hint,
+                    Some(process_vram),
+                )
+                .map_err(|e| anyhow::anyhow!(e.error))?;
+            } else {
                 tracing::debug!(
                     gpu = worker.gpu.ordinal,
                     model = %model_name,
-                    "process-attributed VRAM unavailable; hot-cache plan recheck grants no resident credit"
+                    "process-attributed VRAM unavailable or ambiguous; retaining scheduler grant authority for hot-cache hit"
                 );
             }
-            preflight_planned_memory_guard_with_eviction(
-                &worker.model_cache,
-                cache_key,
-                model_name,
-                worker.gpu.ordinal,
-                predicted_peak_bytes,
-                hint,
-                Some(process_vram.unwrap_or(0)),
-            )
-            .map_err(|e| anyhow::anyhow!(e.error))?;
         }
         return Ok(ModelLoadDisposition::Unchanged);
     }
@@ -4437,10 +4437,14 @@ mod tests {
             hot_cache_path.contains("current_process_vram_bytes(&worker.gpu)"),
             "hot-cache credit must be clamped by fresh Mold-process attribution"
         );
+        assert!(
+            hot_cache_path.contains("if let Some(process_vram)"),
+            "ambiguous attribution must retain scheduler authority instead of becoming zero credit"
+        );
     }
 
     #[test]
-    fn hot_cache_credit_clamps_inflated_or_unattributed_load_delta() {
+    fn active_vram_credit_clamps_an_inflated_load_delta() {
         let stale_global_load_delta = 16 << 30;
 
         assert_eq!(
@@ -4451,7 +4455,7 @@ mod tests {
         assert_eq!(
             planned_active_vram_credit(stale_global_load_delta, Some(0)),
             0,
-            "missing attribution grants no reusable hot-cache capacity"
+            "an explicit zero cap grants no credit; ambiguous attribution never calls this path"
         );
         assert_eq!(
             planned_active_vram_credit(stale_global_load_delta, None),
