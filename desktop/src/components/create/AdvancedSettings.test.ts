@@ -437,6 +437,17 @@ describe("AdvancedSettings — continue a video", () => {
     expect(wrapper.get("[data-test='ltx2-extend-summary']").text()).toContain("80 new frames");
   });
 
+  it("explains a conflicting source image before submission", async () => {
+    const form = formFor("ltx2");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.sourceImage = "AAAA";
+    const wrapper = mountSettings(form, { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+
+    expect(wrapper.get("[data-test='ltx2-extend-error']").text()).toContain("source image");
+  });
+
   it("explains a conflicting source video before submission", async () => {
     const form = formFor("ltx2");
     form.frames = 97;

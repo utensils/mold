@@ -261,6 +261,7 @@ const extendError = computed(() =>
     ? extendValidationError({
         overlapFrames: extendOverlap.value,
         frames: props.form.frames,
+        hasSourceImage: props.form.sourceImage !== null || props.form.imageAttachments.length > 0,
         hasSourceVideo: props.form.sourceVideo !== null,
         hasKeyframes: props.form.keyframes.length > 0,
       })

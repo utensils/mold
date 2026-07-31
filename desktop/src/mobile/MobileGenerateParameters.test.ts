@@ -469,6 +469,16 @@ describe("MobileGenerateParameters — continue a video", () => {
     );
   });
 
+  it("explains a conflicting source image before submission", () => {
+    const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.sourceImage = "AAAA";
+    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], extendModel);
+
+    expect(wrapper.get("[data-test='mobile-ltx2-extend-error']").text()).toContain("source image");
+  });
+
   it("resets the overlap when the attached video is cleared", async () => {
     const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
     form.frames = 97;

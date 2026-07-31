@@ -751,27 +751,38 @@ impl Ltx2Engine {
                 source_frames.len(),
             );
         }
+        // Materialize the plan up front so the source is checked against the
+        // shape the render will ACTUALLY use. `req.fps` is frequently unset —
+        // the plan then supplies the model default — so validating `req`
+        // directly would let a 30 fps clip be continued at 24 fps and
+        // re-encoded at 24, silently retiming the footage we were handed.
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+
         // The stitched output is one video, so the continuation has to render
         // on the source's own lattice. Rejecting is better than silently
         // rescaling: a mid-video resolution change is always a surprise.
-        if probe.width != req.width || probe.height != req.height {
+        if probe.width != plan.width || probe.height != plan.height {
             bail!(
-                "the video to extend is {}x{} but the request asks for {}x{}; \
+                "the video to extend is {}x{} but this request renders {}x{}; \
                  continuations must render at the source's resolution",
                 probe.width,
                 probe.height,
-                req.width,
-                req.height,
+                plan.width,
+                plan.height,
             );
         }
-        if let Some(fps) = req.fps {
-            if probe.fps != fps {
-                bail!(
-                    "the video to extend runs at {} fps but the request asks for {fps} fps; \
-                     continuations must render at the source's frame rate",
-                    probe.fps,
-                );
-            }
+        if probe.fps != plan.frame_rate {
+            bail!(
+                "the video to extend runs at {} fps but this request renders {} fps; \
+                 continuations must render at the source's frame rate{}",
+                probe.fps,
+                plan.frame_rate,
+                if req.fps.is_none() {
+                    format!(" (pass --fps {} to match the source)", probe.fps)
+                } else {
+                    String::new()
+                },
+            );
         }
 
         let tail_start = source_frames.len() - overlap as usize;
@@ -787,10 +798,8 @@ impl Ltx2Engine {
         let frames = stitch_extend_frames(source_frames, &outcome.frames, overlap)?;
         let appended = frames.len() - source_len;
 
-        // `encode_native_video` reads dimensions and frame rate off the plan,
-        // so build one describing the *stitched* result rather than the clip
-        // the transformer rendered.
-        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        // `encode_native_video` reads the frame count off the plan, so describe
+        // the *stitched* result rather than the clip the transformer rendered.
         plan.num_frames = frames.len() as u32;
         let rendered = NativeRenderedVideo {
             frames,
