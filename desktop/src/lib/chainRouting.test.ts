@@ -311,6 +311,7 @@ describe("automatic chain request projection", () => {
         retake_range: { start_seconds: 1, end_seconds: 2 },
         spatial_upscale: "x2",
         temporal_upscale: "x2",
+        guidance_overrides: { stg_scale: 1.5 },
       }),
     ).toEqual([
       "negative_prompt",
@@ -322,6 +323,7 @@ describe("automatic chain request projection", () => {
       "retake_range",
       "spatial_upscale",
       "temporal_upscale",
+      "guidance_overrides",
     ]);
   });
 
@@ -333,5 +335,27 @@ describe("automatic chain request projection", () => {
         lora: { path: "/models/legacy.safetensors", scale: 1 },
       }),
     ).toEqual(["loras"]);
+  });
+
+  it("does not report guidance overrides when every wire value is unset", () => {
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        guidance_overrides: {
+          stg_scale: null,
+          stg_blocks: [],
+          rescale_scale: null,
+          modality_scale: null,
+          skip_step: null,
+        },
+      }),
+    ).toEqual(["negative_prompt"]);
+
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        guidance_overrides: { stg_scale: 0 },
+      }),
+    ).toEqual(["negative_prompt", "guidance_overrides"]);
   });
 });

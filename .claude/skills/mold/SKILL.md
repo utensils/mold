@@ -291,6 +291,11 @@ They are read only by pipelines that run the multimodal guider — `two-stage`,
 deliberately disables (`a2vid` audio), and are ignored by chained/sequence
 renders, which say so instead of pretending the flag landed. Non-LTX-2
 families and out-of-range values are rejected with HTTP 422.
+Web, desktop, and iPhone expose the same optional fields in their LTX-2
+Advanced video controls. Native shells restore them from templates and Library
+metadata, validate before queueing, and refuse automatic long-video routing
+when the chain wire would discard them. The TUI continues to use pipeline
+defaults as part of its broader tracked advanced-video gap.
 
 Community LTX-2 checkpoints can be video-only even when their transformer and
 video VAE are complete. Mold inspects the installed safetensors for both the

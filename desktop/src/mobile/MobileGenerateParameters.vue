@@ -29,6 +29,14 @@ import {
 } from "../lib/generateValidation";
 import { fileToBase64, isStillImageFile } from "../lib/image";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  guidanceOverrideCount,
+  skipStepError,
+  stgBlocksError,
+  MAX_GUIDANCE_SCALE,
+  MAX_GUIDANCE_SKIP_STEP,
+  type Ltx2GuidanceOverridesState,
+} from "@studio/lib/guidanceOverrides";
 
 const props = withDefaults(
   defineProps<{
@@ -78,6 +86,7 @@ const AUTO_CHAIN_FIELD_LABELS: Record<AutoChainUnsupportedField, string> = {
   retake_range: "retake range",
   spatial_upscale: "spatial upscale",
   temporal_upscale: "temporal upscale",
+  guidance_overrides: "guidance overrides",
 };
 
 const chainCompatibilityError = computed(() => {
@@ -168,7 +177,8 @@ function hasAdvancedVideoValue(): boolean {
     props.form.retakeRange ||
     props.form.audioFile ||
     props.form.sourceVideo ||
-    props.form.keyframes.length
+    props.form.keyframes.length ||
+    guidanceOverrideCount(props.form.guidanceOverrides) > 0
   );
 }
 
@@ -182,6 +192,7 @@ watch(
     props.form.audioFile,
     props.form.sourceVideo,
     props.form.keyframes.length,
+    guidanceOverrideCount(props.form.guidanceOverrides),
   ],
   () => {
     if (hasAdvancedVideoValue()) advancedOpen.value = true;
@@ -216,6 +227,22 @@ function setSpatial(value: string): void {
 
 function setTemporal(value: string): void {
   props.form.temporalUpscale = (value || null) as Ltx2TemporalUpscale | null;
+}
+
+const guidance = computed<Ltx2GuidanceOverridesState>(() => props.form.guidanceOverrides);
+const guidanceCount = computed(() => guidanceOverrideCount(guidance.value));
+const stgBlocksMessage = computed(() => stgBlocksError(guidance.value.stgBlocks));
+const skipStepMessage = computed(() => skipStepError(guidance.value.skipStep));
+
+function setGuidance(next: Partial<Ltx2GuidanceOverridesState>): void {
+  props.form.guidanceOverrides = { ...guidance.value, ...next };
+}
+
+function numberOrNull(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
 }
 
 function setRetake(edge: "start" | "end", raw: string): void {
@@ -706,6 +733,130 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
               />
             </label>
           </div>
+        </div>
+
+        <div class="mobile-generate-guidance" data-test="mobile-ltx2-guidance">
+          <div class="mobile-generate-label-row">
+            <span class="mobile-generate-label">
+              Guidance overrides
+              <span
+                v-if="guidanceCount"
+                class="mobile-generate-inline-count"
+                data-test="mobile-ltx2-guidance-count"
+                >{{ guidanceCount }}</span
+              >
+            </span>
+          </div>
+          <p class="mobile-generate-note">
+            Empty keeps this checkpoint’s pipeline defaults. Used by two-stage, two-stage HQ,
+            keyframe, and audio-to-video renders.
+          </p>
+          <div class="mobile-generate-field-grid">
+            <label class="field mobile-generate-field">
+              <span>STG scale</span>
+              <input
+                class="control"
+                type="number"
+                inputmode="decimal"
+                step="0.1"
+                min="0"
+                :max="MAX_GUIDANCE_SCALE"
+                placeholder="Default"
+                data-test="mobile-ltx2-stg-scale"
+                :value="guidance.stgScale ?? ''"
+                @input="
+                  setGuidance({ stgScale: numberOrNull(($event.target as HTMLInputElement).value) })
+                "
+              />
+            </label>
+            <label class="field mobile-generate-field">
+              <span>STG blocks</span>
+              <input
+                class="control"
+                type="text"
+                inputmode="numeric"
+                placeholder="28, 29"
+                data-test="mobile-ltx2-stg-blocks"
+                :aria-invalid="stgBlocksMessage ? 'true' : undefined"
+                :value="guidance.stgBlocks"
+                @input="setGuidance({ stgBlocks: ($event.target as HTMLInputElement).value })"
+              />
+            </label>
+          </div>
+          <p
+            v-if="stgBlocksMessage"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-ltx2-stg-blocks-error"
+          >
+            {{ stgBlocksMessage }}
+          </p>
+          <div class="mobile-generate-field-grid">
+            <label class="field mobile-generate-field">
+              <span>CFG rescale</span>
+              <input
+                class="control"
+                type="number"
+                inputmode="decimal"
+                step="0.05"
+                min="0"
+                max="1"
+                placeholder="Default"
+                data-test="mobile-ltx2-rescale-scale"
+                :value="guidance.rescaleScale ?? ''"
+                @input="
+                  setGuidance({
+                    rescaleScale: numberOrNull(($event.target as HTMLInputElement).value),
+                  })
+                "
+              />
+            </label>
+            <label class="field mobile-generate-field">
+              <span>Modality scale</span>
+              <input
+                class="control"
+                type="number"
+                inputmode="decimal"
+                step="0.1"
+                min="0"
+                :max="MAX_GUIDANCE_SCALE"
+                placeholder="Default"
+                data-test="mobile-ltx2-modality-scale"
+                :value="guidance.modalityScale ?? ''"
+                @input="
+                  setGuidance({
+                    modalityScale: numberOrNull(($event.target as HTMLInputElement).value),
+                  })
+                "
+              />
+            </label>
+          </div>
+          <label class="field mobile-generate-field">
+            <span>Guidance skip stride</span>
+            <input
+              class="control"
+              type="number"
+              inputmode="numeric"
+              step="1"
+              min="0"
+              :max="MAX_GUIDANCE_SKIP_STEP"
+              placeholder="Every step"
+              data-test="mobile-ltx2-guidance-skip-step"
+              :aria-invalid="skipStepMessage ? 'true' : undefined"
+              :value="guidance.skipStep ?? ''"
+              @input="
+                setGuidance({ skipStep: numberOrNull(($event.target as HTMLInputElement).value) })
+              "
+            />
+          </label>
+          <p
+            v-if="skipStepMessage"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-ltx2-guidance-skip-step-error"
+          >
+            {{ skipStepMessage }}
+          </p>
         </div>
 
         <div v-if="form.pipeline === 'a2vid'" class="mobile-generate-file-field">

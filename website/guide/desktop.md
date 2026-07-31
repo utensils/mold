@@ -92,6 +92,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   immediately. A **↺ Reset** beside the Settings header restores every
   generation setting to the selected model's defaults while keeping the
   prompt, the model choice, and any prepared batch size.
+  For LTX-2, Advanced also exposes optional STG scale/blocks, CFG rescale,
+  audio/video modality scale, and guidance skip stride. Empty fields preserve
+  the selected pipeline's constants; invalid values block Develop inline, and
+  templates plus Library **Reuse settings** restore recorded overrides.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed
   gallery), with a Lightroom-style small-to-large slider in the top toolbar
   that resizes the contact sheet continuously and remembers its setting, NEW

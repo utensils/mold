@@ -5,6 +5,7 @@
  */
 
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -309,6 +310,8 @@ export interface GenerateRequest {
   retake_range?: TimeRange;
   spatial_upscale?: Ltx2SpatialUpscale;
   temporal_upscale?: Ltx2TemporalUpscale;
+  /** Optional LTX-2 guider overrides. Absent fields keep pipeline defaults. */
+  guidance_overrides?: Ltx2GuidanceOverrides | null;
   placement?: DevicePlacement | null;
 }
 
@@ -463,6 +466,7 @@ export interface OutputMetadata {
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
+  guidance_overrides?: Ltx2GuidanceOverrides | null;
   frames?: number | null;
   fps?: number | null;
   /** mold version that produced the print. */

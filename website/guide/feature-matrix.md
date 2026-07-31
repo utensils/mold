@@ -142,9 +142,10 @@ complete workflows.
   temporal upscale workflows.
 - LTX-2's multimodal guider exposes optional per-request overrides for STG
   scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
-  stride, on the CLI and in web's Advanced video panel. They apply to the
+  stride on the CLI and in web, desktop, and iPhone Advanced video controls. They apply to the
   `two-stage`, `two-stage-hq`, `keyframe`, and `a2vid` pipelines; unset fields
-  keep each pipeline's own constants.
+  keep each pipeline's own constants. The TUI keeps pipeline defaults while its
+  broader advanced-video controls remain a separate tracked gap.
 - LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
   not supported in this release.
 

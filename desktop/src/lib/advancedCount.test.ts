@@ -32,4 +32,17 @@ describe("advancedActiveCount", () => {
     form.cameraControl = "dolly-in";
     expect(advancedActiveCount(form)).toBe(3);
   });
+
+  it("counts active LTX-2 guidance overrides as one advanced group", () => {
+    const form = { ...newGenerateForm(), family: "ltx2" };
+    form.guidanceOverrides = {
+      ...form.guidanceOverrides,
+      stgScale: 1.5,
+      stgBlocks: "28, 29",
+    };
+    expect(advancedActiveCount(form)).toBe(1);
+
+    form.family = "flux";
+    expect(advancedActiveCount(form)).toBe(0);
+  });
 });

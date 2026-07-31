@@ -7,6 +7,7 @@
  */
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
+import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 
 export function advancedActiveCount(form: GenerateForm): number {
   const caps = generationCapabilitiesForFamily(form.family);
@@ -19,6 +20,7 @@ export function advancedActiveCount(form: GenerateForm): number {
   if (!caps.supportsVideo && form.upscaleModel) count += 1;
   if (caps.supportsVideo && form.cameraControl) count += 1;
   if (caps.supportsAdvancedVideo && form.icLoraControl) count += 1;
+  if (caps.supportsAdvancedVideo && !guidanceOverridesAreEmpty(form.guidanceOverrides)) count += 1;
   if (
     caps.supportsAdvancedVideo &&
     (form.pipeline ||

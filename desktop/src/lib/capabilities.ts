@@ -179,6 +179,7 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
     delete next.retake_range;
     delete next.spatial_upscale;
     delete next.temporal_upscale;
+    delete next.guidance_overrides;
     // The `camera-control:<preset>` virtual lora alias only resolves on the
     // LTX-2 engine — strip it so it never leaks into another family's stack.
     if (next.loras) {

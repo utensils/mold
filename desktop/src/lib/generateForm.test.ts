@@ -80,6 +80,13 @@ describe("newGenerateForm advanced-video defaults", () => {
     expect(form.retakeRange).toBeNull();
     expect(form.spatialUpscale).toBeNull();
     expect(form.temporalUpscale).toBeNull();
+    expect(form.guidanceOverrides).toEqual({
+      stgScale: null,
+      stgBlocks: "",
+      rescaleScale: null,
+      modalityScale: null,
+      skipStep: null,
+    });
   });
 });
 
@@ -97,6 +104,7 @@ describe("cloneGenerateForm", () => {
     form.audioFile = { filename: "sound.wav", base64: "AUDIO" };
     form.keyframes = [{ frame: 0, image: { filename: "first.png", base64: "FRAME" } }];
     form.retakeRange = { start_seconds: 1, end_seconds: 2 };
+    form.guidanceOverrides.stgBlocks = "28, 29";
 
     const snapshot = cloneGenerateForm(form);
     snapshot.imageAttachments.push("NEXT");
@@ -104,12 +112,14 @@ describe("cloneGenerateForm", () => {
     snapshot.loras[0]!.trainedWords.push("grain");
     snapshot.keyframes[0]!.image.filename = "changed.png";
     snapshot.retakeRange!.start_seconds = 9;
+    snapshot.guidanceOverrides.stgBlocks = "30";
 
     expect(form.imageAttachments).toEqual(["EDIT"]);
     expect(form.sourceFit).toMatchObject({ fit: { mode: "crop-fill" } });
     expect(form.loras[0]!.trainedWords).toEqual(["film"]);
     expect(form.keyframes[0]!.image.filename).toBe("first.png");
     expect(form.retakeRange!.start_seconds).toBe(1);
+    expect(form.guidanceOverrides.stgBlocks).toBe("28, 29");
     expect(snapshot).not.toBe(form);
   });
 });
@@ -207,6 +217,29 @@ describe("buildRequest — LTX-2 advanced video", () => {
     const req = buildRequest(form);
     expect(req.pipeline).toBeUndefined();
     expect(req.source_video).toBeUndefined();
+  });
+
+  it("serializes guidance overrides only when LTX-2 controls are active", () => {
+    const form = ltx2Form();
+    expect(buildRequest(form).guidance_overrides).toBeUndefined();
+
+    form.guidanceOverrides = {
+      stgScale: 1.5,
+      stgBlocks: "28, 29",
+      rescaleScale: 0.7,
+      modalityScale: 3,
+      skipStep: 2,
+    };
+    expect(buildRequest(form).guidance_overrides).toEqual({
+      stg_scale: 1.5,
+      stg_blocks: [28, 29],
+      rescale_scale: 0.7,
+      modality_scale: 3,
+      skip_step: 2,
+    });
+
+    form.family = "flux";
+    expect(buildRequest(form).guidance_overrides).toBeUndefined();
   });
 });
 
@@ -620,6 +653,13 @@ describe("applyMetadataToForm", () => {
         enable_audio: true,
         pipeline: "two-stage",
         spatial_upscale: "x2",
+        guidance_overrides: {
+          stg_scale: 1.25,
+          stg_blocks: [28, 29],
+          rescale_scale: 0.6,
+          modality_scale: 2.5,
+          skip_step: 1,
+        },
         output_format: "mp4",
       },
       [ltx2Model()],
@@ -629,6 +669,13 @@ describe("applyMetadataToForm", () => {
     expect(form.enableAudio).toBe(true);
     expect(form.pipeline).toBe("two-stage");
     expect(form.spatialUpscale).toBe("x2");
+    expect(form.guidanceOverrides).toEqual({
+      stgScale: 1.25,
+      stgBlocks: "28, 29",
+      rescaleScale: 0.6,
+      modalityScale: 2.5,
+      skipStep: 1,
+    });
     expect(form.outputFormat).toBe("mp4");
   });
 
@@ -767,6 +814,11 @@ describe("applyPrefillToForm", () => {
           retake_range: { start_seconds: 1, end_seconds: 2 },
           spatial_upscale: "x2",
           temporal_upscale: "x2",
+          guidance_overrides: {
+            stg_scale: 1.5,
+            stg_blocks: [28],
+            rescale_scale: 0.5,
+          },
         },
       },
       [ltx2Model()],
@@ -790,6 +842,13 @@ describe("applyPrefillToForm", () => {
       pipeline: "retake",
       spatialUpscale: "x2",
       temporalUpscale: "x2",
+      guidanceOverrides: {
+        stgScale: 1.5,
+        stgBlocks: "28",
+        rescaleScale: 0.5,
+        modalityScale: null,
+        skipStep: null,
+      },
     });
     expect(form.loras).toEqual([
       expect.objectContaining({ path: "/models/motion.safetensors", scale: 0.7 }),
