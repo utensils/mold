@@ -2272,10 +2272,10 @@ mod tests {
     }
 
     /// `qwen-image-edit` shares the LoRA family gate with `qwen-image`.
-    /// The edit family also gates on `edit_images` separately, so this
+    /// The edit family also requires a target image separately, so this
     /// test exercises just the LoRA gate by inspecting the rejection
     /// message: it must NOT mention LoRA when the only non-LoRA failure
-    /// is the missing edit_images.
+    /// is the missing target image.
     #[test]
     fn lora_on_qwen_image_edit_passes_lora_gate() {
         let mut req = valid_req();
@@ -2284,16 +2284,16 @@ mod tests {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
         });
-        // The request fails on edit_images (a separate gate) but the
+        // The request fails on its target-image requirement, but the
         // LoRA gate is permissive.
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
             !err.to_lowercase().contains("lora"),
-            "LoRA gate must not reject qwen-image-edit; remaining failure should be on edit_images: {err}",
+            "LoRA gate must not reject qwen-image-edit; remaining failure should be on the target image: {err}",
         );
         assert!(
-            err.contains("edit_images"),
-            "expected the only failure to be the edit_images gate: {err}",
+            err.contains("Add a Target image"),
+            "expected the only failure to be the target-image requirement: {err}",
         );
     }
 
