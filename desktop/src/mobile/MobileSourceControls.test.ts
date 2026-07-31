@@ -104,6 +104,11 @@ describe("MobileSourceControls", () => {
       global: { stubs: { MobileImagePickerSheet: true } },
     });
 
+    await chooseFiles(wrapper, "[data-test='mobile-control-input']", [
+      new File(["not-an-image"], "control.txt", { type: "text/plain" }),
+    ]);
+    expect(wrapper.get("[data-test='mobile-source-error']").text()).toContain("Only PNG or JPEG");
+
     await wrapper.get("[data-test='mobile-source-add']").trigger("click");
     const picker = wrapper.getComponent(MobileImagePickerSheet);
     expect(picker.props()).toMatchObject({
@@ -120,6 +125,7 @@ describe("MobileSourceControls", () => {
     expect(form.sourceImageName).toBe("gallery-print.png");
     expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
     expect(picker.props("open")).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-error']").exists()).toBe(false);
   });
 
   it("uses the first upscaler for upscale-then-fit and omits repaint for maskless video", async () => {

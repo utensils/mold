@@ -200,6 +200,7 @@ async function readImages(
 }
 
 function pickSource(image: MobilePickedImage): void {
+  error.value = "";
   props.form.sourceImage = image.base64;
   props.form.sourceImageName = image.filename || null;
   props.form.sourceFit = { mode: "lanczos-resize" };
