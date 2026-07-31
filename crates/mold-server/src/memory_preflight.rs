@@ -170,6 +170,35 @@ pub(crate) fn check_model_memory_budget(
     Ok(())
 }
 
+/// Revalidate one already-admitted execution plan against a fresh physical
+/// memory sample without replacing the plan's memory model at dispatch.
+///
+/// Scheduler admission has already applied the family-specific safety policy
+/// (including the ordinary 90% cap) to `predicted_peak_bytes`. The worker's
+/// post-grant responsibility is narrower: fail closed if new external or
+/// unrecovered pressure means that exact frozen peak no longer physically
+/// fits. Reapplying the legacy path-based estimator here can silently erase
+/// CPU placement or block-offload authority and reject a plan that the worker
+/// is required to execute unchanged.
+pub(crate) fn check_planned_memory_budget(
+    model_name: &str,
+    predicted_peak_bytes: u64,
+    available_bytes: u64,
+) -> Result<(), ApiError> {
+    if predicted_peak_bytes > available_bytes {
+        return Err(ApiError::insufficient_memory(format!(
+            "model '{}' frozen execution plan peak ~{:.1} GB no longer fits the current ~{:.1} GB \
+             physical memory budget; memory pressure changed after scheduler admission. \
+             Retry after other GPU work releases memory.",
+            model_name,
+            predicted_peak_bytes as f64 / 1_000_000_000.0,
+            available_bytes as f64 / 1_000_000_000.0,
+        )));
+    }
+
+    Ok(())
+}
+
 /// Build the suggestion text appended to preflight rejection messages.
 /// For LTX-Video (non-streaming full-weight load) the dominant knob is
 /// reducing `frames` or `width`/`height`; for image families, resolution and
@@ -549,6 +578,40 @@ pub(crate) fn preflight_memory_guard(
     }
 }
 
+/// Recheck a frozen scheduler plan before dropping the currently resident
+/// engine. Only the exact planned peak is authoritative; `active_vram_bytes`
+/// is reclaimable because the caller will unload that engine before loading
+/// the plan.
+pub(crate) fn preflight_planned_memory_guard(
+    model_name: &str,
+    predicted_peak_bytes: u64,
+    active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+) -> Result<(), ApiError> {
+    #[cfg(feature = "cuda")]
+    {
+        let available = authoritative_cuda_available(
+            mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
+        )?
+        .saturating_add(active_vram_bytes);
+        return check_planned_memory_budget(model_name, predicted_peak_bytes, available);
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(available) = mold_inference::device::available_system_memory_bytes()
+            .filter(|available| *available > 0)
+        {
+            return check_planned_memory_budget(
+                model_name,
+                predicted_peak_bytes,
+                available.saturating_add(active_vram_bytes),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Re-check a load against the driver's actual free-memory reading after the
 /// previous engine and all of its device-backed state have been dropped.
 ///
@@ -583,6 +646,32 @@ pub(crate) fn preflight_memory_guard_after_drop(
         // guard. A second instantaneous sample after `unload()` can lag page
         // reclamation and falsely reject a swap.
         let _ = (model_name, paths, gpu_ordinal, hint);
+        Ok(())
+    }
+}
+
+/// Authoritative post-drop recheck for a frozen scheduler plan.
+///
+/// CUDA must prove the exact planned peak still physically fits the driver's
+/// fresh free-memory sample. Metal retains the existing single-gate behavior:
+/// its unified-memory reclamation can lag the engine drop, so a second sample
+/// is not authoritative there.
+pub(crate) fn preflight_planned_memory_guard_after_drop(
+    model_name: &str,
+    predicted_peak_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+) -> Result<(), ApiError> {
+    #[cfg(feature = "cuda")]
+    {
+        let available = authoritative_cuda_available(
+            mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
+        )?;
+        return check_planned_memory_budget(model_name, predicted_peak_bytes, available);
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (model_name, predicted_peak_bytes, gpu_ordinal);
         Ok(())
     }
 }
@@ -978,6 +1067,45 @@ fn request_sensitive_activation_memory(
 mod fail_closed_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn frozen_flux_offload_plan_recheck_accepts_fresh_and_parked_budgets() {
+        let fresh_available = 24_500_000_000;
+        let parked_free = 1_500_000_000u64;
+        let reclaimable_active = 23_000_000_000u64;
+        let frozen_offload_peak = 8_272_629_760;
+        let legacy_resident_peak = 26_100_000_000;
+
+        assert!(
+            check_model_memory_budget("cv:2925935", legacy_resident_peak, fresh_available, "")
+                .is_err(),
+            "the path-based resident estimate reproduces the false rejection"
+        );
+        assert!(
+            check_planned_memory_budget("cv:2925935", frozen_offload_peak, fresh_available).is_ok(),
+            "a fresh worker must retain the scheduler's admitted block-offload peak"
+        );
+        assert!(
+            check_planned_memory_budget(
+                "cv:2925935",
+                frozen_offload_peak,
+                parked_free.saturating_add(reclaimable_active),
+            )
+            .is_ok(),
+            "a parked reload must count the active engine that is about to be dropped"
+        );
+    }
+
+    #[test]
+    fn frozen_plan_recheck_fails_closed_when_physical_memory_drops_below_peak() {
+        let error = check_planned_memory_budget("planned", 8_300_000_000, 8_200_000_000)
+            .expect_err("new pressure after admission must reject the frozen plan");
+
+        assert!(error.error.contains("frozen execution plan peak"));
+        assert!(error
+            .error
+            .contains("memory pressure changed after scheduler admission"));
+    }
 
     fn hint(family: ActivationFamily) -> ActivationHint {
         ActivationHint {

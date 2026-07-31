@@ -144,6 +144,7 @@ impl PlannedEngineMode {
 #[derive(Clone, Copy)]
 struct PlannedLoadContract<'a> {
     mode: PlannedEngineMode,
+    predicted_vram_peak_bytes: u64,
     execution_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
@@ -2503,6 +2504,7 @@ fn process_job_with_sink(
     let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
     let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
         mode: PlannedEngineMode::from_plan(plan),
+        predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
         request: &job.request,
         engine_paths: &plan.engine_paths,
@@ -3050,19 +3052,29 @@ fn preflight_memory_guard_with_eviction(
     paths: &ModelPaths,
     ordinal: usize,
     hint: Option<crate::model_manager::ActivationHint>,
+    planned_peak_bytes: Option<u64>,
 ) -> Result<(), crate::routes::ApiError> {
     loop {
         let active_vram = cache_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active_vram_bytes();
-        let err = match crate::model_manager::preflight_memory_guard(
-            model_name,
-            paths,
-            active_vram,
-            ordinal,
-            hint,
-        ) {
+        let guard = match planned_peak_bytes {
+            Some(predicted_peak_bytes) => crate::memory_preflight::preflight_planned_memory_guard(
+                model_name,
+                predicted_peak_bytes,
+                active_vram,
+                ordinal,
+            ),
+            None => crate::model_manager::preflight_memory_guard(
+                model_name,
+                paths,
+                active_vram,
+                ordinal,
+                hint,
+            ),
+        };
+        let err = match guard {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
@@ -3191,6 +3203,7 @@ fn ensure_model_ready_sync_inner(
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<ModelLoadDisposition> {
     let planned_mode = planned_load.map(|planned| planned.mode);
+    let planned_peak_bytes = planned_load.map(|planned| planned.predicted_vram_peak_bytes);
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
@@ -3251,6 +3264,7 @@ fn ensure_model_ready_sync_inner(
                 paths,
                 worker.gpu.ordinal,
                 hint,
+                planned_peak_bytes,
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -3263,12 +3277,21 @@ fn ensure_model_ready_sync_inner(
             }
         }
         if let Some(ref paths) = preflight_paths {
-            crate::memory_preflight::preflight_memory_guard_after_drop(
-                model_name,
-                paths,
-                worker.gpu.ordinal,
-                hint,
-            )
+            match planned_peak_bytes {
+                Some(predicted_peak_bytes) => {
+                    crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                        model_name,
+                        predicted_peak_bytes,
+                        worker.gpu.ordinal,
+                    )
+                }
+                None => crate::memory_preflight::preflight_memory_guard_after_drop(
+                    model_name,
+                    paths,
+                    worker.gpu.ordinal,
+                    hint,
+                ),
+            }
             .map_err(|e| anyhow::anyhow!(e.error))?;
         } else {
             #[cfg(feature = "cuda")]
@@ -3477,6 +3500,7 @@ fn ensure_model_ready_sync_inner(
         &paths,
         worker.gpu.ordinal,
         hint,
+        planned_peak_bytes,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
@@ -3487,12 +3511,21 @@ fn ensure_model_ready_sync_inner(
             worker.set_resident_model(None);
         }
     }
-    crate::memory_preflight::preflight_memory_guard_after_drop(
-        model_name,
-        &paths,
-        worker.gpu.ordinal,
-        hint,
-    )
+    match planned_peak_bytes {
+        Some(predicted_peak_bytes) => {
+            crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                model_name,
+                predicted_peak_bytes,
+                worker.gpu.ordinal,
+            )
+        }
+        None => crate::memory_preflight::preflight_memory_guard_after_drop(
+            model_name,
+            &paths,
+            worker.gpu.ordinal,
+            hint,
+        ),
+    }
     .map_err(|e| anyhow::anyhow!(e.error))?;
     let load_strategy = if let Some(mode) = planned_mode {
         mode.load_strategy
@@ -3987,6 +4020,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
         load.hint,
         Some(PlannedLoadContract {
             mode: PlannedEngineMode::from_plan(load.plan),
+            predicted_vram_peak_bytes: load.plan.predicted_vram_peak_bytes,
             execution_fingerprint: &load.plan.execution_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
