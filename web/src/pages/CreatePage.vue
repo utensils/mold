@@ -45,8 +45,8 @@ import {
 import { copyableError, describeTransportError } from "@studio/lib/errors";
 import {
   guidanceOverrideCount,
+  guidanceOverridesError,
   guidanceOverridesFromWire,
-  stgBlocksError,
 } from "@studio/lib/guidanceOverrides";
 import {
   defaultClipFrames,
@@ -1887,13 +1887,14 @@ function validateSubmit(): boolean {
       return false;
     }
   }
-  // An unparsable block list would otherwise be dropped on the way to the
-  // wire, quietly rendering with the pipeline's own STG blocks.
-  const blocksError = stgBlocksError(
-    form.state.value.guidanceOverrides?.stgBlocks ?? "",
+  // A value the wire cannot carry — an unparsable block list, a fractional
+  // skip stride — would otherwise be dropped on the way out, quietly
+  // rendering with the pipeline's own constants.
+  const guidanceError = guidanceOverridesError(
+    form.state.value.guidanceOverrides,
   );
-  if (blocksError) {
-    composerError.value = `STG blocks: ${blocksError}`;
+  if (guidanceError) {
+    composerError.value = guidanceError;
     showAdvanced.value = true;
     return false;
   }

@@ -10,8 +10,9 @@
  *    pipeline constant only while its field is absent, so a null that
  *    serializes as `0` would silently change every render.
  * 2. A control the user did touch must reach the server or say why it
- *    cannot. `stgBlocks` is free text, so an unparsable list is reported as
- *    an error rather than quietly dropped.
+ *    cannot. `stgBlocks` is free text and `skipStep` is a `u32` the wire
+ *    cannot carry fractionally, so a value neither can express is reported
+ *    as an error rather than quietly dropped.
  */
 
 /** Additive `guidance_overrides` request/metadata object. Every field is
@@ -104,6 +105,52 @@ export function stgBlocksError(text: string): string | null {
   return null;
 }
 
+/** Validate the guidance skip stride. It is a `u32` on the wire, so a
+ * fractional value would not even deserialize — the request would come back
+ * as an opaque body-parse failure instead of a field-named 422. */
+export function skipStepError(value: number | null): string | null {
+  if (value === null) return null;
+  if (!Number.isFinite(value)) return "Enter a whole number of steps.";
+  if (!Number.isInteger(value)) {
+    return "The skip stride is a whole number of steps.";
+  }
+  if (value < 0 || value > MAX_GUIDANCE_SKIP_STEP) {
+    return `Enter a stride between 0 and ${MAX_GUIDANCE_SKIP_STEP}.`;
+  }
+  return null;
+}
+
+function scaleError(
+  value: number | null,
+  label: string,
+  max: number,
+): string | null {
+  if (value === null) return null;
+  if (!Number.isFinite(value)) return `${label} must be a number.`;
+  if (value < 0 || value > max) {
+    return `${label} must be between 0 and ${max}.`;
+  }
+  return null;
+}
+
+/** One message covering every override control, for a surface's submit gate.
+ * The bounds mirror `mold-core`'s validation so a request that would come
+ * back 422 is caught before the round trip; the server stays the authority. */
+export function guidanceOverridesError(
+  state: Ltx2GuidanceOverridesState | null | undefined,
+): string | null {
+  if (!state) return null;
+  const blocks = stgBlocksError(state.stgBlocks);
+  if (blocks) return `STG blocks: ${blocks}`;
+  const skip = skipStepError(state.skipStep);
+  if (skip) return `Guidance skip stride: ${skip}`;
+  return (
+    scaleError(state.stgScale, "STG scale", MAX_GUIDANCE_SCALE) ??
+    scaleError(state.rescaleScale, "CFG rescale", 1) ??
+    scaleError(state.modalityScale, "Modality scale", MAX_GUIDANCE_SCALE)
+  );
+}
+
 function parseStgBlocks(text: string): number[] | null {
   if (stgBlocksError(text) !== null) return null;
   const blocks = text
@@ -114,9 +161,10 @@ function parseStgBlocks(text: string): number[] | null {
   return blocks.length > 0 ? blocks : null;
 }
 
-/** Build the wire object, or `undefined` when nothing is set. An unparsable
- * block list contributes nothing — the caller surfaces `stgBlocksError`
- * before submitting so this can never be the user's only feedback. */
+/** Build the wire object, or `undefined` when nothing is set. A value the
+ * wire cannot carry — an unparsable block list, a fractional skip stride —
+ * contributes nothing; the caller surfaces `guidanceOverridesError` before
+ * submitting so this can never be the user's only feedback. */
 export function guidanceOverridesToWire(
   state: Ltx2GuidanceOverridesState | null | undefined,
 ): Ltx2GuidanceOverrides | undefined {
@@ -127,7 +175,12 @@ export function guidanceOverridesToWire(
   if (blocks) wire.stg_blocks = blocks;
   if (state.rescaleScale !== null) wire.rescale_scale = state.rescaleScale;
   if (state.modalityScale !== null) wire.modality_scale = state.modalityScale;
-  if (state.skipStep !== null) wire.skip_step = state.skipStep;
+  // `skip_step` is a `u32`: a fractional value fails JSON deserialization
+  // outright, so it is omitted here the same way an unparsable block list is,
+  // and the surface's submit gate reports it via `guidanceOverridesError`.
+  if (skipStepError(state.skipStep) === null && state.skipStep !== null) {
+    wire.skip_step = state.skipStep;
+  }
   return Object.keys(wire).length > 0 ? wire : undefined;
 }
 

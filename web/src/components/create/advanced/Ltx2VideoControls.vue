@@ -32,6 +32,7 @@ import {
   emptyGuidanceOverrides,
   guidanceOverrideCount,
   stgBlocksError,
+  skipStepError,
   MAX_GUIDANCE_SCALE,
   MAX_GUIDANCE_SKIP_STEP,
 } from "@studio/lib/guidanceOverrides";
@@ -268,6 +269,7 @@ function numberOrNull(raw: string): number | null {
 const stgBlocksMessage = computed(() =>
   stgBlocksError(guidance.value.stgBlocks),
 );
+const skipStepMessage = computed(() => skipStepError(guidance.value.skipStep));
 const guidanceCount = computed(() => guidanceOverrideCount(guidance.value));
 function resetGuidance() {
   patch({ guidanceOverrides: emptyGuidanceOverrides() });
@@ -654,6 +656,13 @@ function removeKeyframe(index: number) {
           "
         />
       </label>
+      <p
+        v-if="skipStepMessage"
+        class="ltx2__error"
+        data-test="ltx2-guidance-skip-step-error"
+      >
+        {{ skipStepMessage }}
+      </p>
     </div>
 
     <div class="ltx2__field ltx2__field--last">

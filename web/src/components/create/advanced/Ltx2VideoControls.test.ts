@@ -358,6 +358,21 @@ describe("Ltx2VideoControls", () => {
     });
   });
 
+  it("reports a fractional skip stride inline", async () => {
+    const wrapper = factory({
+      guidanceOverrides: {
+        stgScale: null,
+        stgBlocks: "",
+        rescaleScale: null,
+        modalityScale: null,
+        skipStep: 1.5,
+      },
+    });
+    expect(
+      wrapper.get("[data-test='ltx2-guidance-skip-step-error']").text(),
+    ).toContain("whole number");
+  });
+
   it("renders without the field for templates saved before it existed", () => {
     const wrapper = factory({ guidanceOverrides: undefined });
     expect(
