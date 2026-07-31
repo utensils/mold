@@ -2,11 +2,17 @@
  * Shared browser-safe mirror of the server's automatic chain-routing rules.
  * Keep the constants and branch structure aligned with
  * `crates/mold-cli/src/commands/chain.rs` and `ChainRequest::normalise`.
+ *
+ * `LTX2_DEFAULT_CLIP_FRAMES` is the *routing* clip size, not the model's
+ * ceiling: LTX-2's real single-request limit is a 20 s runtime budget that
+ * moves with fps (see `./videoBudget`), and 97 is simply the clip size that
+ * fits comfortably on one consumer GPU.
  */
 
-export const LTX2_DISTILLED_CLIP_CAP = 97;
+import { ltx2MaxFramesAtFps, maxFramesForFamilyAtFps } from "./videoBudget";
+
+export const LTX2_DEFAULT_CLIP_FRAMES = 97;
 export const MAX_CHAIN_STAGES = 16;
-export const LTX2_TEMPORAL_UPSCALE_MAX_FRAMES = 257;
 
 // 17 pixel frames become three LTX-2 latent frames of carryover under the
 // VAE's 8x causal temporal compression. Keep this in sync with the CLI's
@@ -25,6 +31,7 @@ export type ChainRoutingDecision =
 
 type GenerateRoutingRequest = {
   frames?: number | null;
+  fps?: number | null;
   model: string;
   temporal_upscale?: string | null;
 };
@@ -62,14 +69,18 @@ export function decideGenerateRequestRouting(
     req.temporal_upscale === "x2" &&
     frames
   ) {
-    return frames <= LTX2_TEMPORAL_UPSCALE_MAX_FRAMES
+    // Temporal x2 halves BOTH the stage-1 frame count and the stage-1 fps, so
+    // it renders the same runtime at half the frame rate. It buys temporal
+    // resolution, never extra duration — the ceiling is the same either way.
+    const cap = ltx2MaxFramesAtFps(req.fps);
+    return frames <= cap
       ? { kind: "single" }
       : {
           kind: "reject",
-          reason: `Temporal x2 supports at most ${LTX2_TEMPORAL_UPSCALE_MAX_FRAMES} frames. Reduce the frame count.`,
+          reason: `Temporal x2 renders the same duration as a plain request, so it is still capped at ${cap} frames at ${req.fps ?? 24} fps. Reduce the frame count or raise fps.`,
         };
   }
-  return decideChainRouting(frames, family, req.model, motionTail);
+  return decideChainRouting(frames, family, req.model, motionTail, req.fps);
 }
 
 export function decideChainRouting(
@@ -77,6 +88,7 @@ export function decideChainRouting(
   family: string | null | undefined,
   model: string,
   motionTail: number = DEFAULT_MOTION_TAIL,
+  fps: number | null | undefined = undefined,
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
@@ -90,14 +102,20 @@ export function decideChainRouting(
       isCatalogModel(model));
 
   if (!isChainCapable) {
-    if (frames <= LTX2_DISTILLED_CLIP_CAP) return { kind: "single" };
+    // Non-chainable models still get their family's own single-request
+    // ceiling; only fall back to the routing default when the family
+    // publishes none.
+    const cap =
+      maxFramesForFamilyAtFps(normalizedFamily, fps) ??
+      LTX2_DEFAULT_CLIP_FRAMES;
+    if (frames <= cap) return { kind: "single" };
     return {
       kind: "reject",
-      reason: `Model '${model}' does not support chained video generation. Reduce frames to ${LTX2_DISTILLED_CLIP_CAP} or less.`,
+      reason: `Model '${model}' does not support chained video generation. Reduce frames to ${cap} or less.`,
     };
   }
 
-  const clipFrames = LTX2_DISTILLED_CLIP_CAP;
+  const clipFrames = LTX2_DEFAULT_CLIP_FRAMES;
   if (frames <= clipFrames) return { kind: "single" };
 
   // Families without context handoff are forced to zero by the server.

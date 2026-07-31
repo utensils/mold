@@ -53,6 +53,8 @@ impl VideoMetadata {
             enable_audio: None,
             audio_file_path: None,
             source_video_path: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             pipeline: None,
             ic_lora_control: None,
             retake_range: None,

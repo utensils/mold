@@ -78,6 +78,13 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
+  /** Continuation support. Absent on older servers, which means the Create
+   * surfaces must hide the extend controls rather than send a rejected
+   * request. */
+  video?: {
+    can_extend?: boolean;
+    extend_default_overlap_frames?: number | null;
+  } | null;
   catalog?: { available: boolean; families: string[] } | null;
   /** Server-assisted DNS-SD browse support; absent on older servers. */
   discovery?: { can_browse: boolean } | null;
@@ -135,6 +142,10 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Model can continue an existing video in one request. Absent on servers
+   * that predate continuation — read absence as "no". */
+  supports_extend?: boolean | null;
+  extend_default_overlap_frames?: number | null;
   /** Explicit durable sequence eligibility; absent on older servers. */
   supports_sequence?: boolean | null;
   /** Server-advertised per-clip frame default (LTX-2 ships 97, LTX-Video
@@ -304,6 +315,15 @@ export interface GenerateRequest {
   audio_file?: string;
   /** Source video for video-to-video / retake, base64 (no data-URI prefix). */
   source_video?: string;
+  /** Existing video to continue, base64 (no data-URI prefix). Makes the
+   * request a continuation: the delivered output is this clip followed by the
+   * newly rendered frames. Mutually exclusive with `source_video`. */
+  extend_video?: string;
+  /** Server-local path of the video to continue. */
+  extend_video_path?: string;
+  /** Pixel frames of the source tail used as motion context. Must be 8k+1 and
+   * strictly less than `frames`; omit to use the server default. */
+  extend_overlap_frames?: number;
   keyframes?: KeyframeConditionWire[];
   pipeline?: Ltx2PipelineMode;
   ic_lora_control?: string;
@@ -461,6 +481,8 @@ export interface OutputMetadata {
   enable_audio?: boolean | null;
   audio_file_path?: string | null;
   source_video_path?: string | null;
+  extend_video_path?: string | null;
+  extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;

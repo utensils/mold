@@ -113,6 +113,10 @@ export interface GenerateForm {
   // LTX-2 advanced video (ltx2 only). All optional-safe: null / [] defaults so
   // a partial stored form (template snapshot) still hydrates cleanly.
   sourceVideo: PickedImage | null;
+  /** Existing video to continue; set makes the request a continuation. */
+  extendVideo: PickedImage | null;
+  /** Pixel-frame overlap; null takes the host's advertised default. */
+  extendOverlapFrames: number | null;
   keyframes: FormKeyframe[];
   pipeline: Ltx2PipelineMode | null;
   /** Official host-provided IC-LoRA control adapter ID. */
@@ -168,6 +172,8 @@ export function newGenerateForm(): GenerateForm {
     fps: 24,
     enableAudio: false,
     sourceVideo: null,
+    extendVideo: null,
+    extendOverlapFrames: null,
     keyframes: [],
     pipeline: null,
     icLoraControl: null,
@@ -200,6 +206,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
       trainedWords: [...lora.trainedWords],
     })),
     sourceVideo: form.sourceVideo ? { ...form.sourceVideo } : null,
+    extendVideo: form.extendVideo ? { ...form.extendVideo } : null,
     keyframes: form.keyframes.map((keyframe) => ({
       ...keyframe,
       image: { ...keyframe.image },
@@ -284,6 +291,8 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   if (!caps.supportsAudio || m.supports_audio === false) form.enableAudio = false;
   if (!caps.supportsAdvancedVideo) {
     form.sourceVideo = null;
+    form.extendVideo = null;
+    form.extendOverlapFrames = null;
     form.keyframes = [];
     form.pipeline = null;
     form.icLoraControl = null;
@@ -410,6 +419,14 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
 
   if (caps.supportsAdvancedVideo) {
     if (form.sourceVideo) req.source_video = form.sourceVideo.base64;
+    if (form.extendVideo) {
+      req.extend_video = form.extendVideo.base64;
+      // Only travels with a clip to continue; the server rejects a bare
+      // overlap, and omitting it takes the server's own default.
+      if (form.extendOverlapFrames) {
+        req.extend_overlap_frames = form.extendOverlapFrames;
+      }
+    }
     if (form.keyframes.length) {
       req.keyframes = form.keyframes.map<KeyframeConditionWire>((k) => ({
         frame: k.frame,

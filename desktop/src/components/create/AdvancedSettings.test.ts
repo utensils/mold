@@ -317,7 +317,10 @@ describe("AdvancedSettings — video (LTX-2)", () => {
   it("shows the reject message for a non-chainable model over budget", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
-    form.frames = 241;
+    // 489 frames is past even the single-clip 20s budget at 24 fps, so a
+    // non-chainable model has nowhere to route it. (241 frames is now a valid
+    // single clip — the ceiling is a duration, not a flat 97.)
+    form.frames = 489;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
@@ -398,5 +401,74 @@ describe("AdvancedSettings — reset and summary", () => {
     form.scheduler = "ddim";
     const wrapper = mountSettings(form);
     expect(wrapper.text()).toContain("2 active");
+  });
+});
+
+describe("AdvancedSettings — continue a video", () => {
+  const extendModel = {
+    name: "ltx-2-19b-distilled:fp8",
+    family: "ltx2",
+    supports_extend: true,
+    extend_default_overlap_frames: 17,
+  };
+
+  // A host that predates continuation omits `supports_extend`, so rendering
+  // the control would only let the user build a request the host rejects.
+  it("stays hidden until the selected model advertises continuation", async () => {
+    const legacy = mountSettings(formFor("ltx2"), {
+      selectedModel: { name: "ltx-2-19b-distilled:fp8", family: "ltx2" },
+    });
+    await openSection(legacy, "Video");
+    expect(legacy.find("[data-test='ltx2-extend-video']").exists()).toBe(false);
+
+    const wrapper = mountSettings(formFor("ltx2"), { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+    expect(wrapper.find("[data-test='ltx2-extend-video']").exists()).toBe(true);
+  });
+
+  it("reports how many frames the continuation appends", async () => {
+    const form = formFor("ltx2");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    const wrapper = mountSettings(form, { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+
+    // 97 rendered frames minus the 17 that re-render the source tail.
+    expect(wrapper.get("[data-test='ltx2-extend-summary']").text()).toContain("80 new frames");
+  });
+
+  it("explains a conflicting source image before submission", async () => {
+    const form = formFor("ltx2");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.sourceImage = "AAAA";
+    const wrapper = mountSettings(form, { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+
+    expect(wrapper.get("[data-test='ltx2-extend-error']").text()).toContain("source image");
+  });
+
+  it("explains a conflicting source video before submission", async () => {
+    const form = formFor("ltx2");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.sourceVideo = { filename: "guide.mp4", base64: "BBBB" };
+    const wrapper = mountSettings(form, { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+
+    expect(wrapper.get("[data-test='ltx2-extend-error']").text()).toContain("source video");
+  });
+
+  it("resets the overlap when the attached video is cleared", async () => {
+    const form = formFor("ltx2");
+    form.frames = 97;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    form.extendOverlapFrames = 33;
+    const wrapper = mountSettings(form, { selectedModel: extendModel });
+    await openSection(wrapper, "Video");
+
+    await wrapper.get("[data-test='ltx2-extend-clear']").trigger("click");
+    expect(form.extendVideo).toBeNull();
+    expect(form.extendOverlapFrames).toBeNull();
   });
 });

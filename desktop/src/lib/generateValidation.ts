@@ -18,6 +18,7 @@ export type InlineGenerationMediaField =
   | "controlImage"
   | "imageAttachments"
   | "sourceVideo"
+  | "extendVideo"
   | "keyframes"
   | "audioFile";
 
@@ -39,6 +40,7 @@ export function inlineGenerationMediaBytes(
     total += form.imageAttachments.reduce((sum, image) => sum + decodedBase64Bytes(image), 0);
   }
   if (exclude !== "sourceVideo") total += decodedBase64Bytes(form.sourceVideo?.base64);
+  if (exclude !== "extendVideo") total += decodedBase64Bytes(form.extendVideo?.base64);
   if (exclude !== "audioFile") total += decodedBase64Bytes(form.audioFile?.base64);
   if (exclude !== "keyframes") {
     total += form.keyframes.reduce(

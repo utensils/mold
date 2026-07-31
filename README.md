@@ -182,9 +182,10 @@ with prompt, model, seed, and generation metadata.
   Qwen-Image-Edit, Wuerstchen v2, LTX Video, and LTX-2 / LTX-2.3
 - Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
   LoRA, prompt expansion, and Real-ESRGAN upscaling
-- Text/image-to-video, multi-prompt video chains, native MP4 output,
-  checkpoint-dependent generated audio, and LTX-2 guidance overrides across
-  CLI, web, desktop, and iPhone
+- Text/image-to-video, multi-prompt video chains, one-request continuation of
+  an existing clip (`--extend`), native MP4 output, checkpoint-dependent
+  generated audio, and LTX-2 guidance overrides across CLI, web, desktop, and
+  iPhone
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
   re-renders only the changed clips, explicit remote-machine routing, and a

@@ -397,6 +397,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }
     }
 

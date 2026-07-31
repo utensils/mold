@@ -635,6 +635,23 @@ pub(crate) fn validate_and_normalize_chain_family(
             })));
         }
     }
+    // Each stage is denoised as one generation, so it is bound by the same
+    // ceiling `/api/capabilities/chain-limits` advertises. This used to be
+    // advertised but never enforced, so an over-budget clip only failed once
+    // the stage reached the engine.
+    if let Some(cap) = crate::chain_limits::family_cap_at_fps(&family, req.fps) {
+        if let Some((idx, stage)) = req
+            .stages
+            .iter()
+            .enumerate()
+            .find(|(_, stage)| stage.frames > cap)
+        {
+            return Err(ApiError::validation(format!(
+                "stage {idx} asks for {} frames; the per-clip cap for '{}' at {} fps is {cap} frames",
+                stage.frames, family, req.fps,
+            )));
+        }
+    }
     if family == "ltx-video" && req.motion_tail_frames > 0 {
         // LtxVideoEngine has no img2vid path, so the carry tail can't anchor
         // the next stage's denoise. Zero motion_tail makes Smooth boundaries

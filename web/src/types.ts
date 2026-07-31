@@ -80,6 +80,8 @@ export interface OutputMetadata {
   enable_audio?: boolean | null;
   audio_file_path?: string | null;
   source_video_path?: string | null;
+  extend_video_path?: string | null;
+  extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
@@ -127,6 +129,13 @@ export interface GalleryCapabilities {
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
   gallery?: GalleryCapabilities;
+  /** Continuation support. Absent on older servers, which means the Create
+   * surfaces must hide the extend controls rather than send a rejected
+   * request. */
+  video?: {
+    can_extend?: boolean;
+    extend_default_overlap_frames?: number | null;
+  };
   discovery?: { can_browse: boolean };
   devices?: {
     available?: boolean;
@@ -239,6 +248,15 @@ export interface GenerateRequestWire {
   audio_file_path?: string | null;
   source_video?: string | null;
   source_video_path?: string | null;
+  /** Existing video to continue, base64 (no data-URI prefix). Makes the
+   * request a continuation: the delivered output is this clip followed by the
+   * newly rendered frames. Mutually exclusive with `source_video`. */
+  extend_video?: string | null;
+  /** Server-local path of the video to continue. */
+  extend_video_path?: string | null;
+  /** Pixel frames of the source tail used as motion context. Must be 8k+1 and
+   * strictly less than `frames`; omit to use the server default. */
+  extend_overlap_frames?: number | null;
   keyframes?: KeyframeConditionWire[] | null;
   pipeline?: Ltx2PipelineMode | null;
   ic_lora_control?: string | null;
@@ -281,6 +299,10 @@ export interface ModelInfoExtended extends ModelDefaults {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Model can continue an existing video in one request. Absent on servers
+   * that predate continuation — read absence as "no". */
+  supports_extend?: boolean | null;
+  extend_default_overlap_frames?: number | null;
   /** Model-specific sequence support; absent on older servers. */
   supports_sequence?: boolean | null;
   /** Model's own default frame count (`/api/models`, additive) — LTX-2
@@ -734,6 +756,11 @@ export interface GenerateFormState {
   audioFilePath: string;
   sourceVideo: SourceMediaState | null;
   sourceVideoPath: string;
+  /** Existing video to continue. Set makes the request a continuation. */
+  extendVideo: SourceMediaState | null;
+  extendVideoPath: string;
+  /** Pixel-frame overlap; `null` uses the server's advertised default. */
+  extendOverlapFrames: number | null;
   keyframes: KeyframeConditionState[];
   pipeline: Ltx2PipelineMode | null;
   /** Official host-provided IC-LoRA control adapter ID. */

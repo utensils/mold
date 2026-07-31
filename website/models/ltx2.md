@@ -224,8 +224,18 @@ stays visually coherent.
 `mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
 single-clip path; above 97 the request is rewritten into a chain and dispatched
 to the new `/api/generate/chain/stream` endpoint. Chaining is supported for
-LTX-2 19B and 22B distilled today. Other model families reject
-`--frames > 97` with an actionable error rather than silently over-producing.
+LTX-2 19B and 22B distilled today. Other model families reject `--frames` past
+their own single-request ceiling with an actionable error rather than silently
+over-producing.
+
+::: tip 97 is a routing default, not the model's ceiling
+LTX-2's real single-request limit is a **20-second runtime budget** — 484 frames
+at 24 fps (see [Frame ceiling](#frame-ceiling) below). 97 is simply the clip
+size that fits comfortably on one consumer GPU, so auto-chaining uses it. Raise
+`--clip-frames` to render one long coherent clip instead of a stitched
+sequence: `--frames 241 --clip-frames 241` gives a single 10-second shot with no
+seams, at the cost of far more VRAM and time.
+:::
 
 ```console
 $ mold run ltx-2-19b-distilled:fp8 "a cat walking through autumn leaves" \
@@ -263,11 +273,75 @@ those are the overlap region shared with the prior clip.
 
 ### Flags
 
-| Flag              | Default          | Description                                                                          |
-| ----------------- | ---------------- | ------------------------------------------------------------------------------------ |
-| `--frames N`      | model default    | Total stitched length. Above the per-clip cap (97 for LTX-2 distilled), auto-chains. |
-| `--clip-frames N` | model cap (`97`) | Per-clip length. Must be `8k+1`; values above the cap are clamped with a warning.    |
-| `--motion-tail N` | `4`              | Pixel-frame overlap between clips. `0` disables carryover.                           |
+| Flag              | Default       | Description                                                                         |
+| ----------------- | ------------- | ----------------------------------------------------------------------------------- |
+| `--frames N`      | model default | Total stitched length. Above `--clip-frames`, auto-chains.                          |
+| `--clip-frames N` | `97`          | Per-clip length. Must be `8k+1`; clamped to the model's real budget with a warning. |
+| `--motion-tail N` | `4`           | Pixel-frame overlap between clips. `0` disables carryover.                          |
+
+### Continuing an existing video
+
+`--extend` continues a clip you already have instead of starting a new one:
+
+```console
+$ mold run ltx-2-19b-distilled:fp8 "the car rounds the headland into fog" \
+    --extend coast.mp4 --frames 97 --extend-overlap 17
+
+✓ Saved: mold-ltx-2-19b-distilled-<ts>.mp4 (321 frames, 704x480, 24 fps)
+```
+
+The delivered file is the original followed by the new footage. `--frames` is
+the length of the _rendered continuation_, and its leading `--extend-overlap`
+frames re-render the source tail as motion context — those are dropped from the
+result, so the run appends `frames - overlap` new frames.
+
+| Flag                 | Default | Description                                                                              |
+| -------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `--extend PATH`      | —       | Video to continue. LTX-2 only.                                                           |
+| `--extend-overlap N` | `17`    | Pixel frames of the source tail used as motion context. Must be `8k+1` and `< --frames`. |
+
+Constraints, all enforced before any GPU work:
+
+- The continuation must render at the source clip's **resolution and frame
+  rate**. Mold rejects a mismatch rather than rescaling mid-video.
+- `--extend` cannot be combined with `--image`, `--video`, or `--keyframe`.
+  Each of those claims authority over the same opening frames.
+- The overlap must sit on the `8k+1` grid so the carried frames re-encode
+  cleanly through the video VAE, and must be strictly below `--frames` so the
+  continuation adds at least one new frame.
+
+Under the hood this is the same motion-tail handoff a sequence uses between
+clips — the carryover simply comes from a file instead of the previous stage.
+To chain several continuations, extend the result again.
+
+### Frame ceiling
+
+LTX-2's single-request ceiling is a **duration**, not a frame count. The
+checkpoints ship `pos_embed_max_pos = 20`, and the temporal RoPE axis is
+normalized in seconds — the pixel-frame coordinate is divided by fps before
+`max_pos` normalization. So the budget is 20 seconds of runtime:
+
+```
+max_frames = 20 * fps + 4      (capped at 604 frames)
+```
+
+| fps | Ceiling    | Runtime |
+| --- | ---------- | ------- |
+| 6   | 124 frames | ~20 s   |
+| 12  | 244 frames | ~20 s   |
+| 24  | 484 frames | ~20 s   |
+| 30  | 604 frames | ~20 s   |
+
+`GET /api/models` advertises `max_frames` at the model's own `default_fps`,
+plus `max_runtime_seconds` so clients can recompute it when the user changes
+fps. `--temporal-upscale x2` does **not** extend the budget: it halves the
+stage-1 frame count _and_ the stage-1 fps, so stage 1 renders the same runtime
+at half the frame rate.
+
+Whether a long single clip actually _fits_ is a separate question from whether
+the model allows it — attention cost grows with the square of the token count,
+so a 481-frame render at 1216x704 needs far more VRAM than most cards have.
+The validator permits it; auto-chaining stays at 97-frame clips by default.
 
 When the final clip over-produces (stage math rarely lands exactly on
 `total_frames`), mold trims from the tail so the user-anchored starting image

@@ -45,7 +45,18 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
-                max_frames: crate::validation::max_frames_for_family(&manifest.family),
+                max_frames: crate::validation::max_frames_for_family_at_fps(
+                    &manifest.family,
+                    model_cfg
+                        .effective_fps()
+                        .unwrap_or(crate::validation::LTX2_DEFAULT_FPS),
+                ),
+                max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(
+                    &manifest.family,
+                ),
+                max_frames_absolute: crate::validation::max_frames_absolute_for_family(
+                    &manifest.family,
+                ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
                 max_pixels,
                 recommended_dimensions,
@@ -84,6 +95,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: Some(manifest.family == "ltx2"),
+            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
 
@@ -103,6 +116,7 @@ pub fn build_model_catalog(
             .unwrap_or_else(|| "flux".to_string());
         let (max_pixels, recommended_dimensions, dimension_alignment) =
             resolution_defaults(&family);
+        let is_ltx2 = family == "ltx2";
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -113,7 +127,14 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
-                max_frames: crate::validation::max_frames_for_family(&family),
+                max_frames: crate::validation::max_frames_for_family_at_fps(
+                    &family,
+                    model_cfg
+                        .effective_fps()
+                        .unwrap_or(crate::validation::LTX2_DEFAULT_FPS),
+                ),
+                max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(&family),
+                max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
                 max_pixels,
                 recommended_dimensions,
@@ -138,6 +159,8 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: Some(is_ltx2),
+            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
 
@@ -229,10 +252,17 @@ mod tests {
             .expect("an ltx2 manifest model should exist");
         assert_eq!(ltx2.defaults.default_frames, Some(97));
         assert_eq!(ltx2.defaults.default_fps, Some(24));
+        // The LTX-2 ceiling is a 20s duration, so the advertised scalar is the
+        // frame count that budget buys at this model's own default fps.
         assert_eq!(
             ltx2.defaults.max_frames,
-            Some(153),
-            "no-temporal-upscale RoPE ceiling",
+            Some(crate::validation::ltx2_max_frames_at_fps(24)),
+            "temporal RoPE ceiling at the model's default fps",
+        );
+        assert_eq!(ltx2.defaults.max_runtime_seconds, Some(20));
+        assert_eq!(
+            ltx2.defaults.max_frames_absolute,
+            Some(crate::validation::LTX2_MAX_FRAMES_ABSOLUTE)
         );
         assert_eq!(ltx2.defaults.frame_step, Some(8));
         assert_eq!(
@@ -386,6 +416,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             }
         }
 

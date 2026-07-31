@@ -25,9 +25,17 @@ use crate::control::CliContext;
 use crate::output::{is_piped, status};
 use crate::theme;
 
-/// Per-clip frame cap for LTX-2 19B/22B distilled. The distilled VAE
-/// pipeline maxes at 97 pixel frames (13 latent frames) per clip.
-pub const LTX2_DISTILLED_CLIP_CAP: u32 = 97;
+/// Default per-clip frame count when auto-chaining an over-long LTX-2
+/// request.
+///
+/// This is a *routing* default, not the model's ceiling — see
+/// `mold_core::validation::ltx2_max_frames_at_fps` for that. A 97-frame clip
+/// is what fits comfortably on a single consumer GPU; the model's real
+/// single-request budget is 20 s of runtime, which at 24 fps is 484 frames and
+/// would need far more VRAM than most cards have. Users who want one long clip
+/// instead of a stitched sequence raise `--clip-frames`, which is clamped to
+/// the model's real budget rather than to this default.
+pub const LTX2_DEFAULT_CLIP_FRAMES: u32 = 97;
 
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn local_chain_planning_frames(request: &ChainRequest) -> u32 {
@@ -66,6 +74,7 @@ pub fn decide_chain_routing(
     model: &str,
     clip_frames_flag: Option<u32>,
     motion_tail: u32,
+    fps: u32,
 ) -> ChainRoutingDecision {
     let Some(total_frames) = frames else {
         return ChainRoutingDecision::SingleClip;
@@ -73,26 +82,35 @@ pub fn decide_chain_routing(
 
     let is_ltx2_distilled = family == Some("ltx2") && model.contains("distilled");
 
+    // The model's real single-request ceiling. LTX-2's is a runtime duration,
+    // so it depends on fps; other families report a flat frame count.
+    let single_clip_cap = family
+        .and_then(|family| mold_core::validation::max_frames_for_family_at_fps(family, fps))
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
+
     if !is_ltx2_distilled {
-        // Non-chainable families: if the requested frame count is within a
-        // conservative single-clip budget, stay on the single-clip path and
+        // Non-chainable families: if the requested frame count is within the
+        // family's own single-clip budget, stay on the single-clip path and
         // let the engine decide if it's acceptable. Otherwise, reject with
         // a clear message rather than silently over-producing.
-        if total_frames <= LTX2_DISTILLED_CLIP_CAP {
+        if total_frames <= single_clip_cap {
             return ChainRoutingDecision::SingleClip;
         }
         return ChainRoutingDecision::Rejected {
             reason: format!(
                 "model '{model}' does not support chained video generation \
-                 (only LTX-2 distilled families do); specify --frames <= {} \
+                 (only LTX-2 distilled families do); specify --frames <= {single_clip_cap} \
                  per clip for this model",
-                LTX2_DISTILLED_CLIP_CAP,
             ),
         };
     }
 
-    let cap = LTX2_DISTILLED_CLIP_CAP;
-    let effective_clip_frames = clip_frames_flag.unwrap_or(cap).min(cap);
+    // Auto-chaining uses 97-frame clips by default, but an explicit
+    // --clip-frames may go all the way to the model's real budget so a user
+    // can ask for one long coherent clip instead of a stitched sequence.
+    let effective_clip_frames = clip_frames_flag
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES)
+        .min(single_clip_cap);
 
     if total_frames <= effective_clip_frames {
         return ChainRoutingDecision::SingleClip;
@@ -850,18 +868,25 @@ pub async fn run_from_sugar(
     };
     let model = resolve_model_name(&model_raw);
 
-    // Cap clip_frames to LTX2_DISTILLED_CLIP_CAP if the user didn't override.
+    // Default to the routing clip size, but let an explicit --frames-per-clip
+    // go up to the model's real single-request budget. The sugar path always
+    // renders at the default fps (see `fps` below), so resolve the cap there.
+    let sugar_fps = mold_core::validation::LTX2_DEFAULT_FPS;
+    let clip_cap = mold_core::validation::max_frames_for_family_at_fps("ltx2", sugar_fps)
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
     let clip_frames = frames_per_clip
-        .unwrap_or(LTX2_DISTILLED_CLIP_CAP)
-        .min(LTX2_DISTILLED_CLIP_CAP);
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES)
+        .min(clip_cap);
     if let Some(requested) = frames_per_clip {
-        if requested > LTX2_DISTILLED_CLIP_CAP {
+        if requested > clip_cap {
             crate::output::status!(
-                "{} --frames-per-clip {} exceeds LTX-2 cap {}, clamping to {}",
+                "{} --frames-per-clip {} exceeds the LTX-2 per-clip budget of {} frames \
+                 ({}s at {sugar_fps} fps), clamping to {}",
                 theme::prefix_warning(),
                 requested,
-                LTX2_DISTILLED_CLIP_CAP,
-                LTX2_DISTILLED_CLIP_CAP,
+                clip_cap,
+                mold_core::validation::LTX2_MAX_RUNTIME_SECONDS,
+                clip_cap,
             );
         }
     }
@@ -960,19 +985,33 @@ mod tests {
 
     #[test]
     fn routing_single_clip_under_cap() {
-        let d = decide_chain_routing(Some(97), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4);
+        let d = decide_chain_routing(
+            Some(97),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+        );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
     #[test]
     fn routing_single_clip_when_frames_absent() {
-        let d = decide_chain_routing(None, Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4);
+        let d = decide_chain_routing(None, Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4, 24);
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
     #[test]
     fn routing_chain_over_cap_ltx2_distilled() {
-        let d = decide_chain_routing(Some(200), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4);
+        let d = decide_chain_routing(
+            Some(200),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+        );
         assert_eq!(
             d,
             ChainRoutingDecision::Chain {
@@ -984,7 +1023,7 @@ mod tests {
 
     #[test]
     fn routing_rejects_non_distilled_over_cap() {
-        let d = decide_chain_routing(Some(200), Some("flux"), "flux-dev:q4", None, 4);
+        let d = decide_chain_routing(Some(200), Some("flux"), "flux-dev:q4", None, 4, 24);
         match d {
             ChainRoutingDecision::Rejected { reason } => {
                 assert!(
@@ -998,24 +1037,79 @@ mod tests {
 
     #[test]
     fn routing_rejects_non_ltx2_family_over_cap() {
-        // ltx-video (not ltx2) is not chainable in v1.
-        let d = decide_chain_routing(Some(200), Some("ltx-video"), "ltx-video:0.9.6", None, 4);
+        // ltx-video (not ltx2) is not chainable in v1, so anything past its own
+        // single-request ceiling has nowhere to go.
+        let d = decide_chain_routing(Some(500), Some("ltx-video"), "ltx-video:0.9.6", None, 4, 24);
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
 
+    /// The CLI used to reject any non-ltx2 request past 97 frames, which was
+    /// stricter than the server: ltx-video accepts up to the global ceiling.
     #[test]
-    fn routing_clip_frames_above_cap_clamps_to_cap() {
+    fn routing_keeps_non_chainable_families_single_up_to_their_own_ceiling() {
+        let d = decide_chain_routing(Some(249), Some("ltx-video"), "ltx-video:0.9.6", None, 4, 24);
+        assert_eq!(d, ChainRoutingDecision::SingleClip);
+    }
+
+    /// `--clip-frames` clamps to the model's real budget, not to the routing
+    /// default — that is how a user asks for one long clip instead of a
+    /// stitched sequence.
+    #[test]
+    fn routing_clip_frames_may_exceed_the_routing_default() {
         let d = decide_chain_routing(
             Some(300),
             Some("ltx2"),
             "ltx-2-19b-distilled:fp8",
-            Some(200),
+            Some(201),
             4,
+            24,
         );
         assert_eq!(
             d,
             ChainRoutingDecision::Chain {
-                clip_frames: 97,
+                clip_frames: 201,
+                motion_tail: 4,
+            },
+        );
+    }
+
+    #[test]
+    fn routing_clip_frames_above_the_model_budget_clamps_to_the_budget() {
+        // 12 fps → a 20s budget is 244 frames, so 400 must clamp to 244.
+        let d = decide_chain_routing(
+            Some(900),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            Some(400),
+            4,
+            12,
+        );
+        assert_eq!(
+            d,
+            ChainRoutingDecision::Chain {
+                clip_frames: 244,
+                motion_tail: 4,
+            },
+        );
+    }
+
+    /// Auto-chaining (no --clip-frames) must keep using the conservative
+    /// routing default; the corrected ceiling must not silently promote every
+    /// long request into one enormous single-clip denoise.
+    #[test]
+    fn routing_default_clip_size_is_unchanged_by_the_larger_budget() {
+        let d = decide_chain_routing(
+            Some(400),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+        );
+        assert_eq!(
+            d,
+            ChainRoutingDecision::Chain {
+                clip_frames: LTX2_DEFAULT_CLIP_FRAMES,
                 motion_tail: 4,
             },
         );
@@ -1029,6 +1123,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             Some(65),
             4,
+            24,
         );
         assert_eq!(
             d,
@@ -1047,6 +1142,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             Some(49),
             49,
+            24,
         );
         match d {
             ChainRoutingDecision::Rejected { reason } => {
@@ -1061,14 +1157,21 @@ mod tests {
 
     #[test]
     fn routing_motion_tail_at_clip_frames_rejects() {
-        let d = decide_chain_routing(Some(200), Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 97);
+        let d = decide_chain_routing(
+            Some(200),
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            97,
+            24,
+        );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
 
     #[test]
     fn ltx2_distilled_cap_matches_engine_constraint() {
         // 97 = 8 * 12 + 1, satisfying the VAE 8k+1 constraint.
-        assert_eq!(LTX2_DISTILLED_CLIP_CAP % 8, 1);
+        assert_eq!(LTX2_DEFAULT_CLIP_FRAMES % 8, 1);
     }
 
     #[test]

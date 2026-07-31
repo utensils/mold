@@ -255,6 +255,9 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         audio_file_path: None,
         source_video: None,
         source_video_path: None,
+        extend_video: None,
+        extend_video_path: None,
+        extend_overlap_frames: None,
         keyframes: None,
         pipeline: if is_ltx2 { params.pipeline } else { None },
         ic_lora_control: None,
@@ -804,6 +807,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }
     }
 
@@ -917,6 +922,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -948,6 +955,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -967,6 +976,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -992,6 +1003,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -1022,6 +1035,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1041,6 +1056,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -1067,6 +1084,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1086,6 +1105,8 @@ mod tests {
                 modality: None,
                 nsfw: None,
                 supports_audio: None,
+                supports_extend: None,
+                extend_default_overlap_frames: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

@@ -5700,6 +5700,8 @@ impl App {
                             enable_audio: None,
                             audio_file_path: None,
                             source_video_path: None,
+                            extend_video_path: None,
+                            extend_overlap_frames: None,
                             pipeline: None,
                             ic_lora_control: None,
                             retake_range: None,
@@ -6073,6 +6075,12 @@ impl App {
                         source_video_path: source_meta
                             .as_ref()
                             .and_then(|m| m.source_video_path.clone()),
+                        extend_video_path: source_meta
+                            .as_ref()
+                            .and_then(|m| m.extend_video_path.clone()),
+                        extend_overlap_frames: source_meta
+                            .as_ref()
+                            .and_then(|m| m.extend_overlap_frames),
                         pipeline: source_meta.as_ref().and_then(|m| m.pipeline),
                         ic_lora_control: None,
                         retake_range: source_meta.as_ref().and_then(|m| m.retake_range.clone()),
@@ -6998,6 +7006,8 @@ mod tests {
                 enable_audio: None,
                 audio_file_path: None,
                 source_video_path: None,
+                extend_video_path: None,
+                extend_overlap_frames: None,
                 pipeline: None,
                 ic_lora_control: None,
                 retake_range: None,
@@ -7054,6 +7064,8 @@ mod tests {
                 enable_audio: None,
                 audio_file_path: None,
                 source_video_path: None,
+                extend_video_path: None,
+                extend_overlap_frames: None,
                 pipeline: None,
                 ic_lora_control: None,
                 retake_range: None,
@@ -7174,6 +7186,8 @@ mod tests {
             enable_audio: None,
             audio_file_path: None,
             source_video_path: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             pipeline: None,
             ic_lora_control: None,
             retake_range: None,
@@ -10219,6 +10233,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }
     }
 
@@ -11860,6 +11876,8 @@ mod tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }
     }
 

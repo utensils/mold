@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MOTION_TAIL,
-  LTX2_DISTILLED_CLIP_CAP,
+  LTX2_DEFAULT_CLIP_FRAMES,
   MAX_CHAIN_STAGES,
   decideChainRouting,
   decideGenerateRequestRouting,
@@ -23,7 +23,7 @@ describe("decideChainRouting", () => {
   it("returns single for ltx2-distilled at-or-below the cap", () => {
     expect(
       decideChainRouting(
-        LTX2_DISTILLED_CLIP_CAP,
+        LTX2_DEFAULT_CLIP_FRAMES,
         "ltx2",
         "ltx-2.3-22b-distilled:fp8",
       ),
@@ -70,8 +70,9 @@ describe("decideChainRouting", () => {
 
   it("rejects ltx2-non-distilled models when frames exceed the single-clip budget", () => {
     // ltx2 family but non-distilled: only the distilled path implements
-    // chain rendering on the server.
-    const d = decideChainRouting(241, "ltx2", "ltx-2-19b:fp8");
+    // chain rendering on the server. 489 frames is past even the single-clip
+    // duration budget at the default 24 fps, so there is nowhere to route it.
+    const d = decideChainRouting(489, "ltx2", "ltx-2-19b:fp8");
     expect(d.kind).toBe("reject");
   });
 
@@ -136,20 +137,39 @@ describe("decideChainRouting", () => {
     });
   });
 
-  it("keeps temporal x2 on ordinary generation through its 257-frame limit", () => {
+  it("keeps temporal x2 on ordinary generation up to the duration budget", () => {
+    // Temporal x2 halves the stage-1 frames AND the stage-1 fps, so it renders
+    // the same runtime — the ceiling is the plain fps-derived one, not double.
     const request = {
       model: "ltx-2-19b:fp8",
-      frames: 257,
+      frames: 481,
+      fps: 24,
       temporal_upscale: "x2" as const,
     };
     expect(decideGenerateRequestRouting(request, "ltx2")).toEqual({
       kind: "single",
     });
     expect(
-      decideGenerateRequestRouting({ ...request, frames: 265 }, "ltx2"),
+      decideGenerateRequestRouting({ ...request, frames: 489 }, "ltx2"),
     ).toMatchObject({
       kind: "reject",
-      reason: expect.stringContaining("at most 257 frames"),
+      reason: expect.stringContaining("484 frames"),
+    });
+  });
+
+  it("moves the temporal x2 ceiling with fps", () => {
+    const at12 = {
+      model: "ltx-2-19b:fp8",
+      frames: 249,
+      fps: 12,
+      temporal_upscale: "x2" as const,
+    };
+    expect(decideGenerateRequestRouting(at12, "ltx2")).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("244 frames"),
+    });
+    expect(decideGenerateRequestRouting({ ...at12, fps: 24 }, "ltx2")).toEqual({
+      kind: "single",
     });
   });
 

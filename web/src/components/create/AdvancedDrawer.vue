@@ -23,6 +23,7 @@ import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
+import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
@@ -61,6 +62,9 @@ const props = withDefaults(
     models?: ModelInfoExtended[];
     /** Selected model's resolved audio assets are available. */
     audioOutputSupported?: boolean;
+    /** Host advertises `video.can_extend`; false hides the continuation UI. */
+    canExtend?: boolean;
+    extendDefaultOverlapFrames?: number;
     output?: OutputMode;
     sequenceSupportsAudio?: boolean;
   }>(),
@@ -71,6 +75,8 @@ const props = withDefaults(
     placementGpus: () => [],
     models: () => [],
     audioOutputSupported: true,
+    canExtend: false,
+    extendDefaultOverlapFrames: DEFAULT_EXTEND_OVERLAP_FRAMES,
     output: "single",
     sequenceSupportsAudio: false,
   },
@@ -917,6 +923,8 @@ function setSequenceCameraMode(mode: string) {
             v-if="showLtx2"
             :model-value="modelValue"
             :audio-output-supported="audioOutputSupported"
+            :can-extend="canExtend"
+            :extend-default-overlap-frames="extendDefaultOverlapFrames"
             @update:model-value="emit('update:modelValue', $event)"
           />
         </AccordionSection>

@@ -385,6 +385,26 @@ pub struct GenerateRequest {
     /// Resolved only by `mold serve` against configured allow roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_video_path: Option<String>,
+    /// Existing video to continue, as inline bytes.
+    ///
+    /// Distinct from `source_video`, which is *reference* conditioning for
+    /// video-to-video: `extend_video` makes the request a continuation, so the
+    /// delivered output is the original followed by newly generated frames.
+    ///
+    /// `frames` keeps its usual meaning — the length of the clip the model
+    /// renders — and its leading `extend_overlap_frames` reproduce the source
+    /// tail, so the run adds `frames - extend_overlap_frames` new frames.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub extend_video: Option<Vec<u8>>,
+    /// Server-local path of the video to continue, for trusted deployments.
+    /// Resolved only by `mold serve` against configured allow roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_video_path: Option<String>,
+    /// Pixel frames of the source tail re-encoded as motion conditioning for
+    /// the continuation. Must be `8k+1` (the LTX-2 VAE's causal temporal grid)
+    /// and strictly less than `frames`. `None` uses the chain default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_overlap_frames: Option<u32>,
     /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyframes: Option<Vec<KeyframeCondition>>,
@@ -429,6 +449,30 @@ impl GenerateRequest {
     /// accessing the field directly to avoid an `.unwrap()`.
     pub fn resolved_output_format(&self) -> OutputFormat {
         self.output_format.unwrap_or_default()
+    }
+
+    /// Whether this request continues an existing video rather than starting
+    /// a new one.
+    pub fn is_extend(&self) -> bool {
+        self.extend_video.is_some() || self.extend_video_path.is_some()
+    }
+
+    /// Pixel-frame overlap the continuation conditions on, defaulting to the
+    /// chain motion tail so extend and sequence seams behave identically.
+    pub fn effective_extend_overlap_frames(&self) -> u32 {
+        self.extend_overlap_frames
+            .unwrap_or(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES)
+    }
+
+    /// Net-new pixel frames an extend request appends to its source: the
+    /// rendered clip minus the leading overlap that reproduces the tail.
+    pub fn extend_new_frames(&self) -> Option<u32> {
+        self.is_extend()
+            .then(|| {
+                self.frames
+                    .map(|frames| frames.saturating_sub(self.effective_extend_overlap_frames()))
+            })
+            .flatten()
     }
 
     /// Fill `output_format` with a family-aware default when the caller did
@@ -786,6 +830,14 @@ pub struct OutputMetadata {
     pub audio_file_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_video_path: Option<String>,
+    /// Server-local path of the video this print continues, when it was
+    /// produced by an extend request. Inline `extend_video` bytes are
+    /// deliberately not recorded — metadata rides inside the output file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_video_path: Option<String>,
+    /// Pixel-frame overlap used to condition the continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_overlap_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -888,6 +940,12 @@ impl OutputMetadata {
             enable_audio: req.enable_audio,
             audio_file_path: req.audio_file_path.clone(),
             source_video_path: req.source_video_path.clone(),
+            extend_video_path: req.extend_video_path.clone(),
+            // Only meaningful when this print actually continued something;
+            // recording a bare overlap on an ordinary render would read as
+            // provenance that does not exist.
+            extend_overlap_frames: (req.extend_video.is_some() || req.extend_video_path.is_some())
+                .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
             ic_lora_control: req.ic_lora_control.clone(),
             retake_range: req.retake_range.clone(),
@@ -1019,13 +1077,28 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 24)]
     pub default_fps: Option<u32>,
-    /// Maximum frames a single request may ask for WITHOUT temporal
-    /// upscaling (additive; absent for image models). Clients with
-    /// temporal-upscale support keep their own doubling math; the server
+    /// Maximum frames a single request may ask for at `default_fps`
+    /// (additive; absent for image models). For families whose ceiling is a
+    /// duration — see `max_runtime_seconds` — this scalar moves with fps, so
+    /// clients that let the user change fps should recompute it from
+    /// `max_runtime_seconds` rather than treat it as fixed. The server
     /// validator remains authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(example = 153)]
+    #[schema(example = 484)]
     pub max_frames: Option<u32>,
+    /// Single-request runtime ceiling in seconds, when the family's real limit
+    /// is a duration rather than a frame count (additive; currently LTX-2 /
+    /// LTX-2.3, whose temporal RoPE budget is expressed in seconds). Clients
+    /// derive `max_frames` at an arbitrary fps as
+    /// `max_runtime_seconds * fps + 4`, clamped to `max_frames_absolute`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 20)]
+    pub max_runtime_seconds: Option<u32>,
+    /// Hard frame ceiling that applies regardless of fps (additive). Present
+    /// alongside `max_runtime_seconds`; a resource guard, not a model limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 604)]
+    pub max_frames_absolute: Option<u32>,
     /// Valid frame counts are `k * frame_step + 1` (additive; absent for
     /// image models). 8 for the LTX families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1077,6 +1150,16 @@ pub struct ModelInfoExtended {
     /// compatibility with older servers that only advertised family support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_audio: Option<bool>,
+    /// Whether this model can continue an existing video in one request
+    /// (`GenerateRequest.extend_video`). `None` on servers that predate
+    /// continuation support, which clients must read as "no" — offering the
+    /// control would only produce a rejected request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_extend: Option<bool>,
+    /// Pixel-frame overlap applied when a continuation omits
+    /// `extend_overlap_frames`. Present whenever `supports_extend` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_default_overlap_frames: Option<u32>,
 }
 
 impl ModelInfoExtended {
@@ -1195,20 +1278,23 @@ mod model_defaults_frame_tests {
         let video = ModelDefaults {
             default_frames: Some(97),
             default_fps: Some(24),
-            max_frames: Some(153),
+            max_frames: Some(484),
+            max_runtime_seconds: Some(20),
             frame_step: Some(8),
             ..parsed
         };
         let out = serde_json::to_value(&video).unwrap();
         assert_eq!(out["default_frames"], 97);
         assert_eq!(out["default_fps"], 24);
-        assert_eq!(out["max_frames"], 153);
+        assert_eq!(out["max_frames"], 484);
+        assert_eq!(out["max_runtime_seconds"], 20);
         assert_eq!(out["frame_step"], 8);
 
         let back: ModelDefaults = serde_json::from_value(out).unwrap();
         assert_eq!(back.default_frames, Some(97));
         assert_eq!(back.default_fps, Some(24));
-        assert_eq!(back.max_frames, Some(153));
+        assert_eq!(back.max_frames, Some(484));
+        assert_eq!(back.max_runtime_seconds, Some(20));
         assert_eq!(back.frame_step, Some(8));
     }
 }
@@ -1243,6 +1329,8 @@ mod model_display_name_tests {
             modality: None,
             nsfw: None,
             supports_audio: None,
+            supports_extend: None,
+            extend_default_overlap_frames: None,
         }
     }
 
@@ -2594,6 +2682,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: Some("union".to_string()),
@@ -2783,6 +2874,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -2839,6 +2933,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -2892,6 +2989,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -2960,6 +3060,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3078,6 +3181,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3131,6 +3237,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3187,6 +3296,9 @@ mod tests {
             audio_file_path: Some("/srv/mold/voice.wav".to_string()),
             source_video: None,
             source_video_path: Some("/srv/mold/source.mp4".to_string()),
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: Some(Ltx2PipelineMode::Retake),
             ic_lora_control: None,
@@ -3641,6 +3753,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3700,6 +3815,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3772,6 +3890,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3829,6 +3950,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -3945,6 +4069,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,

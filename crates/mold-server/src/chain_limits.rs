@@ -16,7 +16,17 @@ pub struct SequenceSupport {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChainLimits {
     pub model: String,
+    /// Per-clip cap at `fps`. For families with a `frames_per_clip_runtime_seconds`
+    /// budget this is derived, not fixed — recompute it when the user changes fps.
     pub frames_per_clip_cap: u32,
+    /// fps `frames_per_clip_cap` was computed at (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Per-clip runtime budget in seconds when the family's real limit is a
+    /// duration (additive; currently LTX-2 / LTX-2.3). Clients derive the cap
+    /// at another fps as `seconds * fps + 4`, clamped by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_per_clip_runtime_seconds: Option<u32>,
     pub frames_per_clip_recommended: u32,
     pub max_stages: u32,
     pub max_total_frames: u32,
@@ -36,11 +46,25 @@ pub struct ChainLimits {
     pub sequence_unsupported_reason: Option<String>,
 }
 
-/// Per-model-family hardcoded caps. Keyed by the family string returned by
-/// `mold_core::manifest::resolve_family`.
-pub fn family_cap(family: &str) -> Option<u32> {
-    mold_inference::chain::capability_for_family(family).map(|c| c.frames_per_clip_cap)
+/// Per-clip cap for a family at `fps`. Keyed by the family string returned by
+/// `mold_core::manifest::resolve_family`. `None` = not chain-capable.
+///
+/// LTX-2's per-clip cap is a runtime duration, so it moves with fps; passing
+/// the clip's real fps is what lets a sequence use clips longer than the old
+/// flat 97.
+pub fn family_cap_at_fps(family: &str, fps: u32) -> Option<u32> {
+    mold_inference::chain::frames_per_clip_cap_at_fps(family, fps)
 }
+
+/// `family_cap_at_fps` at the chain default fps. Callers that only need the
+/// chain-capable / not-chain-capable answer can use this.
+pub fn family_cap(family: &str) -> Option<u32> {
+    family_cap_at_fps(family, DEFAULT_CHAIN_FPS)
+}
+
+/// fps assumed when a caller has no request-level fps. Matches
+/// `mold_core::chain`'s `default_fps`.
+pub const DEFAULT_CHAIN_FPS: u32 = 24;
 
 /// Whether a chain-capable family also has an audio path. The chain handler
 /// rejects requests with `enable_audio: true` when this returns false, so
@@ -82,14 +106,18 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
 /// `free_vram_bytes` is the current free VRAM on the primary GPU.
 /// `default_frames` is the model's own default frame count (manifest or
 /// catalog sidecar) and drives the recommended per-clip frames.
+/// `fps` is the frame rate the clips will render at; LTX-2's per-clip cap is
+/// a runtime duration, so the advertised cap moves with it.
 pub fn compute_limits(
     model: &str,
     family: &str,
     quant: &str,
     free_vram_bytes: u64,
     default_frames: Option<u32>,
+    fps: Option<u32>,
 ) -> ChainLimits {
-    let cap = family_cap(family).unwrap_or(97);
+    let fps = fps.filter(|value| *value > 0).unwrap_or(DEFAULT_CHAIN_FPS);
+    let cap = family_cap_at_fps(family, fps).unwrap_or(97);
     // Suppress unused for now; sub-project D wires free VRAM up.
     let _ = free_vram_bytes;
     // Recommend the model's own default frame count (LTX-Video ships 25,
@@ -122,6 +150,9 @@ pub fn compute_limits(
     ChainLimits {
         model: model.to_string(),
         frames_per_clip_cap: cap,
+        fps: Some(fps),
+        frames_per_clip_runtime_seconds: mold_inference::chain::capability_for_family(family)
+            .and_then(|capability| capability.runtime_seconds_cap),
         frames_per_clip_recommended: recommended,
         max_stages: MAX_STAGES,
         max_total_frames: cap * MAX_STAGES,
@@ -138,19 +169,27 @@ pub fn compute_limits(
 mod tests {
     use super::*;
 
+    /// An LTX-2 clip is denoised as one generation, so its cap is the family's
+    /// single-request ceiling — a 20s duration, not the old flat 97.
     #[test]
-    fn ltx2_cap_is_97() {
+    fn ltx2_cap_follows_the_duration_budget() {
         // ltx2 family covers both v2 19B and v2.3 22B (dev and distilled);
         // both resolve to family="ltx2" via `resolve_family`.
-        assert_eq!(family_cap("ltx2"), Some(97));
+        assert_eq!(
+            family_cap("ltx2"),
+            mold_core::validation::max_frames_for_family_at_fps("ltx2", DEFAULT_CHAIN_FPS),
+        );
+        assert_eq!(family_cap_at_fps("ltx2", 12), Some(244));
+        assert_eq!(family_cap_at_fps("ltx2", 24), Some(484));
     }
 
     #[test]
-    fn ltx_video_cap_is_97() {
-        // LTX-Video uses the img2vid-less fallback; same per-clip cap as
-        // ltx2 because the chain endpoint stitches independent clips at the
-        // pixel level once the cap is hit.
+    fn ltx_video_cap_is_97_at_every_fps() {
+        // LTX-Video uses the img2vid-less fallback and publishes a flat frame
+        // ceiling rather than a duration, so fps must not move its cap.
         assert_eq!(family_cap("ltx-video"), Some(97));
+        assert_eq!(family_cap_at_fps("ltx-video", 12), Some(97));
+        assert_eq!(family_cap_at_fps("ltx-video", 30), Some(97));
     }
 
     #[test]
@@ -174,24 +213,68 @@ mod tests {
     /// family cap, so new clips default to what the model actually runs.
     #[test]
     fn recommended_uses_model_default_frames() {
-        let ltx_video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", 0, Some(25));
+        let ltx_video = compute_limits(
+            "ltx-video-0.9.6:bf16",
+            "ltx-video",
+            "bf16",
+            0,
+            Some(25),
+            None,
+        );
         assert_eq!(ltx_video.frames_per_clip_cap, 97);
         assert_eq!(ltx_video.frames_per_clip_recommended, 25);
 
-        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, Some(97));
+        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, Some(97), None);
         assert_eq!(ltx2.frames_per_clip_recommended, 97);
 
         // No model default → fall back to the family cap (old behavior).
-        let unknown = compute_limits("cv:123", "ltx2", "", 0, None);
-        assert_eq!(unknown.frames_per_clip_recommended, 97);
+        let unknown = compute_limits("cv:123", "ltx2", "", 0, None, None);
+        assert_eq!(
+            unknown.frames_per_clip_recommended,
+            family_cap("ltx2").unwrap()
+        );
 
         // Off-grid defaults snap DOWN onto the 8n+1 grid.
-        let off_grid = compute_limits("cv:456", "ltx-video", "", 0, Some(30));
+        let off_grid = compute_limits("cv:456", "ltx-video", "", 0, Some(30), None);
         assert_eq!(off_grid.frames_per_clip_recommended, 25);
 
-        // Defaults above the cap clamp to the cap.
-        let oversized = compute_limits("cv:789", "ltx2", "", 0, Some(500));
-        assert_eq!(oversized.frames_per_clip_recommended, 97);
+        // Defaults above the cap clamp to the cap — 500 is over budget at the
+        // chain default 24 fps only once the absolute guard is applied, so use
+        // a low fps where the duration budget clearly binds.
+        let oversized = compute_limits("cv:789", "ltx2", "", 0, Some(500), Some(12));
+        assert_eq!(oversized.frames_per_clip_cap, 244);
+        assert_eq!(oversized.frames_per_clip_recommended, 241);
+    }
+
+    /// The advertised cap must move with the fps the clips will render at, and
+    /// carry the duration budget so clients can recompute it themselves.
+    #[test]
+    fn compute_limits_advertises_the_fps_it_used() {
+        let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(24));
+        assert_eq!(at_24.fps, Some(24));
+        assert_eq!(at_24.frames_per_clip_cap, 484);
+        assert_eq!(at_24.frames_per_clip_runtime_seconds, Some(20));
+
+        let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(12));
+        assert_eq!(at_12.frames_per_clip_cap, 244);
+
+        // A zero/absent fps falls back to the chain default rather than
+        // collapsing the cap to a single frame.
+        let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(0));
+        assert_eq!(fallback.fps, Some(DEFAULT_CHAIN_FPS));
+        assert_eq!(fallback.frames_per_clip_cap, 484);
+
+        // ltx-video has no duration budget to advertise.
+        let video = compute_limits(
+            "ltx-video-0.9.6:bf16",
+            "ltx-video",
+            "bf16",
+            0,
+            None,
+            Some(30),
+        );
+        assert_eq!(video.frames_per_clip_runtime_seconds, None);
+        assert_eq!(video.frames_per_clip_cap, 97);
     }
 
     #[test]
@@ -202,11 +285,13 @@ mod tests {
             "fp8",
             8_000_000_000,
             None,
+            None,
         );
-        assert_eq!(lim.frames_per_clip_cap, 97);
-        assert_eq!(lim.frames_per_clip_recommended, 97);
+        let cap = family_cap("ltx2").unwrap();
+        assert_eq!(lim.frames_per_clip_cap, cap);
+        assert_eq!(lim.frames_per_clip_recommended, cap);
         assert_eq!(lim.max_stages, 16);
-        assert_eq!(lim.max_total_frames, 97 * 16);
+        assert_eq!(lim.max_total_frames, cap * 16);
         assert_eq!(
             lim.transition_modes,
             vec!["smooth".to_string(), "cut".into(), "fade".into()]
@@ -237,7 +322,7 @@ mod tests {
 
     #[test]
     fn ltx2_dev_legacy_alias_keeps_two_stage_sequence_gate() {
-        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None);
+        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None, None);
         assert!(!limits.supports_sequence);
         assert!(limits
             .sequence_unsupported_reason
@@ -256,7 +341,14 @@ mod tests {
     fn compute_limits_for_ltx_video_has_no_audio() {
         // LTX-Video is video-only; the SPA must hide the audio toggle and the
         // chain endpoint will reject `enable_audio: true` upstream regardless.
-        let lim = compute_limits("ltx-video-0.9.7-distilled:fp8", "ltx-video", "fp8", 0, None);
+        let lim = compute_limits(
+            "ltx-video-0.9.7-distilled:fp8",
+            "ltx-video",
+            "fp8",
+            0,
+            None,
+            None,
+        );
         assert!(
             !lim.supports_audio,
             "ltx-video has no audio path — toggle must stay off",

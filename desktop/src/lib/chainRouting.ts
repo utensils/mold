@@ -8,8 +8,7 @@ import type { AutoChainRequest, GenerateRequest } from "./api/types";
 
 export {
   DEFAULT_MOTION_TAIL,
-  LTX2_DISTILLED_CLIP_CAP,
-  LTX2_TEMPORAL_UPSCALE_MAX_FRAMES,
+  LTX2_DEFAULT_CLIP_FRAMES,
   MAX_CHAIN_STAGES,
   decideChainRouting,
   decideGenerateRequestRouting,

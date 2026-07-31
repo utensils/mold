@@ -694,7 +694,167 @@ fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
 }
 
 impl Ltx2Engine {
+    /// Resolve the video an extend request continues into decoded RGB frames.
+    ///
+    /// Inline bytes are staged to `work_dir` because the decoder is
+    /// file-backed; a server-local path is used as-is (the server has already
+    /// resolved it against its allow roots).
+    fn load_extend_source(
+        req: &GenerateRequest,
+        work_dir: &Path,
+    ) -> Result<(Vec<image::RgbImage>, media::ProbeMetadata)> {
+        let path = match (&req.extend_video, &req.extend_video_path) {
+            (Some(bytes), _) => {
+                conditioning::stage_input_file(work_dir, "extend-video", bytes, "mp4")?
+            }
+            (None, Some(path)) => PathBuf::from(path),
+            (None, None) => bail!("extend requested without extend_video or extend_video_path"),
+        };
+        let (probe, frames) = media::decode_video_frames_from_path(&path).with_context(|| {
+            format!("failed to decode the video to extend ({})", path.display())
+        })?;
+        if frames.is_empty() {
+            bail!(
+                "the video to extend ({}) decoded to zero frames",
+                path.display()
+            );
+        }
+        Ok((frames, probe))
+    }
+
+    /// Continue an existing video in one request.
+    ///
+    /// This is the chain motion-tail handoff with the carryover coming from a
+    /// decoded file instead of a previous stage: the last
+    /// `extend_overlap_frames` pixel frames are re-encoded through the video
+    /// VAE as conditioning, the model renders `frames` frames whose leading
+    /// overlap reproduces that tail, and the delivered output is the original
+    /// followed by everything past the overlap.
+    fn extend_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.checkpoint()?;
+        if !self.loaded {
+            self.load()?;
+        }
+        self.checkpoint()?;
+        let start = Instant::now();
+        self.emit("Preparing native LTX-2 continuation");
+
+        let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
+        let native_output = work_dir.path().join("ltx2-native-output.mp4");
+        let (source_frames, probe) = Self::load_extend_source(req, work_dir.path())?;
+
+        let overlap = req.effective_extend_overlap_frames();
+        if (source_frames.len() as u32) < overlap {
+            bail!(
+                "the video to extend has {} frames but the requested overlap is {overlap}; \
+                 lower --extend-overlap or supply a longer clip",
+                source_frames.len(),
+            );
+        }
+        // Materialize the plan up front so the source is checked against the
+        // shape the render will ACTUALLY use. `req.fps` is frequently unset —
+        // the plan then supplies the model default — so validating `req`
+        // directly would let a 30 fps clip be continued at 24 fps and
+        // re-encoded at 24, silently retiming the footage we were handed.
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+
+        // The stitched output is one video, so the continuation has to render
+        // on the source's own lattice. Rejecting is better than silently
+        // rescaling: a mid-video resolution change is always a surprise.
+        if probe.width != plan.width || probe.height != plan.height {
+            bail!(
+                "the video to extend is {}x{} but this request renders {}x{}; \
+                 continuations must render at the source's resolution",
+                probe.width,
+                probe.height,
+                plan.width,
+                plan.height,
+            );
+        }
+        if probe.fps != plan.frame_rate {
+            bail!(
+                "the video to extend runs at {} fps but this request renders {} fps; \
+                 continuations must render at the source's frame rate{}",
+                probe.fps,
+                plan.frame_rate,
+                if req.fps.is_none() {
+                    format!(" (pass --fps {} to match the source)", probe.fps)
+                } else {
+                    String::new()
+                },
+            );
+        }
+
+        let tail_start = source_frames.len() - overlap as usize;
+        let carry = ChainTail {
+            frames: overlap,
+            tail_rgb_frames: source_frames[tail_start..].to_vec(),
+        };
+
+        let outcome = self.render_chain_stage(req, Some(&carry), overlap)?;
+        self.checkpoint()?;
+
+        let source_len = source_frames.len();
+        let frames = stitch_extend_frames(source_frames, &outcome.frames, overlap)?;
+        let appended = frames.len() - source_len;
+
+        // `encode_native_video` reads the frame count off the plan, so describe
+        // the *stitched* result rather than the clip the transformer rendered.
+        plan.num_frames = frames.len() as u32;
+        let rendered = NativeRenderedVideo {
+            frames,
+            audio_track: outcome.audio,
+            has_audio: false,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        let (output_bytes, thumbnail_bytes, gif_preview, out_probe) =
+            self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
+
+        self.emit(&format!(
+            "Extended {source_len} source frames with {appended} new frames ({} total)",
+            rendered.frames.len(),
+        ));
+
+        let fps = out_probe
+            .as_ref()
+            .map(|probe| probe.fps)
+            .unwrap_or(plan.frame_rate);
+        Ok(GenerateResponse {
+            images: vec![],
+            video: Some(VideoData {
+                data: output_bytes,
+                format: req.resolved_output_format(),
+                width: plan.width,
+                height: plan.height,
+                frames: out_probe
+                    .as_ref()
+                    .and_then(|probe| probe.frames)
+                    .unwrap_or(plan.num_frames),
+                fps,
+                thumbnail: thumbnail_bytes,
+                gif_preview,
+                has_audio: false,
+                duration_ms: out_probe
+                    .as_ref()
+                    .and_then(|probe| probe.duration_ms)
+                    .or(Some(
+                        (plan.num_frames as u64 * 1000).div_ceil(fps.max(1) as u64),
+                    )),
+                audio_sample_rate: None,
+                audio_channels: None,
+            }),
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            model: self.model_name.clone(),
+            seed_used: plan.seed,
+            gpu: None,
+        })
+    }
+
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        if req.is_extend() {
+            return self.extend_inner(req);
+        }
         self.checkpoint()?;
         if !self.loaded {
             self.load()?;
@@ -981,6 +1141,28 @@ impl Ltx2Engine {
     }
 }
 
+/// Join an extend request's source clip to its continuation.
+///
+/// The continuation's leading `overlap` frames are a re-render of the source
+/// tail that conditioned it, so they are dropped rather than delivered twice.
+/// Everything after that is genuinely new footage appended to the source.
+pub(crate) fn stitch_extend_frames(
+    mut source: Vec<image::RgbImage>,
+    continuation: &[image::RgbImage],
+    overlap: u32,
+) -> Result<Vec<image::RgbImage>> {
+    let overlap = overlap as usize;
+    if continuation.len() <= overlap {
+        bail!(
+            "LTX-2 continuation returned {} frames but the {overlap}-frame overlap consumes all \
+             of them, leaving nothing new to append; this is a pipeline wiring bug",
+            continuation.len(),
+        );
+    }
+    source.extend_from_slice(&continuation[overlap..]);
+    Ok(source)
+}
+
 fn pipeline_supports_render_chain(pipeline: PipelineKind) -> bool {
     matches!(pipeline, PipelineKind::OneStage | PipelineKind::Distilled)
 }
@@ -1172,6 +1354,54 @@ mod tests {
     use crate::ltx2::text::prompt_encoder::{
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
+
+    fn solid_frame(value: u8) -> image::RgbImage {
+        image::RgbImage::from_pixel(4, 4, image::Rgb([value, value, value]))
+    }
+
+    fn frame_values(frames: &[image::RgbImage]) -> Vec<u8> {
+        frames
+            .iter()
+            .map(|frame| frame.get_pixel(0, 0)[0])
+            .collect()
+    }
+
+    /// The continuation's leading overlap re-renders the source tail that
+    /// conditioned it. Delivering those frames would visibly stutter the seam,
+    /// so exactly `overlap` frames are dropped — no more, no fewer.
+    #[test]
+    fn stitch_extend_drops_exactly_the_overlap() {
+        let source: Vec<_> = (1..=5).map(solid_frame).collect();
+        // The continuation reproduces frames 4 and 5, then adds 6, 7, 8.
+        let continuation: Vec<_> = [4u8, 5, 6, 7, 8].into_iter().map(solid_frame).collect();
+
+        let stitched = stitch_extend_frames(source, &continuation, 2).unwrap();
+        assert_eq!(frame_values(&stitched), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn stitch_extend_keeps_the_source_when_only_one_frame_is_new() {
+        let source: Vec<_> = (1..=3).map(solid_frame).collect();
+        let continuation: Vec<_> = [3u8, 4].into_iter().map(solid_frame).collect();
+
+        let stitched = stitch_extend_frames(source, &continuation, 1).unwrap();
+        assert_eq!(frame_values(&stitched), vec![1, 2, 3, 4]);
+    }
+
+    /// A continuation no longer than its overlap would append nothing, which
+    /// means the render was wired up wrong — fail loudly instead of silently
+    /// returning the untouched source as though the extend had succeeded.
+    #[test]
+    fn stitch_extend_rejects_a_continuation_that_adds_nothing() {
+        let source: Vec<_> = (1..=3).map(solid_frame).collect();
+        let continuation: Vec<_> = [3u8, 4].into_iter().map(solid_frame).collect();
+
+        let err = stitch_extend_frames(source.clone(), &continuation, 2).unwrap_err();
+        assert!(format!("{err}").contains("nothing new"), "got: {err}");
+
+        let err = stitch_extend_frames(source, &continuation, 5).unwrap_err();
+        assert!(format!("{err}").contains("nothing new"), "got: {err}");
+    }
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
@@ -1479,6 +1709,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -1584,6 +1817,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -1641,6 +1877,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,
@@ -1871,6 +2110,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,

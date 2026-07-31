@@ -1,0 +1,56 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  LTX2_MAX_FRAMES_ABSOLUTE,
+  LTX2_MAX_RUNTIME_SECONDS,
+  MAX_FRAMES_GLOBAL,
+  ltx2MaxFramesAtFps,
+  maxFramesForFamilyAtFps,
+} from "./videoBudget";
+
+describe("ltx2MaxFramesAtFps", () => {
+  it("derives the ceiling from fps because the budget is a duration", () => {
+    // Mirrors crates/mold-core/src/validation.rs: F <= seconds * fps + 4.
+    expect(ltx2MaxFramesAtFps(24)).toBe(484);
+    expect(ltx2MaxFramesAtFps(25)).toBe(504);
+    expect(ltx2MaxFramesAtFps(12)).toBe(244);
+    expect(ltx2MaxFramesAtFps(8)).toBe(164);
+  });
+
+  it("is tighter than the old flat 153 at low frame rates", () => {
+    // 6 fps only buys 20s of runtime; the old constant over-admitted here.
+    expect(ltx2MaxFramesAtFps(6)).toBe(124);
+    expect(ltx2MaxFramesAtFps(6)).toBeLessThan(153);
+  });
+
+  it("clamps to the absolute resource guard above 30 fps", () => {
+    expect(ltx2MaxFramesAtFps(60)).toBe(LTX2_MAX_FRAMES_ABSOLUTE);
+    expect(ltx2MaxFramesAtFps(120)).toBe(LTX2_MAX_FRAMES_ABSOLUTE);
+  });
+
+  it("falls back to the default fps rather than collapsing to one frame", () => {
+    expect(ltx2MaxFramesAtFps(null)).toBe(484);
+    expect(ltx2MaxFramesAtFps(undefined)).toBe(484);
+    expect(ltx2MaxFramesAtFps(0)).toBe(LTX2_MAX_RUNTIME_SECONDS + 4);
+  });
+
+  it("honours a server-advertised budget over the built-in fallback", () => {
+    expect(ltx2MaxFramesAtFps(24, 10)).toBe(244);
+    expect(ltx2MaxFramesAtFps(24, 20, 200)).toBe(200);
+  });
+});
+
+describe("maxFramesForFamilyAtFps", () => {
+  it("only ltx2 has an fps-dependent ceiling", () => {
+    expect(maxFramesForFamilyAtFps("ltx2", 12)).toBe(244);
+    expect(maxFramesForFamilyAtFps("ltx-2", 12)).toBe(244);
+    expect(maxFramesForFamilyAtFps("ltx-video", 12)).toBe(MAX_FRAMES_GLOBAL);
+    expect(maxFramesForFamilyAtFps("ltx-video", 30)).toBe(MAX_FRAMES_GLOBAL);
+  });
+
+  it("returns null for families that publish no frame ceiling", () => {
+    expect(maxFramesForFamilyAtFps("flux", 24)).toBeNull();
+    expect(maxFramesForFamilyAtFps("", 24)).toBeNull();
+    expect(maxFramesForFamilyAtFps(null, 24)).toBeNull();
+  });
+});

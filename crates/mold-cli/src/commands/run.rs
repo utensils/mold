@@ -579,6 +579,8 @@ pub async fn run(
     no_audio: bool,
     audio_file: Option<String>,
     video: Option<String>,
+    extend: Option<String>,
+    extend_overlap: Option<u32>,
     keyframe: Vec<String>,
     pipeline: Option<Ltx2PipelineArg>,
     ic_lora_control: Option<String>,
@@ -700,6 +702,7 @@ pub async fn run(
     };
     let audio_file_bytes = audio_file.as_deref().map(std::fs::read).transpose()?;
     let source_video_bytes = video.as_deref().map(std::fs::read).transpose()?;
+    let extend_video_bytes = extend.as_deref().map(std::fs::read).transpose()?;
     let keyframes = parse_keyframes(&keyframe)?;
     let pipeline = resolve_ic_lora_pipeline(
         parse_pipeline(pipeline),
@@ -971,6 +974,8 @@ pub async fn run(
             },
             audio_file: audio_file_bytes,
             source_video: source_video_bytes,
+            extend_video: extend_video_bytes,
+            extend_overlap_frames: extend_overlap,
             keyframes,
             pipeline,
             ic_lora_control,

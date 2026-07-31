@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MOTION_TAIL,
-  LTX2_DISTILLED_CLIP_CAP,
+  LTX2_DEFAULT_CLIP_FRAMES,
   MAX_CHAIN_STAGES,
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -26,7 +26,7 @@ describe("decideChainRouting", () => {
 
   it("returns single for ltx2-distilled at-or-below the cap", () => {
     expect(
-      decideChainRouting(LTX2_DISTILLED_CLIP_CAP, "ltx2", "ltx-2.3-22b-distilled:fp8"),
+      decideChainRouting(LTX2_DEFAULT_CLIP_FRAMES, "ltx2", "ltx-2.3-22b-distilled:fp8"),
     ).toEqual({ kind: "single" });
     expect(decideChainRouting(25, "ltx2", "ltx-2.3-22b-distilled:fp8")).toEqual({
       kind: "single",
@@ -35,7 +35,7 @@ describe("decideChainRouting", () => {
 
   it("chains ltx2-distilled requests one past the cap boundary (98)", () => {
     // 98 frames, clip=97, tail=17 → remainder=1, stageCount = 1 + ceil(1/80) = 2.
-    const d = decideChainRouting(LTX2_DISTILLED_CLIP_CAP + 1, "ltx2", "ltx-2.3-22b-distilled:fp8");
+    const d = decideChainRouting(LTX2_DEFAULT_CLIP_FRAMES + 1, "ltx2", "ltx-2.3-22b-distilled:fp8");
     expect(d).toEqual({
       kind: "chain",
       clipFrames: 97,
@@ -83,8 +83,9 @@ describe("decideChainRouting", () => {
 
   it("rejects ltx2-non-distilled models when frames exceed the single-clip budget", () => {
     // ltx2 family but non-distilled: only the distilled path implements
-    // chain rendering on the server.
-    const d = decideChainRouting(241, "ltx2", "ltx-2-19b:fp8");
+    // chain rendering on the server. 489 frames is past even the single-clip
+    // duration budget at the default 24 fps, so there is nowhere to route it.
+    const d = decideChainRouting(489, "ltx2", "ltx-2-19b:fp8");
     expect(d.kind).toBe("reject");
   });
 
@@ -181,8 +182,9 @@ describe("decideChainRouting", () => {
 
   it("applies the distilled-only chain gate to the 'ltx-2' alias too", () => {
     // Non-distilled ltx2 (via the alias) still can't chain — only the distilled
-    // path implements chain rendering on the server.
-    const d = decideChainRouting(241, "ltx-2", "ltx-2-19b:fp8");
+    // path implements chain rendering on the server. 489 frames is past even
+    // the single-clip duration budget at the default 24 fps.
+    const d = decideChainRouting(489, "ltx-2", "ltx-2-19b:fp8");
     expect(d.kind).toBe("reject");
   });
 });
@@ -202,11 +204,25 @@ describe("request-aware generation routing", () => {
     temporal_upscale: "x2",
   };
 
-  it("keeps temporal x2 on ordinary generation through its 257-frame limit", () => {
+  it("keeps temporal x2 on ordinary generation up to the duration budget", () => {
+    // Temporal x2 halves the stage-1 frames AND the stage-1 fps, so it renders
+    // the same runtime — the ceiling is the plain fps-derived one, not double.
     expect(decideGenerateRequestRouting(request, "ltx2")).toEqual({ kind: "single" });
-    expect(decideGenerateRequestRouting({ ...request, frames: 265 }, "ltx2")).toMatchObject({
+    expect(decideGenerateRequestRouting({ ...request, frames: 489 }, "ltx2")).toMatchObject({
       kind: "reject",
-      reason: expect.stringContaining("at most 257 frames"),
+      reason: expect.stringContaining("484 frames"),
+    });
+  });
+
+  it("moves the temporal x2 ceiling with fps", () => {
+    expect(
+      decideGenerateRequestRouting({ ...request, fps: 12, frames: 249 }, "ltx2"),
+    ).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("244 frames"),
+    });
+    expect(decideGenerateRequestRouting({ ...request, fps: 12, frames: 241 }, "ltx2")).toEqual({
+      kind: "single",
     });
   });
 

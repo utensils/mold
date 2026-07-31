@@ -598,7 +598,16 @@ fn installed_catalog_models(
                 default_guidance: guidance,
                 default_frames: frames,
                 default_fps: fps,
-                max_frames: mold_core::validation::max_frames_for_family(&sidecar.family),
+                max_frames: mold_core::validation::max_frames_for_family_at_fps(
+                    &sidecar.family,
+                    fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
+                ),
+                max_runtime_seconds: mold_core::validation::max_runtime_seconds_for_family(
+                    &sidecar.family,
+                ),
+                max_frames_absolute: mold_core::validation::max_frames_absolute_for_family(
+                    &sidecar.family,
+                ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
                 max_pixels: Some(mold_core::validation::MAX_PIXELS),
                 recommended_dimensions: mold_core::validation::recommended_dimensions(
@@ -632,6 +641,13 @@ fn installed_catalog_models(
             nsfw: sidecar.nsfw,
             supports_audio: (sidecar.family == "ltx2")
                 .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
+            // Continuation reuses the chain motion-tail handoff, which the
+            // whole ltx2 family implements — unlike audio, it does not depend
+            // on optional checkpoint assets.
+            supports_extend: Some(sidecar.family == "ltx2"),
+            extend_default_overlap_frames: Some(
+                mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
+            ),
         });
     }
     out
@@ -2169,7 +2185,12 @@ mod tests {
         // family runtime defaults and the family constraint helpers.
         assert_eq!(video_only[0].defaults.default_frames, Some(97));
         assert_eq!(video_only[0].defaults.default_fps, Some(24));
-        assert_eq!(video_only[0].defaults.max_frames, Some(153));
+        assert_eq!(
+            video_only[0].defaults.max_frames,
+            Some(484),
+            "the 20s LTX-2 temporal budget at the sidecar's 24 fps default",
+        );
+        assert_eq!(video_only[0].defaults.max_runtime_seconds, Some(20));
         assert_eq!(video_only[0].defaults.frame_step, Some(8));
 
         write_safetensors_with_keys(
@@ -3697,6 +3718,9 @@ mod tests {
             audio_file_path: None,
             source_video: None,
             source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
             keyframes: None,
             pipeline: None,
             ic_lora_control: None,

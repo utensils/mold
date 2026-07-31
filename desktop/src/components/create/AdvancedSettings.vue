@@ -37,6 +37,13 @@ import {
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import {
+  canOfferExtend,
+  extendNewFrames,
+  extendOverlapOptions,
+  extendValidationError,
+  serverExtendOverlapDefault,
+} from "@studio/lib/extend";
+import {
   emptyGuidanceOverrides,
   guidanceOverrideCount,
   skipStepError,
@@ -233,6 +240,37 @@ async function setSourceVideo(event: Event) {
 function clearSourceVideo() {
   props.form.sourceVideo = null;
 }
+async function setExtendVideo(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  props.form.extendVideo = { filename: file.name, base64: await fileToBase64(file) };
+}
+function clearExtendVideo() {
+  // Drop the overlap too: a value valid for this clip may be invalid for the
+  // next one, and a stale number would silently ride along.
+  props.form.extendVideo = null;
+  props.form.extendOverlapFrames = null;
+}
+const canExtend = computed(() => canOfferExtend(props.selectedModel));
+const extendOverlap = computed(
+  () => props.form.extendOverlapFrames ?? serverExtendOverlapDefault(props.selectedModel),
+);
+const extendOverlapChoices = computed(() => extendOverlapOptions(props.form.frames));
+const extendError = computed(() =>
+  props.form.extendVideo
+    ? extendValidationError({
+        overlapFrames: extendOverlap.value,
+        frames: props.form.frames,
+        hasSourceImage: props.form.sourceImage !== null || props.form.imageAttachments.length > 0,
+        hasSourceVideo: props.form.sourceVideo !== null,
+        hasKeyframes: props.form.keyframes.length > 0,
+      })
+    : null,
+);
+const extendSummary = computed(() => {
+  const added = extendNewFrames(props.form.frames, extendOverlap.value);
+  return added === null ? "" : `Appends ${added} new frames after the source clip.`;
+});
 async function setAudioFile(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
@@ -820,6 +858,55 @@ function reset() {
               data-test="ltx2-source-video"
               @change="setSourceVideo"
             />
+
+            <template v-if="canExtend">
+              <label class="ms-label ms-label--mt">Continue a video</label>
+              <div v-if="form.extendVideo" class="ms-file-row">
+                <span class="data-mono ms-file-row__name" :title="form.extendVideo.filename">{{
+                  form.extendVideo.filename
+                }}</span>
+                <button
+                  type="button"
+                  class="ms-file-row__clear"
+                  data-test="ltx2-extend-clear"
+                  @click="clearExtendVideo"
+                >
+                  clear
+                </button>
+              </div>
+              <input
+                v-else
+                type="file"
+                accept="video/*"
+                aria-label="Video to continue"
+                class="ms-file"
+                data-test="ltx2-extend-video"
+                @change="setExtendVideo"
+              />
+              <template v-if="form.extendVideo">
+                <label class="ms-label ms-label--mt">Overlap (frames of motion context)</label>
+                <select
+                  class="ms-select"
+                  data-test="ltx2-extend-overlap"
+                  :value="String(extendOverlap)"
+                  @change="
+                    form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)
+                  "
+                >
+                  <option
+                    v-for="option in extendOverlapChoices"
+                    :key="option"
+                    :value="String(option)"
+                  >
+                    {{ option }}
+                  </option>
+                </select>
+                <p v-if="extendError" class="ms-error" data-test="ltx2-extend-error">
+                  {{ extendError }}
+                </p>
+                <p v-else class="ms-hint" data-test="ltx2-extend-summary">{{ extendSummary }}</p>
+              </template>
+            </template>
 
             <div class="ms-kf-head ms-label--mt">
               <label class="ms-label">Keyframes</label>

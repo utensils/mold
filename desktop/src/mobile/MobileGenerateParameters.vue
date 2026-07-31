@@ -30,6 +30,13 @@ import {
 import { fileToBase64, isStillImageFile } from "../lib/image";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import {
+  canOfferExtend,
+  extendNewFrames,
+  extendOverlapOptions,
+  extendValidationError,
+  serverExtendOverlapDefault,
+} from "@studio/lib/extend";
+import {
   guidanceOverrideCount,
   skipStepError,
   stgBlocksError,
@@ -41,6 +48,8 @@ import {
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    /** Selected model row; carries the continuation capability. */
+    selectedModel?: ModelEntry | null;
     upscalers?: ModelEntry[];
     audioOutputSupported?: boolean;
     controlAdapters?: Ltx2ControlAdapterInfo[];
@@ -48,6 +57,7 @@ const props = withDefaults(
     cameraControlsLoaded?: boolean;
   }>(),
   {
+    selectedModel: null,
     upscalers: () => [],
     audioOutputSupported: true,
     controlAdapters: () => [],
@@ -177,6 +187,7 @@ function hasAdvancedVideoValue(): boolean {
     props.form.retakeRange ||
     props.form.audioFile ||
     props.form.sourceVideo ||
+    props.form.extendVideo ||
     props.form.keyframes.length ||
     guidanceOverrideCount(props.form.guidanceOverrides) > 0
   );
@@ -191,6 +202,7 @@ watch(
     props.form.retakeRange,
     props.form.audioFile,
     props.form.sourceVideo,
+    props.form.extendVideo,
     props.form.keyframes.length,
     guidanceOverrideCount(props.form.guidanceOverrides),
   ],
@@ -286,6 +298,59 @@ async function setSourceVideo(event: Event): Promise<void> {
     mediaReadError.value = "Couldn’t read that source video. Try choosing it again.";
   }
 }
+
+async function setExtendVideo(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  input.value = "";
+  if (file.size === 0) {
+    mediaReadError.value = "The video to continue cannot be empty.";
+    return;
+  }
+  if (file.size > MAX_INLINE_GENERATION_MEDIA_BYTES) {
+    mediaReadError.value = "Videos to continue must be 64 MiB or smaller.";
+    return;
+  }
+  if (exceedsMobileRequestBudget(file.size, "extendVideo")) {
+    mediaReadError.value = "Combined generation media must be 45 MiB or smaller on iPhone.";
+    return;
+  }
+  try {
+    props.form.extendVideo = { filename: file.name, base64: await fileToBase64(file) };
+    mediaReadError.value = "";
+  } catch {
+    mediaReadError.value = "Couldn’t read that video. Try choosing it again.";
+  }
+}
+
+function clearExtendVideo(): void {
+  // Drop the overlap too: a value valid for this clip may be invalid for the
+  // next one, and a stale number would silently ride along.
+  props.form.extendVideo = null;
+  props.form.extendOverlapFrames = null;
+}
+
+const canExtend = computed(() => canOfferExtend(props.selectedModel));
+const extendOverlap = computed(
+  () => props.form.extendOverlapFrames ?? serverExtendOverlapDefault(props.selectedModel),
+);
+const extendOverlapChoices = computed(() => extendOverlapOptions(props.form.frames));
+const extendError = computed(() =>
+  props.form.extendVideo
+    ? extendValidationError({
+        overlapFrames: extendOverlap.value,
+        frames: props.form.frames,
+        hasSourceImage: props.form.sourceImage !== null || props.form.imageAttachments.length > 0,
+        hasSourceVideo: props.form.sourceVideo !== null,
+        hasKeyframes: props.form.keyframes.length > 0,
+      })
+    : null,
+);
+const extendSummary = computed(() => {
+  const added = extendNewFrames(props.form.frames, extendOverlap.value);
+  return added === null ? "" : `Appends ${added} new frames after the source clip.`;
+});
 
 async function setAudioFile(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
@@ -896,6 +961,55 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
               @change="setSourceVideo"
             />
           </label>
+        </div>
+
+        <div v-if="canExtend" class="mobile-generate-file-field">
+          <span class="mobile-generate-label">Continue a video</span>
+          <div v-if="form.extendVideo" class="mobile-generate-picked-file">
+            <span>{{ form.extendVideo.filename }}</span>
+            <button
+              type="button"
+              class="mobile-generate-clear"
+              data-test="mobile-ltx2-extend-clear"
+              @click="clearExtendVideo"
+            >
+              Remove
+            </button>
+          </div>
+          <label v-else class="mobile-generate-file-button">
+            <span>Choose video to continue</span>
+            <input
+              type="file"
+              accept="video/*"
+              data-test="mobile-ltx2-extend-video"
+              @change="setExtendVideo"
+            />
+          </label>
+          <template v-if="form.extendVideo">
+            <span class="mobile-generate-label">Overlap (frames of motion context)</span>
+            <select
+              class="mobile-generate-select"
+              data-test="mobile-ltx2-extend-overlap"
+              :value="String(extendOverlap)"
+              @change="
+                form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option v-for="option in extendOverlapChoices" :key="option" :value="String(option)">
+                {{ option }}
+              </option>
+            </select>
+            <p
+              v-if="extendError"
+              class="mobile-generate-error"
+              data-test="mobile-ltx2-extend-error"
+            >
+              {{ extendError }}
+            </p>
+            <p v-else class="mobile-generate-note" data-test="mobile-ltx2-extend-summary">
+              {{ extendSummary }}
+            </p>
+          </template>
         </div>
 
         <div class="mobile-generate-file-field">

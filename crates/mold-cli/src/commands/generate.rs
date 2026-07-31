@@ -213,6 +213,12 @@ pub struct Ltx2Options {
     pub enable_audio: Option<bool>,
     pub audio_file: Option<Vec<u8>>,
     pub source_video: Option<Vec<u8>>,
+    /// Existing video to continue. Makes the request a continuation: the
+    /// delivered output is this clip followed by the newly rendered frames.
+    pub extend_video: Option<Vec<u8>>,
+    /// Pixel-frame overlap the continuation conditions on. `None` uses the
+    /// shared chain motion-tail default.
+    pub extend_overlap_frames: Option<u32>,
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub pipeline: Option<Ltx2PipelineMode>,
     pub ic_lora_control: Option<String>,
@@ -273,6 +279,8 @@ pub async fn run(
         enable_audio,
         audio_file,
         source_video,
+        extend_video,
+        extend_overlap_frames,
         keyframes,
         pipeline,
         ic_lora_control,
@@ -321,12 +329,14 @@ pub async fn run(
     // other video families error fast rather than silently over-producing.
     {
         use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
+        let routing_fps = effective_fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
         let decision = decide_chain_routing(
             effective_frames,
             family.as_deref(),
             model,
             clip_frames,
             motion_tail,
+            routing_fps,
         );
         match decision {
             ChainRoutingDecision::SingleClip => {
@@ -339,7 +349,15 @@ pub async fn run(
                 clip_frames: cf,
                 motion_tail: mt,
             } => {
-                warn_if_clamped(clip_frames, super::chain::LTX2_DISTILLED_CLIP_CAP);
+                warn_if_clamped(
+                    clip_frames,
+                    family
+                        .as_deref()
+                        .and_then(|family| {
+                            mold_core::validation::max_frames_for_family_at_fps(family, routing_fps)
+                        })
+                        .unwrap_or(super::chain::LTX2_DEFAULT_CLIP_FRAMES),
+                );
                 let (eff_w, eff_h) = effective_dimensions(
                     &config,
                     &model_cfg,
@@ -504,6 +522,9 @@ pub async fn run(
         audio_file_path: None,
         source_video,
         source_video_path: None,
+        extend_video,
+        extend_video_path: None,
+        extend_overlap_frames,
         keyframes,
         pipeline,
         ic_lora_control,

@@ -13,7 +13,10 @@ pub mod orchestrator;
 pub mod stitch;
 
 pub use crate::audio::NativeAudioTrack;
-pub use capability::{capability_for_family, CarryoverKind, ChainCapability};
+pub use capability::{
+    capability_for_family, frames_per_clip_cap_at_fps, CarryoverKind, ChainCapability,
+    LTX_VIDEO_FRAMES_PER_CLIP_CAP,
+};
 pub use encode::{encode_chain_frames, ChainEncodeWarning, EncodedChainVideo};
 pub use orchestrator::{
     ChainOrchestrator, ChainOrchestratorError, ChainRunOutput, ChainStageRenderer, ChainTail,
