@@ -12,10 +12,20 @@ export interface MobilePickedImage {
   base64: string;
 }
 
-const props = defineProps<{
-  open: boolean;
-  target: ApiTarget | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    open: boolean;
+    target: ApiTarget | null;
+    title?: string;
+    maxBytes?: number;
+    oversizeMessage?: string;
+  }>(),
+  {
+    title: "Opening image",
+    maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+    oversizeMessage: "The opening image must be 45 MiB or smaller on iPhone.",
+  },
+);
 
 const emit = defineEmits<{
   pick: [image: MobilePickedImage];
@@ -80,8 +90,8 @@ async function chooseFile(event: Event): Promise<void> {
     error.value = "That image is empty.";
     return;
   }
-  if (file.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) {
-    error.value = "The opening image must be 45 MiB or smaller on iPhone.";
+  if (file.size > props.maxBytes) {
+    error.value = props.oversizeMessage;
     return;
   }
   error.value = "";
@@ -96,14 +106,12 @@ async function chooseGallery(entry: GalleryImage): Promise<void> {
   try {
     const response = await apiFetchTo(props.target, galleryMediaPath(entry.filename, "host"));
     const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declared) && declared > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) {
-      throw new Error("The opening image must be 45 MiB or smaller on iPhone.");
+    if (Number.isFinite(declared) && declared > props.maxBytes) {
+      throw new Error(props.oversizeMessage);
     }
     const blob = await response.blob();
     if (blob.size === 0) throw new Error("That gallery image is empty.");
-    if (blob.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) {
-      throw new Error("The opening image must be 45 MiB or smaller on iPhone.");
-    }
+    if (blob.size > props.maxBytes) throw new Error(props.oversizeMessage);
     emit("pick", {
       filename: entry.filename,
       base64: await blobToBase64(blob),
@@ -123,19 +131,19 @@ async function chooseGallery(entry: GalleryImage): Promise<void> {
     class="mobile-image-picker"
     role="dialog"
     aria-modal="true"
-    aria-label="Opening image"
+    :aria-label="title"
     data-test="mobile-image-picker"
   >
     <button
       type="button"
       class="mobile-image-picker-backdrop"
-      aria-label="Close opening image picker"
+      :aria-label="`Close ${title.toLowerCase()} picker`"
       @click="emit('close')"
     />
     <section class="mobile-image-picker-panel">
       <header>
         <div>
-          <strong>Opening image</strong>
+          <strong>{{ title }}</strong>
           <p>Choose a PNG or JPEG from this iPhone or the selected machine.</p>
         </div>
         <button

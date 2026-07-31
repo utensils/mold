@@ -47,6 +47,25 @@ describe("MobileImagePickerSheet", () => {
     expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(2);
   });
 
+  it("rejects unsupported local image formats with an associated alert", async () => {
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: { open: true, target },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    const input = wrapper.get<HTMLInputElement>("[data-test='mobile-image-picker-input']");
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [new File(["photo"], "photo.webp", { type: "image/webp" })],
+    });
+
+    await input.trigger("change");
+    await flushPromises();
+
+    const alert = wrapper.get("[role='alert']");
+    expect(alert.text()).toContain("PNG or JPEG");
+    expect(wrapper.emitted("pick")).toBeUndefined();
+  });
+
   it("fetches a gallery choice from the exact authenticated host and emits wire bytes", async () => {
     const wrapper = mount(MobileImagePickerSheet, {
       props: { open: true, target },
@@ -62,6 +81,25 @@ describe("MobileImagePickerSheet", () => {
       filename: "still.png",
       base64: "Ynl0ZXM=",
     });
+  });
+
+  it("honors a caller's combined-media budget before downloading gallery bytes", async () => {
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: {
+        open: true,
+        target,
+        maxBytes: 1,
+        oversizeMessage: "Combined media is too large.",
+      },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+    await wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")[0]!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[role='alert']").text()).toBe("Combined media is too large.");
+    expect(wrapper.emitted("pick")).toBeUndefined();
   });
 
   it("ignores a stale gallery response after the target host changes", async () => {

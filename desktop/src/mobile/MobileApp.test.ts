@@ -87,6 +87,7 @@ vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
 });
 
 import MobileApp from "./MobileApp.vue";
+import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
@@ -1148,14 +1149,10 @@ describe("MobileApp generation queue", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
-    const sourceInput = wrapper.get("[data-test='mobile-source-input']");
-    Object.defineProperty(sourceInput.element, "files", {
-      configurable: true,
-      value: [new File(["source"], "source.png", { type: "image/png" })],
-    });
-    await sourceInput.trigger("change");
-    await flushPromises();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await wrapper.get("[data-test='mobile-source-add']").trigger("click");
+    wrapper
+      .getComponent(MobileImagePickerSheet)
+      .vm.$emit("pick", { filename: "source.png", base64: btoa("source") });
     await flushPromises();
     await vi.waitFor(() =>
       expect(wrapper?.find("[data-test='mobile-source-preview']").exists()).toBe(true),
