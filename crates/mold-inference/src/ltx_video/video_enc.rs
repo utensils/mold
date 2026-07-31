@@ -21,6 +21,7 @@ impl VideoMetadata {
     /// carries the same composite `mold:parameters` block still images do.
     fn to_output_metadata(&self) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            guidance_overrides: None,
             prompt: self.prompt.clone(),
             negative_prompt: None,
             original_prompt: None,

@@ -140,6 +140,11 @@ complete workflows.
 - LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
   audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
   temporal upscale workflows.
+- LTX-2's multimodal guider exposes optional per-request overrides for STG
+  scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
+  stride, on the CLI and in web's Advanced video panel. They apply to the
+  `two-stage`, `two-stage-hq`, `keyframe`, and `a2vid` pipelines; unset fields
+  keep each pipeline's own constants.
 - LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
   not supported in this release.
 

@@ -42,6 +42,9 @@ come from stdin.
 | `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                 |
 | `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                    |
 | `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                           |
+| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                        |
+| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                   |
+| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                     |
 | `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                 |
 | `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                        |
 | `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                          |

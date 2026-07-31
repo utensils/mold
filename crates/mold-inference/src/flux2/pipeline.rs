@@ -2140,6 +2140,7 @@ mod tests {
             CachedTensor::from_tensor(&txt_emb).unwrap(),
         );
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             model: "flux2-klein:bf16".to_string(),

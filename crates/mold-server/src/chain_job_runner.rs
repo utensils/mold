@@ -3342,6 +3342,7 @@ fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        guidance_overrides: None,
         prompt: stage.prompt.clone(),
         negative_prompt: stage.negative_prompt.clone(),
         model: chain.model.clone(),

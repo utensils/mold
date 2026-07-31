@@ -3660,6 +3660,7 @@ mod tests {
     #[test]
     fn activation_hint_from_request_classifies_correctly() {
         let mut req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "test".into(),
             negative_prompt: None,
             model: "flux-dev:bf16".into(),

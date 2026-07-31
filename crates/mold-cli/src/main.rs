@@ -723,6 +723,39 @@ Examples:
         #[arg(long, help_heading = "Video", value_enum)]
         temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
 
+        /// LTX-2 spatiotemporal guidance (STG) scale. 0 disables STG.
+        ///
+        /// Overrides the pipeline's own constant (1.0 for two-stage /
+        /// keyframe / a2-vid, 0 for two-stage-hq). Higher values add motion
+        /// structure and detail at the cost of stability.
+        #[arg(long, value_name = "SCALE", help_heading = "Video")]
+        stg_scale: Option<f64>,
+
+        /// Transformer blocks perturbed for STG (comma-separated, e.g. 28,29).
+        ///
+        /// Defaults to the checkpoint's own block (29 for LTX-2 19B, 28 for
+        /// LTX-2.3 22B). Deeper blocks are weaker; earlier blocks are stronger.
+        #[arg(long, value_name = "BLOCKS", help_heading = "Video")]
+        stg_blocks: Option<String>,
+
+        /// LTX-2 CFG-rescale factor between 0 and 1.
+        ///
+        /// Rescales the guided prediction toward the conditional prediction's
+        /// standard deviation. Raise it when high guidance washes out contrast.
+        #[arg(long, value_name = "SCALE", help_heading = "Video")]
+        rescale_scale: Option<f64>,
+
+        /// LTX-2 cross-modality (audio ↔ video) guidance scale. 1 disables it.
+        #[arg(long, value_name = "SCALE", help_heading = "Video")]
+        modality_scale: Option<f64>,
+
+        /// Apply LTX-2 guidance on every Nth+1 step only (0 = every step).
+        ///
+        /// Trades a little prompt adherence for a shorter denoise: each
+        /// skipped step takes the conditional prediction directly.
+        #[arg(long, value_name = "N", help_heading = "Video")]
+        guidance_skip_step: Option<u32>,
+
         /// Camera-control LoRA preset name or .safetensors path.
         ///
         /// Preset aliases (dolly-in, dolly-left, dolly-out, dolly-right,
@@ -1561,6 +1594,11 @@ async fn run() -> anyhow::Result<()> {
             retake,
             spatial_upscale,
             temporal_upscale,
+            stg_scale,
+            stg_blocks,
+            rescale_scale,
+            modality_scale,
+            guidance_skip_step,
             camera_control,
             host,
             format,
@@ -1699,6 +1737,13 @@ async fn run() -> anyhow::Result<()> {
                 retake,
                 spatial_upscale,
                 temporal_upscale,
+                commands::run::GuidanceFlags {
+                    stg_scale,
+                    stg_blocks,
+                    rescale_scale,
+                    modality_scale,
+                    skip_step: guidance_skip_step,
+                },
                 camera_control,
                 host,
                 format,

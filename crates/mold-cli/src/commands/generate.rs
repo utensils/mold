@@ -6,8 +6,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
     DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, ImageData,
-    KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
-    MoldClient, OutputFormat, Scheduler, TimeRange,
+    KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale,
+    Ltx2TemporalUpscale, MoldClient, OutputFormat, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -220,6 +220,9 @@ pub struct Ltx2Options {
     pub retake_range: Option<TimeRange>,
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Advanced multimodal-guider overrides. `None` keeps every pipeline
+    /// constant, which is what makes existing seeds reproducible.
+    pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,6 +280,7 @@ pub async fn run(
         retake_range,
         spatial_upscale,
         temporal_upscale,
+        guidance_overrides,
     } = ltx2;
 
     // Load config and pull model-specific defaults.
@@ -383,9 +387,19 @@ pub async fn run(
                     batch_index: None,
                     batch_count: None,
                 };
+                // Guidance overrides are a single-clip concept: chain stages
+                // render through their own pipeline constants, so say so
+                // rather than pretend the flags took effect.
+                if guidance_overrides.is_some() {
+                    status!(
+                        "{} guidance overrides have no effect in chain mode; each clip keeps its pipeline defaults",
+                        theme::icon_warn(),
+                    );
+                }
                 // Consume otherwise-unused LTX-2 knobs that chain v1 ignores so
                 // clippy doesn't fire `unused_variables` on the early return.
                 let _ = (
+                    &guidance_overrides,
                     &audio_file,
                     &source_video,
                     &keyframes,
@@ -453,6 +467,7 @@ pub async fn run(
     );
 
     let mut req = GenerateRequest {
+        guidance_overrides,
         prompt: prompt.to_string(),
         negative_prompt: effective_negative_prompt.clone(),
         model: model.to_string(),

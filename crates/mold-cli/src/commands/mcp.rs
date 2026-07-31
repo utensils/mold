@@ -1368,6 +1368,7 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        guidance_overrides: None,
         prompt: args.prompt,
         negative_prompt: args.negative_prompt,
         model,
@@ -2224,6 +2225,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            guidance_overrides: None,
             prompt: "a cat".into(),
             negative_prompt: None,
             model: "flux2-klein:q8".into(),
@@ -2327,6 +2329,7 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                guidance_overrides: None,
                 prompt: prompt.into(),
                 negative_prompt: None,
                 original_prompt: None,
