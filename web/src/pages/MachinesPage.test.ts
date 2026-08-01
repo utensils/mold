@@ -6,6 +6,13 @@ import type { ResourceSnapshot } from "../types";
 import MachinesPage from "./MachinesPage.vue";
 import ConnectModal from "../components/machines/ConnectModal.vue";
 
+const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
+
+vi.mock("../lib/toasts", () => ({
+  toast: toastMock,
+  requestConfirm: vi.fn().mockResolvedValue(false),
+}));
+
 // Shared, mutable poll stub returned by the mocked useHostPoll (every HostCard
 // shares it — the page renders one card here, the primary origin).
 let poll: {
@@ -55,6 +62,7 @@ const mountPage = () =>
 
 beforeEach(() => {
   localStorage.clear();
+  toastMock.mockClear();
   poll = {
     status: ref<HostStatus | null>(null),
     resources: ref<ResourceSnapshot | null>(null),
@@ -90,6 +98,31 @@ describe("MachinesPage", () => {
     expect(w.get('[data-test="host-name"]').text()).toBe("this server");
     expect(w.get('[data-test="host-queue"]').text()).toBe("queue 1");
     expect(w.get('[data-test="host-mem"]').text()).toContain("/ 48.0 GB");
+  });
+
+  it("opens a common-actions context menu for a connected host", async () => {
+    poll.loading.value = false;
+    poll.online.value = true;
+    poll.status.value = makeStatus();
+    const w = mountPage();
+    await nextTick();
+
+    await w.get('[data-test="host-card"]').trigger("contextmenu", {
+      clientX: 24,
+      clientY: 32,
+    });
+    const menu = w.get('[data-test="machine-context-menu"]');
+    expect(menu.text()).toContain("Open details");
+    expect(menu.text()).toContain("Generation target");
+    expect(menu.text()).toContain("Copy address");
+    expect(menu.text()).not.toContain("Disconnect");
+    expect(menu.text()).not.toContain("Forget");
+
+    document.body.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true }),
+    );
+    await nextTick();
+    expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
   });
 
   it("shows an offline card with a retry that forces a poll", async () => {
@@ -132,6 +165,41 @@ describe("MachinesPage", () => {
       connected: true,
       apiKey: "secret",
     });
+  });
+
+  it("offers reconnect and forget for a remembered host context menu", async () => {
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-7680",
+          name: "Studio",
+          url: "http://studio:7680",
+          apiKey: "secret",
+          connected: false,
+        },
+      ]),
+    );
+    poll.loading.value = false;
+    const w = mountPage();
+    const cards = w.findAll('[data-test="host-card"]');
+    expect(cards).toHaveLength(2);
+    await cards[1]!.trigger("contextmenu", { clientX: 24, clientY: 32 });
+
+    const menu = w.get('[data-test="machine-context-menu"]');
+    expect(menu.text()).toContain("Connect");
+    expect(menu.text()).toContain("Copy address");
+    expect(menu.text()).toContain("Forget…");
+    expect(menu.text()).not.toContain("Disconnect");
+
+    await menu
+      .findAll("button")
+      .find((button) => button.text() === "Connect")!
+      .trigger("click");
+    expect(
+      JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0],
+    ).toMatchObject({ connected: true });
+    expect(toastMock).toHaveBeenCalledWith("success", "Studio connected.");
   });
 
   it("opens the connect modal from the header button", async () => {

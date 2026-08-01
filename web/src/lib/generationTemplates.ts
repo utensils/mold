@@ -1,6 +1,13 @@
 import type { GenerateFormState, SourceImageState } from "../types";
 import { cloneTemplateForm } from "../composables/useGenerateForm";
 import { createUuid } from "@studio/lib/id";
+import {
+  deleteGenerationTemplateMedia,
+  hydrateGenerationTemplateMedia,
+  persistGenerationTemplateMedia,
+  type GenerationTemplateMediaAsset,
+  type TemplateMediaPersistence,
+} from "@studio/lib/templateMediaStore";
 
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.generation.templates.v1";
 
@@ -26,10 +33,12 @@ export interface GenerationTemplate {
   createdAt: number;
   updatedAt: number;
   form: GenerateFormState;
-  /** Human-facing references for media that could not be persisted without
-   * storing browser-local base64 blobs. Loading a template restores safe path
-   * fields from `form`, but upload/gallery bytes must be re-selected. */
+  /** Human-facing references for media present when the template was saved.
+   * Source images also have durable `mediaAssets`; unsupported auxiliary
+   * media keeps this metadata so the UI can request re-selection. */
   mediaReferences: GenerationTemplateMediaReference[];
+  /** Durable client-local source snapshots. Legacy templates omit this. */
+  mediaAssets?: GenerationTemplateMediaAsset[];
 }
 
 function now(): number {
@@ -165,6 +174,84 @@ export function saveGenerationTemplate(
   return template;
 }
 
+/** Save the template only after source bytes are durable in IndexedDB. */
+export async function saveGenerationTemplateWithMedia(
+  name: string,
+  form: GenerateFormState,
+  persistence?: TemplateMediaPersistence,
+): Promise<GenerationTemplate> {
+  const timestamp = now();
+  const id = templateId();
+  const mediaAssets = await persistGenerationTemplateMedia(
+    id,
+    form.imageAttachments.map((image, index) => ({
+      field: "imageAttachments",
+      index,
+      filename: image.filename,
+      kind: image.kind,
+      width: image.width,
+      height: image.height,
+      mime: image.mime,
+      base64: image.base64,
+    })),
+    persistence,
+  );
+  const template: GenerationTemplate = {
+    id,
+    name: normalizeName(name),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    form: cloneTemplateForm(form),
+    mediaReferences: collectTemplateMediaReferences(form),
+    ...(mediaAssets.length ? { mediaAssets } : {}),
+  };
+  try {
+    writeTemplates([template, ...loadGenerationTemplates()]);
+  } catch (error) {
+    await deleteGenerationTemplateMedia(mediaAssets, persistence);
+    throw error;
+  }
+  return template;
+}
+
+export async function hydrateGenerationTemplate(
+  template: GenerationTemplate,
+  persistence?: TemplateMediaPersistence,
+): Promise<{ form: GenerateFormState; sourceMissing: boolean }> {
+  const form = JSON.parse(JSON.stringify(template.form)) as GenerateFormState;
+  // Legacy byte-free attachment markers must not masquerade as usable source
+  // images. New templates rebuild the ordered list from durable assets below.
+  form.imageAttachments = [];
+  const assets = template.mediaAssets ?? [];
+  const { media, missing } = await hydrateGenerationTemplateMedia(
+    assets,
+    persistence,
+  );
+  const attachments = media
+    .filter((asset) => asset.field === "imageAttachments")
+    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+    .map<SourceImageState>((asset) => ({
+      kind: asset.kind ?? "upload",
+      filename: asset.filename,
+      base64: asset.base64,
+      ...(asset.width != null ? { width: asset.width } : {}),
+      ...(asset.height != null ? { height: asset.height } : {}),
+      ...(asset.mime != null ? { mime: asset.mime } : {}),
+    }));
+  form.imageAttachments = attachments;
+  const expected = assets.filter(
+    (asset) => asset.field === "imageAttachments",
+  ).length;
+  return {
+    form,
+    sourceMissing:
+      template.mediaReferences.some(
+        (reference) => reference.field === "imageAttachments",
+      ) &&
+      (expected === 0 || attachments.length !== expected || missing.length > 0),
+  };
+}
+
 export function renameGenerationTemplate(
   id: string,
   name: string,
@@ -188,6 +275,14 @@ export function deleteGenerationTemplate(id: string): void {
   writeTemplates(
     loadGenerationTemplates().filter((template) => template.id !== id),
   );
+}
+
+export async function deleteGenerationTemplateWithMedia(
+  template: GenerationTemplate,
+  persistence?: TemplateMediaPersistence,
+): Promise<void> {
+  deleteGenerationTemplate(template.id);
+  await deleteGenerationTemplateMedia(template.mediaAssets ?? [], persistence);
 }
 
 export function searchGenerationTemplates(

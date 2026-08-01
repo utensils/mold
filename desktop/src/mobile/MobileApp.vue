@@ -85,7 +85,11 @@ import {
   resetFormToModelDefaults,
   type GenerateForm,
 } from "../lib/generateForm";
-import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
+import {
+  formatTemplateMediaReferences,
+  hydrateGenerationTemplate,
+  type GenerationTemplate,
+} from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
@@ -1691,8 +1695,12 @@ function appendPromptWord(word: string): void {
   form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
 }
 
-function loadTemplate(template: GenerationTemplate): void {
-  Object.assign(form, template.form);
+let templateLoadEpoch = 0;
+async function loadTemplate(template: GenerationTemplate): Promise<void> {
+  const epoch = ++templateLoadEpoch;
+  const hydrated = await hydrateGenerationTemplate(template);
+  if (epoch !== templateLoadEpoch) return;
+  Object.assign(form, hydrated.form);
   const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
   if (!sameHost) clearHostScopedGenerationSelections();
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);
@@ -1703,8 +1711,8 @@ function loadTemplate(template: GenerationTemplate): void {
       ? `Loaded ${template.name}`
       : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`,
   );
-  const mediaMessage = template.mediaReferences.length
-    ? ` Re-add ${formatTemplateMediaReferences(template.mediaReferences)}.`
+  const mediaMessage = hydrated.missingMediaReferences.length
+    ? ` Re-add ${formatTemplateMediaReferences(hydrated.missingMediaReferences)}.`
     : "";
   generationAnnouncement.value = sameHost
     ? `Template loaded.${mediaMessage}`

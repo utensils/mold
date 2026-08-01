@@ -15,6 +15,7 @@ import Icon from "@ui/components/Icon.vue";
 import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue";
 import QueueColumn from "../components/machines/QueueColumn.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
 import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
@@ -22,12 +23,16 @@ import { formatGB } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
 import { podGpuName, type RunPodPod } from "../lib/runpod";
 import { useHostsStore, type HostView } from "../stores/hosts";
+import { useAppPrefsStore } from "../stores/appPrefs";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useJobsStore } from "../stores/jobs";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 
 const router = useRouter();
 const hosts = useHostsStore();
+const appPrefs = useAppPrefsStore();
+const contextMenu = useContextMenuStore();
 const jobs = useJobsStore();
 const runpod = useRunPodStore();
 const toasts = useToastStore();
@@ -55,6 +60,110 @@ const connectOpen = ref(false);
 
 function openDetail(host: HostView) {
   void router.push(`/machines/${host.id}`);
+}
+
+async function copyAddress(address: string) {
+  try {
+    await navigator.clipboard.writeText(address);
+    toasts.push("Address copied");
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
+}
+
+async function openHostUrl(url: string) {
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  } catch {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
+async function disconnectHost(host: HostView) {
+  await hosts.disconnect(host.id);
+  await refreshSaved();
+  toasts.push(`Disconnected from ${host.label}`);
+}
+
+const forgetCandidate = ref<{ id: string; label: string; connected: boolean } | null>(null);
+
+async function forgetHost() {
+  const candidate = forgetCandidate.value;
+  forgetCandidate.value = null;
+  if (!candidate) return;
+  try {
+    if (candidate.connected) await hosts.disconnect(candidate.id);
+    await ipc.forgetRemoteHost(candidate.id);
+    await refreshSaved();
+    toasts.push(`Forgot ${candidate.label}`);
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
+}
+
+function connectedHostMenu(host: HostView): MenuEntry[] {
+  const isTarget = (appPrefs.settings?.generateTargetHost ?? null) === host.id;
+  return [
+    { label: "Open details", action: () => openDetail(host) },
+    {
+      label: isTarget ? "Generation target" : "Set as generation target",
+      disabled: isTarget || host.status !== "ready",
+      action: () => void appPrefs.update({ generateTargetHost: host.id }),
+    },
+    {
+      label: "Copy address",
+      disabled: !host.baseUrl,
+      action: () => void copyAddress(host.baseUrl ?? ""),
+    },
+    {
+      label: "Open web UI",
+      disabled: !host.baseUrl,
+      action: () => void openHostUrl(host.baseUrl ?? ""),
+    },
+    ...(host.kind === "remote"
+      ? [
+          { separator: true } as const,
+          ...(host.status === "error"
+            ? [{ label: "Retry connection", action: () => void hosts.reconnect(host.id) }]
+            : []),
+          { label: "Disconnect", action: () => void disconnectHost(host) },
+          {
+            label: "Forget…",
+            danger: true,
+            action: () => {
+              forgetCandidate.value = { id: host.id, label: host.label, connected: true };
+            },
+          },
+        ]
+      : []),
+  ];
+}
+
+function rememberedHostMenu(host: SavedHost): MenuEntry[] {
+  return [
+    { label: "Connect", disabled: adding.value, action: () => void connectSaved(host) },
+    { label: "Copy address", action: () => void copyAddress(host.url) },
+    { separator: true },
+    {
+      label: "Forget…",
+      danger: true,
+      action: () => {
+        forgetCandidate.value = { id: host.id, label: savedHostLabel(host), connected: false };
+      },
+    },
+  ];
+}
+
+function discoveredHostMenu(host: DiscoveredHost): MenuEntry[] {
+  return [
+    {
+      label: "Connect",
+      disabled: adding.value || isThisMachine(host),
+      action: () => void addDiscovered(host),
+    },
+    { label: "Copy address", action: () => void copyAddress(host.url) },
+  ];
 }
 
 // ── Card telemetry (from the app-wide status poll) ────────────────────────
@@ -239,6 +348,7 @@ async function onConnected() {
             :data-test="host.primary ? 'this-device-card' : 'host-card'"
             class="border-edge rounded-chrome border bg-bench p-4 text-left shadow-[inset_0_1px_0_var(--card-hi)] transition-colors hover:border-ink-3"
             @click="openDetail(host)"
+            @contextmenu="contextMenu.open($event, connectedHostMenu(host))"
           >
             <div class="flex items-center gap-2.5">
               <span class="h-2 w-2 shrink-0 rounded-full" :class="statusDot(host.status)" />
@@ -317,6 +427,7 @@ async function onConnected() {
               :key="saved.id"
               data-test="remembered-host"
               class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3 opacity-70"
+              @contextmenu="contextMenu.open($event, rememberedHostMenu(saved))"
             >
               <span class="h-2 w-2 shrink-0 rounded-full bg-ink-3" />
               <div class="min-w-0 flex-1">
@@ -353,6 +464,7 @@ async function onConnected() {
             :key="host.url"
             data-test="discovered-host"
             class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3"
+            @contextmenu="contextMenu.open($event, discoveredHostMenu(host))"
           >
             <span class="h-2 w-2 shrink-0 rounded-full bg-halide" />
             <div class="min-w-0 flex-1">
@@ -394,6 +506,15 @@ async function onConnected() {
       :open="connectOpen"
       @close="connectOpen = false"
       @connected="onConnected"
+    />
+    <ConfirmDialog
+      :open="forgetCandidate !== null"
+      title="Forget this machine?"
+      :message="`${forgetCandidate?.label ?? 'This machine'} and its saved API key will be removed.`"
+      confirm-label="Forget machine"
+      danger
+      @confirm="forgetHost"
+      @cancel="forgetCandidate = null"
     />
   </div>
 </template>

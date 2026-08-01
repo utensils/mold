@@ -5,10 +5,11 @@ import type { ModelInfoExtended } from "../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { requestText } from "../lib/toasts";
 import {
-  deleteGenerationTemplate,
+  deleteGenerationTemplateWithMedia,
+  hydrateGenerationTemplate,
   loadGenerationTemplates,
   renameGenerationTemplate,
-  saveGenerationTemplate,
+  saveGenerationTemplateWithMedia,
   sortGenerationTemplates,
   type GenerationTemplate,
   type GenerationTemplateSort,
@@ -32,6 +33,10 @@ const sort = ref<GenerationTemplateSort>("updated-desc");
 const templates = ref<GenerationTemplate[]>(
   loadGenerationTemplates(sort.value),
 );
+const saving = ref(false);
+const loadingId = ref<string | null>(null);
+const error = ref("");
+let loadEpoch = 0;
 
 const visibleTemplates = computed(() => {
   const q = search.value.trim().toLowerCase();
@@ -56,18 +61,51 @@ function refreshTemplates() {
   templates.value = loadGenerationTemplates(sort.value);
 }
 
-function saveCurrent() {
+async function saveCurrent() {
+  if (saving.value) return;
   const fallback =
     props.modelValue.prompt.trim().slice(0, 48) ||
     props.modelValue.model ||
     "Untitled template";
-  saveGenerationTemplate(nameDraft.value || fallback, props.modelValue);
-  nameDraft.value = "";
-  refreshTemplates();
+  saving.value = true;
+  error.value = "";
+  try {
+    await saveGenerationTemplateWithMedia(
+      nameDraft.value || fallback,
+      props.modelValue,
+    );
+    nameDraft.value = "";
+    refreshTemplates();
+  } catch (cause) {
+    error.value =
+      cause instanceof Error
+        ? cause.message
+        : "Couldn’t save the template media.";
+  } finally {
+    saving.value = false;
+  }
 }
 
-function loadTemplate(template: GenerationTemplate) {
-  emit("update:modelValue", template.form);
+async function loadTemplate(template: GenerationTemplate) {
+  const epoch = ++loadEpoch;
+  loadingId.value = template.id;
+  error.value = "";
+  try {
+    const hydrated = await hydrateGenerationTemplate(template);
+    if (epoch !== loadEpoch) return;
+    emit("update:modelValue", hydrated.form);
+    if (hydrated.sourceMissing) {
+      error.value =
+        "The template loaded, but some saved images are no longer available.";
+    }
+  } catch (cause) {
+    if (epoch === loadEpoch) {
+      error.value =
+        cause instanceof Error ? cause.message : "Couldn’t load the template.";
+    }
+  } finally {
+    if (epoch === loadEpoch) loadingId.value = null;
+  }
 }
 
 async function renameTemplate(template: GenerationTemplate) {
@@ -81,9 +119,10 @@ async function renameTemplate(template: GenerationTemplate) {
   refreshTemplates();
 }
 
-function deleteTemplate(template: GenerationTemplate) {
-  deleteGenerationTemplate(template.id);
+async function deleteTemplate(template: GenerationTemplate) {
+  const deletion = deleteGenerationTemplateWithMedia(template);
   refreshTemplates();
+  await deletion;
 }
 </script>
 
@@ -111,11 +150,13 @@ function deleteTemplate(template: GenerationTemplate) {
         type="button"
         class="rounded-md bg-surface px-2 py-1 text-xs text-ink-2 hover:bg-surface"
         data-test="template-save"
+        :disabled="saving"
         @click="saveCurrent"
       >
-        Save
+        {{ saving ? "Saving…" : "Save" }}
       </button>
     </div>
+    <p v-if="error" class="mt-1 text-xs text-stop" role="alert">{{ error }}</p>
 
     <div class="mt-2 grid grid-cols-[1fr_auto] gap-2">
       <input
@@ -148,9 +189,11 @@ function deleteTemplate(template: GenerationTemplate) {
           type="button"
           class="min-w-0 truncate text-left text-xs text-ink-2 hover:text-rebate"
           data-test="template-load"
+          :disabled="loadingId === template.id"
           @click="loadTemplate(template)"
         >
           <span data-test="template-row-name">{{ template.name }}</span>
+          <span v-if="loadingId === template.id" class="ml-1">Restoring…</span>
           <span class="ml-1 text-ink-3">
             {{
               template.form.model ? modelLabel(template.form.model) : "no model"

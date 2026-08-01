@@ -32,6 +32,7 @@ vi.mock("../lib/notify", () => ({ notifyGenerated: vi.fn(), notifyGenerationFail
 import MachinesView from "./MachinesView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
+import { useContextMenuStore } from "../stores/contextMenu";
 
 const stub = { template: "<div />" };
 let router: Router;
@@ -130,6 +131,33 @@ beforeEach(() => {
 });
 
 describe("MachinesView overview", () => {
+  it("offers common context-menu actions for connected, remembered, and discovered hosts", async () => {
+    const wrapper = await mountView();
+
+    await wrapper.get("[data-test='host-card']").trigger("contextmenu");
+    expect(
+      useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
+    ).toEqual([
+      "Open details",
+      "Set as generation target",
+      "Copy address",
+      "Open web UI",
+      "Disconnect",
+      "Forget…",
+    ]);
+
+    await wrapper.get("[data-test='remembered-host']").trigger("contextmenu");
+    expect(
+      useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
+    ).toEqual(["Connect", "Copy address", "Forget…"]);
+
+    await wrapper.get("[data-test='discovered-host']").trigger("contextmenu");
+    expect(
+      useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
+    ).toEqual(["Connect", "Copy address"]);
+    wrapper.unmount();
+  });
+
   it("renders This device first, then connected remote cards", async () => {
     const wrapper = await mountView();
     expect(wrapper.find("[data-test='this-device-card']").exists()).toBe(true);

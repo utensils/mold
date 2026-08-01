@@ -1,8 +1,9 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GenerationTemplatesPanel from "./GenerationTemplatesPanel.vue";
 import type { GenerateFormState } from "../types";
 import { saveGenerationTemplate } from "../lib/generationTemplates";
+import * as generationTemplates from "../lib/generationTemplates";
 import {
   resetNotifications,
   settleConfirm,
@@ -93,6 +94,51 @@ describe("GenerationTemplatesPanel", () => {
       .emitted("update:modelValue")
       ?.at(-1)?.[0] as GenerateFormState;
     expect(emitted.prompt).toBe("from template");
+  });
+
+  it("does not let a slower earlier template load overwrite the latest choice", async () => {
+    saveGenerationTemplate("First", makeForm({ prompt: "first" }));
+    saveGenerationTemplate("Second", makeForm({ prompt: "second" }));
+    const resolvers = new Map<
+      string,
+      (value: { form: GenerateFormState; sourceMissing: boolean }) => void
+    >();
+    vi.spyOn(
+      generationTemplates,
+      "hydrateGenerationTemplate",
+    ).mockImplementation(
+      (template) =>
+        new Promise((resolve) => {
+          resolvers.set(template.name, resolve);
+        }),
+    );
+    const w = mount(GenerationTemplatesPanel, {
+      props: { modelValue: makeForm({ prompt: "current" }) },
+    });
+    const buttons = w.findAll("[data-test='template-load']");
+    const secondButton = buttons.find((button) =>
+      button.text().includes("Second"),
+    );
+    const firstButton = buttons.find((button) =>
+      button.text().includes("First"),
+    );
+    await secondButton?.trigger("click");
+    await firstButton?.trigger("click");
+
+    resolvers.get("First")?.({
+      form: makeForm({ prompt: "first" }),
+      sourceMissing: false,
+    });
+    await flushPromises();
+    resolvers.get("Second")?.({
+      form: makeForm({ prompt: "second" }),
+      sourceMissing: false,
+    });
+    await flushPromises();
+
+    const loaded = w.emitted("update:modelValue") ?? [];
+    expect(loaded).toHaveLength(1);
+    expect((loaded[0]?.[0] as GenerateFormState).prompt).toBe("first");
   });
 
   it("searches, sorts, renames, and deletes templates", async () => {
