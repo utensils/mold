@@ -4,21 +4,27 @@
  * recalled with one click. Ported from the web SPA's `generationTemplates.ts`,
  * but keyed on a desktop-only storage key so the two never share blobs.
  *
- * Media fields (`sourceImage` / `maskImage` / `controlImage`, plus video,
- * keyframe, and audio conditioning files) hold browser-local base64 that
- * we deliberately do NOT persist — a saved template records only a
- * human-facing `mediaReferences` hint so the user knows to re-select bytes.
+ * Large media bytes never enter localStorage. Source/edit images are stored
+ * durably in the shared IndexedDB media store and restored with the template;
+ * unsupported auxiliary media retains a human-facing re-selection hint.
  */
 import type { GenerateForm } from "./generateForm";
 import { createUuid } from "@studio/lib/id";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
+import {
+  deleteGenerationTemplateMedia,
+  hydrateGenerationTemplateMedia,
+  persistGenerationTemplateMedia,
+  type GenerationTemplateMediaAsset,
+  type TemplateMediaPersistence,
+} from "@studio/lib/templateMediaStore";
 
 /** Storage key — MUST differ from the web SPA's `mold.generation.templates.v1`. */
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.desktop.generation.templates.v1";
 
 export type GenerationTemplateSort = "updated-desc" | "updated-asc" | "name-asc" | "name-desc";
 
-/** Human-facing labels for media that a template could not persist. */
+/** Human-facing labels for media present when the template was saved. */
 export type GenerationTemplateMediaField =
   "source" | "mask" | "control" | "sourceVideo" | "keyframes" | "editImages" | "audioFile";
 
@@ -29,8 +35,10 @@ export interface GenerationTemplate {
   updatedAt: number;
   /** The saved form with base64 media stripped to null / empty. */
   form: GenerateForm;
-  /** Which media slots were populated when saved — the user must re-select them. */
+  /** Which media slots were populated when saved. */
   mediaReferences: GenerationTemplateMediaField[];
+  /** Durable client-local source snapshots. Legacy templates omit this. */
+  mediaAssets?: GenerationTemplateMediaAsset[];
   /** Optional host scope for remote-only clients. Legacy/desktop templates omit it. */
   scopeId?: string;
 }
@@ -49,6 +57,19 @@ export function formatTemplateMediaReferences(
   references: readonly GenerationTemplateMediaField[],
 ): string {
   return references.map((reference) => MEDIA_REFERENCE_LABELS[reference]).join(", ");
+}
+
+/** Media that definitely has no durable snapshot and must be re-selected. */
+export function unsnapshottedTemplateMediaReferences(
+  template: GenerationTemplate,
+): GenerationTemplateMediaField[] {
+  const assets = template.mediaAssets ?? [];
+  const hasSource = assets.some((asset) => asset.field === "sourceImage");
+  const hasAttachments = assets.some((asset) => asset.field === "imageAttachments");
+  return template.mediaReferences.filter(
+    (reference) =>
+      !((reference === "source" && hasSource) || (reference === "editImages" && hasAttachments)),
+  );
 }
 
 function now(): number {
@@ -182,6 +203,91 @@ export function saveGenerationTemplate(
   return template;
 }
 
+/** Save the template only after its source bytes are durable in IndexedDB. */
+export async function saveGenerationTemplateWithMedia(
+  name: string,
+  form: GenerateForm,
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+  scopeId?: string,
+  persistence?: TemplateMediaPersistence,
+): Promise<GenerationTemplate> {
+  const timestamp = now();
+  const id = templateId();
+  const inputs = [
+    ...(form.sourceImage
+      ? [
+          {
+            field: "sourceImage" as const,
+            filename: form.sourceImageName || "Source image",
+            base64: form.sourceImage,
+          },
+        ]
+      : []),
+    ...form.imageAttachments.map((base64, index) => ({
+      field: "imageAttachments" as const,
+      index,
+      filename: `Reference ${index + 1}`,
+      base64,
+    })),
+  ];
+  const mediaAssets = await persistGenerationTemplateMedia(id, inputs, persistence);
+  const template: GenerationTemplate = {
+    id,
+    name: normalizeName(name || fallbackTemplateName(form)),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    form: stripTemplateForm(form),
+    mediaReferences: collectTemplateMediaReferences(form),
+    ...(mediaAssets.length ? { mediaAssets } : {}),
+    ...(scopeId ? { scopeId } : {}),
+  };
+  try {
+    writeTemplates([template, ...loadGenerationTemplates("updated-desc", storageKey)], storageKey);
+  } catch (error) {
+    await deleteGenerationTemplateMedia(mediaAssets, persistence);
+    throw error;
+  }
+  return template;
+}
+
+export async function hydrateGenerationTemplate(
+  template: GenerationTemplate,
+  persistence?: TemplateMediaPersistence,
+): Promise<{
+  form: GenerateForm;
+  missingMediaReferences: GenerationTemplateMediaField[];
+}> {
+  const form = JSON.parse(JSON.stringify(template.form)) as GenerateForm;
+  const assets = template.mediaAssets ?? [];
+  const { media, missing } = await hydrateGenerationTemplateMedia(assets, persistence);
+  const source = media.find((asset) => asset.field === "sourceImage");
+  if (source) {
+    form.sourceImage = source.base64;
+    form.sourceImageName = source.filename;
+  }
+  const attachments = media
+    .filter((asset) => asset.field === "imageAttachments")
+    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+  if (attachments.length) form.imageAttachments = attachments.map((asset) => asset.base64);
+
+  const restoredSource = Boolean(source) && !missing.some((asset) => asset.field === "sourceImage");
+  const expectedAttachments = assets.filter((asset) => asset.field === "imageAttachments").length;
+  const restoredAttachments =
+    expectedAttachments > 0 &&
+    attachments.length === expectedAttachments &&
+    !missing.some((asset) => asset.field === "imageAttachments");
+  return {
+    form,
+    missingMediaReferences: template.mediaReferences.filter(
+      (reference) =>
+        !(
+          (reference === "source" && restoredSource) ||
+          (reference === "editImages" && restoredAttachments)
+        ),
+    ),
+  };
+}
+
 export function renameGenerationTemplate(
   id: string,
   name: string,
@@ -205,6 +311,15 @@ export function deleteGenerationTemplate(
     loadGenerationTemplates("updated-desc", storageKey).filter((template) => template.id !== id),
     storageKey,
   );
+}
+
+export async function deleteGenerationTemplateWithMedia(
+  template: GenerationTemplate,
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+  persistence?: TemplateMediaPersistence,
+): Promise<void> {
+  deleteGenerationTemplate(template.id, storageKey);
+  await deleteGenerationTemplateMedia(template.mediaAssets ?? [], persistence);
 }
 
 export function searchGenerationTemplates(

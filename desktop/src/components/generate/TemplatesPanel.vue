@@ -3,11 +3,11 @@ import { computed, ref } from "vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
 import {
-  deleteGenerationTemplate,
+  deleteGenerationTemplateWithMedia,
   fallbackTemplateName,
   loadGenerationTemplates,
   renameGenerationTemplate,
-  saveGenerationTemplate,
+  saveGenerationTemplateWithMedia,
   sortGenerationTemplates,
   type GenerationTemplate,
   type GenerationTemplateSort,
@@ -29,6 +29,8 @@ const templates = ref<GenerationTemplate[]>(loadGenerationTemplates(sort.value))
 const renamingId = ref<string | null>(null);
 const renameDraft = ref("");
 const confirmingDeleteId = ref<string | null>(null);
+const saving = ref(false);
+const error = ref("");
 
 const visibleTemplates = computed(() => {
   const q = search.value.trim().toLowerCase();
@@ -52,10 +54,23 @@ function refresh() {
   templates.value = loadGenerationTemplates(sort.value);
 }
 
-function saveCurrent() {
-  saveGenerationTemplate(nameDraft.value || fallbackTemplateName(props.form), props.form);
-  nameDraft.value = "";
-  refresh();
+async function saveCurrent() {
+  if (saving.value) return;
+  saving.value = true;
+  error.value = "";
+  try {
+    await saveGenerationTemplateWithMedia(
+      nameDraft.value || fallbackTemplateName(props.form),
+      props.form,
+    );
+    nameDraft.value = "";
+    refresh();
+  } catch (cause) {
+    error.value =
+      cause instanceof Error ? cause.message : "Couldn’t save the template and its source image.";
+  } finally {
+    saving.value = false;
+  }
 }
 
 function loadTemplate(template: GenerationTemplate) {
@@ -77,11 +92,12 @@ function cancelRename() {
   renamingId.value = null;
 }
 
-function requestDelete(template: GenerationTemplate) {
+async function requestDelete(template: GenerationTemplate) {
   if (confirmingDeleteId.value === template.id) {
-    deleteGenerationTemplate(template.id);
+    const deletion = deleteGenerationTemplateWithMedia(template);
     confirmingDeleteId.value = null;
     refresh();
+    await deletion;
   } else {
     renamingId.value = null;
     confirmingDeleteId.value = template.id;
@@ -111,12 +127,14 @@ function requestDelete(template: GenerationTemplate) {
       <button
         type="button"
         data-test="template-save"
+        :disabled="saving"
         class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
         @click="saveCurrent"
       >
-        Save
+        {{ saving ? "Saving…" : "Save" }}
       </button>
     </div>
+    <p v-if="error" class="mt-1 text-caption text-stop" role="alert">{{ error }}</p>
 
     <!-- Search + sort -->
     <div class="mt-2 grid grid-cols-[1fr_auto] gap-2">

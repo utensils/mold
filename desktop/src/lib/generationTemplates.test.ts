@@ -10,12 +10,16 @@ import {
   deleteGenerationTemplate,
   formatTemplateMediaReferences,
   loadGenerationTemplates,
+  hydrateGenerationTemplate,
   renameGenerationTemplate,
   saveGenerationTemplate,
+  saveGenerationTemplateWithMedia,
+  deleteGenerationTemplateWithMedia,
   searchGenerationTemplates,
   sortGenerationTemplates,
   type GenerationTemplate,
 } from "./generationTemplates";
+import type { StoredTemplateMedia, TemplateMediaPersistence } from "@studio/lib/templateMediaStore";
 
 const B64 = "aGVsbG8td29ybGQtYmFzZTY0"; // "hello-world-base64"
 
@@ -23,11 +27,59 @@ function formWith(overrides: Partial<GenerateForm> = {}): GenerateForm {
   return { ...newGenerateForm(), ...overrides };
 }
 
+function memoryMedia(): TemplateMediaPersistence & { records: Map<string, StoredTemplateMedia> } {
+  const records = new Map<string, StoredTemplateMedia>();
+  return {
+    records,
+    async put(record) {
+      records.set(record.assetId, structuredClone(record));
+      return true;
+    },
+    async get(assetId) {
+      return records.get(assetId) ?? null;
+    },
+    async delete(assetId) {
+      records.delete(assetId);
+    },
+  };
+}
+
 beforeEach(() => {
   localStorage.clear();
 });
 
 describe("save / load round-trip", () => {
+  it("restores a saved source image independently of its original gallery host", async () => {
+    const persistence = memoryMedia();
+    const saved = await saveGenerationTemplateWithMedia(
+      "Portable source",
+      formWith({
+        sourceImage: B64,
+        sourceImageName: "remote-gallery.png",
+      }),
+      GENERATION_TEMPLATES_STORAGE_KEY,
+      "host-a",
+      persistence,
+    );
+
+    expect(saved.form.sourceImage).toBeNull();
+    expect(JSON.stringify(saved)).not.toContain(B64);
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect(hydrated.form.sourceImage).toBe(B64);
+    expect(hydrated.form.sourceImageName).toBe("remote-gallery.png");
+    expect(hydrated.missingMediaReferences).toEqual([]);
+
+    await deleteGenerationTemplateWithMedia(saved, GENERATION_TEMPLATES_STORAGE_KEY, persistence);
+    expect(persistence.records.size).toBe(0);
+  });
+
+  it("keeps the legacy re-add warning when no durable source asset exists", async () => {
+    const legacy = saveGenerationTemplate("Legacy", formWith({ sourceImage: B64 }));
+    const hydrated = await hydrateGenerationTemplate(legacy, memoryMedia());
+    expect(hydrated.form.sourceImage).toBeNull();
+    expect(hydrated.missingMediaReferences).toEqual(["source"]);
+  });
+
   it("strips base64 media and records references", () => {
     const form = formWith({
       prompt: "a lighthouse at dusk",
