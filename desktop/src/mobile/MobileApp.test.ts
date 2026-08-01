@@ -4473,7 +4473,7 @@ describe("MobileApp host and catalog coordination", () => {
       expect.objectContaining({
         id: "pair-local-7680",
         instanceId: "pair-id",
-        name: "Pair Host",
+        name: "pair-host",
         baseUrl: "http://pair.local:7680",
       }),
     );

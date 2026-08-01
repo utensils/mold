@@ -1166,7 +1166,7 @@ async function scanPairingCode(): Promise<void> {
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
-    hostInput.name = payload.name;
+    hostInput.name = claim.hostname ?? payload.name;
     hostInput.address = baseUrl;
     hostInput.apiKey = claim.api_key ?? "";
     await connectHost();
