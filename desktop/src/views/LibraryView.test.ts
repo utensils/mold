@@ -52,6 +52,7 @@ import { useConnectionStore } from "../stores/connection";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useGalleryStore } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
+import { useGenerateFormStore } from "../stores/generateForm";
 import { useToastStore } from "../stores/toasts";
 import type { GalleryImage } from "../lib/api/types";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
@@ -158,6 +159,39 @@ beforeEach(() => {
 });
 
 describe("LibraryView delete keyboard handling", () => {
+  it("loads a remote gallery image as the Create source from its context menu", async () => {
+    const remotePrint: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-source.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9 },
+    };
+    apiFetchTo.mockResolvedValueOnce(new Response(new Uint8Array([65, 66, 67])));
+    const { wrapper, router } = await mountView(remotePrint);
+
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    expect(tile).toBeDefined();
+    await tile!.trigger("contextmenu");
+
+    const menu = useContextMenuStore();
+    const sourceEntry = menu.entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    )!;
+    expect(sourceEntry).toMatchObject({ disabled: false });
+    menu.activate(sourceEntry);
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://plato:7680", apiKey: "secret" },
+      "/api/gallery/image/remote-source.png",
+    );
+    expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
+    expect(useGenerateFormStore().form.sourceImageName).toBe("remote-source.png");
+    expect(router.currentRoute.value.path).toBe("/create");
+    expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source");
+    wrapper.unmount();
+  });
+
   it.each(["Delete", "Backspace"])(
     "prevents %s navigation and only DELETEs after the undo window",
     async (key) => {

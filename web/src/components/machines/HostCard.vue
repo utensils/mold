@@ -16,7 +16,11 @@ import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
 import type { HostEntry } from "../../lib/hostRegistry";
 
 const props = defineProps<{ host: HostEntry; primary?: boolean }>();
-const emit = defineEmits<{ open: [id: string]; reconnect: [id: string] }>();
+const emit = defineEmits<{
+  open: [id: string];
+  reconnect: [id: string];
+  contextMenu: [payload: { host: HostEntry; x: number; y: number }];
+}>();
 
 const disconnected = computed(() => props.host.connected === false);
 const poll = useHostPoll(
@@ -101,6 +105,10 @@ function reconnect(event: Event) {
   event.stopPropagation();
   emit("reconnect", props.host.id);
 }
+
+function openContextMenu(event: MouseEvent) {
+  emit("contextMenu", { host: props.host, x: event.clientX, y: event.clientY });
+}
 </script>
 
 <template>
@@ -119,6 +127,7 @@ function reconnect(event: Event) {
       :aria-label="disconnected ? undefined : `Open ${host.name}`"
       @click="open"
       @keydown="onKey"
+      @contextmenu.prevent.stop="openContextMenu"
     >
       <div class="hc__head">
         <StatusDot :state="dotState" />
