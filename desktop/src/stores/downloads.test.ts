@@ -99,8 +99,11 @@ describe("applyDownloadEvent", () => {
         current_file: "Verifying file [1/19] tokenizer.json...",
       },
       { type: "started", id: "b", files_total: 19, bytes_total: 28_336_447_724 },
+      { type: "enqueued", id: "c", model: "z-image-turbo:bf16", position: 0 },
+      { type: "started", id: "c", files_total: 4, bytes_total: 12_000 },
+      { type: "started", id: "b", files_total: 19, bytes_total: 28_336_447_724 },
     ]);
-    expect(s.activeJobs).toHaveLength(1);
+    expect(s.activeJobs.map((job) => job.id)).toEqual(["b", "c"]);
     expect(s.activeJobs[0]).toMatchObject({
       id: "b",
       model: "ltx-2-19b-distilled:fp8",

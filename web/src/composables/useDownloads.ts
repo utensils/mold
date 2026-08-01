@@ -78,10 +78,13 @@ export function applyDownloadEvent(
     }
     case "started": {
       const idx = state.queued.findIndex((j) => j.id === event.id);
+      const activeIdx = state.activeJobs.findIndex(
+        (job) => job.id === event.id,
+      );
       const from =
         idx >= 0
           ? state.queued.splice(idx, 1)[0]
-          : (state.activeJobs.find((job) => job.id === event.id) ?? {
+          : (state.activeJobs[activeIdx] ?? {
               id: event.id,
               model: "",
               catalog_id: null,
@@ -100,12 +103,10 @@ export function applyDownloadEvent(
         status: "active",
         files_total: event.files_total,
         bytes_total: event.bytes_total,
-        started_at: Date.now(),
+        started_at: from.started_at ?? Date.now(),
       };
-      state.activeJobs = [
-        ...state.activeJobs.filter((job) => job.id !== event.id),
-        active,
-      ];
+      if (activeIdx >= 0) state.activeJobs.splice(activeIdx, 1, active);
+      else state.activeJobs.push(active);
       state.active = state.activeJobs[0] ?? null;
       return;
     }

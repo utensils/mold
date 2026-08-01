@@ -68,9 +68,10 @@ export function applyDownloadEvent(state: DownloadsState, event: DownloadEvent):
     case "dequeued":
       return { ...state, queued: state.queued.filter((job) => job.id !== event.id) };
     case "started": {
+      const activeIndex = state.activeJobs.findIndex((job) => job.id === event.id);
       const base =
         state.queued.find((job) => job.id === event.id) ??
-        state.activeJobs.find((job) => job.id === event.id) ??
+        state.activeJobs[activeIndex] ??
         synthQueued(event.id, "");
       const active: DownloadJob = {
         ...base,
@@ -78,8 +79,11 @@ export function applyDownloadEvent(state: DownloadsState, event: DownloadEvent):
         files_total: event.files_total,
         bytes_total: event.bytes_total,
       };
+      const activeJobs = [...state.activeJobs];
+      if (activeIndex >= 0) activeJobs.splice(activeIndex, 1, active);
+      else activeJobs.push(active);
       return {
-        activeJobs: [...state.activeJobs.filter((job) => job.id !== event.id), active],
+        activeJobs,
         queued: state.queued.filter((job) => job.id !== event.id),
         history: state.history,
       };
