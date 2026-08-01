@@ -2,11 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerateFormState } from "../types";
 import {
   deleteGenerationTemplate,
+  deleteGenerationTemplateWithMedia,
+  hydrateGenerationTemplate,
   loadGenerationTemplates,
   renameGenerationTemplate,
   saveGenerationTemplate,
+  saveGenerationTemplateWithMedia,
   searchGenerationTemplates,
 } from "./generationTemplates";
+import type {
+  StoredTemplateMedia,
+  TemplateMediaPersistence,
+} from "@studio/lib/templateMediaStore";
 
 function makeForm(
   overrides: Partial<GenerateFormState> = {},
@@ -59,10 +66,71 @@ function makeForm(
   };
 }
 
+function memoryMedia(): TemplateMediaPersistence & {
+  records: Map<string, StoredTemplateMedia>;
+} {
+  const records = new Map<string, StoredTemplateMedia>();
+  return {
+    records,
+    async put(record) {
+      records.set(record.assetId, structuredClone(record));
+      return true;
+    },
+    async get(assetId) {
+      return records.get(assetId) ?? null;
+    },
+    async delete(assetId) {
+      records.delete(assetId);
+    },
+  };
+}
+
 describe("generation templates", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.setSystemTime(new Date("2026-05-28T12:00:00Z"));
+  });
+
+  it("restores ordered local and gallery sources from durable template media", async () => {
+    const persistence = memoryMedia();
+    const saved = await saveGenerationTemplateWithMedia(
+      "Sources",
+      makeForm({
+        imageAttachments: [
+          { kind: "upload", filename: "local.png", base64: "LOCAL" },
+          { kind: "gallery", filename: "remote.jpg", base64: "REMOTE" },
+        ],
+      }),
+      persistence,
+    );
+
+    expect(saved.form.imageAttachments.every((image) => !image.base64)).toBe(
+      true,
+    );
+    expect(JSON.stringify(saved)).not.toContain('"LOCAL"');
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect(hydrated.sourceMissing).toBe(false);
+    expect(hydrated.form.imageAttachments).toEqual([
+      { kind: "upload", filename: "local.png", base64: "LOCAL" },
+      { kind: "gallery", filename: "remote.jpg", base64: "REMOTE" },
+    ]);
+
+    await deleteGenerationTemplateWithMedia(saved, persistence);
+    expect(persistence.records.size).toBe(0);
+  });
+
+  it("does not expose byte-free legacy source markers as usable images", async () => {
+    const legacy = saveGenerationTemplate(
+      "Legacy",
+      makeForm({
+        imageAttachments: [
+          { kind: "gallery", filename: "gone.png", base64: "GONE" },
+        ],
+      }),
+    );
+    const hydrated = await hydrateGenerationTemplate(legacy, memoryMedia());
+    expect(hydrated.form.imageAttachments).toEqual([]);
+    expect(hydrated.sourceMissing).toBe(true);
   });
 
   it("saves named templates with sanitized form config and media references", () => {

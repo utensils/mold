@@ -105,7 +105,11 @@ import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import type { HostRoute } from "../stores/hosts";
-import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
+import {
+  formatTemplateMediaReferences,
+  hydrateGenerationTemplate,
+  type GenerationTemplate,
+} from "../lib/generationTemplates";
 import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
 import { randomSeed } from "../stores/generation";
 import type { GenerateRequest, OutputMetadata } from "../lib/api/types";
@@ -1421,16 +1425,20 @@ const edgeCode = computed(() => {
   return [name, s, stepPart, size, time].filter(Boolean).join("  ");
 });
 
-function loadTemplate(template: GenerationTemplate) {
-  // Base64 media was stripped on save; buildRequest's pruneRequestForFamily
-  // still guards anything the (possibly different) family can't use.
-  Object.assign(form, template.form);
+let templateLoadEpoch = 0;
+async function loadTemplate(template: GenerationTemplate) {
+  const epoch = ++templateLoadEpoch;
   templatesOpen.value = false;
+  const hydrated = await hydrateGenerationTemplate(template);
+  if (epoch !== templateLoadEpoch) return;
+  // buildRequest's pruneRequestForFamily still guards anything the (possibly
+  // different) family can't use after the source snapshot is restored.
+  Object.assign(form, hydrated.form);
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
-  if (template.mediaReferences.length > 0) {
-    toasts.push(`Re-add media: ${formatTemplateMediaReferences(template.mediaReferences)}.`);
+  if (hydrated.missingMediaReferences.length > 0) {
+    toasts.push(`Re-add media: ${formatTemplateMediaReferences(hydrated.missingMediaReferences)}.`);
   }
 }
 

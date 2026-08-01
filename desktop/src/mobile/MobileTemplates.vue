@@ -8,14 +8,15 @@ export { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY };
 import { computed, onMounted, ref } from "vue";
 import {
   formatTemplateMediaReferences,
-  deleteGenerationTemplate,
+  deleteGenerationTemplateWithMedia,
   fallbackTemplateName,
   loadGenerationTemplates,
   renameGenerationTemplate,
-  saveGenerationTemplate,
+  saveGenerationTemplateWithMedia,
   sortGenerationTemplates,
   type GenerationTemplate,
   type GenerationTemplateSort,
+  unsnapshottedTemplateMediaReferences,
 } from "../lib/generationTemplates";
 import type { GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
@@ -33,6 +34,8 @@ const templates = ref<GenerationTemplate[]>([]);
 const renamingId = ref<string | null>(null);
 const renameDraft = ref("");
 const confirmingDeleteId = ref<string | null>(null);
+const saving = ref(false);
+const error = ref("");
 
 const visible = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -55,20 +58,33 @@ function toggle(): void {
   if (open.value) refresh();
 }
 
-function save(): void {
-  saveGenerationTemplate(
-    name.value || fallbackTemplateName(props.form),
-    props.form,
-    MOBILE_GENERATION_TEMPLATES_STORAGE_KEY,
-    props.hostId,
-  );
-  name.value = "";
-  refresh();
+async function save(): Promise<void> {
+  if (saving.value) return;
+  saving.value = true;
+  error.value = "";
+  try {
+    await saveGenerationTemplateWithMedia(
+      name.value || fallbackTemplateName(props.form),
+      props.form,
+      MOBILE_GENERATION_TEMPLATES_STORAGE_KEY,
+      props.hostId,
+    );
+    name.value = "";
+    refresh();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "Couldn’t save the template media.";
+  } finally {
+    saving.value = false;
+  }
 }
 
 function load(template: GenerationTemplate): void {
   emit("load", template);
   open.value = false;
+}
+
+function mediaToReAdd(template: GenerationTemplate) {
+  return unsnapshottedTemplateMediaReferences(template);
 }
 
 function startRename(template: GenerationTemplate): void {
@@ -84,15 +100,19 @@ function commitRename(id: string): void {
   refresh();
 }
 
-function remove(template: GenerationTemplate): void {
+async function remove(template: GenerationTemplate): Promise<void> {
   if (confirmingDeleteId.value !== template.id) {
     confirmingDeleteId.value = template.id;
     renamingId.value = null;
     return;
   }
-  deleteGenerationTemplate(template.id, MOBILE_GENERATION_TEMPLATES_STORAGE_KEY);
+  const deletion = deleteGenerationTemplateWithMedia(
+    template,
+    MOBILE_GENERATION_TEMPLATES_STORAGE_KEY,
+  );
   confirmingDeleteId.value = null;
   refresh();
+  await deletion;
 }
 
 onMounted(refresh);
@@ -127,11 +147,15 @@ onMounted(refresh);
           type="button"
           class="secondary-button"
           data-test="mobile-template-save"
+          :disabled="saving"
           @click="save"
         >
-          Save
+          {{ saving ? "Saving…" : "Save" }}
         </button>
       </div>
+      <p v-if="error" class="mobile-helper-text mobile-inline-danger" role="alert">
+        {{ error }}
+      </p>
 
       <div class="mobile-inline-form mobile-template-filter">
         <input
@@ -189,8 +213,8 @@ onMounted(refresh);
               {{ confirmingDeleteId === template.id ? "Confirm" : "Delete" }}
             </button>
           </div>
-          <p v-if="template.mediaReferences.length" class="mobile-helper-text">
-            Re-add {{ formatTemplateMediaReferences(template.mediaReferences) }} after loading.
+          <p v-if="mediaToReAdd(template).length" class="mobile-helper-text">
+            Re-add {{ formatTemplateMediaReferences(mediaToReAdd(template)) }} after loading.
           </p>
         </article>
         <p v-if="visible.length === 0" class="mobile-helper-text">
