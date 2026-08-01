@@ -20,15 +20,20 @@ MOLD_API_KEY='choose-a-long-secret' mold serve --bind 0.0.0.0 --port 7680
 
 Open **Machines** on the iPhone and use one of these paths:
 
+- Recommended: open **Settings → Mobile pairing** in Mold desktop or web,
+  confirm the LAN, MagicDNS, or HTTPS address the phone can reach, tap **Pair an
+  iPhone**, then tap **Scan pairing code** on iPhone. The code is single-use,
+  expires after two minutes, and contains no API key; the redeemed key goes
+  directly into the iOS Keychain.
 - Tap **Discover nearby** to browse `_mold._tcp` services on the current LAN.
   Allow Local Network access when iOS asks.
 - Enter an IP address such as `192.168.1.10`. Mold adds `http://` and port
   `7680` when they are omitted.
 - Enter a DNS hostname, HTTPS URL, or Tailscale MagicDNS name.
 
-Paste the same API key, then tap **Test and save**. Saved host metadata remains
-in the app's local storage, while the API key is kept separately in the iOS
-Keychain.
+For manual entry, paste the same API key, then tap **Test and save**. Saved host
+metadata remains in the app's local storage, while the API key is kept
+separately in the iOS Keychain.
 
 ### Tailscale
 

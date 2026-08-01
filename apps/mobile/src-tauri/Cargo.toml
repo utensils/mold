@@ -31,6 +31,7 @@ security-framework-sys = "2"
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
 objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["UIInterface", "UIImage", "UIPasteboard", "UIResponder", "UIViewController"] }
+tauri-plugin-barcode-scanner = "2.4.5"
 
 [features]
 default = []

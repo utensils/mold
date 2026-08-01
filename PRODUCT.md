@@ -27,7 +27,10 @@ understand what the GPU is doing, inspect results, and reuse successful settings
 without leaving the task. The iPhone app should make the remote parts of that
 loop first-class without pretending the phone is an inference host: connect and
 inspect servers, queue generation, manage models, browse media, and reuse
-successful work from anywhere the host is reachable.
+successful work from anywhere the host is reachable. Pairing should be a
+single native camera scan from desktop or web Settings: short-lived,
+single-use, bound to the expected server identity, and Keychain-backed without
+putting a durable API key in the QR code.
 
 ## Brand Personality
 

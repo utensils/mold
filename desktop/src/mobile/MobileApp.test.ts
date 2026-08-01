@@ -17,6 +17,8 @@ const {
   startCatalogDownload,
   previewChainPlacement,
   previewGenerationPlacement,
+  scanPairingQr,
+  claimPairingSession,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -29,9 +31,19 @@ const {
   startCatalogDownload: vi.fn(),
   previewChainPlacement: vi.fn(),
   previewGenerationPlacement: vi.fn(),
+  scanPairingQr: vi.fn(),
+  claimPairingSession: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/plugin-barcode-scanner", () => ({
+  Format: { QRCode: "QRCode" },
+  scan: scanPairingQr,
+}));
+vi.mock("@studio/api/pairing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/pairing")>()),
+  claimPairingSession,
+}));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiFetchTo,
@@ -251,6 +263,8 @@ beforeEach(() => {
   startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
   previewChainPlacement.mockReset().mockResolvedValue(plannedPlacement());
   previewGenerationPlacement.mockReset().mockResolvedValue(plannedPlacement());
+  scanPairingQr.mockReset();
+  claimPairingSession.mockReset();
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -4379,6 +4393,94 @@ describe("MobileApp gallery", () => {
 
 describe("MobileApp host and catalog coordination", () => {
   const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+
+  function pairingPayload(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: "mold.mobile-pairing",
+      version: 1,
+      base_url: "http://pair.local:7680",
+      token: "one-time-token",
+      expires_at: Math.floor(Date.now() / 1000) + 120,
+      instance_id: "pair-id",
+      name: "Pair Host",
+      ...overrides,
+    });
+  }
+
+  async function scanFromMachines(): Promise<void> {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+    await flushPromises();
+  }
+
+  it("rejects expired pairing codes before contacting the host", async () => {
+    scanPairingQr.mockResolvedValue({
+      content: pairingPayload({ expires_at: Math.floor(Date.now() / 1000) - 1 }),
+    });
+
+    await scanFromMachines();
+
+    expect(claimPairingSession).not.toHaveBeenCalled();
+    expect(wrapper?.get(".error-text").text()).toContain("pairing code expired");
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
+  });
+
+  it("rejects a pairing claim from a different server identity", async () => {
+    scanPairingQr.mockResolvedValue({ content: pairingPayload() });
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "wrong-host",
+      hostname: "impostor",
+    });
+
+    await scanFromMachines();
+
+    expect(claimPairingSession).toHaveBeenCalledWith(
+      "http://pair.local:7680",
+      "one-time-token",
+    );
+    expect(wrapper?.get(".error-text").text()).toContain("different Mold host");
+    expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
+  });
+
+  it("stores a verified pairing key through the existing Keychain host path", async () => {
+    scanPairingQr.mockResolvedValue({ content: pairingPayload() });
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "pair-id",
+      hostname: "pair-host",
+    });
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      if (path === "/api/status" && baseUrl === "http://pair.local:7680") {
+        return Promise.resolve({ ...status, instance_id: "pair-id", hostname: "pair-host" });
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    await scanFromMachines();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
+        hostId: "pair-local-7680",
+        apiKey: "paired-key",
+      }),
+    );
+
+    const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1") ?? "[]");
+    expect(saved).toContainEqual(
+      expect.objectContaining({
+        id: "pair-local-7680",
+        instanceId: "pair-id",
+        name: "Pair Host",
+        baseUrl: "http://pair.local:7680",
+      }),
+    );
+  });
 
   function installTwoHosts(): void {
     localStorage.setItem(

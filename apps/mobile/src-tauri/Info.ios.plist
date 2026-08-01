@@ -12,6 +12,8 @@
   </array>
   <key>NSPhotoLibraryAddUsageDescription</key>
   <string>Save generated images from Mold to your photo library.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Scan a one-time Mold host pairing code.</string>
   <key>UIViewControllerBasedStatusBarAppearance</key>
   <true/>
   <key>NSAppTransportSecurity</key>

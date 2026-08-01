@@ -10,6 +10,7 @@ import {
   watch,
 } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { Format, scan } from "@tauri-apps/plugin-barcode-scanner";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -17,6 +18,7 @@ import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   canvasMatchesSourceResolution,
@@ -277,6 +279,7 @@ const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const discovering = ref(false);
+const pairing = ref(false);
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
@@ -1145,6 +1148,32 @@ async function discoverHosts(): Promise<void> {
     hostError.value = describeTransportError(error);
   } finally {
     discovering.value = false;
+  }
+}
+
+async function scanPairingCode(): Promise<void> {
+  if (pairing.value) return;
+  pairing.value = true;
+  hostError.value = "";
+  try {
+    const result = await scan({ cameraDirection: "back", formats: [Format.QRCode] });
+    const payload = parseMobilePairingPayload(result.content);
+    if (payload.expires_at !== null && payload.expires_at <= Math.floor(Date.now() / 1000)) {
+      throw new Error("That pairing code expired. Create a new one in the host's Settings.");
+    }
+    const baseUrl = normalizeRemoteAddress(payload.base_url);
+    const claim = await claimPairingSession(baseUrl, payload.token);
+    if (claim.instance_id !== payload.instance_id) {
+      throw new Error("The pairing code was redeemed by a different Mold host.");
+    }
+    hostInput.name = payload.name;
+    hostInput.address = baseUrl;
+    hostInput.apiKey = claim.api_key ?? "";
+    await connectHost();
+  } catch (error) {
+    hostError.value = describeTransportError(error);
+  } finally {
+    pairing.value = false;
   }
 }
 
@@ -4121,6 +4150,17 @@ onBeforeUnmount(() => {
         <template v-else>
           <h1 class="section-title">Machines</h1>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
+          <button
+            class="primary-button mobile-pair-button"
+            type="button"
+            :disabled="pairing"
+            data-test="mobile-scan-pairing"
+            @click="scanPairingCode"
+          >
+            <span aria-hidden="true">▦</span>
+            {{ pairing ? "Opening camera…" : "Scan pairing code" }}
+          </button>
+          <p class="mobile-pair-note">On your host, open Settings → Mobile pairing.</p>
           <button
             class="secondary-button"
             type="button"

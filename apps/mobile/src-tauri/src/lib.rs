@@ -13,6 +13,11 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|_app| {
+            #[cfg(target_os = "ios")]
+            _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             appearance::set_mobile_appearance,
             discovery::discover_mold_hosts,
@@ -70,5 +75,12 @@ mod tests {
         let plist = include_str!("../Info.ios.plist");
         assert!(plist.contains("<key>NSPhotoLibraryAddUsageDescription</key>"));
         assert!(plist.contains("Save generated images"));
+    }
+
+    #[test]
+    fn ios_declares_camera_access_only_for_pairing_scans() {
+        let plist = include_str!("../Info.ios.plist");
+        assert!(plist.contains("<key>NSCameraUsageDescription</key>"));
+        assert!(plist.contains("Scan a one-time Mold host pairing code."));
     }
 }
