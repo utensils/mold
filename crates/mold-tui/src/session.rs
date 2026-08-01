@@ -638,6 +638,7 @@ mod tests {
             mask_image_path: None,
             frames: 25,
             fps: 24,
+            enable_audio: None,
             control_image_path: None,
             control_model: None,
             control_scale: 0.8,

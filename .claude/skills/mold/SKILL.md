@@ -297,6 +297,12 @@ metadata, validate before queueing, and refuse automatic long-video routing
 when the chain wire would discard them. The TUI continues to use pipeline
 defaults as part of its broader tracked advanced-video gap.
 
+The TUI's Advanced → Video accordion does expose the shared synchronized-audio
+contract for LTX-2: Audio cycles `default` / `on` / `off`, where `default`
+omits `enable_audio`, `on` selects MP4, and a current checkpoint advertising
+`supports_audio:false` hides the row. Pipeline, guidance, conditioning-file,
+and upscale controls remain the separate broader TUI gap.
+
 Community LTX-2 checkpoints can be video-only even when their transformer and
 video VAE are complete. Mold inspects the installed safetensors for both the
 audio VAE and vocoder; web, desktop, and iPhone disable generated audio when

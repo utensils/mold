@@ -195,7 +195,13 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
         AdvSection::Lora => vec![ParamField::Lora],
         AdvSection::Upscale => vec![ParamField::Upscale],
         AdvSection::Output => vec![ParamField::Format],
-        AdvSection::Video => vec![ParamField::Frames, ParamField::Fps],
+        AdvSection::Video => {
+            let mut fields = vec![ParamField::Frames, ParamField::Fps];
+            if caps.supports_audio {
+                fields.push(ParamField::Audio);
+            }
+            fields
+        }
     }
 }
 
@@ -279,7 +285,17 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             .unwrap_or_else(|| "none".into()),
         AdvSection::Upscale => params.upscale_model.clone().unwrap_or_else(|| "off".into()),
         AdvSection::Output => format!("{:?}", params.format).to_lowercase(),
-        AdvSection::Video => format!("{}f \u{00b7} {}fps", params.frames, params.fps),
+        AdvSection::Video => {
+            let mut summary = format!("{}f \u{00b7} {}fps", params.frames, params.fps);
+            if let Some(enabled) = params.enable_audio {
+                summary.push_str(if enabled {
+                    " \u{00b7} audio on"
+                } else {
+                    " \u{00b7} audio off"
+                });
+            }
+            summary
+        }
     }
 }
 
@@ -313,6 +329,9 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         count += 1;
     }
     if params.expand {
+        count += 1;
+    }
+    if params.enable_audio.is_some() {
         count += 1;
     }
     count
@@ -476,6 +495,15 @@ mod tests {
     }
 
     #[test]
+    fn ltx2_video_section_exposes_audio_without_leaking_to_legacy_video() {
+        let ltx2 = capabilities_for_family("ltx2");
+        assert!(section_fields(AdvSection::Video, &ltx2).contains(&ParamField::Audio));
+
+        let legacy = capabilities_for_family("ltx-video");
+        assert!(!section_fields(AdvSection::Video, &legacy).contains(&ParamField::Audio));
+    }
+
+    #[test]
     fn negative_section_gated_on_capability() {
         let caps = capabilities_for_family("flux");
         if !caps.supports_negative_prompt {
@@ -557,6 +585,17 @@ mod tests {
             "real-esrgan-x4plus:fp16"
         );
         assert_eq!(section_summary(AdvSection::Negative, &params, false), "on");
+
+        params.enable_audio = Some(true);
+        assert_eq!(
+            section_summary(AdvSection::Video, &params, true),
+            "25f \u{00b7} 24fps \u{00b7} audio on"
+        );
+        params.enable_audio = Some(false);
+        assert_eq!(
+            section_summary(AdvSection::Video, &params, true),
+            "25f \u{00b7} 24fps \u{00b7} audio off"
+        );
     }
 
     #[test]
@@ -579,6 +618,13 @@ mod tests {
         params.source_image_path = Some("/tmp/a.png".into());
         params.mask_image_path = Some("/tmp/m.png".into());
         assert_eq!(advanced_active_count(&params, false), 8);
+
+        params.enable_audio = Some(false);
+        assert_eq!(
+            advanced_active_count(&params, false),
+            9,
+            "an explicit audio override must count even when it disables audio"
+        );
     }
 
     #[test]

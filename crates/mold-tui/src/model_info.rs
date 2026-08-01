@@ -21,6 +21,8 @@ pub struct ModelCapabilities {
     pub supports_lora: bool,
     /// Whether the model is a video model (supports frames/fps params).
     pub supports_video: bool,
+    /// Whether the model can emit synchronized audio with video.
+    pub supports_audio: bool,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -38,6 +40,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: true,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -50,6 +53,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -62,6 +66,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -74,6 +79,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -86,6 +92,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false, // ControlNet only supported on SD1.5
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -98,6 +105,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -110,6 +118,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -122,6 +131,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "qwen-image-edit" => ModelCapabilities {
@@ -134,6 +144,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
         "ltx-video" => ModelCapabilities {
@@ -146,6 +157,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: false,
             supports_video: true,
+            supports_audio: false,
             default_scheduler: None,
         },
         "ltx2" => ModelCapabilities {
@@ -158,6 +170,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: true,
             supports_video: true,
+            supports_audio: true,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -170,9 +183,25 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
+            supports_audio: false,
             default_scheduler: None,
         },
     }
+}
+
+/// Refine family capabilities with the selected checkpoint's additive
+/// `/api/models[].supports_audio` fact. Older servers omit the field, so
+/// `None` preserves the family-level LTX-2 capability; a current server's
+/// explicit `false` hides a control the checkpoint cannot honor.
+pub fn capabilities_for_model(
+    family: &str,
+    advertised_audio_support: Option<bool>,
+) -> ModelCapabilities {
+    let mut caps = capabilities_for_family(family);
+    if advertised_audio_support == Some(false) {
+        caps.supports_audio = false;
+    }
+    caps
 }
 
 /// Resolve the family string for a given model name using the config and manifest.
@@ -256,6 +285,14 @@ mod tests {
         assert!(!caps.supports_img2img);
         assert!(!caps.supports_controlnet);
         assert!(caps.supports_lora);
+    }
+
+    #[test]
+    fn checkpoint_audio_fact_can_disable_ltx2_audio_without_enabling_other_families() {
+        assert!(capabilities_for_model("ltx2", None).supports_audio);
+        assert!(capabilities_for_model("ltx2", Some(true)).supports_audio);
+        assert!(!capabilities_for_model("ltx2", Some(false)).supports_audio);
+        assert!(!capabilities_for_model("ltx-video", Some(true)).supports_audio);
     }
 
     #[test]

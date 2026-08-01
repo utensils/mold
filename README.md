@@ -220,6 +220,10 @@ Or open the keyboard-first Mold Studio terminal interface:
 mold tui
 ```
 
+Its Advanced → Video section exposes Frames/FPS for video models and a
+checkpoint-aware `default` / `on` / `off` synchronized-audio control for
+LTX-2, using the same `enable_audio` request contract as the CLI and apps.
+
 <p align="center">
   <img src="website/public/gallery/tui-generate.png" alt="Mold TUI Create workspace with image preview" width="720" />
   <br/>
