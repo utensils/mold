@@ -3860,6 +3860,9 @@ impl App {
                     OutputFormat::Webp => OutputFormat::Mp4,
                     OutputFormat::Mp4 => OutputFormat::Png,
                 };
+                if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
+                    p.enable_audio = None;
+                }
             }
             ParamField::Expand => {
                 p.expand = !p.expand;
@@ -9643,6 +9646,21 @@ mod tests {
 
         app.dispatch_action(Action::Confirm);
         assert_eq!(app.generate.params.enable_audio, Some(true));
+    }
+
+    #[tokio::test]
+    async fn changing_away_from_mp4_clears_audio_override() {
+        let mut app = make_settings_test_app();
+        app.generate.params.format = OutputFormat::Mp4;
+        app.generate.params.enable_audio = Some(true);
+
+        app.adjust_field(ParamField::Format, 1);
+
+        assert_ne!(app.generate.params.format, OutputFormat::Mp4);
+        assert_eq!(
+            app.generate.params.enable_audio, None,
+            "a non-MP4 container cannot retain explicit audio output authority"
+        );
     }
 
     #[tokio::test]
