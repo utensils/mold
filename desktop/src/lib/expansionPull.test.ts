@@ -121,6 +121,21 @@ describe("resolveExpansionPullStatus", () => {
     expect(status).toMatchObject({ kind: "pulling", job: { id: "already-running" } });
   });
 
+  it("shows an active job without transfer totals as starting", () => {
+    const status = resolveExpansionPullStatus({
+      model: "qwen3-expand:q8",
+      phase: "starting",
+      jobId: "preparing",
+      baselineJobIds: [],
+      allowExistingInFlight: false,
+      activeJobs: [job("preparing", "active", { files_total: 0, bytes_total: 0 })],
+      queued: [],
+      history: [],
+    });
+
+    expect(status).toMatchObject({ kind: "starting", job: { id: "preparing" } });
+  });
+
   it.each(["jobId", "observedJobId"] as const)(
     "waits only for authoritative %s A instead of following competing same-model B",
     (field) => {

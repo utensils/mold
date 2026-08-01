@@ -59,6 +59,7 @@ function pct(job: DownloadJobWire): number {
 }
 
 function subLine(job: DownloadJobWire): string {
+  if (!job.bytes_total) return "Preparing download…";
   const parts = [`${job.files_done}/${job.files_total} files`];
   const rate = formatRate(props.rateByJob[job.id]);
   if (rate) parts.push(rate);

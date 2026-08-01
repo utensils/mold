@@ -100,7 +100,14 @@ export function applyDownloadEvent(state: DownloadsState, event: DownloadEvent):
         ),
       };
     case "file_done":
-      return state;
+      return {
+        ...state,
+        activeJobs: state.activeJobs.map((job) =>
+          job.id === event.id
+            ? { ...job, files_done: Math.min(job.files_total, job.files_done + 1) }
+            : job,
+        ),
+      };
     case "job_done":
       return finishJob(state, event.id, "completed");
     case "job_failed":

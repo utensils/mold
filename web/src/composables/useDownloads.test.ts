@@ -112,6 +112,35 @@ describe("applyDownloadEvent", () => {
     expect(state.active?.status).toBe("active");
   });
 
+  it("preserves the model when preparing is followed by real transfer totals", () => {
+    const state = newDownloadsState();
+    applyDownloadEvent(state, {
+      type: "enqueued",
+      id: "a",
+      model: "ltx-2-19b-distilled:fp8",
+      position: 0,
+    });
+    applyDownloadEvent(state, {
+      type: "started",
+      id: "a",
+      files_total: 0,
+      bytes_total: 0,
+    });
+    applyDownloadEvent(state, {
+      type: "started",
+      id: "a",
+      files_total: 19,
+      bytes_total: 28_336_447_724,
+    });
+    expect(state.activeJobs).toHaveLength(1);
+    expect(state.active).toMatchObject({
+      id: "a",
+      model: "ltx-2-19b-distilled:fp8",
+      files_total: 19,
+      bytes_total: 28_336_447_724,
+    });
+  });
+
   it("Progress updates bytes_done", () => {
     const state = newDownloadsState();
     applyDownloadEvent(state, {

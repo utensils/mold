@@ -231,6 +231,24 @@ describe("DownloadsTray a11y", () => {
     expect(wrapper.get('[data-test="download-eta"]').text()).toContain("—");
   });
 
+  it("labels active pre-transfer work as preparing instead of queued or zero-file progress", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [
+      job({
+        files_done: 0,
+        files_total: 0,
+        bytes_done: 0,
+        bytes_total: 0,
+        current_file: "Verifying file [1/19] tokenizer.json...",
+      }),
+    ];
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("preparing");
+    expect(wrapper.get('[data-test="download-current-file"]').text()).toContain("Verifying file");
+    expect(wrapper.find('[data-test="download-files"]').exists()).toBe(false);
+  });
+
   it("renders failed jobs in a collapsed history section with their error", async () => {
     const store = useDownloadsStore();
     store.history = [job({ status: "failed", error: "connection reset" })];

@@ -54,6 +54,23 @@ describe("DownloadsPopover", () => {
     expect(wrapper.text()).toContain("eta 5s");
   });
 
+  it("renders active pre-transfer work as preparing instead of 0/0 progress", () => {
+    const wrapper = mountPopover({
+      active: [
+        makeJob({
+          files_done: 0,
+          files_total: 0,
+          bytes_done: 0,
+          bytes_total: 0,
+          current_file: "Verifying file [1/19] tokenizer.json...",
+        }) as never,
+      ],
+    });
+    expect(wrapper.text()).toContain("Preparing");
+    expect(wrapper.text()).toContain("Verifying file");
+    expect(wrapper.text()).not.toContain("0/0 files");
+  });
+
   it("shows each concurrent download its own eta", () => {
     const wrapper = mountPopover({
       active: [

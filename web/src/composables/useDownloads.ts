@@ -81,7 +81,7 @@ export function applyDownloadEvent(
       const from =
         idx >= 0
           ? state.queued.splice(idx, 1)[0]
-          : {
+          : (state.activeJobs.find((job) => job.id === event.id) ?? {
               id: event.id,
               model: "",
               catalog_id: null,
@@ -94,7 +94,7 @@ export function applyDownloadEvent(
               started_at: null,
               completed_at: null,
               error: null,
-            };
+            });
       const active: DownloadJobWire = {
         ...from,
         status: "active",

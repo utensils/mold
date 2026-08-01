@@ -1189,7 +1189,12 @@ onBeforeUnmount(() => {
           >
             <div class="mobile-catalog-download-copy">
               <strong>{{ modelLabel(row.job.model) }}</strong>
-              <span>{{ row.host.name }} · {{ row.job.status }}</span>
+              <span>
+                {{ row.host.name }} ·
+                {{
+                  row.job.status === "active" && !row.job.bytes_total ? "Preparing" : row.job.status
+                }}
+              </span>
             </div>
             <div
               class="mobile-catalog-download-progress"
@@ -1204,6 +1209,9 @@ onBeforeUnmount(() => {
             <span class="mobile-catalog-download-size">
               <template v-if="row.job.bytes_total">
                 {{ formatGB(row.job.bytes_done) }} / {{ formatGB(row.job.bytes_total) }}
+              </template>
+              <template v-else-if="row.job.status === 'active'">
+                {{ row.job.current_file || "Preparing…" }}
               </template>
               <template v-else>Waiting…</template>
             </span>

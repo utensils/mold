@@ -455,6 +455,33 @@ describe("MobileHostDetail remote host data", () => {
         .get("[role='meter'][aria-label='Download progress for qwen-image:bf16']")
         .attributes("aria-valuenow"),
     ).toBe("25");
+
+    stream("/api/downloads/stream").options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: {
+          active_jobs: [
+            {
+              id: "download-2",
+              model: "ltx-2-19b-distilled:fp8",
+              status: "active",
+              files_done: 0,
+              files_total: 0,
+              bytes_done: 0,
+              bytes_total: 0,
+              current_file: "Verifying file [1/19] tokenizer.json...",
+            },
+          ],
+          queued: [],
+          history: [],
+        },
+      }),
+    );
+    await flushPromises();
+    expect(view.text()).toContain("Preparing");
+    expect(view.text()).toContain("Verifying file [1/19]");
+    expect(view.text()).not.toContain("0/0 files");
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
   });
 
