@@ -66,8 +66,7 @@ async function saveCurrent() {
     nameDraft.value = "";
     refresh();
   } catch (cause) {
-    error.value =
-      cause instanceof Error ? cause.message : "Couldn’t save the template and its source image.";
+    error.value = cause instanceof Error ? cause.message : "Couldn’t save the template media.";
   } finally {
     saving.value = false;
   }

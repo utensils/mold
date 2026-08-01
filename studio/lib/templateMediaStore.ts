@@ -67,7 +67,7 @@ export async function persistGenerationTemplateMedia(
   try {
     for (const record of stored) {
       if (!(await persistence.put(record))) {
-        throw new Error("Source image storage is unavailable.");
+        throw new Error("Template media storage is unavailable.");
       }
       written.push(record.assetId);
     }

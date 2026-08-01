@@ -80,7 +80,7 @@ async function saveCurrent() {
     error.value =
       cause instanceof Error
         ? cause.message
-        : "Couldn’t save the template and its source image.";
+        : "Couldn’t save the template media.";
   } finally {
     saving.value = false;
   }
@@ -96,7 +96,7 @@ async function loadTemplate(template: GenerationTemplate) {
     emit("update:modelValue", hydrated.form);
     if (hydrated.sourceMissing) {
       error.value =
-        "The template loaded, but its source image is no longer available.";
+        "The template loaded, but some saved images are no longer available.";
     }
   } catch (cause) {
     if (epoch === loadEpoch) {
