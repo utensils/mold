@@ -4437,10 +4437,7 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith(
-      "http://pair.local:7680",
-      "one-time-token",
-    );
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
     expect(wrapper?.get(".error-text").text()).toContain("different Mold host");
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
