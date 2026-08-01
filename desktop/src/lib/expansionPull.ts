@@ -69,7 +69,7 @@ export function resolveExpansionPullStatus(input: ExpansionPullResolutionInput):
 function viewForJob(job: DownloadJob): ExpansionPullView {
   switch (job.status) {
     case "active":
-      return { kind: "pulling", job };
+      return { kind: job.bytes_total > 0 ? "pulling" : "starting", job };
     case "queued":
       return { kind: "queued", job };
     case "completed":

@@ -157,16 +157,26 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
 
     // Collect events for up to 2 seconds.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let mut seen_started = false;
+    let mut started_totals = Vec::new();
     let mut seen_progress = false;
+    let mut seen_preparing_status = false;
     let mut seen_done = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Ok(DownloadEvent::Started { id: ev_id, .. })) if ev_id == id => {
-                seen_started = true;
+            Ok(Ok(DownloadEvent::Started {
+                id: ev_id,
+                files_total,
+                bytes_total,
+            })) if ev_id == id => {
+                started_totals.push((files_total, bytes_total));
             }
-            Ok(Ok(DownloadEvent::Progress { id: ev_id, .. })) if ev_id == id => {
+            Ok(Ok(DownloadEvent::Progress {
+                id: ev_id,
+                current_file,
+                ..
+            })) if ev_id == id => {
                 seen_progress = true;
+                seen_preparing_status |= current_file.as_deref() == Some("starting");
             }
             Ok(Ok(DownloadEvent::JobDone { id: ev_id, .. })) if ev_id == id => {
                 seen_done = true;
@@ -189,8 +199,20 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
         Some("hf_desktop".into()),
         "request-scoped HF fallback was not forwarded to the pull driver"
     );
-    assert!(seen_started, "missing Started event");
+    assert_eq!(
+        started_totals.first(),
+        Some(&(0, 0)),
+        "the queue must publish active/preparing before the pull driver resolves file metadata"
+    );
+    assert!(
+        started_totals.contains(&(1, 1_000)),
+        "the later Started update must publish the real transfer totals"
+    );
     assert!(seen_progress, "missing Progress event");
+    assert!(
+        seen_preparing_status,
+        "pre-transfer status must be visible to SSE clients"
+    );
     assert!(seen_done, "missing JobDone event");
 
     // History should now hold one Completed entry.

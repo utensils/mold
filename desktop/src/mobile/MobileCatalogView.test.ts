@@ -1797,10 +1797,11 @@ describe("MobileCatalogView", () => {
             id: "job-1",
             model: "flux-dev:q8",
             status: "active",
-            files_done: 1,
-            files_total: 4,
-            bytes_done: 25,
-            bytes_total: 100,
+            files_done: 0,
+            files_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            current_file: "Verifying file [1/4] tokenizer.json...",
           },
         ],
         queued: [],
@@ -1822,6 +1823,24 @@ describe("MobileCatalogView", () => {
 
     const row = wrapper.get("[data-test='mobile-catalog-download']");
     expect(row.text()).toContain("flux-dev:q8");
+    expect(row.text()).toContain("Preparing");
+    expect(row.text()).toContain("Verifying file [1/4]");
+    expect(row.text()).not.toContain("Waiting");
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({ type: "started", id: "job-1", files_total: 4, bytes_total: 100 }),
+    );
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "job-1",
+        files_done: 1,
+        bytes_done: 25,
+        current_file: "transformer.gguf",
+      }),
+    );
+    await flushPromises();
     expect(row.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
     expect(wrapper.emitted("models-changed")).toContainEqual([studio.id]);
 

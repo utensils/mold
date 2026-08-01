@@ -960,6 +960,17 @@ async fn run_one_job(
         abort: cancel.clone(),
     };
     queue.set_active(active_handle).await;
+    // The queue owns the lifecycle transition, so publish it immediately.
+    // Waiting for the pull driver's first FileStart left clients showing
+    // "queued" throughout repository resolution, cache verification, and
+    // request setup even though this job already occupied an active slot.
+    // A second Started frame supplies the real totals once file metadata is
+    // available; reducers treat it as an idempotent active-job update.
+    queue.emit(DownloadEvent::Started {
+        id: job.id.clone(),
+        files_total: 0,
+        bytes_total: 0,
+    });
 
     let _ = try_pull_with_retry(
         queue,
@@ -1245,13 +1256,24 @@ async fn translate_event(
                 });
             }
             P::Status { message } => {
-                // Only surface as a transient info on the active job's current_file
-                // placeholder. The drawer shows `current_file` literally.
-                queue
+                // Status-only preflight work is still live progress. Mirror
+                // the current counters into a Progress delta so connected
+                // clients see verification/resolution text without waiting
+                // for a later snapshot or the first transferred byte.
+                let counters = queue
                     .with_active(&id, |j| {
                         j.current_file = Some(message.clone());
+                        (j.files_done, j.bytes_done)
                     })
                     .await;
+                if let Some((files_done, bytes_done)) = counters {
+                    queue.emit(DownloadEvent::Progress {
+                        id: id.clone(),
+                        files_done,
+                        bytes_done,
+                        current_file: Some(message),
+                    });
+                }
             }
         }
     }

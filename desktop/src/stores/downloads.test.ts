@@ -68,6 +68,14 @@ describe("applyDownloadEvent", () => {
     expect(s.activeJobs[0]?.current_file).toBe("unet.safetensors");
   });
 
+  it("advances completed-file progress before the next byte update", () => {
+    const s = reduce([
+      { type: "snapshot", listing: snapshot },
+      { type: "file_done", id: "a", filename: "tokenizer.json" },
+    ]);
+    expect(s.activeJobs[0]?.files_done).toBe(2);
+  });
+
   it("promotes a queued job to active on started with its totals", () => {
     const s = reduce([
       { type: "snapshot", listing: { active: null, queued: snapshot.queued, history: [] } },
@@ -77,6 +85,32 @@ describe("applyDownloadEvent", () => {
     expect(s.activeJobs[0]?.status).toBe("active");
     expect(s.activeJobs[0]?.bytes_total).toBe(6_900_000);
     expect(s.queued).toHaveLength(0);
+  });
+
+  it("keeps identity while early preparing totals are replaced by transfer totals", () => {
+    const s = reduce([
+      { type: "enqueued", id: "b", model: "ltx-2-19b-distilled:fp8", position: 0 },
+      { type: "started", id: "b", files_total: 0, bytes_total: 0 },
+      {
+        type: "progress",
+        id: "b",
+        files_done: 0,
+        bytes_done: 0,
+        current_file: "Verifying file [1/19] tokenizer.json...",
+      },
+      { type: "started", id: "b", files_total: 19, bytes_total: 28_336_447_724 },
+      { type: "enqueued", id: "c", model: "z-image-turbo:bf16", position: 0 },
+      { type: "started", id: "c", files_total: 4, bytes_total: 12_000 },
+      { type: "started", id: "b", files_total: 19, bytes_total: 28_336_447_724 },
+    ]);
+    expect(s.activeJobs.map((job) => job.id)).toEqual(["b", "c"]);
+    expect(s.activeJobs[0]).toMatchObject({
+      id: "b",
+      model: "ltx-2-19b-distilled:fp8",
+      status: "active",
+      files_total: 19,
+      bytes_total: 28_336_447_724,
+    });
   });
 
   it("enqueues a synthetic queued job and dequeues by id", () => {

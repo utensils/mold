@@ -16,6 +16,7 @@ import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import type {
   DownloadEvent,
+  DownloadJob,
   GpuSnapshot,
   ModelEntry,
   ResourceSnapshot,
@@ -90,6 +91,14 @@ const queueDepth = computed(() =>
   queueApiAvailable.value ? queue.value.length : (status.value?.queue_depth ?? queue.value.length),
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
+
+function downloadStatus(job: DownloadJob): string {
+  if (job.status === "queued") return "Waiting";
+  if (!job.bytes_total) {
+    return job.current_file ? `Preparing… · ${job.current_file}` : "Preparing…";
+  }
+  return `${job.files_done}/${job.files_total} files`;
+}
 
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value?.gpus.length) return snapshot.value.gpus;
@@ -752,9 +761,7 @@ onBeforeUnmount(() => {
           <li v-for="job in inFlightDownloads" :key="job.id">
             <div class="download-row-copy">
               <strong>{{ modelLabel(job.model) }}</strong>
-              <span>{{
-                job.status === "queued" ? "Waiting" : `${job.files_done}/${job.files_total} files`
-              }}</span>
+              <span>{{ downloadStatus(job) }}</span>
               <div
                 v-if="job.status === 'active'"
                 class="meter"

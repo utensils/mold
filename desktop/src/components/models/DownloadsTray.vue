@@ -60,6 +60,10 @@ function isRetrying(row: HostedDownloadJob): boolean {
   return retrying.value.includes(rowKey(row));
 }
 
+function statusLabel(row: HostedDownloadJob): string {
+  return row.job.status === "active" && row.job.bytes_total === 0 ? "preparing" : row.job.status;
+}
+
 async function retry(row: HostedDownloadJob) {
   const key = rowKey(row);
   if (retrying.value.includes(key)) return;
@@ -105,7 +109,7 @@ async function retry(row: HostedDownloadJob) {
             :class="STATUS_CHIP[row.job.status]"
             data-test="download-status"
           >
-            {{ row.job.status }}
+            {{ statusLabel(row) }}
           </span>
           <div
             class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath"
