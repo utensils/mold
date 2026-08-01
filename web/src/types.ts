@@ -691,24 +691,14 @@ export interface LoraSelection {
 /// Soft cap on stacked LoRAs in the web UI. The inference engine has no
 /// hard limit (the merge is `W' = W + Σ deltas`) but each adapter adds
 /// matmul work and disk I/O at build time, so 4 is a sane UX ceiling.
-export const MAX_LORA_STACK = 4;
+export { MAX_LORA_STACK } from "@studio/lib/generationCapabilities";
 
 /// Families whose engines actually merge LoRA adapters today. Mirrors
 /// `crates/mold-tui/src/model_info.rs::capabilities_for_family` and the
 /// server-side gate in `mold-core/src/validation.rs`. Keep all three in
 /// sync — divergence shows up as a UI that lets the user pick a LoRA the
 /// server then rejects.
-export const LORA_CAPABLE_FAMILIES = [
-  "flux",
-  "flux2",
-  "ltx2",
-  "sd15",
-  "sd3",
-  "sdxl",
-  "qwen-image",
-  "qwen-image-edit",
-  "z-image",
-] as const;
+export { LORA_CAPABLE_FAMILIES } from "@studio/lib/generationCapabilities";
 
 /** Advanced overrides for the LTX-2 multimodal guider, and their form-side
  * mirror. Both shapes and every parse/serialize rule live in `@studio` so

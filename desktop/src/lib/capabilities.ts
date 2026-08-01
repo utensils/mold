@@ -1,9 +1,8 @@
 /**
  * Per-family generation capability matrix.
  *
- * Logic ported verbatim from the web SPA's `generateCapabilities.ts`
- * (families, scheduler options, CFG++ gate, negative-prompt gate, LoRA gate,
- * ControlNet gate, qwen-edit mode, batch-size lock). Two desktop additions:
+ * Shared family policy lives in `@studio/lib/generationCapabilities`. Two
+ * desktop additions:
  *   - `supportsImg2img` — whether the SourceImageWell should render at all.
  *     True for every non-video image family AND for LTX-2, whose engine
  *     stages `source_image` as frame-0 conditioning (image-to-video, with
@@ -12,106 +11,55 @@
  *   - `pruneRequestForFamily` — strips request fields the target family does
  *     not support, applied on model change so a leftover value never ships.
  *
- * Keep the LoRA-capable list in sync with the web `LORA_CAPABLE_FAMILIES`,
- * `mold-tui/src/model_info.rs::capabilities_for_family`, and the server-side
+ * Keep the shared LoRA-capable list in sync with
+ * `mold-tui/src/model_info.rs::capabilities_for_family` and the server-side
  * gate in `mold-core/src/validation.rs`.
  */
+import {
+  baseGenerationCapabilities,
+  isAdvancedVideoFamily,
+  isFlux2DevModel,
+  isQwenImageEditFamily,
+  MAX_LORA_STACK,
+  type BaseGenerationCapabilities,
+} from "@studio/lib/generationCapabilities";
 import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
 
-export type SourceImageMode = "single" | "qwen-edit" | "references";
+export type { SourceImageMode } from "@studio/lib/generationCapabilities";
+export { isFlux2DevModel, isQwenImageEditFamily, MAX_LORA_STACK };
 
-export interface GenerationCapabilities {
-  supportsNegativePrompt: boolean;
-  supportsScheduler: boolean;
+export interface GenerationCapabilities extends Omit<
+  BaseGenerationCapabilities,
+  "schedulerOptions"
+> {
   schedulerOptions: Scheduler[];
-  supportsCfgPlus: boolean;
-  supportsVideo: boolean;
-  supportsAudio: boolean;
-  supportsLora: boolean;
-  supportsControlNet: boolean;
   supportsImg2img: boolean;
-  sourceImageMode: SourceImageMode;
-  supportsMask: boolean;
-  forcesBatchSizeOne: boolean;
   /** LTX-2 only — the pipeline/keyframe/upscale/retake surface. `ltx-video`
    * is a plain video family and does NOT get these. */
   supportsAdvancedVideo: boolean;
 }
 
-const SCHEDULER_OPTIONS: Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
-
-const NO_NEGATIVE_PROMPT_FAMILIES = new Set([
-  "flux",
-  "flux2",
-  "flux.2",
-  "flux-2",
-  "z-image",
-  "qwen-image",
-  "qwen_image",
-  "qwen-image-edit",
-]);
-
-const SCHEDULER_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5", "sdxl"]);
-
-const CFG_PLUS_FAMILIES = new Set(["sd3", "sd3.5"]);
-const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2"]);
-const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
-/** LTX-2 only — the advanced pipeline/keyframe/upscale/retake surface. */
-const ADVANCED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2"]);
-const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
-
-/** Mirrors web `LORA_CAPABLE_FAMILIES`. */
-const LORA_CAPABLE_FAMILIES = new Set([
-  "flux",
-  "flux2",
-  "ltx2",
-  "sd15",
-  "sd3",
-  "sdxl",
-  "qwen-image",
-  "qwen-image-edit",
-  "z-image",
-]);
-
-/** Soft ceiling on stacked LoRAs — matches web `MAX_LORA_STACK`. */
-export const MAX_LORA_STACK = 4;
-
 export function generationCapabilitiesForFamily(
   family: string,
   model = "",
 ): GenerationCapabilities {
-  const normalized = family.trim().toLowerCase();
-  const qwenEdit = isQwenImageEditFamily(normalized);
-  const referenceEdit = qwenEdit || isFlux2DevModel(model);
-  const supportsVideo = VIDEO_FAMILIES.has(normalized);
-  const schedulerOptions = SCHEDULER_FAMILIES.has(normalized) ? SCHEDULER_OPTIONS.slice() : [];
+  const shared = baseGenerationCapabilities(family, model);
+  const supportsAdvancedVideo = isAdvancedVideoFamily(family);
   return {
-    supportsNegativePrompt: !NO_NEGATIVE_PROMPT_FAMILIES.has(normalized),
-    supportsScheduler: schedulerOptions.length > 0,
-    schedulerOptions,
-    supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
-    supportsVideo,
-    supportsAudio: AUDIO_FAMILIES.has(normalized),
-    supportsLora: !isFlux2DevModel(model) && LORA_CAPABLE_FAMILIES.has(normalized),
-    supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
+    ...shared,
     // LTX-2 accepts a still source_image as frame-0 conditioning (img2video);
     // ltx-video's engine has no img2vid path, so only the advanced-video
     // families get the well among video families.
-    supportsImg2img: !supportsVideo || ADVANCED_VIDEO_FAMILIES.has(normalized),
-    sourceImageMode: isFlux2DevModel(model) ? "references" : qwenEdit ? "qwen-edit" : "single",
-    supportsMask: !referenceEdit && !supportsVideo,
-    // Qwen edit always has a target image. FLUX.2 Dev only requires one
-    // output when references are actually attached; serializers and controls
-    // apply that request-sensitive lock.
-    forcesBatchSizeOne: qwenEdit,
-    supportsAdvancedVideo: ADVANCED_VIDEO_FAMILIES.has(normalized),
+    supportsImg2img: !shared.supportsVideo || supportsAdvancedVideo,
+    supportsMask: shared.supportsMask && !shared.supportsVideo,
+    supportsAdvancedVideo,
   };
 }
 
 /** LTX-2 advanced video gate: pipeline mode, keyframes, spatial/temporal
  * upscale, retake range, and source video. `ltx-video` returns false. */
 export function supportsAdvancedVideo(family: string): boolean {
-  return generationCapabilitiesForFamily(family).supportsAdvancedVideo;
+  return isAdvancedVideoFamily(family);
 }
 
 export function schedulerOptionsForFamily(family: string): Scheduler[] {
@@ -120,15 +68,6 @@ export function schedulerOptionsForFamily(family: string): Scheduler[] {
 
 export function isVideoFamily(family: string): boolean {
   return generationCapabilitiesForFamily(family).supportsVideo;
-}
-
-export function isQwenImageEditFamily(family: string): boolean {
-  return family === "qwen-image-edit";
-}
-
-export function isFlux2DevModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase();
-  return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");
 }
 
 /** Output-format options for a family, most-preferred first (the UI default). */
