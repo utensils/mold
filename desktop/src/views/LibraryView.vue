@@ -314,6 +314,11 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void copyImage(entry),
     },
     {
+      label: "Use as source",
+      disabled: isVideo(item),
+      action: () => void useAsSource(entry),
+    },
+    {
       label: "Copy file path",
       action: () =>
         void copyLocalOutputPath(item.filename)
@@ -691,14 +696,12 @@ function removeSelected() {
 }
 
 /**
- * "Use as source" from the lightbox — load this print's bytes into the Create
+ * "Use as source" from the gallery — load this print's bytes into the Create
  * composer as the img2img source (raw base64, the form's contract) and open
  * Create. Deliberately does NOT touch `composer.prefill`, so GenerateView's
  * prefill watcher can't clobber the source we just attached.
  */
-async function useSelectedAsSource() {
-  const entry = selectedEntry.value;
-  if (!entry) return;
+async function useAsSource(entry: MergedPrint) {
   try {
     const base64 = await fetchItemBase64(entry);
     generateForm.form.sourceImage = base64;
@@ -709,6 +712,11 @@ async function useSelectedAsSource() {
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
+}
+
+async function useSelectedAsSource() {
+  const entry = selectedEntry.value;
+  if (entry) await useAsSource(entry);
 }
 
 // Deep link: /library?host=<bucket key> pre-picks a chip ("local" = This

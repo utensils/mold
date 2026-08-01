@@ -92,6 +92,25 @@ describe("MachinesPage", () => {
     expect(w.get('[data-test="host-mem"]').text()).toContain("/ 48.0 GB");
   });
 
+  it("opens a common-actions context menu for a connected host", async () => {
+    poll.loading.value = false;
+    poll.online.value = true;
+    poll.status.value = makeStatus();
+    const w = mountPage();
+    await nextTick();
+
+    await w.get('[data-test="host-card"]').trigger("contextmenu", {
+      clientX: 24,
+      clientY: 32,
+    });
+    const menu = w.get('[data-test="machine-context-menu"]');
+    expect(menu.text()).toContain("Open details");
+    expect(menu.text()).toContain("Generation target");
+    expect(menu.text()).toContain("Copy address");
+    expect(menu.text()).not.toContain("Disconnect");
+    expect(menu.text()).not.toContain("Forget");
+  });
+
   it("shows an offline card with a retry that forces a poll", async () => {
     poll.loading.value = false;
     poll.online.value = false;
@@ -132,6 +151,32 @@ describe("MachinesPage", () => {
       connected: true,
       apiKey: "secret",
     });
+  });
+
+  it("offers reconnect and forget for a remembered host context menu", async () => {
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-7680",
+          name: "Studio",
+          url: "http://studio:7680",
+          apiKey: "secret",
+          connected: false,
+        },
+      ]),
+    );
+    poll.loading.value = false;
+    const w = mountPage();
+    const cards = w.findAll('[data-test="host-card"]');
+    expect(cards).toHaveLength(2);
+    await cards[1]!.trigger("contextmenu", { clientX: 24, clientY: 32 });
+
+    const menu = w.get('[data-test="machine-context-menu"]');
+    expect(menu.text()).toContain("Connect");
+    expect(menu.text()).toContain("Copy address");
+    expect(menu.text()).toContain("Forget…");
+    expect(menu.text()).not.toContain("Disconnect");
   });
 
   it("opens the connect modal from the header button", async () => {
