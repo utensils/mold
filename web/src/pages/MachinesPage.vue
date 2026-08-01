@@ -51,7 +51,7 @@ function closeContextMenu() {
   contextMenu.value = null;
 }
 
-function onWindowPointer(event: MouseEvent) {
+function onDocumentPointer(event: PointerEvent) {
   const target = event.target as HTMLElement | null;
   if (!target?.closest("[data-test='machine-context-menu']"))
     closeContextMenu();
@@ -64,14 +64,14 @@ function onWindowKey(event: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener(HOSTS_CHANGED_EVENT, refreshHosts);
   window.addEventListener("storage", onStorage);
-  window.addEventListener("mousedown", onWindowPointer);
+  document.addEventListener("pointerdown", onDocumentPointer);
   window.addEventListener("keydown", onWindowKey);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener(HOSTS_CHANGED_EVENT, refreshHosts);
   window.removeEventListener("storage", onStorage);
-  window.removeEventListener("mousedown", onWindowPointer);
+  document.removeEventListener("pointerdown", onDocumentPointer);
   window.removeEventListener("keydown", onWindowKey);
 });
 
@@ -122,7 +122,9 @@ async function contextCopyAddress() {
 function contextConnect() {
   const host = contextMenu.value?.host;
   closeContextMenu();
-  if (host) reconnect(host.id);
+  if (!host) return;
+  const connected = setHostConnected(host.id, true);
+  if (connected) toast("success", `${connected.name} connected.`);
 }
 
 function contextDisconnect() {

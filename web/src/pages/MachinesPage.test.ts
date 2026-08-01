@@ -6,6 +6,13 @@ import type { ResourceSnapshot } from "../types";
 import MachinesPage from "./MachinesPage.vue";
 import ConnectModal from "../components/machines/ConnectModal.vue";
 
+const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
+
+vi.mock("../lib/toasts", () => ({
+  toast: toastMock,
+  requestConfirm: vi.fn().mockResolvedValue(false),
+}));
+
 // Shared, mutable poll stub returned by the mocked useHostPoll (every HostCard
 // shares it — the page renders one card here, the primary origin).
 let poll: {
@@ -55,6 +62,7 @@ const mountPage = () =>
 
 beforeEach(() => {
   localStorage.clear();
+  toastMock.mockClear();
   poll = {
     status: ref<HostStatus | null>(null),
     resources: ref<ResourceSnapshot | null>(null),
@@ -109,6 +117,12 @@ describe("MachinesPage", () => {
     expect(menu.text()).toContain("Copy address");
     expect(menu.text()).not.toContain("Disconnect");
     expect(menu.text()).not.toContain("Forget");
+
+    document.body.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true }),
+    );
+    await nextTick();
+    expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
   });
 
   it("shows an offline card with a retry that forces a poll", async () => {
@@ -177,6 +191,15 @@ describe("MachinesPage", () => {
     expect(menu.text()).toContain("Copy address");
     expect(menu.text()).toContain("Forget…");
     expect(menu.text()).not.toContain("Disconnect");
+
+    await menu
+      .findAll("button")
+      .find((button) => button.text() === "Connect")!
+      .trigger("click");
+    expect(
+      JSON.parse(localStorage.getItem("mold.web.hosts.v1") ?? "[]")[0],
+    ).toMatchObject({ connected: true });
+    expect(toastMock).toHaveBeenCalledWith("success", "Studio connected.");
   });
 
   it("opens the connect modal from the header button", async () => {
