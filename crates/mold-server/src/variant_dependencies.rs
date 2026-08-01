@@ -1037,7 +1037,7 @@ async fn prepare_inputs_for_devices(
     let qwen3_family = matches!(
         family.as_str(),
         "z-image" | "flux2" | "flux.2" | "flux2-klein"
-    );
+    ) && !mold_core::validation::is_flux2_dev_model(&request.model);
     let qwen3_auto = base
         .qwen3_variant
         .as_deref()
@@ -1076,10 +1076,13 @@ async fn prepare_inputs_for_devices(
             .t5_variant
             .as_deref()
             .is_none_or(|value| value.is_empty() || value == "auto"),
-        "z-image" | "flux2" | "flux.2" | "flux2-klein" => base
-            .qwen3_variant
-            .as_deref()
-            .is_none_or(|value| value.is_empty() || value == "auto"),
+        "z-image" | "flux2" | "flux.2" | "flux2-klein"
+            if !mold_core::validation::is_flux2_dev_model(&request.model) =>
+        {
+            base.qwen3_variant
+                .as_deref()
+                .is_none_or(|value| value.is_empty() || value == "auto")
+        }
         "qwen-image" | "qwen_image" | "qwen-image-edit" => base
             .qwen2_variant
             .as_deref()
@@ -1121,7 +1124,9 @@ async fn prepare_inputs_for_devices(
                 )
                 .await
             }
-            "z-image" | "flux2" | "flux.2" | "flux2-klein" => {
+            "z-image" | "flux2" | "flux.2" | "flux2-klein"
+                if !mold_core::validation::is_flux2_dev_model(&request.model) =>
+            {
                 materialize_qwen3(
                     &dependency_context,
                     &request.model,
@@ -1728,6 +1733,72 @@ mod tests {
         assert!(flux2_uses_qwen3_8b("flux2-klein-9b", &paths));
         paths.text_encoder_files = vec![PathBuf::from("/missing")];
         assert!(!flux2_uses_qwen3_8b("opaque-model-id", &paths));
+    }
+
+    #[test]
+    fn flux2_dev_is_not_a_qwen3_dependency_family() {
+        assert!(mold_core::validation::is_flux2_dev_model("flux2-dev:bf16"));
+        assert!(mold_core::validation::is_flux2_dev_model(
+            "hf:black-forest-labs/FLUX.2-dev"
+        ));
+        assert!(!mold_core::validation::is_flux2_dev_model(
+            "flux2-klein-9b:bf16"
+        ));
+    }
+
+    #[tokio::test]
+    async fn flux2_dev_preserves_checkpoint_native_mistral_dependencies() {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "transformer.safetensors",
+            "vae.safetensors",
+            "mistral-00001.safetensors",
+            "tokenizer.json",
+        ] {
+            std::fs::write(root.path().join(name), b"prepared").unwrap();
+        }
+        let mistral = root.path().join("mistral-00001.safetensors");
+        let mut config = Config {
+            qwen3_variant: Some("q4".to_string()),
+            ..Config::default()
+        };
+        config.models.insert(
+            "prepared-flux2-dev".to_string(),
+            ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("transformer.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                text_encoder_files: Some(vec![mistral.display().to_string()]),
+                text_tokenizer: Some(root.path().join("tokenizer.json").display().to_string()),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"prepared-flux2-dev","width":256,"height":256,"steps":1,"guidance":4.0}"#,
+        )
+        .unwrap();
+        let prepared = prepare_local_execution_inputs(
+            &config,
+            &request,
+            vec![DeviceFact {
+                id: "cuda:0".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 24_000_000_000,
+            }],
+        )
+        .await
+        .unwrap();
+        let device = &prepared.by_device["cuda:0"];
+        assert_eq!(device.engine_paths.text_encoder_files, vec![mistral]);
+        assert_eq!(device.engine_config.qwen3_variant, None);
+        assert!(device.engine_config.selected_qwen3_paths.is_empty());
     }
 
     fn zimage_case() -> (TempDir, Config, GenerateRequest) {

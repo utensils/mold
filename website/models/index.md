@@ -149,7 +149,7 @@ for more options.
 
 | Family                                | Native Resolution             | Architecture                                   |
 | ------------------------------------- | ----------------------------- | ---------------------------------------------- |
-| [FLUX.2](/models/flux2)               | 1024x1024                     | Qwen3 encoder, 4B transformer                  |
+| [FLUX.2](/models/flux2)               | 1024x1024                     | Klein Qwen3 or Dev Mistral3 transformer family |
 | [FLUX.1](/models/flux)                | 1024x1024                     | Flow-matching transformer                      |
 | [SDXL](/models/sdxl)                  | 1024x1024                     | Dual-CLIP, UNet                                |
 | [SD 1.5](/models/sd15)                | 512x512                       | CLIP-L, UNet                                   |

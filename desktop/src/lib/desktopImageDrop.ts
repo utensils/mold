@@ -31,10 +31,10 @@ export function applyDesktopImageDrop(
   const metadataApplied = image.metadata != null;
   if (image.metadata) applyMetadataToForm(form, image.metadata, models);
 
-  const caps = generationCapabilitiesForFamily(form.family);
+  const caps = generationCapabilitiesForFamily(form.family, form.model);
   if (!caps.supportsImg2img) return { attached: false, metadataApplied };
 
-  if (caps.sourceImageMode === "qwen-edit") {
+  if (caps.sourceImageMode !== "single") {
     form.sourceImage = null;
     form.sourceImageName = null;
     form.imageAttachments = [image.base64];

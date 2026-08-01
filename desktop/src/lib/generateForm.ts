@@ -94,9 +94,9 @@ export interface GenerateForm {
    * and never travel on the generation wire. */
   sourceImageWidth: number | null;
   sourceImageHeight: number | null;
-  /** Qwen-Image-Edit picture strip, base64 each (no data-URI prefix). Order is
-   * load-bearing: index 0 is the primary edit Target, the rest are References.
-   * Only read in `sourceImageMode === "qwen-edit"`; empty everywhere else. */
+  /** Ordered edit/reference strip, base64 each (no data-URI prefix). For Qwen,
+   * index 0 is the edit Target and the rest are References. FLUX.2 Dev treats
+   * every entry as an ordered Reference. Empty in single-source mode. */
   imageAttachments: string[];
   /** How a source image that doesn't match width×height maps onto the canvas.
    * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
@@ -243,7 +243,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
 export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): void {
   form.model = m.name;
   form.family = m.family;
-  const caps = generationCapabilitiesForFamily(m.family);
+  const caps = generationCapabilitiesForFamily(m.family, m.name);
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
   }
@@ -257,7 +257,7 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.sourceImageHeight = null;
     form.maskImage = null;
     form.imageAttachments = [];
-  } else if (caps.sourceImageMode === "qwen-edit") {
+  } else if (caps.sourceImageMode !== "single") {
     // Entering qwen-edit: a single-mode source seeds the strip as the Target
     // (web parity — the Composer's attachment survives the model switch).
     if (form.imageAttachments.length === 0 && form.sourceImage) {
@@ -329,7 +329,9 @@ export function resetFormToModelDefaults(
   }
   form.prompt = prompt;
   form.originalPrompt = originalPrompt;
-  form.batchSize = generationCapabilitiesForFamily(form.family).forcesBatchSizeOne ? 1 : batchSize;
+  form.batchSize = generationCapabilitiesForFamily(form.family, form.model).forcesBatchSizeOne
+    ? 1
+    : batchSize;
 }
 
 /**
@@ -338,7 +340,7 @@ export function resetFormToModelDefaults(
  * ships even if the form retained a stale value.
  */
 export function buildRequest(form: GenerateForm): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(form.family);
+  const caps = generationCapabilitiesForFamily(form.family, form.model);
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   const loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
 
@@ -363,7 +365,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     height: form.height,
     steps: form.steps,
     guidance: form.guidance,
-    batch_size: form.batchSize,
+    batch_size:
+      caps.forcesBatchSizeOne ||
+      (caps.sourceImageMode === "references" && form.imageAttachments.length > 0)
+        ? 1
+        : form.batchSize,
     output_format: form.outputFormat,
   };
 
@@ -382,7 +388,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // by forcesBatchSizeOne + pruneRequestForFamily.
   if (
     caps.supportsImg2img &&
-    caps.sourceImageMode === "qwen-edit" &&
+    caps.sourceImageMode !== "single" &&
     form.imageAttachments.length > 0
   ) {
     req.edit_images = [...form.imageAttachments];
@@ -446,7 +452,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.pipeline === "a2vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
-  return pruneRequestForFamily(req, form.family);
+  return pruneRequestForFamily(req, form.family, form.model);
 }
 
 const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];

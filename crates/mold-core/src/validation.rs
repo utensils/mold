@@ -8,6 +8,12 @@ use crate::{
 pub const MAX_PIXELS: u64 = 1_800_000;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
+pub const FLUX2_DEV_MAX_REFERENCE_IMAGES: usize = 4;
+/// BFL's pixel cap for a single FLUX.2 Dev reference. The upstream value is
+/// intentionally 2024 squared, not 2048 squared.
+pub const FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS: u64 = 2_024 * 2_024;
+/// BFL's per-image pixel cap when a FLUX.2 Dev request has multiple references.
+pub const FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS: u64 = 1_024 * 1_024;
 pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
     "flux",
     "flux2",
@@ -602,6 +608,7 @@ pub fn validate_generate_request_with_family(
             ));
         }
     }
+    let flux2_dev = is_flux2_dev_model(&req.model);
     if family == Some("qwen-image-edit") {
         if req.edit_images.as_ref().is_none_or(Vec::is_empty) {
             return Err(
@@ -628,8 +635,41 @@ pub fn validate_generate_request_with_family(
                 }
             }
         }
+    } else if flux2_dev {
+        if req.batch_size != 1
+            && req
+                .edit_images
+                .as_ref()
+                .is_some_and(|images| !images.is_empty())
+        {
+            return Err("flux2-dev reference editing only supports batch_size = 1".to_string());
+        }
+        if req.source_image.is_some() {
+            return Err("flux2-dev uses edit_images instead of source_image".to_string());
+        }
+        if req.mask_image.is_some() {
+            return Err("flux2-dev does not support mask_image".to_string());
+        }
+        if req.control_image.is_some() || req.control_model.is_some() {
+            return Err("flux2-dev does not support ControlNet inputs".to_string());
+        }
+        if req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty()) {
+            return Err("flux2-dev does not support LoRA".to_string());
+        }
+        if let Some(images) = &req.edit_images {
+            if images.len() > FLUX2_DEV_MAX_REFERENCE_IMAGES {
+                return Err(format!(
+                    "flux2-dev supports at most {FLUX2_DEV_MAX_REFERENCE_IMAGES} ordered reference images"
+                ));
+            }
+            if images.iter().any(|image| !is_valid_image_format(image)) {
+                return Err("edit_images must contain only PNG or JPEG images".to_string());
+            }
+        }
     } else if req.edit_images.is_some() {
-        return Err("edit_images are only supported for qwen-image-edit models".to_string());
+        return Err(
+            "edit_images are only supported for qwen-image-edit and flux2-dev models".to_string(),
+        );
     }
     // img2img validation
     if let Some(ref img) = req.source_image {
@@ -888,6 +928,13 @@ pub fn validate_generate_request_with_family(
     }
 
     Ok(())
+}
+
+/// Whether a stable name or catalog ID denotes the first-party FLUX.2 Dev
+/// architecture rather than a Klein checkpoint.
+pub fn is_flux2_dev_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("flux2-dev") || model.contains("flux.2-dev")
 }
 
 /// Validate an upscale request. Returns `Ok(())` if valid, or an error message.
@@ -2195,6 +2242,49 @@ mod tests {
         req.edit_images = Some(vec![png_bytes()]);
         req.guidance = 4.0;
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn flux2_dev_accepts_text_only_and_ordered_references() {
+        let mut req = valid_req();
+        req.model = "flux2-dev:bf16".to_string();
+        req.guidance = 4.0;
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.edit_images = Some(vec![png_bytes(), jpeg_bytes()]);
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn flux2_dev_catalog_id_accepts_references_but_rejects_img2img_fields() {
+        let mut req = valid_req();
+        req.model = "hf:black-forest-labs/FLUX.2-dev".to_string();
+        req.edit_images = Some(vec![png_bytes()]);
+        assert!(validate_generate_request_with_family(&req, Some("flux2")).is_ok());
+
+        req.source_image = Some(png_bytes());
+        let error = validate_generate_request_with_family(&req, Some("flux2")).unwrap_err();
+        assert!(error.contains("edit_images instead of source_image"));
+    }
+
+    #[test]
+    fn flux2_dev_bounds_reference_count_and_rejects_lora() {
+        let mut req = valid_req();
+        req.model = "flux2-dev:bf16".to_string();
+        req.edit_images = Some(vec![png_bytes(); FLUX2_DEV_MAX_REFERENCE_IMAGES + 1]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("at most"));
+
+        req.edit_images = None;
+        req.lora = Some(LoraWeight {
+            path: "adapter.safetensors".into(),
+            scale: 1.0,
+        });
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            "flux2-dev does not support LoRA"
+        );
     }
 
     #[test]

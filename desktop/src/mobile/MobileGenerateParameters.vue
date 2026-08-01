@@ -71,7 +71,12 @@ const emit = defineEmits<{
   "validity-change": [valid: boolean];
 }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const batchLocked = computed(
+  () =>
+    caps.value.forcesBatchSizeOne ||
+    (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
+);
 const generationRequest = computed(() => buildRequest(props.form));
 const frameError = computed(() =>
   caps.value.supportsVideo ? frames8n1Error(props.form.frames) : null,
@@ -136,12 +141,12 @@ watch(
 );
 
 function stepBatch(delta: -1 | 1): void {
-  if (caps.value.forcesBatchSizeOne) return;
+  if (batchLocked.value) return;
   props.form.batchSize = Math.min(MAX_BATCH_SIZE, Math.max(1, props.form.batchSize + delta));
 }
 
 function setBatch(raw: string): void {
-  if (caps.value.forcesBatchSizeOne) return;
+  if (batchLocked.value) return;
   const value = Number(raw);
   props.form.batchSize = Number.isFinite(value)
     ? Math.min(MAX_BATCH_SIZE, Math.max(1, Math.round(value)))
@@ -447,11 +452,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       <div class="mobile-generate-field">
         <div class="mobile-generate-label-row">
           <span class="mobile-generate-label">Batch</span>
-          <span
-            v-if="caps.forcesBatchSizeOne"
-            class="mobile-generate-note"
-            data-test="mobile-batch-locked"
-          >
+          <span v-if="batchLocked" class="mobile-generate-note" data-test="mobile-batch-locked">
             Edit models render one at a time
           </span>
         </div>
@@ -461,7 +462,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             class="mobile-generate-stepper-button"
             data-test="mobile-batch-decrement"
             aria-label="Decrease batch size"
-            :disabled="caps.forcesBatchSizeOne || form.batchSize <= 1"
+            :disabled="batchLocked || form.batchSize <= 1"
             @click="stepBatch(-1)"
           >
             −
@@ -474,8 +475,8 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             min="1"
             step="1"
             aria-label="Batch size"
-            :value="form.batchSize"
-            :disabled="caps.forcesBatchSizeOne"
+            :value="batchLocked ? 1 : form.batchSize"
+            :disabled="batchLocked"
             @change="setBatch(($event.target as HTMLInputElement).value)"
           />
           <button
@@ -483,7 +484,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             class="mobile-generate-stepper-button"
             data-test="mobile-batch-increment"
             aria-label="Increase batch size"
-            :disabled="caps.forcesBatchSizeOne || form.batchSize >= MAX_BATCH_SIZE"
+            :disabled="batchLocked || form.batchSize >= MAX_BATCH_SIZE"
             @click="stepBatch(1)"
           >
             +

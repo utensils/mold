@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # mold — Local AI Image Generation CLI
 
-Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, and Wuerstchen diffusion models running on local GPU hardware.
+Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, and Wuerstchen diffusion models running on local GPU hardware.
 
 The native apps' public privacy policy is sourced at `website/privacy.md`,
 published at `https://utensils.io/mold/privacy`, and linked from the desktop and
@@ -375,6 +375,7 @@ Pick the right model for the task:
 | `flux-dev:q4`                       | Slow (25 steps)   | Excellent | Final quality, detailed                                 |
 | `flux2-klein:q8`                    | Fast (4 steps)    | Good      | Low VRAM, lightweight FLUX                              |
 | `flux2-klein-9b:q8`                 | Fast (4 steps)    | Excellent | Higher quality 9B, non-commercial                       |
+| `flux2-dev:bf16`                    | Slow (50 steps)   | Excellent | Full FLUX.2 Dev; gated, non-commercial, high host RAM   |
 | `sdxl-turbo:fp16`                   | Fast (4 steps)    | Good      | Quick SDXL generation                                   |
 | `sd15:fp16`                         | Medium (25 steps) | Good      | ControlNet, 512x512                                     |
 | `z-image-turbo:q8`                  | Fast (9 steps)    | Excellent | High quality, Qwen3 encoder                             |
@@ -425,6 +426,8 @@ Default model if none specified: `flux2-klein:q8`
 **Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
 
 **Flux.2 Klein-9B**: `flux2-klein-9b:bf16`, `flux2-klein-9b:q8`, `flux2-klein-9b:q6`, `flux2-klein-9b:q4`
+
+**Flux.2 Dev**: `flux2-dev:bf16` (gated, non-commercial; 50 steps, guidance 4.0; automatically block-offloads on constrained CUDA GPUs)
 
 **Wuerstchen**: `wuerstchen-v2:fp16`
 

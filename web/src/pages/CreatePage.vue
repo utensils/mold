@@ -104,6 +104,7 @@ import {
   isQwenImageEditFamily,
   useGenerateForm,
 } from "../composables/useGenerateForm";
+import { isFlux2DevModel } from "../lib/generateCapabilities";
 import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   activeCanvasJob,
@@ -953,7 +954,10 @@ function syncSourceCanvas(
       },
       previous.resolution,
     );
-  if (replaced || wasFollowing) {
+  const isReferenceConditioning = isFlux2DevModel(
+    currentModel.value?.name ?? form.state.value.model,
+  );
+  if (!isReferenceConditioning && (replaced || wasFollowing)) {
     form.state.value.width = resolution.output.width;
     form.state.value.height = resolution.output.height;
   }
@@ -1030,7 +1034,7 @@ const currentFamily = computed(
 );
 
 const capabilities = computed(() =>
-  generationCapabilitiesForFamily(currentFamily.value),
+  generationCapabilitiesForFamily(currentFamily.value, form.state.value.model),
 );
 
 // Continuation rides the selected model's own `/api/models` row, which the
@@ -1872,8 +1876,10 @@ function validateSubmit(): boolean {
     composerError.value = "Qwen image edit needs a target image.";
     return false;
   }
+  const referenceEdit =
+    qwenImageEdit || isFlux2DevModel(form.state.value.model);
   if (
-    !qwenImageEdit &&
+    !referenceEdit &&
     form.state.value.maskImage &&
     form.state.value.imageAttachments.length === 0
   ) {
@@ -2445,8 +2451,10 @@ async function onPickSource(v: SourceImageState[]) {
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
     ) || form.state.value.model.startsWith("qwen-image-edit:");
+  const flux2Dev = isFlux2DevModel(form.state.value.model);
+  const referenceEdit = qwenEdit || flux2Dev;
   if (
-    !qwenEdit &&
+    !referenceEdit &&
     form.state.value.maskImage &&
     form.state.value.imageAttachments.length > 0 &&
     v.length > 0 &&
@@ -2454,10 +2462,13 @@ async function onPickSource(v: SourceImageState[]) {
   ) {
     return;
   }
-  form.state.value.imageAttachments = qwenEdit
-    ? [...form.state.value.imageAttachments, ...v]
+  form.state.value.imageAttachments = referenceEdit
+    ? [...form.state.value.imageAttachments, ...v].slice(
+        0,
+        flux2Dev ? 4 : undefined,
+      )
     : v.slice(0, 1);
-  if (!qwenEdit && v.length > 0) {
+  if (!referenceEdit && v.length > 0) {
     // A source-matched canvas differs only by the model's pixel grid or safe
     // downscale. Resize exactly instead of manufacturing narrow repaint bands.
     form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
@@ -3240,11 +3251,16 @@ onBeforeUnmount(() => {
       :title="
         sequenceMode
           ? 'Opening sequence image'
-          : currentFamily === 'qwen-image-edit'
+          : currentFamily === 'qwen-image-edit' ||
+              isFlux2DevModel(form.state.value.model)
             ? 'Edit images'
             : 'Source image'
       "
-      :multiple="!sequenceMode && currentFamily === 'qwen-image-edit'"
+      :multiple="
+        !sequenceMode &&
+        (currentFamily === 'qwen-image-edit' ||
+          isFlux2DevModel(form.state.value.model))
+      "
       @pick="onPickSource"
       @close="showPicker = false"
     />

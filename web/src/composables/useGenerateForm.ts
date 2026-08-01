@@ -180,7 +180,10 @@ function modelDefaultsPatch(
     loras: [],
     icLoraControl: null,
   };
-  const capabilities = generationCapabilitiesForFamily(model.family);
+  const capabilities = generationCapabilitiesForFamily(
+    model.family,
+    model.name,
+  );
   if (capabilities.supportsVideo) {
     next.frames ??= 25;
     // The model's advertised rate is applied like steps/guidance — it is only
@@ -221,8 +224,10 @@ function modelDefaultsPatch(
     next.guidanceOverrides = emptyGuidanceOverrides();
     next.cameraControl = null;
   }
-  if (capabilities.sourceImageMode === "qwen-edit") {
-    next.batchSize = 1;
+  if (capabilities.sourceImageMode !== "single") {
+    if (capabilities.sourceImageMode !== "references") {
+      next.batchSize = 1;
+    }
     next.maskImage = null;
     next.controlImage = null;
     next.controlModel = "";
@@ -588,9 +593,16 @@ export function useGenerateForm(): UseGenerateForm {
       // multi-LoRA stacks reach the FLUX engine; older single-LoRA
       // clients still set `lora`, which the server coalesces.
       let loras = s.loras.map((l) => ({ path: l.path, scale: l.scale }));
-      const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
-      const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
+      const capabilities = generationCapabilitiesForFamily(
+        selectedFamily(s),
+        s.model,
+      );
+      const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];
+      const requestForcesBatchSizeOne =
+        capabilities.forcesBatchSizeOne ||
+        (capabilities.sourceImageMode === "references" &&
+          attachments.length > 0);
       const controlModel = capabilities.supportsControlNet
         ? s.controlModel.trim()
         : "";
@@ -629,11 +641,11 @@ export function useGenerateForm(): UseGenerateForm {
         steps: s.steps,
         guidance: s.guidance,
         seed: s.seedMode === "random" ? null : s.seed,
-        batch_size: capabilities.forcesBatchSizeOne ? 1 : s.batchSize,
+        batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,
         cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
         scheduler: capabilities.supportsScheduler ? s.scheduler : undefined,
-        ...(qwenEdit
+        ...(attachmentMode
           ? {
               edit_images: attachments.map((image) => image.base64),
             }
@@ -659,7 +671,7 @@ export function useGenerateForm(): UseGenerateForm {
         gif_preview:
           capabilities.supportsVideo && s.gifPreview ? true : undefined,
         placement: s.placement ?? undefined,
-        loras: loras.length ? loras : undefined,
+        loras: capabilities.supportsLora && loras.length ? loras : undefined,
         // A persisted draft can retain `true` from a previously-selected AV
         // checkpoint. The resolved model row is the final authority at submit
         // time: video-only LTX-2 exports must never reach the server with audio

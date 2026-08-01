@@ -20,7 +20,9 @@ const loading = ref(false);
 const error = ref("");
 let loadToken = 0;
 
-const supported = computed(() => generationCapabilitiesForFamily(props.form.family).supportsLora);
+const supported = computed(
+  () => generationCapabilitiesForFamily(props.form.family, props.form.model).supportsLora,
+);
 const summary = computed(() =>
   props.form.loras.length === 0 ? "Optional" : `${props.form.loras.length} active`,
 );

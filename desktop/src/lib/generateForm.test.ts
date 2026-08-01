@@ -421,6 +421,42 @@ describe("buildRequest — qwen-edit edit_images", () => {
   });
 });
 
+describe("buildRequest — FLUX.2 Dev references", () => {
+  it("uses edit_images while keeping Klein on classic source_image", () => {
+    const dev = newGenerateForm();
+    dev.model = "flux2-dev:bf16";
+    dev.family = "flux2";
+    dev.prompt = "preserve the subject";
+    dev.imageAttachments = ["REF_ONE", "REF_TWO"];
+    dev.batchSize = 2;
+    const devRequest = buildRequest(dev);
+    expect(devRequest.edit_images).toEqual(["REF_ONE", "REF_TWO"]);
+    expect("source_image" in devRequest).toBe(false);
+    expect(devRequest.batch_size).toBe(1);
+
+    const klein = newGenerateForm();
+    klein.model = "flux2-klein:q8";
+    klein.family = "flux2";
+    klein.prompt = "a cat";
+    klein.sourceImage = "SOURCE";
+    const kleinRequest = buildRequest(klein);
+    expect(kleinRequest.source_image).toBe("SOURCE");
+    expect("edit_images" in kleinRequest).toBe(false);
+  });
+
+  it("preserves text-only batches and locks only reference requests", () => {
+    const dev = newGenerateForm();
+    dev.model = "flux2-dev:bf16";
+    dev.family = "flux2";
+    dev.prompt = "three landscapes";
+    dev.batchSize = 3;
+
+    expect(buildRequest(dev).batch_size).toBe(3);
+    dev.imageAttachments = ["REFERENCE"];
+    expect(buildRequest(dev).batch_size).toBe(1);
+  });
+});
+
 describe("buildRequest — independent ControlNet conditioning", () => {
   it("ships control_image, model, and scale without source_image", () => {
     const form = newGenerateForm();

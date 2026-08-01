@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repo. Keep lean: only things not obviou
 
 ## What mold is
 
-Local AI image/video generation CLI built on [candle](https://github.com/huggingface/candle). Supports FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, Wuerstchen v2, LTX-Video, and LTX-2. Runs locally on GPU or talks to a remote `mold serve` over HTTP. Single binary, everything feature-gated.
+Local AI image/video generation CLI built on [candle](https://github.com/huggingface/candle). Supports FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, Wuerstchen v2, LTX-Video, and LTX-2. Runs locally on GPU or talks to a remote `mold serve` over HTTP. Single binary, everything feature-gated.
 
 Desktop gallery authority is singular: while its local server is running or its lifecycle is unresolved, native list/save/delete/media paths use authenticated HTTP (ticketed for media elements). Direct filesystem access is allowed only while the lifecycle mutex proves `LocalServer::Off`.
 

@@ -4,7 +4,7 @@ import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
 import { fetchCatalogInstalled } from "../lib/api/catalog";
 import type { ApiTarget } from "../lib/api/client";
 import type { CatalogEntry, ModelEntry } from "../lib/api/types";
-import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import { generationCapabilitiesForFamily, isFlux2DevModel } from "../lib/capabilities";
 import { buildControlNetOptions } from "../lib/controlNetOptions";
 import { attachmentRoleLabel, attachmentTitleLabel, moveAttachment } from "../lib/editAttachments";
 import type { GenerateForm } from "../lib/generateForm";
@@ -36,8 +36,9 @@ const emit = defineEmits<{
   "validity-change": [valid: boolean];
 }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
-const isQwenEdit = computed(() => caps.value.sourceImageMode === "qwen-edit");
+const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const isAttachmentMode = computed(() => caps.value.sourceImageMode !== "single");
+const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 const error = ref("");
 const maskOpen = ref(false);
 const sourcePickerOpen = ref(false);
@@ -67,7 +68,7 @@ const controlSelectValue = computed(() =>
   controlCustomMode.value ? CUSTOM_CONTROL_MODEL : props.form.controlModel,
 );
 const validationError = computed(() => {
-  if (isQwenEdit.value && props.form.imageAttachments.length === 0) {
+  if (caps.value.sourceImageMode === "qwen-edit" && props.form.imageAttachments.length === 0) {
     return "Add a Target photo before generating an edit.";
   }
   if (caps.value.supportsControlNet && props.form.controlImage && !props.form.controlModel.trim()) {
@@ -210,10 +211,8 @@ function pickSource(image: MobilePickedImage): void {
 async function pickEditImages(event: Event): Promise<void> {
   const picked = await readImages(event, true);
   if (picked.length === 0) return;
-  props.form.imageAttachments = [
-    ...props.form.imageAttachments,
-    ...picked.map((image) => image.b64),
-  ];
+  const next = [...props.form.imageAttachments, ...picked.map((image) => image.b64)];
+  props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
 }
 
 async function pickMask(event: Event): Promise<void> {
@@ -294,10 +293,18 @@ function applyMask(mask: string): void {
 
 <template>
   <template v-if="caps.supportsImg2img">
-    <fieldset v-if="isQwenEdit" class="mobile-source-controls" data-test="mobile-source-controls">
-      <legend class="mobile-source-legend">Pictures</legend>
+    <fieldset
+      v-if="isAttachmentMode"
+      class="mobile-source-controls"
+      data-test="mobile-source-controls"
+    >
+      <legend class="mobile-source-legend">{{ flux2Dev ? "References" : "Pictures" }}</legend>
       <p class="mobile-source-note">
-        The first picture is the edit Target. Additional pictures are References.
+        {{
+          flux2Dev
+            ? "Add up to four optional references. Their order is preserved."
+            : "The first picture is the edit Target. Additional pictures are References."
+        }}
       </p>
       <p
         v-if="validationError"
@@ -344,7 +351,7 @@ function applyMask(mask: string): void {
           />
           <div class="mobile-attachment-copy">
             <strong :data-test="`mobile-edit-role-${index}`">{{
-              attachmentRoleLabel(index)
+              flux2Dev ? `Reference ${index + 1}` : attachmentRoleLabel(index)
             }}</strong>
             <span :data-test="`mobile-edit-title-${index}`">{{ attachmentTitleLabel(index) }}</span>
           </div>
@@ -630,7 +637,7 @@ function applyMask(mask: string): void {
       @close="maskOpen = false"
     />
     <MobileImagePickerSheet
-      v-if="!isQwenEdit"
+      v-if="!isAttachmentMode"
       :open="sourcePickerOpen"
       :target="target"
       title="Source image"

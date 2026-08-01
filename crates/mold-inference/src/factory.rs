@@ -59,10 +59,14 @@ impl FrozenEngineConfig {
                 .value("MOLD_T5_VARIANT")
                 .map(str::to_string)
                 .or_else(|| config.t5_variant.clone()),
-            qwen3_variant: runtime_environment
-                .value("MOLD_QWEN3_VARIANT")
-                .map(str::to_string)
-                .or_else(|| config.qwen3_variant.clone()),
+            qwen3_variant: (!mold_core::validation::is_flux2_dev_model(model_name))
+                .then(|| {
+                    runtime_environment
+                        .value("MOLD_QWEN3_VARIANT")
+                        .map(str::to_string)
+                        .or_else(|| config.qwen3_variant.clone())
+                })
+                .flatten(),
             qwen2_variant: runtime_environment
                 .value("MOLD_QWEN2_VARIANT")
                 .map(str::to_string),
@@ -748,6 +752,17 @@ mod tests {
         assert!(error
             .to_string()
             .contains("refusing post-lease dependency resolution"));
+    }
+
+    #[test]
+    fn flux2_dev_ignores_global_qwen3_variant_authority() {
+        let config = Config {
+            qwen3_variant: Some("q4".into()),
+            ..Config::default()
+        };
+        let frozen = FrozenEngineConfig::resolve("flux2-dev:bf16", &config);
+        assert_eq!(frozen.qwen3_variant, None);
+        assert!(frozen.selected_qwen3_paths.is_empty());
     }
 
     #[test]

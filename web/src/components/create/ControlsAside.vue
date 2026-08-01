@@ -77,13 +77,20 @@ const emit = defineEmits<{
 }>();
 
 const capabilities = computed(() =>
-  generationCapabilitiesForFamily(props.family),
+  generationCapabilitiesForFamily(
+    props.family,
+    props.model?.name ?? props.modelValue.model,
+  ),
 );
 const sequenceMode = computed(() => props.output === "sequence");
 // Edit families (Qwen image edit) render one print at a time; a sequence
 // renders one timeline.
 const batchLocked = computed(
-  () => capabilities.value.forcesBatchSizeOne || sequenceMode.value,
+  () =>
+    capabilities.value.forcesBatchSizeOne ||
+    (capabilities.value.sourceImageMode === "references" &&
+      props.modelValue.imageAttachments.length > 0) ||
+    sequenceMode.value,
 );
 
 const outputSegments = [

@@ -18,7 +18,7 @@
  */
 import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
 
-export type SourceImageMode = "single" | "qwen-edit";
+export type SourceImageMode = "single" | "qwen-edit" | "references";
 
 export interface GenerationCapabilities {
   supportsNegativePrompt: boolean;
@@ -76,9 +76,13 @@ const LORA_CAPABLE_FAMILIES = new Set([
 /** Soft ceiling on stacked LoRAs — matches web `MAX_LORA_STACK`. */
 export const MAX_LORA_STACK = 4;
 
-export function generationCapabilitiesForFamily(family: string): GenerationCapabilities {
+export function generationCapabilitiesForFamily(
+  family: string,
+  model = "",
+): GenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
+  const referenceEdit = qwenEdit || isFlux2DevModel(model);
   const supportsVideo = VIDEO_FAMILIES.has(normalized);
   const schedulerOptions = SCHEDULER_FAMILIES.has(normalized) ? SCHEDULER_OPTIONS.slice() : [];
   return {
@@ -88,14 +92,17 @@ export function generationCapabilitiesForFamily(family: string): GenerationCapab
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
     supportsVideo,
     supportsAudio: AUDIO_FAMILIES.has(normalized),
-    supportsLora: LORA_CAPABLE_FAMILIES.has(normalized),
+    supportsLora: !isFlux2DevModel(model) && LORA_CAPABLE_FAMILIES.has(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
     // LTX-2 accepts a still source_image as frame-0 conditioning (img2video);
     // ltx-video's engine has no img2vid path, so only the advanced-video
     // families get the well among video families.
     supportsImg2img: !supportsVideo || ADVANCED_VIDEO_FAMILIES.has(normalized),
-    sourceImageMode: qwenEdit ? "qwen-edit" : "single",
-    supportsMask: !qwenEdit && !supportsVideo,
+    sourceImageMode: isFlux2DevModel(model) ? "references" : qwenEdit ? "qwen-edit" : "single",
+    supportsMask: !referenceEdit && !supportsVideo,
+    // Qwen edit always has a target image. FLUX.2 Dev only requires one
+    // output when references are actually attached; serializers and controls
+    // apply that request-sensitive lock.
     forcesBatchSizeOne: qwenEdit,
     supportsAdvancedVideo: ADVANCED_VIDEO_FAMILIES.has(normalized),
   };
@@ -119,6 +126,11 @@ export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
 }
 
+export function isFlux2DevModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");
+}
+
 /** Output-format options for a family, most-preferred first (the UI default). */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
   return isVideoFamily(family) ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"];
@@ -134,25 +146,34 @@ export function defaultOutputFormat(family: string): OutputFormat {
  * family) changes so a value set for one family never leaks into a request for
  * another (e.g. a scheduler chosen under SDXL must not ship with FLUX).
  */
-export function pruneRequestForFamily(req: GenerateRequest, family: string): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(family);
+export function pruneRequestForFamily(
+  req: GenerateRequest,
+  family: string,
+  model = "",
+): GenerateRequest {
+  const caps = generationCapabilitiesForFamily(family, model);
   const next: GenerateRequest = { ...req };
 
   if (!caps.supportsNegativePrompt) delete next.negative_prompt;
   if (!caps.supportsScheduler) delete next.scheduler;
   if (!caps.supportsCfgPlus) delete next.cfg_plus;
 
-  if (caps.forcesBatchSizeOne) next.batch_size = 1;
+  if (
+    caps.forcesBatchSizeOne ||
+    (caps.sourceImageMode === "references" && (next.edit_images?.length ?? 0) > 0)
+  ) {
+    next.batch_size = 1;
+  }
 
   // qwen-edit requests carry `edit_images` (ordered: target first, then
   // references) and NEVER `source_image`/`strength`; every other family is the
   // exact inverse. The sanitizer used to strip the image entirely for
   // qwen-edit — keep `edit_images` intact there (P7 regression flip).
-  if (!caps.supportsImg2img || caps.sourceImageMode === "qwen-edit") {
+  if (!caps.supportsImg2img || caps.sourceImageMode !== "single") {
     delete next.source_image;
     delete next.strength;
   }
-  if (!caps.supportsImg2img || caps.sourceImageMode !== "qwen-edit") {
+  if (!caps.supportsImg2img || caps.sourceImageMode === "single") {
     delete next.edit_images;
   }
   if (!caps.supportsMask) delete next.mask_image;

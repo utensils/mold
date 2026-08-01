@@ -121,7 +121,7 @@ fn read_tensor_keys(path: &Path) -> Result<Vec<String>, DetectError> {
 }
 
 /// Header-peek the checkpoint to determine its `hidden_size` (= the
-/// `Flux2Config` variant: 3072 → klein-4B, 4096 → klein-9B).
+/// `Flux2Config` variant: 3072 → Klein-4B, 4096 → Klein-9B, 6144 → Dev).
 ///
 /// Reads the shape of the first weight tensor whose first dim is the
 /// transformer's `hidden_size`. Probes `<prefix>img_in.weight` (first dim
@@ -148,6 +148,9 @@ pub fn detect_hidden_size(path: &Path) -> Result<Option<usize>, DetectError> {
 
     for prefix in ["model.diffusion_model.", ""] {
         if let Some(d) = first_dim(&format!("{prefix}img_in.weight")) {
+            return Ok(Some(d));
+        }
+        if let Some(d) = first_dim(&format!("{prefix}x_embedder.weight")) {
             return Ok(Some(d));
         }
     }
@@ -261,6 +264,21 @@ mod tests {
         let p = temp_path("unknown");
         write_fixture(&p, &["some.other.weight"]);
         assert_eq!(detect_format(&p).unwrap(), Flux2SingleFileFormat::Unknown);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn flux2_detect_hidden_size_recognizes_dev_diffusers_input() {
+        let p = temp_path("dev-hidden-size");
+        let bytes = vec![0u8; 6_144 * 128 * 2];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "x_embedder.weight".to_string(),
+            TensorView::new(SafeDtype::BF16, vec![6_144, 128], &bytes).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &p).unwrap();
+
+        assert_eq!(detect_hidden_size(&p).unwrap(), Some(6_144));
         let _ = std::fs::remove_file(p);
     }
 }

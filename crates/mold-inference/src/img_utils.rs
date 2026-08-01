@@ -1,7 +1,8 @@
 //! Image decoding and preprocessing utilities for img2img.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
+use image::{DynamicImage, RgbImage};
 
 /// Normalization range for source images before VAE encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +26,78 @@ pub fn decode_source_image(
     let img = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
 
-    let img = img.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
-    let img = img.to_rgb8();
+    let img = img
+        .resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
 
+    rgb_image_to_tensor(img, range, device, dtype)
+}
+
+/// Decode and preprocess one FLUX.2 Dev reference exactly like BFL's
+/// `default_prep`: reject sides below 64 px and aspect ratios above 8:1,
+/// downscale only when the image exceeds its pixel cap, then center-crop both
+/// dimensions down to a multiple of 16. References are never upscaled.
+pub fn decode_flux2_reference_image(
+    bytes: &[u8],
+    max_pixels: u64,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let image = image::load_from_memory(bytes)
+        .map_err(|error| anyhow::anyhow!("failed to decode FLUX.2 reference image: {error}"))?;
+    let image = preprocess_flux2_reference(image, max_pixels)?;
+    rgb_image_to_tensor(image, NormalizeRange::MinusOneToOne, device, dtype)
+}
+
+fn preprocess_flux2_reference(image: DynamicImage, max_pixels: u64) -> Result<RgbImage> {
+    const MIN_SIDE: u32 = 64;
+    const MAX_ASPECT_RATIO: u32 = 8;
+    const DIMENSION_MULTIPLE: u32 = 16;
+
+    let mut image = image.to_rgb8();
+    let (width, height) = image.dimensions();
+    if width < MIN_SIDE || height < MIN_SIDE {
+        bail!(
+            "FLUX.2 reference images require both sides to be at least {MIN_SIDE}px (got {width}x{height})"
+        );
+    }
+    let (long, short) = if width >= height {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    if u64::from(long) > u64::from(short) * u64::from(MAX_ASPECT_RATIO) {
+        bail!(
+            "FLUX.2 reference images support aspect ratios up to {MAX_ASPECT_RATIO}:1 (got {width}x{height})"
+        );
+    }
+
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > max_pixels {
+        let scale = (max_pixels as f64 / pixels as f64).sqrt();
+        let scaled_width = ((width as f64 * scale) as u32).max(1);
+        let scaled_height = ((height as f64 * scale) as u32).max(1);
+        image = image::imageops::resize(
+            &image,
+            scaled_width,
+            scaled_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+
+    let crop_width = image.width() / DIMENSION_MULTIPLE * DIMENSION_MULTIPLE;
+    let crop_height = image.height() / DIMENSION_MULTIPLE * DIMENSION_MULTIPLE;
+    let left = (image.width() - crop_width) / 2;
+    let top = (image.height() - crop_height) / 2;
+    Ok(image::imageops::crop_imm(&image, left, top, crop_width, crop_height).to_image())
+}
+
+fn rgb_image_to_tensor(
+    img: RgbImage,
+    range: NormalizeRange,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let raw = img.into_raw();
 
@@ -127,6 +197,67 @@ mod normalization_tests {
         assert!((values[0] + 1.0).abs() < 1e-6);
         assert!((values[1] - ((128.0 / 255.0) * 2.0 - 1.0)).abs() < 1e-6);
         assert!((values[2] - 1.0).abs() < 1e-6);
+    }
+
+    fn encode_solid_png(width: u32, height: u32) -> Vec<u8> {
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(width, height, Rgb([32, 64, 96]));
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Png)
+            .expect("encode PNG");
+        out.into_inner()
+    }
+
+    #[test]
+    fn flux2_reference_prep_never_upscales_and_center_crops_to_sixteen() {
+        let bytes = encode_solid_png(513, 527);
+        let tensor = decode_flux2_reference_image(
+            &bytes,
+            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        assert_eq!(tensor.dims(), &[1, 3, 512, 512]);
+    }
+
+    #[test]
+    fn flux2_reference_prep_downscales_only_above_the_cap() {
+        let bytes = encode_solid_png(4096, 1024);
+        let tensor = decode_flux2_reference_image(
+            &bytes,
+            mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        assert_eq!(tensor.dims(), &[1, 3, 512, 2048]);
+    }
+
+    #[test]
+    fn flux2_reference_prep_rejects_small_sides_and_extreme_aspects() {
+        let small = encode_solid_png(512, 63);
+        assert!(decode_flux2_reference_image(
+            &small,
+            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("at least 64px"));
+
+        let wide = encode_solid_png(1024, 64);
+        assert!(decode_flux2_reference_image(
+            &wide,
+            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("up to 8:1"));
     }
 }
 

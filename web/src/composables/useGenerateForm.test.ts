@@ -528,6 +528,50 @@ describe("useGenerateForm", () => {
     expect(wire.source_image).toBeUndefined();
   });
 
+  it("serializes FLUX.2 Dev attachments as ordered references", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "flux2-dev:bf16",
+      modelFamily: "flux2",
+      batchSize: 3,
+      imageAttachments: [
+        { kind: "upload", filename: "one.png", base64: "REF_ONE" },
+        { kind: "upload", filename: "two.png", base64: "REF_TWO" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+
+    const wire = form.toRequest();
+    expect(wire.edit_images).toEqual(["REF_ONE", "REF_TWO"]);
+    expect(wire.source_image).toBeUndefined();
+    expect(wire.mask_image).toBeUndefined();
+    expect(wire.strength).toBeUndefined();
+    expect(wire.batch_size).toBe(1);
+  });
+
+  it("omits stale LoRA state from FLUX.2 Dev requests", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "flux2-dev:bf16",
+      modelFamily: "flux2",
+      loras: [{ path: "/loras/stale.safetensors", scale: 0.8 }],
+    });
+
+    expect(form.toRequest().loras).toBeUndefined();
+  });
+
+  it("preserves text-only FLUX.2 Dev batches", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "flux2-dev:bf16",
+      modelFamily: "flux2",
+      batchSize: 3,
+      imageAttachments: [],
+    });
+
+    expect(form.toRequest().batch_size).toBe(3);
+  });
+
   it("serializes an uploaded mask image for non-edit img2img requests", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {
@@ -549,6 +593,8 @@ describe("useGenerateForm", () => {
 
   it("serializes LoRAs in the visible stack order", () => {
     const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
     form.state.value.loras = [
       { path: "/loras/second.safetensors", scale: 0.9 },
       { path: "/loras/first.safetensors", scale: 1.2 },
@@ -775,6 +821,18 @@ describe("useGenerateForm", () => {
     expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.imageAttachments).toHaveLength(1);
     expect(form.state.value.imageAttachments[0]?.base64).toBe("TARGET");
+  });
+
+  it("model switching preserves a text-only batch for FLUX.2 Dev", () => {
+    const form = useGenerateForm();
+    form.state.value.batchSize = 4;
+
+    form.applyModelDefaults(
+      makeModel({ name: "flux2-dev:bf16", family: "flux2" }),
+    );
+
+    expect(form.state.value.batchSize).toBe(4);
+    expect(form.state.value.imageAttachments).toEqual([]);
   });
 
   it("toRequest omits expand entirely when disabled (server treats missing/false the same, but this keeps payload minimal)", () => {

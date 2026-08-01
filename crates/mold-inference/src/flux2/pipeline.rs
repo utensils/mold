@@ -1,25 +1,25 @@
-//! Flux.2 Klein inference engine (4B and 9B variants).
+//! FLUX.2 inference engine (Klein 4B/9B and full Dev variants).
 //!
 //! Follows the same Eager + Sequential loading pattern as FluxEngine and ZImageEngine.
 //!
 //! Key differences from FLUX.1:
-//! - Uses Qwen3 text encoder (not T5 + CLIP)
+//! - Klein uses Qwen3; Dev streams the checkpoint-native Mistral3 encoder
 //!   - Klein-4B: Qwen3-4B (hidden=2560), stacked layers → 7680-dim context
 //!   - Klein-9B: Qwen3-8B (hidden=4096), stacked layers → 12288-dim context
 //! - VAE has latent_channels=32 (not 16)
 //! - Transformer has 128 input channels (not 64)
 //! - 4D RoPE (not 3D)
-//! - Klein is distilled (no guidance embedding)
+//! - Klein has no guidance embedding; Dev uses guidance-distilled conditioning
 //! - No pooled text vector input
 //! - Linear timestep schedule (distilled, no time-shifting)
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
@@ -67,6 +67,10 @@ struct LoadedFlux2 {
 /// Flux.2 Klein inference engine (4B and 9B variants) backed by candle.
 pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
+    /// Header-derived architecture is immutable for an engine. Cache it so a
+    /// sharded Dev checkpoint's large safetensors header is parsed once, not
+    /// repeatedly throughout every request.
+    resolved_config: OnceLock<Flux2Config>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
     /// Force adaptive block-level transformer offload.
@@ -149,6 +153,13 @@ fn flux2_offload_decision(
     Flux2OffloadDecision::Selected
 }
 
+fn validate_dev_lora_runtime(config: &Flux2Config, has_lora: bool) -> Result<()> {
+    if config.hidden_size == 6144 && has_lora {
+        bail!("FLUX.2 [dev] LoRA loading is not implemented")
+    }
+    Ok(())
+}
+
 impl Flux2Engine {
     /// Create a new Flux2Engine. Does not load models until `load()` is called.
     pub fn new(
@@ -162,6 +173,7 @@ impl Flux2Engine {
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            resolved_config: OnceLock::new(),
             qwen3_variant,
             offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
@@ -221,6 +233,7 @@ impl Flux2Engine {
 
         Ok(Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            resolved_config: OnceLock::new(),
             qwen3_variant,
             offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
@@ -238,24 +251,38 @@ impl Flux2Engine {
     /// community FP8 conversions). This is necessary for opaque names
     /// like `cv:2759597` whose mapping to a Klein variant is only
     /// recoverable from the file itself.
-    fn resolve_config(&self) -> Flux2Config {
+    fn resolve_config(&self) -> Result<Flux2Config> {
+        if let Some(config) = self.resolved_config.get() {
+            return Ok(config.clone());
+        }
         if let Some(cfg) = self.detect_config_from_checkpoint() {
-            return cfg;
+            let _ = self.resolved_config.set(cfg.clone());
+            return Ok(cfg);
         }
-        if self.base.model_name.to_lowercase().contains("9b") {
+        let name = self.base.model_name.to_lowercase();
+        let config = if name.contains("flux2-dev") || name.contains("flux.2-dev") {
+            Flux2Config::dev()
+        } else if name.contains("9b") {
             Flux2Config::klein_9b()
-        } else {
+        } else if name.contains("klein") || self.is_gguf_transformer() {
+            // Opaque catalog IDs are common for Klein GGUF checkpoints. GGUF
+            // metadata is not available through the safetensors header probe,
+            // so retain the established Klein-4B default for this format.
             Flux2Config::klein()
-        }
+        } else {
+            return Err(anyhow::anyhow!(
+                "unsupported FLUX.2 architecture for model '{}': checkpoint metadata did not identify a known 3072, 4096, or 6144-wide transformer",
+                self.base.model_name
+            ));
+        };
+        let _ = self.resolved_config.set(config.clone());
+        Ok(config)
     }
 
     /// Header-peek the transformer file (if it's a single `.safetensors`)
     /// and pick the config matching its `hidden_size`. Returns `None` for
     /// sharded loads or when no `img_in.weight` marker is present.
     fn detect_config_from_checkpoint(&self) -> Option<Flux2Config> {
-        if !self.base.paths.transformer_shards.is_empty() {
-            return None;
-        }
         let path = &self.base.paths.transformer;
         let is_safetensors = path
             .extension()
@@ -265,6 +292,7 @@ impl Flux2Engine {
             return None;
         }
         match super::single_file::detect_hidden_size(path) {
+            Ok(Some(6144)) => Some(Flux2Config::dev()),
             Ok(Some(4096)) => Some(Flux2Config::klein_9b()),
             Ok(Some(3072)) => Some(Flux2Config::klein()),
             // Anything else: unknown variant, defer to name heuristic.
@@ -276,10 +304,17 @@ impl Flux2Engine {
     /// Mirrors `resolve_config` — peek the checkpoint first, fall back
     /// to the model-name heuristic.
     fn is_9b(&self) -> bool {
-        if let Some(cfg) = self.detect_config_from_checkpoint() {
-            return cfg.hidden_size == 4096;
-        }
-        self.base.model_name.to_lowercase().contains("9b")
+        self.resolve_config()
+            .is_ok_and(|config| config.hidden_size == 4096)
+    }
+
+    fn is_dev(&self) -> bool {
+        self.resolve_config()
+            .is_ok_and(|config| config.hidden_size == 6144)
+    }
+
+    fn block_offload_enabled(&self) -> bool {
+        self.offload
     }
 
     /// Return the Qwen3 encoder size enum for this model.
@@ -306,7 +341,7 @@ impl Flux2Engine {
         }
         Tokenizer::from_file(tokenizer_path)
             .map(Arc::new)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
+            .map_err(|e| anyhow::anyhow!("failed to load FLUX.2 text tokenizer: {e}"))
     }
 
     fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
@@ -352,7 +387,8 @@ impl Flux2Engine {
     }
 
     fn uses_sequential_generate_path(&self, req: &GenerateRequest) -> bool {
-        self.base.load_strategy == LoadStrategy::Sequential
+        self.is_dev()
+            || self.base.load_strategy == LoadStrategy::Sequential
             || self.offload
             || !self.pending_loras.is_empty()
             || req.source_image.is_some()
@@ -447,6 +483,10 @@ impl Flux2Engine {
         activation_budget: u64,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         let has_lora = !self.pending_loras.is_empty();
+        // This engine-level guard is load-bearing. Validation may only know an
+        // opaque catalog ID, while the checkpoint header still identifies a
+        // 6144-wide Dev transformer.
+        validate_dev_lora_runtime(cfg, has_lora)?;
         if self.is_gguf_transformer() {
             if has_lora {
                 // Dequant→merge→requant on every LoRA-affected GGUF tensor.
@@ -508,7 +548,7 @@ impl Flux2Engine {
                     cfg,
                 )?;
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
-            if self.offload && !has_lora && !is_nvfp4 {
+            if self.block_offload_enabled() && !has_lora && !is_nvfp4 {
                 let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
                 return Ok((
                     Flux2TransformerWrapper::Offloaded(
@@ -633,7 +673,7 @@ impl Flux2Engine {
                     candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone()),
                     None,
                 )
-            } else if self.offload {
+            } else if self.block_offload_enabled() {
                 (
                     crate::weight_loader::load_safetensors_with_progress(
                         &xformer_paths,
@@ -742,7 +782,7 @@ impl Flux2Engine {
             .unwrap_or(false);
 
         if needs_reload {
-            let cfg = self.resolve_config();
+            let cfg = self.resolve_config()?;
             self.base
                 .progress
                 .stage_start("Reloading Flux.2 transformer");
@@ -854,8 +894,10 @@ impl Flux2Engine {
             return Ok(());
         }
 
-        // Sequential mode defers loading to generate_sequential()
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        // Sequential mode and full Dev defer loading to
+        // generate_sequential(). Dev's 64 GB transformer must never enter the
+        // eager path even if a stale caller supplied an eager strategy.
+        if self.base.load_strategy == LoadStrategy::Sequential || self.is_dev() {
             return Ok(());
         }
 
@@ -877,7 +919,7 @@ impl Flux2Engine {
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
         // --- Load transformer on GPU first ---
-        let flux2_cfg = self.resolve_config();
+        let flux2_cfg = self.resolve_config()?;
         let xformer_stage = Instant::now();
         let (transformer, xformer_label) =
             self.load_transformer(&flux2_cfg, gpu_dtype, &device, 0)?;
@@ -999,7 +1041,7 @@ impl Flux2Engine {
         let is_gguf = self.is_gguf_transformer();
 
         match flux2_offload_decision(
-            self.offload,
+            self.block_offload_enabled(),
             is_gguf,
             self.is_nvfp4_single_file(),
             !self.pending_loras.is_empty(),
@@ -1029,6 +1071,12 @@ impl Flux2Engine {
         let width = req.width as usize;
         let height = req.height as usize;
 
+        if self.is_dev() && (req.source_image.is_some() || req.mask_image.is_some()) {
+            bail!(
+                "FLUX.2 [dev] uses ordered edit_images references; source_image, strength, and mask_image img2img controls are unsupported"
+            );
+        }
+
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
@@ -1040,7 +1088,7 @@ impl Flux2Engine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Qwen3 text encoding ---
+        // --- Phase 1: text encoding ---
         // Check prompt cache first — skip encoder load entirely on cache hit.
         // This saves ~1-5s per batch image (encoder load + VRAM allocation).
         let cache_key = prompt_text_key(&req.prompt);
@@ -1050,102 +1098,165 @@ impl Flux2Engine {
             self.base.progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            // Reserve-adjusted reading drives the Qwen3 variant selection.
-            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            self.base.progress.stage_start("Selecting Qwen3 encoder");
-            let resolve_start = Instant::now();
-            let qwen3_size = self.qwen3_size();
-            let (encoder_paths, is_gguf, on_gpu, device_label) = {
-                let bf16_paths = self.text_encoder_paths();
-                let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
-                crate::encoders::variant_resolution::resolve_qwen3_variant(
-                    &self.base.progress,
-                    self.qwen3_variant.as_deref(),
-                    &device,
-                    free,
-                    &bf16_paths,
-                    have_bf16,
+            if self.is_dev() {
+                if self
+                    .qwen3_variant
+                    .as_deref()
+                    .is_some_and(|variant| !matches!(variant, "auto" | "bf16"))
+                {
+                    bail!(
+                        "FLUX.2 [dev] uses its checkpoint-native Mistral3 BF16 encoder; Qwen3 variant overrides are unsupported"
+                    );
+                }
+                let encoder_paths = self.text_encoder_paths();
+                // Mistral replaces Qwen for Dev, but it occupies the same
+                // frozen text-encoder placement slot in the wire contract.
+                let mistral_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |advanced| advanced.qwen.clone(),
                     true,
-                    qwen3_size,
-                )?
-            };
-            self.base
-                .progress
-                .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
+                );
+                let encoder_device =
+                    crate::device::resolve_device(Some(mistral_ref), || Ok(device.clone()))?;
+                let encoder_dtype = if encoder_device.is_cpu() {
+                    DType::F32
+                } else {
+                    gpu_dtype
+                };
+                let activation_budget = crate::device::activation_bytes(
+                    512,
+                    1,
+                    1,
+                    crate::device::dtype_bytes(encoder_dtype),
+                    crate::device::ActivationFamily::SmallTransformer,
+                );
+                preflight_memory_check(
+                    "FLUX.2 [dev] streamed Mistral3 encoder",
+                    encoders::mistral3::streamed_peak_weight_bytes(encoder_dtype),
+                    activation_budget,
+                )?;
 
-            let qwen3_ref = effective_device_ref(
-                self.pending_placement.as_ref(),
-                |adv| adv.qwen.clone(),
-                true,
-            );
-            let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
-            let enc_device_owned =
-                crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
-            let enc_device = &enc_device_owned;
-            let on_gpu = !enc_device.is_cpu();
-            let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
-            let bf16_cfg = self.qwen3_bf16_config();
-
-            // Pre-flight memory check
-            let enc_size: u64 = encoder_paths
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                .sum();
-            let enc_activation_budget = crate::device::activation_bytes(
-                req.width,
-                req.height,
-                1,
-                crate::device::dtype_bytes(enc_dtype),
-                crate::device::ActivationFamily::SmallTransformer,
-            );
-            preflight_memory_check("Qwen3 encoder", enc_size, enc_activation_budget)?;
-            if let Some(status) = memory_status_string() {
-                self.base.progress.info(&status);
-            }
-
-            let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
-            self.base.progress.stage_start(&enc_stage_label);
-            let enc_stage = Instant::now();
-            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
-
-            let mut text_encoder = if is_gguf {
-                encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
-                    &encoder_paths[0],
-                    &text_tokenizer_path,
-                    Some(text_tokenizer),
-                    enc_device,
-                    &bf16_cfg,
-                )?
-            } else {
-                encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
+                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+                let encoder = encoders::mistral3::Mistral3Encoder::load(
                     &encoder_paths,
-                    &text_tokenizer_path,
-                    Some(text_tokenizer),
-                    enc_device,
-                    enc_dtype,
-                    &bf16_cfg,
+                    text_tokenizer,
+                    &encoder_device,
+                    encoder_dtype,
+                )?;
+                self.base
+                    .progress
+                    .stage_start("Encoding prompt (streamed Mistral3)");
+                let encode_start = Instant::now();
+                let (txt_emb, _) = encoder.encode(&req.prompt, &device, gpu_dtype)?;
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (streamed Mistral3)",
+                    encode_start.elapsed(),
+                );
+                let cached = CachedTensor::from_tensor(&txt_emb)?;
+                self.prompt_cache.lock().unwrap().insert(cache_key, cached);
+                drop(encoder);
+                encoder_device.synchronize()?;
+                self.base.progress.info("Freed streamed Mistral3 encoder");
+                txt_emb
+            } else {
+                // Reserve-adjusted reading drives the Qwen3 variant selection.
+                let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+                self.base.progress.stage_start("Selecting Qwen3 encoder");
+                let resolve_start = Instant::now();
+                let qwen3_size = self.qwen3_size();
+                let (encoder_paths, is_gguf, on_gpu, device_label) = {
+                    let bf16_paths = self.text_encoder_paths();
+                    let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+                    crate::encoders::variant_resolution::resolve_qwen3_variant(
+                        &self.base.progress,
+                        self.qwen3_variant.as_deref(),
+                        &device,
+                        free,
+                        &bf16_paths,
+                        have_bf16,
+                        true,
+                        qwen3_size,
+                    )?
+                };
+                self.base
+                    .progress
+                    .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
+
+                let qwen3_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.qwen.clone(),
+                    true,
+                );
+                let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
+                let enc_device_owned =
+                    crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
+                let enc_device = &enc_device_owned;
+                let on_gpu = !enc_device.is_cpu();
+                let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
+                let bf16_cfg = self.qwen3_bf16_config();
+
+                // Pre-flight memory check
+                let enc_size: u64 = encoder_paths
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                    .sum();
+                let enc_activation_budget = crate::device::activation_bytes(
+                    req.width,
+                    req.height,
+                    1,
+                    crate::device::dtype_bytes(enc_dtype),
+                    crate::device::ActivationFamily::SmallTransformer,
+                );
+                preflight_memory_check("Qwen3 encoder", enc_size, enc_activation_budget)?;
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
+
+                let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
+                self.base.progress.stage_start(&enc_stage_label);
+                let enc_stage = Instant::now();
+                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+
+                let mut text_encoder = if is_gguf {
+                    encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
+                        &encoder_paths[0],
+                        &text_tokenizer_path,
+                        Some(text_tokenizer),
+                        enc_device,
+                        &bf16_cfg,
+                    )?
+                } else {
+                    encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
+                        &encoder_paths,
+                        &text_tokenizer_path,
+                        Some(text_tokenizer),
+                        enc_device,
+                        enc_dtype,
+                        &bf16_cfg,
+                        &self.base.progress,
+                    )?
+                };
+                self.base
+                    .progress
+                    .stage_done(&enc_stage_label, enc_stage.elapsed());
+
+                let txt_emb = Self::encode_prompt_cached(
                     &self.base.progress,
-                )?
-            };
-            self.base
-                .progress
-                .stage_done(&enc_stage_label, enc_stage.elapsed());
+                    &self.prompt_cache,
+                    &mut text_encoder,
+                    &req.prompt,
+                    &device,
+                    gpu_dtype,
+                )?;
 
-            let txt_emb = Self::encode_prompt_cached(
-                &self.base.progress,
-                &self.prompt_cache,
-                &mut text_encoder,
-                &req.prompt,
-                &device,
-                gpu_dtype,
-            )?;
+                // Drop text encoder to free memory
+                drop(text_encoder);
+                self.base.progress.info("Freed Qwen3 encoder");
+                tracing::info!("Qwen3 encoder dropped (sequential mode)");
 
-            // Drop text encoder to free memory
-            drop(text_encoder);
-            self.base.progress.info("Freed Qwen3 encoder");
-            tracing::info!("Qwen3 encoder dropped (sequential mode)");
-
-            txt_emb
+                txt_emb
+            }
         };
 
         let latent_h = height.div_ceil(8);
@@ -1168,6 +1279,60 @@ impl Flux2Engine {
                 "img2img: truncated schedule from strength"
             );
         }
+
+        // FLUX.2 [dev] conditions on independently VAE-encoded reference
+        // images appended after the noisy target tokens. References retain
+        // their order through time coordinates 10, 20, ... and remain fixed
+        // throughout denoising.
+        let reference_tokens = if self.is_dev() {
+            if let Some(references) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
+                let max_pixels = if references.len() == 1 {
+                    mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
+                } else {
+                    mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
+                };
+                let (vae, _) = self.load_sequential_vae(&device, gpu_dtype)?;
+                self.base
+                    .progress
+                    .stage_start("Encoding FLUX.2 reference images (VAE)");
+                let encode_start = Instant::now();
+                let mut token_groups = Vec::with_capacity(references.len());
+                let mut id_groups = Vec::with_capacity(references.len());
+                for (index, image_bytes) in references.iter().enumerate() {
+                    let source = crate::img_utils::decode_flux2_reference_image(
+                        image_bytes,
+                        max_pixels,
+                        &device,
+                        gpu_dtype,
+                    )?;
+                    let latent = vae.encode(&source)?;
+                    let time_coordinate = u32::try_from(index + 1)
+                        .context("too many FLUX.2 reference images")?
+                        .checked_mul(10)
+                        .context("FLUX.2 reference time coordinate overflow")?;
+                    let (tokens, ids) = sampling::pack_image_tokens(&latent, time_coordinate)?;
+                    token_groups.push(tokens);
+                    id_groups.push(ids);
+                }
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::Vae,
+                    "Encoding FLUX.2 reference images (VAE)",
+                    encode_start.elapsed(),
+                );
+                let tokens = Tensor::cat(&token_groups.iter().collect::<Vec<_>>(), 1)?;
+                let ids = Tensor::cat(&id_groups.iter().collect::<Vec<_>>(), 1)?;
+                drop(vae);
+                device.synchronize()?;
+                self.base
+                    .progress
+                    .info("Freed VAE after reference encoding");
+                Some((tokens, ids))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Generate noise / encode source image for img2img. Source-image
         // requests pre-encode in a VAE-only phase, then drop VAE before the
@@ -1230,9 +1395,15 @@ impl Flux2Engine {
             .transpose()?;
 
         // --- Phase 2: Load transformer, denoise ---
-        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let xformer_paths = if self.base.paths.transformer_shards.is_empty() {
+            std::slice::from_ref(&self.base.paths.transformer)
+        } else {
+            self.base.paths.transformer_shards.as_slice()
+        };
+        let xformer_size = xformer_paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum::<u64>();
         let xformer_activation_budget = crate::device::activation_bytes(
             req.width,
             req.height,
@@ -1240,16 +1411,24 @@ impl Flux2Engine {
             crate::device::dtype_bytes(gpu_dtype),
             crate::device::ActivationFamily::Flux2Dit,
         );
+        // Block offload reserves a bounded GPU working set; the full
+        // transformer remains host-mapped and is accounted by Scheduler V2's
+        // host-memory ledger.
+        let resident_xformer_size = if self.block_offload_enabled() {
+            xformer_size.min(crate::device::STREAMING_TRANSFORMER_CAP_BYTES)
+        } else {
+            xformer_size
+        };
         preflight_memory_check(
             "Flux.2 transformer",
-            xformer_size,
+            resident_xformer_size,
             xformer_activation_budget,
         )?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
 
-        let flux2_cfg = self.resolve_config();
+        let flux2_cfg = self.resolve_config()?;
         let xformer_stage = Instant::now();
         let (transformer, xformer_label) =
             self.load_transformer(&flux2_cfg, gpu_dtype, &device, xformer_activation_budget)?;
@@ -1265,6 +1444,7 @@ impl Flux2Engine {
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
+            reference_tokens.as_ref().map(|(tokens, ids)| (tokens, ids)),
             &state.txt,
             &state.txt_ids,
             &state.vec,
@@ -1376,7 +1556,7 @@ impl Flux2Engine {
                 "scheduler selection not supported for Flux.2 (flow-matching), ignoring"
             );
         }
-        if req.guidance != 0.0 {
+        if !self.is_dev() && req.guidance != 0.0 {
             tracing::debug!(
                 guidance = req.guidance,
                 "Flux.2 Klein is distilled — guidance value is ignored (no guidance embedding)"
@@ -1596,6 +1776,7 @@ impl Flux2Engine {
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
+            None,
             &state.txt,
             &state.txt_ids,
             &state.vec,
@@ -1848,6 +2029,28 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn flux2_dev_refuses_eager_preload_before_touching_model_files() {
+        let dir = temp_test_dir("mold-flux2-dev-eager-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-dev:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+
+        engine.load().unwrap();
+        assert!(
+            !engine.is_loaded(),
+            "FLUX.2 Dev must remain sequential even under a stale eager plan"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
     fn flux2_model_paths(
         dir: &Path,
         transformer_name: &str,
@@ -1969,8 +2172,19 @@ mod tests {
             None,
         );
 
-        let standard_cfg = standard.resolve_config();
-        let nine_b_cfg = nine_b.resolve_config();
+        let dev = Flux2Engine::new(
+            "flux2-dev:bf16".to_string(),
+            flux2_model_paths(&base_dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+
+        let standard_cfg = standard.resolve_config().unwrap();
+        let nine_b_cfg = nine_b.resolve_config().unwrap();
+        let dev_cfg = dev.resolve_config().unwrap();
 
         assert_eq!(standard_cfg.hidden_size, 3072);
         assert_eq!(standard_cfg.context_in_dim, 7680);
@@ -1982,7 +2196,40 @@ mod tests {
         assert_eq!(nine_b.qwen3_size(), Qwen3Size::B8);
         assert_eq!(nine_b.qwen3_bf16_config().hidden_size, 4096);
 
+        assert_eq!(dev_cfg.hidden_size, 6144);
+        assert_eq!(dev_cfg.context_in_dim, 15360);
+        assert!(dev_cfg.guidance_embed);
+        assert!(dev.is_dev());
+
         fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn opaque_gguf_keeps_the_established_klein_four_b_config() {
+        let dir = temp_test_dir("mold-flux2-opaque-gguf-config");
+        let engine = Flux2Engine::new(
+            "cv:2759597".to_string(),
+            flux2_model_paths(&dir, "opaque.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        );
+
+        let config = engine.resolve_config().unwrap();
+        assert_eq!(config.hidden_size, 3072);
+        assert_eq!(config.context_in_dim, 7680);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn detected_dev_config_rejects_lora_at_the_runtime_boundary() {
+        assert!(validate_dev_lora_runtime(&Flux2Config::dev(), true)
+            .unwrap_err()
+            .to_string()
+            .contains("LoRA loading is not implemented"));
+        assert!(validate_dev_lora_runtime(&Flux2Config::klein(), true).is_ok());
     }
 
     #[test]
@@ -2133,7 +2380,7 @@ mod tests {
             true,
             None,
         );
-        let cfg = engine.resolve_config();
+        let cfg = engine.resolve_config().unwrap();
         let txt_emb = Tensor::zeros((1, 1, cfg.context_in_dim), DType::F32, &Device::Cpu).unwrap();
         engine.prompt_cache.lock().unwrap().insert(
             prompt_text_key("a cat"),

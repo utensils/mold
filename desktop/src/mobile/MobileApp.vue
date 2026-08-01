@@ -47,7 +47,11 @@ import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { upscaleImage } from "../lib/api/upscale";
-import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
+import {
+  generationCapabilitiesForFamily,
+  isFlux2DevModel,
+  outputFormatsForFamily,
+} from "../lib/capabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   CompleteEvent,
@@ -545,9 +549,12 @@ watch(
   },
   { immediate: true },
 );
-const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const caps = computed(() => generationCapabilitiesForFamily(form.family, form.model));
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne ? 1 : Math.max(1, Math.floor(form.batchSize)),
+  caps.value.forcesBatchSizeOne ||
+  (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
+    ? 1
+    : Math.max(1, Math.floor(form.batchSize)),
 );
 const selectedRoute = computed<HostRoute | null>(() => {
   const host = selectedHost.value;
@@ -625,11 +632,18 @@ const upscalers = computed(() =>
 );
 const controlModels = computed(() => models.value.filter((model) => model.family === "controlnet"));
 const sourceSectionTitle = computed(() =>
-  caps.value.sourceImageMode === "qwen-edit" ? "Pictures" : "Source image",
+  caps.value.sourceImageMode !== "single"
+    ? isFlux2DevModel(form.model)
+      ? "References"
+      : "Pictures"
+    : "Source image",
 );
 const sourceSectionSummary = computed(() => {
-  if (caps.value.sourceImageMode === "qwen-edit") {
+  if (caps.value.sourceImageMode !== "single") {
     const count = form.imageAttachments.length;
+    if (isFlux2DevModel(form.model)) {
+      return count === 0 ? "Optional · up to 4" : `${count} reference${count === 1 ? "" : "s"}`;
+    }
     return count === 0 ? "Target required" : `${count} photo${count === 1 ? "" : "s"}`;
   }
   if (form.sourceImage) return form.sourceImageName || "Selected";
@@ -679,7 +693,7 @@ function applyMobileSourceResolution(
   const wasFollowing =
     previous.resolution !== null &&
     canvasMatchesSourceResolution({ width: form.width, height: form.height }, previous.resolution);
-  if (replaced || wasFollowing) {
+  if (caps.value.sourceImageMode !== "references" && (replaced || wasFollowing)) {
     form.width = resolution.output.width;
     form.height = resolution.output.height;
   }
@@ -689,7 +703,7 @@ function applyMobileSourceResolution(
 watch(
   [
     () =>
-      caps.value.sourceImageMode === "qwen-edit"
+      caps.value.sourceImageMode !== "single"
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedGenerationModel.value?.name ?? form.model,
@@ -2249,7 +2263,7 @@ async function prepareGenerationRequest(
   draft: GenerateForm,
   isCurrent: () => boolean = () => true,
 ) {
-  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
   if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
     const result = await applySourceFitPreprocess(
       {
@@ -2351,7 +2365,7 @@ async function generate(): Promise<void> {
     return;
 
   const draft = cloneGenerateForm(form);
-  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
   // The composer style preset is baked into the OUTGOING request at submit —
   // the textarea and negative field are never mutated. Reviewed prepared
   // prompts ship verbatim (the style already reached them through the
@@ -2905,8 +2919,8 @@ async function useSelectedPrintAsSource(): Promise<void> {
   reusePrintError.value = "";
   try {
     const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"));
-    const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
-    const existingBytes = inlineGenerationMediaBytes(form, qwenEdit ? null : "sourceImage");
+    const attachmentMode = caps.value.sourceImageMode !== "single";
+    const existingBytes = inlineGenerationMediaBytes(form, attachmentMode ? null : "sourceImage");
     const exceedsBudget = (incomingBytes: number) =>
       existingBytes + incomingBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES;
     // Reject from Content-Length before materialising the response Blob when
@@ -2920,9 +2934,16 @@ async function useSelectedPrintAsSource(): Promise<void> {
     if (blob.size === 0) throw new Error("That gallery image is empty.");
     if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     const base64 = await blobToBase64(blob);
-    if (qwenEdit) {
-      form.imageAttachments = [base64, ...form.imageAttachments];
-      setGenerationStatus("Added gallery print as the edit target");
+    if (attachmentMode) {
+      form.imageAttachments = [base64, ...form.imageAttachments].slice(
+        0,
+        isFlux2DevModel(form.model) ? 4 : undefined,
+      );
+      setGenerationStatus(
+        isFlux2DevModel(form.model)
+          ? "Added gallery print as reference 1"
+          : "Added gallery print as the edit target",
+      );
     } else {
       form.sourceImage = base64;
       form.sourceImageName = print.filename;
@@ -3684,7 +3705,7 @@ onBeforeUnmount(() => {
                 class="mobile-native-disclosure"
                 :open="
                   !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
-                  caps.sourceImageMode === 'qwen-edit'
+                  caps.sourceImageMode !== 'single'
                 "
                 data-test="mobile-source-disclosure"
               >

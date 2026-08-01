@@ -68,4 +68,22 @@ describe("generationCapabilities", () => {
     expect(schedulerOptionsForFamily("flux")).toEqual([]);
     expect(schedulerOptionsForFamily("qwen-image")).toEqual([]);
   });
+
+  it("distinguishes FLUX.2 Dev reference editing from Klein img2img", () => {
+    expect(
+      generationCapabilitiesForFamily("flux2", "flux2-dev:bf16"),
+    ).toMatchObject({
+      sourceImageMode: "references",
+      supportsMask: false,
+      supportsLora: false,
+      forcesBatchSizeOne: false,
+    });
+    expect(
+      generationCapabilitiesForFamily("flux2", "flux2-klein:bf16"),
+    ).toMatchObject({
+      sourceImageMode: "single",
+      supportsMask: true,
+      supportsLora: true,
+    });
+  });
 });
