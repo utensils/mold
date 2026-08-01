@@ -54,6 +54,17 @@ frame for LTX-2 image-to-video. When the rendered MP4 exceeds Discord's upload
 ceiling the bot falls back to the always-bundled GIF preview.
 :::
 
+::: warning `prompt` is now optional — re-register the commands
+`/generate`'s `prompt` option changed from required to optional so an LTX-2
+image-to-video run can be submitted with just a `source_image`. Discord caches
+command definitions, so **the bot's slash commands must be re-registered** before
+users see the new signature; until then Discord keeps enforcing the old required
+`prompt`. The relaxation is guarded on both ends: the bot only skips the
+up-front check when a `source_image` is attached, and the server's family-aware
+validator still rejects an empty prompt for every image family and for
+text-to-video.
+:::
+
 ::: info Block List
 The `/admin block` command stores blocks in memory. Blocks clear when the bot
 restarts. For permanent restrictions, use role-based access via

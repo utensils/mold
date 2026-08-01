@@ -132,6 +132,7 @@ import {
 } from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
+import { promptOptional } from "@studio/lib/promptRequirement";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -1035,6 +1036,21 @@ const currentFamily = computed(
 
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(currentFamily.value, form.state.value.model),
+);
+
+// A conditioned LTX-2 render may go out undescribed — the server admits it,
+// so the composer says so instead of implying a prompt is mandatory. Nothing
+// here gates submit: `validateSubmit` never required a prompt.
+const canSkipPrompt = computed(() =>
+  promptOptional({
+    family: currentFamily.value,
+    imageAttachments: form.state.value.imageAttachments,
+    keyframes: form.state.value.keyframes,
+    sourceVideo: form.state.value.sourceVideo,
+    sourceVideoPath: form.state.value.sourceVideoPath,
+    extendVideo: form.state.value.extendVideo,
+    extendVideoPath: form.state.value.extendVideoPath,
+  }),
 );
 
 // Continuation rides the selected model's own `/api/models` row, which the
@@ -2195,6 +2211,10 @@ function validateExpandedPrompts(
 }
 
 async function onExpand() {
+  // Desktop parity (`ExpandControl.expand`): expansion rewrites the prompt,
+  // so there has to be one. This stays true even where a blank prompt is a
+  // legitimate render — there is nothing to enrich.
+  if (!form.state.value.prompt.trim()) return;
   if (form.state.value.batchSize > 1) {
     if (!validateSubmit()) return;
     const decision = chainDecision.value;
@@ -2995,6 +3015,7 @@ onBeforeUnmount(() => {
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
             :expanded="expanded"
+            :prompt-optional="canSkipPrompt"
             :history="promptHistory"
             @submit="onSubmit"
             @expand="onExpand"
@@ -3114,6 +3135,7 @@ onBeforeUnmount(() => {
           <ResultCanvas
             v-else
             :mode="canvasMode"
+            :prompt-optional="canSkipPrompt"
             :progress="genProgress"
             :stage="genStage"
             :preview-src="runningJob?.previewUrl ?? undefined"

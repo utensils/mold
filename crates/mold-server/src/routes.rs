@@ -979,14 +979,20 @@ async fn normalize_generation_placement(
 }
 
 /// Record an accepted generation prompt into prompt history (best-effort;
-/// no-op when the metadata DB is disabled). Consecutive identical rows are
-/// collapsed so batch siblings and retries don't spam duplicates. Records
-/// what the user actually typed — callers capture the prompt before
-/// `prepare_generation` runs prompt expansion.
+/// no-op when the metadata DB is disabled or the prompt is empty). Consecutive
+/// identical rows are collapsed so batch siblings and retries don't spam
+/// duplicates. Records what the user actually typed — callers capture the
+/// prompt before `prepare_generation` runs prompt expansion.
 fn record_prompt_history(state: &AppState, prompt: &str, negative: Option<&str>, model: &str) {
     let Some(db) = state.metadata_db.as_ref().as_ref() else {
         return;
     };
+    // Video requests may legitimately carry no prompt at all; there is nothing
+    // to recall later, so keep those rows out of history entirely (same rule as
+    // the TUI's `History::push_entry`).
+    if prompt.trim().is_empty() {
+        return;
+    }
     let history = mold_db::PromptHistory::new(db);
     if let Ok(rows) = history.recent(1) {
         if rows.first().is_some_and(|latest| {
@@ -1445,6 +1451,17 @@ async fn maybe_expand_prompt(
     preferred_gpu: Option<usize>,
 ) -> Result<(), ApiError> {
     if req.expand != Some(true) {
+        return Ok(());
+    }
+    // An empty prompt is a deliberate signal that the visual conditioning
+    // carries the shot (see `mold_core::prompt_required_for`). Feeding "" to
+    // the expander would let it invent a prompt that then becomes the frozen,
+    // recorded one — expand nothing instead. Clear the flag rather than just
+    // returning: scheduler-owned local expansion re-reads `request.expand`
+    // when it plans the PromptExpansion dependency stage, so leaving it set
+    // would hand "" to the expander one layer down.
+    if req.prompt.trim().is_empty() {
+        req.expand = Some(false);
         return Ok(());
     }
 
@@ -7081,5 +7098,48 @@ mod tests {
         let _ = writer_release_tx.send(());
         writer.await.unwrap();
         worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn expansion_skipped_for_empty_prompt() {
+        // An empty prompt is a deliberate "let the conditioning speak" signal.
+        // Handing "" to the expander would let the LLM hallucinate a prompt
+        // that then becomes the frozen, recorded prompt.
+        let state = AppState::for_tests();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "   ",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "expand": true
+        }))
+        .unwrap();
+
+        maybe_expand_prompt(&state, &mut request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(request.prompt, "   ");
+        assert!(request.original_prompt.is_none());
+        // Cleared so scheduler-owned local expansion doesn't re-plan it.
+        assert_eq!(request.expand, Some(false));
+    }
+
+    #[test]
+    fn prompt_history_skips_empty() {
+        let mut state = AppState::for_tests();
+        state.metadata_db =
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        record_prompt_history(&state, "", None, "ltx-2-19b-distilled:fp8");
+        record_prompt_history(&state, "  \n ", None, "ltx-2-19b-distilled:fp8");
+        let history = mold_db::PromptHistory::new(state.metadata_db.as_ref().as_ref().unwrap());
+        assert!(history.recent(10).unwrap().is_empty());
+
+        record_prompt_history(&state, "a red apple", None, "ltx-2-19b-distilled:fp8");
+        assert_eq!(history.recent(10).unwrap().len(), 1);
     }
 }

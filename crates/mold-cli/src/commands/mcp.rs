@@ -1330,6 +1330,11 @@ fn build_generate_request(
     args: GenerateImageArgs,
     loras: Option<Vec<LoraWeight>>,
 ) -> std::result::Result<GenerateRequest, String> {
+    // The MCP generate tools take no visual conditioning (no source image,
+    // keyframes, source video, or extend), so the optional-prompt path in
+    // `mold_core::prompt_required_for` can never apply here. If a conditioning
+    // input is ever added, relax this check and the `"required": ["prompt"]`
+    // arrays in `tool_definitions` together.
     if args.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -2385,5 +2390,40 @@ mod tests {
             size_bytes: Some(123),
             metadata_synthetic: false,
         }
+    }
+
+    #[test]
+    fn mcp_generate_tools_keep_the_prompt_required() {
+        // Optional prompts are gated on visual conditioning (source image,
+        // keyframes, source video, extend). The MCP generate tools accept none
+        // of those, so both the JSON-Schema `required` array and the runtime
+        // check must stay strict — and must move in lockstep if that changes.
+        let tools = tool_definitions();
+        for name in ["generate_image", "generate_image_async"] {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} should be advertised"));
+            let schema = &tool["inputSchema"];
+            let properties = schema["properties"].as_object().unwrap();
+            for conditioning in ["source_image", "keyframes", "source_video", "extend_video"] {
+                assert!(
+                    !properties.contains_key(conditioning),
+                    "{name} grew a {conditioning} input; revisit the prompt requirement"
+                );
+            }
+            assert_eq!(
+                schema["required"],
+                json!(["prompt"]),
+                "{name} must keep prompt required"
+            );
+        }
+
+        let args: GenerateImageArgs = serde_json::from_value(json!({ "prompt": "   " })).unwrap();
+        assert!(build_generate_request(args, None)
+            .unwrap_err()
+            .contains("prompt"));
     }
 }

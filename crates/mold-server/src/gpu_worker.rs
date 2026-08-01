@@ -145,6 +145,9 @@ impl PlannedEngineMode {
 struct PlannedLoadContract<'a> {
     mode: PlannedEngineMode,
     predicted_vram_peak_bytes: u64,
+    /// Decayed observed high-water envelope for this estimate bucket. Zero
+    /// when there is no learned evidence.
+    learned_vram_envelope_bytes: u64,
     execution_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
@@ -2222,6 +2225,20 @@ pub(crate) fn oom_user_message_for_request(
     family_slug: Option<&str>,
     req: Option<&mold_core::GenerateRequest>,
 ) -> String {
+    oom_user_message_with_advice(model_name, family_slug, req, None)
+}
+
+/// `supported_shape_advice` names a concrete resolution/frame combination that
+/// fits this card. Without it the video branch could only say "reduce --frames
+/// below N (e.g. 17 or 9)", which is a guess: it does not know whether the
+/// shortfall is frames or resolution, and 17 or 9 frames is far below what the
+/// card can actually run (#641).
+pub(crate) fn oom_user_message_with_advice(
+    model_name: &str,
+    family_slug: Option<&str>,
+    req: Option<&mold_core::GenerateRequest>,
+    shape_advice: Option<&str>,
+) -> String {
     let requested_size = req
         .map(|r| format!(" Requested size: {}x{}.", r.width, r.height))
         .unwrap_or_default();
@@ -2231,6 +2248,13 @@ pub(crate) fn oom_user_message_for_request(
     };
 
     if family_slug.is_some_and(is_video_family) || req.and_then(|r| r.frames).is_some() {
+        if let Some(advice) = shape_advice {
+            return format!(
+                "GPU ran out of memory loading or running '{model_name}'.{requested_size} \
+                 This shape {advice}. Use that shape, a quantized variant if available, \
+                 or close other GPU apps."
+            );
+        }
         let frames_hint = req
             .and_then(|r| r.frames)
             .map(|frames| format!("reduce --frames below {frames} (e.g. 17 or 9)"))
@@ -2341,20 +2365,68 @@ fn upscale_generated_image_on_worker(
         .map_err(|e| format!("upscale failed: {e:#}"))
 }
 
-fn cuda_oom_user_message(
+/// Re-run the corrected LTX-2 estimator over the supported shape grid for the
+/// card that just OOMed, so the rejection names a resolution/frame count the
+/// user can actually run.
+fn ltx2_oom_shape_advice(
+    worker: &GpuWorker,
+    family_slug: Option<&str>,
+    req: Option<&mold_core::GenerateRequest>,
+    paths: Option<&mold_core::ModelPaths>,
+) -> Option<String> {
+    if family_slug != Some("ltx2") {
+        return None;
+    }
+    let req = req?;
+    let facts = crate::ltx2_admission::checkpoint_facts_cached(&paths?.transformer)?;
+    crate::ltx2_admission::supported_shape_advice(
+        &facts,
+        crate::ltx2_admission::Ltx2ShapeHint::from_request(req),
+        worker.gpu.total_vram_bytes,
+    )
+}
+
+/// `observed_high_water_bytes` is the memory authority the failed attempt ran
+/// under — the frozen plan's predicted peak. The attempt proved it cannot have
+/// all of that, so the next admission for the same `(model, shape, GPU)` plans
+/// against a reduced grant instead of repeating the identical plan.
+fn cuda_oom_user_message_with_plan(
     worker: &GpuWorker,
     model_name: &str,
     family_slug: Option<&str>,
     req: Option<&mold_core::GenerateRequest>,
+    paths: Option<&mold_core::ModelPaths>,
+    observed_high_water_bytes: Option<u64>,
 ) -> (String, bool) {
-    let base = if family_slug.is_none() && req.is_none() {
+    let advice = ltx2_oom_shape_advice(worker, family_slug, req, paths);
+    let mut base = if family_slug.is_none() && req.is_none() {
         oom_user_message(model_name)
     } else {
-        oom_user_message_for_request(model_name, family_slug, req)
+        oom_user_message_with_advice(model_name, family_slug, req, advice.as_deref())
     };
-    let outcome = crate::gpu_pool::record_model_cuda_oom(model_name, worker.gpu.ordinal);
+    let shape_bucket = req.map(crate::gpu_pool::oom_shape_bucket);
+    if let (Some(bucket), Some(high_water)) = (shape_bucket.as_deref(), observed_high_water_bytes) {
+        if let Some(grant) = crate::gpu_pool::record_reduced_vram_grant(
+            model_name,
+            bucket,
+            worker.gpu.ordinal,
+            high_water,
+        ) {
+            base.push_str(&format!(
+                " Retrying with a smaller memory grant (~{:.1} GB).",
+                grant as f64 / 1_000_000_000.0
+            ));
+        }
+    }
+    let outcome = crate::gpu_pool::record_model_cuda_oom(
+        model_name,
+        shape_bucket.as_deref(),
+        worker.gpu.ordinal,
+    );
     if outcome.is_unschedulable() {
-        if let Some(cooldown) = crate::gpu_pool::model_unschedulable_message(model_name) {
+        if let Some(cooldown) =
+            crate::gpu_pool::model_unschedulable_message(model_name, shape_bucket.as_deref())
+        {
             return (format!("{base} {cooldown}"), false);
         }
     }
@@ -2480,6 +2552,15 @@ fn process_job_with_sink(
 
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
 
+    // Hand the frozen plan's admitted peak down to the engine for this
+    // dispatch. Held for the whole job (load + inference) and released on
+    // every exit path by the guard's Drop.
+    let _vram_grant = ScopedThreadVramGrant::enter(
+        job.execution_plan
+            .as_ref()
+            .map(|plan| plan.predicted_vram_peak_bytes),
+    );
+
     // Acquire per-GPU load lock — ensures only one model load at a time per GPU.
     let _load_lock = worker.model_load_lock.lock().unwrap();
 
@@ -2505,6 +2586,7 @@ fn process_job_with_sink(
     let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
         mode: PlannedEngineMode::from_plan(plan),
         predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
+        learned_vram_envelope_bytes: plan.learned_vram_envelope_bytes,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
         request: &job.request,
         engine_paths: &plan.engine_paths,
@@ -2530,11 +2612,15 @@ fn process_job_with_sink(
             (fatal_cuda_user_message(&model_name), false)
         } else if is_oom {
             if synchronize_after_oom(worker) {
-                cuda_oom_user_message(
+                cuda_oom_user_message_with_plan(
                     worker,
                     &model_name,
                     family_slug.as_deref(),
                     Some(&job.request),
+                    job.execution_plan.as_ref().map(|plan| &plan.engine_paths),
+                    job.execution_plan
+                        .as_ref()
+                        .map(|plan| plan.predicted_vram_peak_bytes),
                 )
             } else {
                 (fatal_cuda_user_message(&model_name), false)
@@ -2923,11 +3009,15 @@ fn process_job_with_sink(
                 (fatal_cuda_user_message(&model_name), false)
             } else if is_oom {
                 if synchronize_after_oom(worker) {
-                    cuda_oom_user_message(
+                    cuda_oom_user_message_with_plan(
                         worker,
                         &model_name,
                         family_slug.as_deref(),
                         Some(&job.request),
+                        job.execution_plan.as_ref().map(|plan| &plan.engine_paths),
+                        job.execution_plan
+                            .as_ref()
+                            .map(|plan| plan.predicted_vram_peak_bytes),
                     )
                 } else {
                     (fatal_cuda_user_message(&model_name), false)
@@ -3287,6 +3377,21 @@ fn ensure_model_ready_sync_inner_guarded(
     })
 }
 
+/// The memory number the worker rechecks before executing a frozen plan.
+///
+/// Admission reserves `max(static, decayed observed high water)`
+/// (`mold_scheduler::estimates`), but the recheck only looked at the static
+/// prediction. A plan the scheduler had already sized against a 24.9 GB
+/// observed peak therefore passed the worker gate and died two minutes later
+/// in CUDA (#641). A zero envelope means no learned evidence and must never
+/// weaken the frozen plan.
+pub(crate) fn planned_recheck_peak_bytes(
+    predicted_vram_peak_bytes: u64,
+    learned_vram_envelope_bytes: u64,
+) -> u64 {
+    predicted_vram_peak_bytes.max(learned_vram_envelope_bytes)
+}
+
 fn ensure_model_ready_sync_inner(
     worker: &GpuWorker,
     cache_key: &str,
@@ -3297,7 +3402,12 @@ fn ensure_model_ready_sync_inner(
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<ModelLoadDisposition> {
     let planned_mode = planned_load.map(|planned| planned.mode);
-    let planned_peak_bytes = planned_load.map(|planned| planned.predicted_vram_peak_bytes);
+    let planned_peak_bytes = planned_load.map(|planned| {
+        planned_recheck_peak_bytes(
+            planned.predicted_vram_peak_bytes,
+            planned.learned_vram_envelope_bytes,
+        )
+    });
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
@@ -3938,6 +4048,39 @@ impl Drop for ScopedThreadGpuBinding {
     }
 }
 
+/// Publish the frozen plan's admitted VRAM peak to the engine for the duration
+/// of one dispatch.
+///
+/// Engines that self-size against *sampled free VRAM* (LTX-2's adaptive block
+/// residency) otherwise expand to fill the card even though the scheduler
+/// admitted them at a much smaller peak, then die at the first denoise step.
+/// The frozen plan owns the memory authority at dispatch (`CLAUDE.md`), so the
+/// worker hands that authority down and takes it back on every exit path —
+/// including early returns and panics — so a later job on this thread can't
+/// inherit a stale grant.
+///
+/// Deliberately `predicted_vram_peak_bytes` and not
+/// `planned_recheck_peak_bytes`: the learned envelope can carry a *failed*
+/// run's high-water mark, and granting that back is precisely the number that
+/// OOM'd.
+struct ScopedThreadVramGrant;
+
+impl ScopedThreadVramGrant {
+    fn enter(predicted_vram_peak_bytes: Option<u64>) -> Option<Self> {
+        // A zero peak is "no estimate", not "no memory": granting it would
+        // starve the engine into full streaming on every job.
+        let bytes = predicted_vram_peak_bytes.filter(|bytes| *bytes > 0)?;
+        mold_inference::device::init_thread_vram_grant_bytes(bytes);
+        Some(Self)
+    }
+}
+
+impl Drop for ScopedThreadVramGrant {
+    fn drop(&mut self) {
+        mold_inference::device::clear_thread_vram_grant_bytes();
+    }
+}
+
 /// Run a blocking chain operation on a specific GPU worker.
 ///
 /// Acquires `worker.model_load_lock` for the full duration, binds the current
@@ -4152,6 +4295,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
         Some(PlannedLoadContract {
             mode: PlannedEngineMode::from_plan(load.plan),
             predicted_vram_peak_bytes: load.plan.predicted_vram_peak_bytes,
+            learned_vram_envelope_bytes: load.plan.learned_vram_envelope_bytes,
             execution_fingerprint: &load.plan.execution_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
@@ -7908,6 +8052,37 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_publishes_the_frozen_plans_vram_grant_and_takes_it_back() {
+        mold_inference::device::clear_thread_vram_grant_bytes();
+
+        {
+            let _grant = ScopedThreadVramGrant::enter(Some(11_500_000_000));
+            assert_eq!(
+                mold_inference::device::thread_vram_grant_bytes(),
+                Some(11_500_000_000),
+                "an engine that self-sizes against free VRAM must see the admitted peak"
+            );
+        }
+        assert_eq!(
+            mold_inference::device::thread_vram_grant_bytes(),
+            None,
+            "the grant must not leak to the next job on this worker thread"
+        );
+    }
+
+    #[test]
+    fn dispatch_without_a_frozen_plan_grants_nothing() {
+        mold_inference::device::clear_thread_vram_grant_bytes();
+
+        assert!(ScopedThreadVramGrant::enter(None).is_none());
+        assert_eq!(mold_inference::device::thread_vram_grant_bytes(), None);
+
+        // A zero estimate means "unknown", not "no memory".
+        assert!(ScopedThreadVramGrant::enter(Some(0)).is_none());
+        assert_eq!(mold_inference::device::thread_vram_grant_bytes(), None);
+    }
+
+    #[test]
     fn chain_scope_preserves_scheduler_owner_binding_and_clears_legacy_binding() {
         let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
         let config = Config::default();
@@ -8436,6 +8611,85 @@ mod tests {
         assert!(
             is_cuda_oom(&oom_err),
             "must detect CUDA_ERROR_OUT_OF_MEMORY in anyhow error chain"
+        );
+    }
+
+    /// #641: "reduce --frames below 97 (e.g. 17 or 9)" is a guess — it does
+    /// not know whether resolution or frame count is the binding constraint,
+    /// and 9 frames is far below what the card can run. When the LTX-2
+    /// estimator can name a shape that fits, the message must use it.
+    #[test]
+    fn infeasible_rejection_names_a_supported_shape() {
+        let facts = crate::ltx2_admission::test_support::ltx2_19b_fp8_facts();
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt": "Bring this image to life",
+                "model": "ltx-2-19b-distilled:fp8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 8,
+                "guidance": 3.0,
+                "frames": 97
+            }"#,
+        )
+        .unwrap();
+        request.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        let advice = crate::ltx2_admission::supported_shape_advice(
+            &facts,
+            crate::ltx2_admission::Ltx2ShapeHint::from_request(&request),
+            25_757_220_864,
+        )
+        .expect("a 24 GB card must have a runnable LTX-2 shape");
+
+        let message = oom_user_message_with_advice(
+            "ltx-2-19b-distilled:fp8",
+            Some("ltx2"),
+            Some(&request),
+            Some(&advice),
+        );
+
+        let shapes = crate::ltx2_admission::supported_shapes(
+            &facts,
+            crate::ltx2_admission::Ltx2ShapeHint::from_request(&request),
+            25_757_220_864,
+        );
+        let named = shapes
+            .first()
+            .expect("supported_shape_advice implies at least one shape");
+        assert!(
+            message.contains(&format!("{}x{}", named.width, named.height)),
+            "message must name a concrete resolution; got: {message}"
+        );
+        assert!(
+            message.contains(&format!("{} frames", named.frames)),
+            "message must name a concrete frame count; got: {message}"
+        );
+        assert!(
+            !message.contains("e.g. 17 or 9"),
+            "the guessed frame hint must not survive when a real shape is known; \
+             got: {message}"
+        );
+    }
+
+    /// #641: admission reserves `max(static, decayed observed high water)`,
+    /// but the worker's pre-load recheck only looked at the static prediction.
+    /// A plan the scheduler had already sized against a 24.9 GB observed peak
+    /// therefore passed the worker gate and died two minutes later in CUDA.
+    #[test]
+    fn planned_recheck_uses_the_larger_of_static_and_learned_vram() {
+        assert_eq!(
+            planned_recheck_peak_bytes(11_548_381_184, 24_884_805_632),
+            24_884_805_632,
+            "the learned envelope must win when it is the conservative one"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(24_884_805_632, 0),
+            24_884_805_632,
+            "no learned evidence must never weaken the frozen plan"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000),
+            20_000_000_000
         );
     }
 

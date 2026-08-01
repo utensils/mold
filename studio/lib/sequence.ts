@@ -32,6 +32,13 @@ export interface SequenceLimits {
   maxStages: number;
   maxTotalFrames: number;
   motionTailFrames: number;
+  /**
+   * Whether a clip may be left undescribed — `promptOptional` from
+   * `./promptRequirement` for the draft's family and conditioning. Absent
+   * reads as "required", which is every image family and unconditioned
+   * text-to-video.
+   */
+  promptOptional?: boolean;
 }
 
 // Verified on Plato's 48 GB L40S at the catalog model's 1216×704 defaults.
@@ -122,8 +129,10 @@ export function sequenceValidation(
   limits: SequenceLimits,
 ): string[] {
   if (stages.length < 2) return ["Add at least two clips to make a sequence."];
-  const empty = stages.findIndex((stage) => !stage.prompt.trim());
-  if (empty >= 0) return [`Describe clip ${empty + 1} before generating.`];
+  if (!limits.promptOptional) {
+    const empty = stages.findIndex((stage) => !stage.prompt.trim());
+    if (empty >= 0) return [`Describe clip ${empty + 1} before generating.`];
+  }
   if (stages.length > limits.maxStages) {
     return [`Reduce the sequence to ${limits.maxStages} clips or fewer.`];
   }

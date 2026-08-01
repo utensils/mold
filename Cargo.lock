@@ -3149,6 +3149,7 @@ dependencies = [
  "mold-ai-scheduler",
  "mold-ai-server",
  "mold-ai-tui",
+ "png 0.18.1",
  "predicates",
  "rand 0.8.5",
  "reqwest",

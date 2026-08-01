@@ -28,6 +28,7 @@ import {
   sequenceOpeningImageError,
   stageInvalidation,
 } from "@studio/lib/sequenceForm";
+import { promptOptional } from "@studio/lib/promptRequirement";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -157,11 +158,18 @@ const stages = computed<SequenceStage[]>(() =>
     fade_frames: clip.fadeFrames,
   })),
 );
+// The opening image conditions clip 1, and every later clip inherits the
+// previous clip's motion tail — the same handoff extend uses — so a
+// promptless-capable family can render the whole sequence undescribed.
+const clipPromptOptional = computed(() =>
+  promptOptional({ family: props.form.family, sourceImage: draft.openingImage }),
+);
 const validation = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: props.chainLimits?.max_total_frames ?? Number.MAX_SAFE_INTEGER,
     motionTailFrames: motionTail.value,
+    promptOptional: clipPromptOptional.value,
   }),
 );
 const duration = computed(() => sequenceDuration(stages.value, props.form.fps, motionTail.value));

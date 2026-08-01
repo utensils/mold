@@ -453,6 +453,10 @@ impl Ltx2Engine {
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
             guidance_overrides: req.guidance_overrides.clone(),
+            // The scheduler's admitted peak, when a worker bound one for this
+            // dispatch. `None` on the CLI / test paths keeps the legacy
+            // free-VRAM-only sizing.
+            vram_grant_bytes: crate::device::thread_vram_grant_bytes(),
         })
     }
 

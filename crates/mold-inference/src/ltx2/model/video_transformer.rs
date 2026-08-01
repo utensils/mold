@@ -219,17 +219,14 @@ impl RmsNorm {
 // GELU (approximate) — F32 upcast for numerical stability
 // ---------------------------------------------------------------------------
 
+/// Tanh-approximate GELU evaluated in F32.
+///
+/// `Tensor::gelu` is candle's fused single-kernel form of the same polynomial
+/// `0.5·v·(1 + tanh(sqrt(2/π)·(v + 0.044715·v³)))`. The hand-rolled expression
+/// this replaced bound eight live full-size F32 buffers; at LTX-2 stage-2 shapes
+/// (13,312 tokens × 16,384 feed-forward hidden) that alone peaked near 7 GB.
 pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let x_cube = x_f32.sqr()?.broadcast_mul(&x_f32)?;
-    let inner = x_f32.broadcast_add(&x_cube.affine(0.044715, 0.0)?)?;
-    let scale = (2.0f64 / std::f64::consts::PI).sqrt() as f32;
-    let tanh_input = inner.affine(scale as f64, 0.0)?;
-    let tanh_out = tanh_input.tanh()?;
-    let gelu = x_f32
-        .broadcast_mul(&tanh_out.affine(1.0, 1.0)?)?
-        .affine(0.5, 0.0)?;
-    gelu.to_dtype(x.dtype())
+    x.to_dtype(DType::F32)?.gelu()?.to_dtype(x.dtype())
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +492,35 @@ fn dequantize_fp8_weight_for_runtime(
     Ok(dequantized)
 }
 
+/// Writes one output-dimension chunk into a lazily allocated destination.
+///
+/// Collecting every chunk in a `Vec` and then `cat`ing them holds the whole
+/// output twice; writing into a single preallocated buffer keeps the peak at
+/// one output plus the chunk being produced.
+fn write_output_chunk(
+    dst: &mut Option<Tensor>,
+    chunk: &Tensor,
+    out_dim: usize,
+    offset: usize,
+) -> Result<()> {
+    if dst.is_none() {
+        let mut shape = chunk.dims().to_vec();
+        match shape.last_mut() {
+            Some(last) => *last = out_dim,
+            None => candle_core::bail!("chunked linear output must have at least one dimension"),
+        }
+        *dst = Some(Tensor::zeros(shape, chunk.dtype(), chunk.device())?);
+    }
+    let dst = dst
+        .as_ref()
+        .expect("chunked linear destination allocated above");
+    dst.slice_set(&chunk.contiguous()?, D::Minus1, offset)
+}
+
+fn finish_output_chunks(dst: Option<Tensor>) -> Result<Tensor> {
+    dst.ok_or_else(|| candle_core::Error::msg("chunked linear produced no output chunks"))
+}
+
 fn fp8_linear_output_chunk_size(weight: &Tensor) -> Result<usize> {
     let out_dim = weight.dim(0)?;
     if !weight.device().is_cuda() {
@@ -535,7 +561,7 @@ fn fp8_linear_forward_chunked(
         };
     }
 
-    let mut outputs = Vec::with_capacity(out_dim.div_ceil(chunk_size));
+    let mut dst = None;
     match *xs.dims() {
         [batch0, batch1, tokens, hidden] => {
             let xs_flat = xs.reshape((batch0 * batch1 * tokens, hidden))?;
@@ -548,11 +574,9 @@ fn fp8_linear_forward_chunked(
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch0, batch1, tokens, rows))?;
-                outputs.push(chunk);
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
         [batch, tokens, hidden] => {
             let xs_flat = xs.reshape((batch * tokens, hidden))?;
@@ -565,11 +589,9 @@ fn fp8_linear_forward_chunked(
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch, tokens, rows))?;
-                outputs.push(chunk);
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
         _ => {
             let mut offset = 0;
@@ -578,13 +600,13 @@ fn fp8_linear_forward_chunked(
                 let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
                 let weight_chunk =
                     dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
-                outputs.push(xs.matmul(&weight_chunk.t()?)?);
+                let chunk = xs.matmul(&weight_chunk.t()?)?;
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
     }
+    finish_output_chunks(dst)
 }
 
 fn nvfp4_linear_output_chunk_size(out_dim: usize, device: &Device) -> usize {
@@ -627,7 +649,7 @@ fn nvfp4_linear_forward_chunked(
         };
     }
 
-    let mut outputs = Vec::with_capacity(out_dim.div_ceil(chunk_size));
+    let mut dst = None;
     match *xs.dims() {
         [batch0, batch1, tokens, hidden] => {
             let xs_flat = xs.reshape((batch0 * batch1 * tokens, hidden))?;
@@ -642,11 +664,9 @@ fn nvfp4_linear_forward_chunked(
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch0, batch1, tokens, rows))?;
-                outputs.push(chunk);
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
         [batch, tokens, hidden] => {
             let xs_flat = xs.reshape((batch * tokens, hidden))?;
@@ -661,11 +681,9 @@ fn nvfp4_linear_forward_chunked(
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch, tokens, rows))?;
-                outputs.push(chunk);
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
         _ => {
             let mut offset = 0;
@@ -676,13 +694,13 @@ fn nvfp4_linear_forward_chunked(
                     .contiguous()?
                     .to_device(xs.device())?
                     .to_dtype(runtime_dtype)?;
-                outputs.push(xs.matmul(&weight_chunk.t()?)?);
+                let chunk = xs.matmul(&weight_chunk.t()?)?;
+                write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
             }
-            let refs = outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&refs, D::Minus1)
         }
     }
+    finish_output_chunks(dst)
 }
 
 impl Module for LtxLinear {
@@ -867,6 +885,15 @@ impl Module for GeluProjection {
 // FeedForward (GELU projection + linear)
 // ---------------------------------------------------------------------------
 
+/// Token-axis chunk size for `FeedForward`.
+///
+/// The GELU projection widens the hidden dimension 4×, so an unchunked pass at
+/// LTX-2 stage-2 shapes holds a `[1, 13312, 16384]` activation (plus its F32
+/// GELU staging) live at once. Chunking the token axis makes the working set
+/// O(chunk) instead of O(tokens) at any resolution, and composes with the
+/// out-dimension chunking the quantized linears already do.
+const FEED_FORWARD_TOKEN_CHUNK: usize = 2_048;
+
 #[derive(Clone, Debug)]
 pub struct FeedForward {
     net_0: GeluProjection,
@@ -903,8 +930,37 @@ impl FeedForward {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let x = self.net_0.forward(xs)?;
-        self.net_2.forward(&x)
+        self.forward_token_chunked(xs, FEED_FORWARD_TOKEN_CHUNK)
+    }
+
+    fn forward_token_chunked(&self, xs: &Tensor, chunk_size: usize) -> Result<Tensor> {
+        if chunk_size == 0 || xs.rank() != 3 || xs.dim(1)? <= chunk_size {
+            let x = self.net_0.forward(xs)?;
+            return self.net_2.forward(&x);
+        }
+
+        let (batch, tokens, _) = xs.dims3()?;
+        let mut out = None;
+        let mut offset = 0;
+        while offset < tokens {
+            let rows = chunk_size.min(tokens - offset);
+            let chunk = xs.narrow(1, offset, rows)?.contiguous()?;
+            let chunk = self.net_2.forward(&self.net_0.forward(&chunk)?)?;
+            if out.is_none() {
+                let dim = chunk.dim(D::Minus1)?;
+                out = Some(Tensor::zeros(
+                    (batch, tokens, dim),
+                    chunk.dtype(),
+                    chunk.device(),
+                )?);
+            }
+            let dst = out
+                .as_ref()
+                .expect("feed-forward destination allocated above");
+            dst.slice_set(&chunk.contiguous()?, 1, offset)?;
+            offset += rows;
+        }
+        out.ok_or_else(|| candle_core::Error::msg("feed-forward produced no token chunks"))
     }
 }
 
@@ -1172,7 +1228,6 @@ fn apply_split_rotary_emb(
     head_dim: usize,
 ) -> Result<Tensor> {
     let dtype = x.dtype();
-    let x = x.to_dtype(DType::F32)?;
     let (batch, seq, inner_dim) = x.dims3()?;
     if inner_dim != heads * head_dim {
         candle_core::bail!(
@@ -1185,23 +1240,34 @@ fn apply_split_rotary_emb(
         candle_core::bail!("split rotary requires an even head_dim, got {head_dim}");
     }
 
-    let x = x
-        .reshape((batch, seq, heads, head_dim))?
-        .transpose(1, 2)?
-        .contiguous()?;
-    let x = x.reshape((batch, heads, seq, 2, head_dim / 2))?;
-    let first = x.i((.., .., .., 0..1, ..))?;
-    let second = x.i((.., .., .., 1..2, ..))?;
+    // Scope the F32 upcast so it drops once the head-major copy exists; shadowing
+    // it kept both full-size buffers alive for the whole call. The F32 staging
+    // itself is deliberate — `double_precision_rope` depends on it.
+    let x = {
+        let x_f32 = x.to_dtype(DType::F32)?;
+        x_f32
+            .reshape((batch, seq, heads, head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((batch, heads, seq, 2, head_dim / 2))?
+    };
     let cos = cos.to_dtype(DType::F32)?.unsqueeze(3)?;
     let sin = sin.to_dtype(DType::F32)?.unsqueeze(3)?;
 
-    let first_out = first
-        .broadcast_mul(&cos)?
-        .broadcast_sub(&second.broadcast_mul(&sin)?)?;
-    let second_out = second
-        .broadcast_mul(&cos)?
-        .broadcast_add(&first.broadcast_mul(&sin)?)?;
-    Tensor::cat(&[first_out, second_out], 3)?
+    let rotated = {
+        let first = x.i((.., .., .., 0..1, ..))?;
+        let second = x.i((.., .., .., 1..2, ..))?;
+        let first_out = first
+            .broadcast_mul(&cos)?
+            .broadcast_sub(&second.broadcast_mul(&sin)?)?;
+        let second_out = second
+            .broadcast_mul(&cos)?
+            .broadcast_add(&first.broadcast_mul(&sin)?)?;
+        Tensor::cat(&[first_out, second_out], 3)?
+    };
+    drop(x);
+
+    rotated
         .reshape((batch, heads, seq, head_dim))?
         .transpose(1, 2)?
         .contiguous()?
@@ -1634,11 +1700,13 @@ impl LtxAttention {
 
         let v = self.to_v.forward(enc)?;
         let v = v.reshape((b, k_len, self.heads, self.head_dim))?;
-        let value_passthrough = v.transpose(1, 2)?.contiguous()?;
 
         let dtype = hidden_states.dtype();
+        // The head-major passthrough copy is only read by the perturbation paths;
+        // materializing it eagerly cost a full transposing copy of `v` on every
+        // call, including the entire unperturbed distilled path.
         let out = if all_perturbed {
-            value_passthrough.clone()
+            v.transpose(1, 2)?.contiguous()?
         } else {
             let mut q = self.to_q.forward(hidden_states)?;
             let mut k = self.to_k.forward(enc)?;
@@ -1682,14 +1750,15 @@ impl LtxAttention {
                 let q_t = q.transpose(1, 2)?;
                 let k_t = k.transpose(1, 2)?;
                 let v_t = v.transpose(1, 2)?;
+                let key_chunk = attention_key_chunk_size(k_len);
                 chunked_attention(
                     &q_t,
                     &k_t,
                     &v_t,
                     attn_mask_f32.as_ref(),
                     scale,
-                    attention_query_chunk_size(q_len),
-                    attention_key_chunk_size(k_len),
+                    attention_query_chunk_size(b, self.heads, q_len, key_chunk),
+                    key_chunk,
                 )?
             } else {
                 let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
@@ -1712,6 +1781,7 @@ impl LtxAttention {
                     mask.to_dtype(out.dtype())?
                 };
                 let one_minus_mask = Tensor::ones_like(&mask)?.broadcast_sub(&mask)?;
+                let value_passthrough = v.transpose(1, 2)?.contiguous()?;
                 out = out
                     .broadcast_mul(&mask)?
                     .broadcast_add(&value_passthrough.broadcast_mul(&one_minus_mask)?)?;
@@ -1774,14 +1844,32 @@ fn should_chunk_attention(
         > attention_chunk_threshold_bytes(device)
 }
 
-fn attention_query_chunk_size(q_len: usize) -> usize {
-    if q_len >= 8_192 {
-        32
-    } else if q_len >= 4_096 {
-        64
-    } else {
-        128
-    }
+/// Target F32 bytes for one `query_chunk × key_chunk` attention tile.
+const ATTENTION_TILE_TARGET_BYTES: u64 = 128 * 1024 * 1024;
+const MIN_ATTENTION_QUERY_CHUNK: usize = 32;
+const MAX_ATTENTION_QUERY_CHUNK: usize = 2_048;
+
+/// Query-chunk size derived from a tile byte budget rather than from `q_len`.
+///
+/// The previous 32/64/128 step function shrank the tile precisely where the
+/// sequence is longest: at LTX-2 stage-2 shapes (13,312 queries, 32 heads) it
+/// produced 416 × 13 = 5,408 tiny inner iterations per self-attention, leaving
+/// almost all of the GPU idle. Sizing from bytes keeps the same working set
+/// while giving each matmul enough work to saturate the device.
+fn attention_query_chunk_size(
+    batch: usize,
+    heads: usize,
+    q_len: usize,
+    key_chunk_size: usize,
+) -> usize {
+    let bytes_per_query = (batch.max(1) as u64)
+        .saturating_mul(heads.max(1) as u64)
+        .saturating_mul(key_chunk_size.max(1) as u64)
+        .saturating_mul(std::mem::size_of::<f32>() as u64);
+    let chunk = (ATTENTION_TILE_TARGET_BYTES / bytes_per_query.max(1)) as usize;
+    chunk
+        .clamp(MIN_ATTENTION_QUERY_CHUNK, MAX_ATTENTION_QUERY_CHUNK)
+        .min(q_len.max(1))
 }
 
 fn attention_key_chunk_size(k_len: usize) -> usize {
@@ -1826,21 +1914,15 @@ fn chunked_attention(
     query_chunk_size: usize,
     key_chunk_size: usize,
 ) -> Result<Tensor> {
-    let q = if q.dtype() == DType::F32 {
-        q.clone()
-    } else {
-        q.to_dtype(DType::F32)?
-    };
-    let k = if k.dtype() == DType::F32 {
-        k.clone()
-    } else {
-        k.to_dtype(DType::F32)?
-    };
-    let v = if v.dtype() == DType::F32 {
-        v.clone()
-    } else {
-        v.to_dtype(DType::F32)?
-    };
+    // q/k/v stay in their incoming dtype here; each tile is narrowed first and
+    // upcast to F32 inside the loop. Upcasting whole tensors up front cost four
+    // full-size F32 buffers (q, k, v, and the transposed k) that exist only to
+    // be read one tile at a time — 872 MB at the 13,312-token stage-2 shape.
+    // BF16 -> F32 is an exact widening and the matmuls are still F32, so tiling
+    // the cast is bit-identical, not a numerics trade.
+    let q = q.clone();
+    let k = k.clone();
+    let v = v.clone();
     let attn_mask = attn_mask
         .map(|mask| {
             if mask.dtype() == DType::F32 {
@@ -1853,12 +1935,14 @@ fn chunked_attention(
     let q_len = q.dim(2)?;
     let k_len = k.dim(2)?;
     let value_dim = v.dim(3)?;
-    let k_t = k.transpose(D::Minus1, D::Minus2)?.contiguous()?;
-    let mut outputs = Vec::with_capacity(q_len.div_ceil(query_chunk_size));
+    let mut out: Option<Tensor> = None;
     let mut q_offset = 0;
     while q_offset < q_len {
         let q_chunk_len = query_chunk_size.min(q_len - q_offset);
-        let q_chunk = q.narrow(2, q_offset, q_chunk_len)?.contiguous()?;
+        let q_chunk = q
+            .narrow(2, q_offset, q_chunk_len)?
+            .contiguous()?
+            .to_dtype(DType::F32)?;
         let (b_sz, h_sz, _, _) = q_chunk.dims4()?;
         let mut running_max =
             Tensor::full(f32::NEG_INFINITY, (b_sz, h_sz, q_chunk_len, 1), q.device())?;
@@ -1870,8 +1954,18 @@ fn chunked_attention(
         let mut k_offset = 0;
         while k_offset < k_len {
             let k_chunk_len = key_chunk_size.min(k_len - k_offset);
-            let k_chunk = k_t.narrow(3, k_offset, k_chunk_len)?.contiguous()?;
-            let v_chunk = v.narrow(2, k_offset, k_chunk_len)?.contiguous()?;
+            // Transpose the key tile rather than the whole key tensor: the
+            // full `[b, h, d, k_len]` contiguous copy was the single largest
+            // staging buffer here.
+            let k_chunk = k
+                .narrow(2, k_offset, k_chunk_len)?
+                .transpose(D::Minus1, D::Minus2)?
+                .contiguous()?
+                .to_dtype(DType::F32)?;
+            let v_chunk = v
+                .narrow(2, k_offset, k_chunk_len)?
+                .contiguous()?
+                .to_dtype(DType::F32)?;
 
             let mut att = q_chunk.matmul(&k_chunk)?;
             att = (att * (scale as f64))?;
@@ -1886,9 +1980,13 @@ fn chunked_attention(
             let chunk_max = att.max_keepdim(D::Minus1)?;
             let next_max = running_max.maximum(&chunk_max)?;
             let prev_scale = running_max.broadcast_sub(&next_max)?.exp()?;
-            let att = att.broadcast_sub(&next_max)?.exp()?;
+            // Reassign rather than shadow: shadowing keeps every intermediate
+            // score tile alive for the rest of the iteration, tripling the peak.
+            att = att.broadcast_sub(&next_max)?;
+            att = att.exp()?;
             let chunk_denom = att.sum_keepdim(D::Minus1)?;
             let chunk_out = att.matmul(&v_chunk)?;
+            drop(att);
 
             running_denom = running_denom
                 .broadcast_mul(&prev_scale)?
@@ -1900,11 +1998,21 @@ fn chunked_attention(
             k_offset += k_chunk_len;
         }
 
-        outputs.push(running_out.broadcast_div(&running_denom)?);
+        let chunk = running_out.broadcast_div(&running_denom)?;
+        if out.is_none() {
+            out = Some(Tensor::zeros(
+                (b_sz, h_sz, q_len, value_dim),
+                DType::F32,
+                q.device(),
+            )?);
+        }
+        let dst = out
+            .as_ref()
+            .expect("chunked attention destination allocated above");
+        dst.slice_set(&chunk.contiguous()?, 2, q_offset)?;
         q_offset += q_chunk_len;
     }
-    let refs = outputs.iter().collect::<Vec<_>>();
-    Tensor::cat(&refs, 2)
+    out.ok_or_else(|| candle_core::Error::msg("chunked attention produced no query chunks"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2502,6 +2610,30 @@ fn rms_norm_tensor(xs: &Tensor, eps: f64) -> Result<Tensor> {
     xs_f32.broadcast_div(&denom)?.to_dtype(dtype)
 }
 
+/// One AdaLN modulation component: `scale_shift_table[index] + timestep[.., index]`.
+///
+/// `timestep` is `[batch, tokens, count * dim]` and the table broadcasts over the
+/// token axis, so summing the whole `[batch, tokens, count, dim]` block only to
+/// narrow a few components out of it costs a full extra activation (~650 MB at
+/// LTX-2 stage-2 shapes, twice per block). Slicing the component first keeps each
+/// result at `[batch, tokens, dim]`.
+fn ada_component(scale_shift_table: &Tensor, timestep: &Tensor, index: usize) -> Result<Tensor> {
+    let dim = scale_shift_table.dim(1)?;
+    let width = timestep.dim(D::Minus1)?;
+    if !width.is_multiple_of(dim) || (index + 1) * dim > width {
+        candle_core::bail!(
+            "AdaLN component {index} is out of range for timestep width {width} and dim {dim}"
+        );
+    }
+    let entry = scale_shift_table
+        .narrow(0, index, 1)?
+        .reshape((1, 1, dim))?
+        .to_dtype(timestep.dtype())?;
+    timestep
+        .narrow(D::Minus1, index * dim, dim)?
+        .broadcast_add(&entry)
+}
+
 fn broadcast_to_tokens(values: &Tensor, tokens: usize) -> Result<Tensor> {
     if values.dim(1)? == 1 {
         values.broadcast_as((values.dim(0)?, tokens, values.dim(2)?))
@@ -2511,20 +2643,19 @@ fn broadcast_to_tokens(values: &Tensor, tokens: usize) -> Result<Tensor> {
 }
 
 fn modulate_tokens(x: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor> {
-    let scale = broadcast_to_tokens(scale, x.dim(1)?)?;
+    // Fold the identity into `scale` before broadcasting: `Tensor::ones_like` on
+    // a token-broadcast view materializes a full-size activation for nothing.
     let scale = if scale.dtype() == x.dtype() {
-        scale
+        scale.clone()
     } else {
         scale.to_dtype(x.dtype())?
     };
-    let shift = broadcast_to_tokens(shift, x.dim(1)?)?;
     let shift = if shift.dtype() == x.dtype() {
-        shift
+        shift.clone()
     } else {
         shift.to_dtype(x.dtype())?
     };
-    let one = Tensor::ones_like(&scale)?;
-    x.broadcast_mul(&one.broadcast_add(&scale)?)?
+    x.broadcast_mul(&scale.affine(1.0, 1.0)?)?
         .broadcast_add(&shift)
 }
 
@@ -2761,33 +2892,16 @@ impl LtxAvTransformerBlock {
         })
     }
 
-    fn add_ada_values(
-        scale_shift_table: &Tensor,
-        timestep: &Tensor,
-        count: usize,
-    ) -> Result<Tensor> {
-        let batch = timestep.dim(0)?;
-        let tokens = timestep.dim(1)?;
-        let dim = scale_shift_table.dim(1)?;
-        let table = scale_shift_table
-            .to_dtype(timestep.dtype())?
-            .unsqueeze(0)?
-            .unsqueeze(0)?
-            .broadcast_as((batch, tokens, count, dim))?;
-        table.broadcast_add(&timestep.reshape((batch, tokens, count, dim))?)
-    }
-
     fn get_ada_triplet(
         &self,
         scale_shift_table: &Tensor,
         timestep: &Tensor,
         start_index: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let ada = Self::add_ada_values(scale_shift_table, timestep, scale_shift_table.dim(0)?)?;
         Ok((
-            ada.i((.., .., start_index, ..))?,
-            ada.i((.., .., start_index + 1, ..))?,
-            ada.i((.., .., start_index + 2, ..))?,
+            ada_component(scale_shift_table, timestep, start_index)?,
+            ada_component(scale_shift_table, timestep, start_index + 1)?,
+            ada_component(scale_shift_table, timestep, start_index + 2)?,
         ))
     }
 
@@ -2798,13 +2912,16 @@ impl LtxAvTransformerBlock {
         gate_timestep: &Tensor,
         start_index: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let scale_shift =
-            Self::add_ada_values(&scale_shift_table.i((0..4, ..))?, scale_shift_timestep, 4)?;
-        let gate = Self::add_ada_values(&scale_shift_table.i((4..5, ..))?, gate_timestep, 1)?;
+        let scale_shift_table_head = scale_shift_table.i((0..4, ..))?;
+        let gate_table = scale_shift_table.i((4..5, ..))?;
         Ok((
-            scale_shift.i((.., .., start_index, ..))?,
-            scale_shift.i((.., .., start_index + 1, ..))?,
-            gate.i((.., .., 0, ..))?,
+            ada_component(&scale_shift_table_head, scale_shift_timestep, start_index)?,
+            ada_component(
+                &scale_shift_table_head,
+                scale_shift_timestep,
+                start_index + 1,
+            )?,
+            ada_component(&gate_table, gate_timestep, 0)?,
         ))
     }
 
@@ -2829,9 +2946,8 @@ impl LtxAvTransformerBlock {
             let (shift_q, scale_q, gate) = self.get_ada_triplet(scale_shift_table, timestep, 6)?;
             let attn_input =
                 modulate_tokens(&rms_norm_tensor(x, self.norm_eps)?, &scale_q, &shift_q)?;
-            let prompt = Self::add_ada_values(prompt_scale_shift_table, prompt_timestep, 2)?;
-            let shift_kv = prompt.i((.., .., 0, ..))?;
-            let scale_kv = prompt.i((.., .., 1, ..))?;
+            let shift_kv = ada_component(prompt_scale_shift_table, prompt_timestep, 0)?;
+            let scale_kv = ada_component(prompt_scale_shift_table, prompt_timestep, 1)?;
             let context = modulate_tokens(context, &scale_kv, &shift_kv)?;
             return gate_tokens(
                 &attn.forward(
@@ -3781,7 +3897,6 @@ impl Ltx2AvTransformer3DModel {
         x: &Tensor,
         embedded_timestep: &Tensor,
     ) -> Result<Tensor> {
-        let tokens = x.dim(1)?;
         let table = scale_shift_table
             .to_dtype(embedded_timestep.dtype())?
             .unsqueeze(0)?
@@ -3790,21 +3905,20 @@ impl Ltx2AvTransformer3DModel {
         let shift = scale_shift.i((.., .., 0, ..))?;
         let scale = scale_shift.i((.., .., 1, ..))?;
         let x = norm_out.forward(x)?;
-        let scale = broadcast_to_tokens(&scale, tokens)?;
+        // Same identity fold as `modulate_tokens`: add 1.0 to the small
+        // per-sample scale before it is broadcast across the token axis.
         let scale = if scale.dtype() == x.dtype() {
             scale
         } else {
             scale.to_dtype(x.dtype())?
         };
-        let shift = broadcast_to_tokens(&shift, tokens)?;
         let shift = if shift.dtype() == x.dtype() {
             shift
         } else {
             shift.to_dtype(x.dtype())?
         };
-        let one = Tensor::ones_like(&scale)?;
         proj_out.forward(
-            &x.broadcast_mul(&one.broadcast_add(&scale)?)?
+            &x.broadcast_mul(&scale.affine(1.0, 1.0)?)?
                 .broadcast_add(&shift)?,
         )
     }
@@ -4101,9 +4215,9 @@ mod tests {
 
     use super::{
         cached_timestep_embedding_inv_freq, emulate_static_fp8_input_quantization, gate_tokens,
-        modulate_tokens, LayerNormNoParams, LinearLoraAdapter, Ltx2AvTransformer3DModel,
-        Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear,
-        LtxRopeType, Nvfp4LinearCache, TimestepEmbeddingInvFreqCache,
+        modulate_tokens, FeedForward, LayerNormNoParams, LinearLoraAdapter,
+        Ltx2AvTransformer3DModel, Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig,
+        LtxAttention, LtxLinear, LtxRopeType, Nvfp4LinearCache, TimestepEmbeddingInvFreqCache,
         TimestepEmbeddingInvFreqCacheKey,
     };
 
@@ -5671,6 +5785,7 @@ mod tests {
             largest_streamed_block: 20,
             activation_budget: 0,
             runtime_headroom: 0,
+            fixed_resident_bytes: 0,
         };
         let adaptive = Ltx2AvTransformer3DModel::new_adaptive(
             &config,
@@ -5972,5 +6087,278 @@ mod tests {
 
         assert_tensors_close(&scalar_video, &token_video, 1e-4);
         assert_tensors_close(&scalar_audio.unwrap(), &token_audio.unwrap(), 1e-4);
+    }
+
+    #[test]
+    fn gelu_approximate_matches_tanh_polynomial_reference() {
+        let device = Device::Cpu;
+        let values: Vec<f32> = (0..512)
+            .map(|index| (index as f32 - 256.0) / 64.0)
+            .collect();
+        let x = Tensor::from_vec(values, (1, 32, 16), &device).unwrap();
+
+        // The hand-rolled expression this helper used to evaluate. Kept as the
+        // permanent guard for the fused single-kernel form.
+        let x_f32 = x.to_dtype(DType::F32).unwrap();
+        let x_cube = x_f32.sqr().unwrap().broadcast_mul(&x_f32).unwrap();
+        let inner = x_f32
+            .broadcast_add(&x_cube.affine(0.044715, 0.0).unwrap())
+            .unwrap();
+        let scale = (2.0f64 / std::f64::consts::PI).sqrt() as f32;
+        let tanh_out = inner.affine(scale as f64, 0.0).unwrap().tanh().unwrap();
+        let expected = x_f32
+            .broadcast_mul(&tanh_out.affine(1.0, 1.0).unwrap())
+            .unwrap()
+            .affine(0.5, 0.0)
+            .unwrap();
+
+        let actual = super::gelu_approximate(&x).unwrap();
+
+        assert_eq!(actual.dtype(), DType::F32);
+        assert_tensors_close(&expected, &actual, 1e-6);
+    }
+
+    #[test]
+    fn gelu_approximate_preserves_input_dtype() {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(patterned_values(32, 3), (1, 8, 4), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let out = super::gelu_approximate(&x).unwrap();
+
+        assert_eq!(out.dtype(), DType::BF16);
+        assert_eq!(out.dims(), &[1, 8, 4]);
+    }
+
+    fn feed_forward_var_builder(dim: usize, device: &Device) -> VarBuilder<'static> {
+        let hidden = dim * 4;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "net.0.proj.weight".to_string(),
+            Tensor::from_vec(patterned_values(hidden * dim, 3), (hidden, dim), device).unwrap(),
+        );
+        tensors.insert(
+            "net.0.proj.bias".to_string(),
+            Tensor::from_vec(patterned_values(hidden, 5), hidden, device).unwrap(),
+        );
+        tensors.insert(
+            "net.2.weight".to_string(),
+            Tensor::from_vec(patterned_values(dim * hidden, 7), (dim, hidden), device).unwrap(),
+        );
+        tensors.insert(
+            "net.2.bias".to_string(),
+            Tensor::from_vec(patterned_values(dim, 11), dim, device).unwrap(),
+        );
+        VarBuilder::from_tensors(tensors, DType::F32, device)
+    }
+
+    #[test]
+    fn feed_forward_token_chunking_matches_unchunked_output() {
+        let device = Device::Cpu;
+        let ff =
+            FeedForward::new(4, feed_forward_var_builder(4, &device), None, "ff", None).unwrap();
+        let xs = Tensor::from_vec(patterned_values(2 * 10 * 4, 13), (2, 10, 4), &device).unwrap();
+
+        let unchunked = ff.forward_token_chunked(&xs, usize::MAX).unwrap();
+        let chunked = ff.forward_token_chunked(&xs, 3).unwrap();
+
+        assert_eq!(chunked.dims(), unchunked.dims());
+        assert_tensors_close(&unchunked, &chunked, 1e-6);
+    }
+
+    #[test]
+    fn feed_forward_leaves_small_token_counts_unchunked() {
+        let device = Device::Cpu;
+        let ff =
+            FeedForward::new(4, feed_forward_var_builder(4, &device), None, "ff", None).unwrap();
+        let xs = Tensor::from_vec(patterned_values(5 * 4, 17), (1, 5, 4), &device).unwrap();
+
+        let via_forward = ff.forward(&xs).unwrap();
+        let unchunked = ff.forward_token_chunked(&xs, usize::MAX).unwrap();
+
+        assert_tensors_close(&via_forward, &unchunked, 0.0);
+    }
+
+    #[test]
+    fn fp8_linear_forward_chunked_matches_full_for_rank3_and_rank2_inputs() {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(patterned_values(24, 31), (6, 4), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.25f32, &device).unwrap();
+
+        for dims in [vec![2usize, 3, 4], vec![5usize, 4]] {
+            let len: usize = dims.iter().product();
+            let xs = Tensor::from_vec(patterned_values(len, 41), dims.clone(), &device).unwrap();
+
+            let full =
+                super::fp8_linear_forward_chunked(&xs, &weight, Some(&weight_scale), DType::F32, 6)
+                    .unwrap();
+            let chunked =
+                super::fp8_linear_forward_chunked(&xs, &weight, Some(&weight_scale), DType::F32, 4)
+                    .unwrap();
+
+            assert_eq!(chunked.dims(), full.dims());
+            assert_tensors_close(&full, &chunked, 1e-5);
+        }
+    }
+
+    #[test]
+    fn nvfp4_linear_forward_chunked_matches_full_dequantized_matmul() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(patterned_values(24, 43), (1, 2, 3, 4), &device).unwrap();
+        let weight = Tensor::from_vec(patterned_values(24, 47), (6, 4), &device).unwrap();
+
+        let full = super::nvfp4_linear_forward_chunked(&xs, &weight, DType::F32, 6).unwrap();
+        let chunked = super::nvfp4_linear_forward_chunked(&xs, &weight, DType::F32, 2).unwrap();
+
+        assert_eq!(chunked.dims(), full.dims());
+        assert_tensors_close(&full, &chunked, 1e-5);
+    }
+
+    #[test]
+    fn ada_component_matches_broadcast_table_reference() {
+        let device = Device::Cpu;
+        let (batch, tokens, count, dim) = (2usize, 3usize, 6usize, 4usize);
+        let table =
+            Tensor::from_vec(patterned_values(count * dim, 1), (count, dim), &device).unwrap();
+        let timestep = Tensor::from_vec(
+            patterned_values(batch * tokens * count * dim, 5),
+            (batch, tokens, count * dim),
+            &device,
+        )
+        .unwrap();
+
+        let reference = table
+            .unsqueeze(0)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap()
+            .broadcast_as((batch, tokens, count, dim))
+            .unwrap()
+            .broadcast_add(&timestep.reshape((batch, tokens, count, dim)).unwrap())
+            .unwrap();
+
+        for index in 0..count {
+            let expected = reference.narrow(2, index, 1).unwrap().squeeze(2).unwrap();
+            let actual = super::ada_component(&table, &timestep, index).unwrap();
+
+            assert_eq!(actual.dims(), &[batch, tokens, dim]);
+            assert_tensors_close(&expected, &actual, 1e-6);
+        }
+    }
+
+    #[test]
+    fn ada_component_rejects_out_of_range_components() {
+        let device = Device::Cpu;
+        let table = Tensor::from_vec(patterned_values(8, 1), (2, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(patterned_values(24, 5), (1, 3, 8), &device).unwrap();
+
+        assert!(super::ada_component(&table, &timestep, 2).is_err());
+    }
+
+    #[test]
+    fn modulate_tokens_matches_one_plus_scale_reference() {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(patterned_values(2 * 5 * 3, 19), (2, 5, 3), &device).unwrap();
+        let scale = Tensor::from_vec(patterned_values(2 * 3, 23), (2, 1, 3), &device).unwrap();
+        let shift = Tensor::from_vec(patterned_values(2 * 3, 29), (2, 1, 3), &device).unwrap();
+
+        let scale_broadcast = scale.broadcast_as((2usize, 5, 3)).unwrap();
+        let expected = x
+            .broadcast_mul(
+                &Tensor::ones_like(&scale_broadcast)
+                    .unwrap()
+                    .broadcast_add(&scale_broadcast)
+                    .unwrap(),
+            )
+            .unwrap()
+            .broadcast_add(&shift.broadcast_as((2usize, 5, 3)).unwrap())
+            .unwrap();
+
+        let actual = modulate_tokens(&x, &scale, &shift).unwrap();
+
+        assert_eq!(actual.dims(), &[2, 5, 3]);
+        assert_tensors_close(&expected, &actual, 1e-6);
+    }
+
+    #[test]
+    fn split_rotary_is_identity_for_unit_cosine() {
+        let device = Device::Cpu;
+        let (batch, seq, heads, head_dim) = (1usize, 3usize, 2usize, 4usize);
+        let x = Tensor::from_vec(
+            patterned_values(batch * seq * heads * head_dim, 53),
+            (batch, seq, heads * head_dim),
+            &device,
+        )
+        .unwrap();
+        let cos = Tensor::ones((batch, heads, seq, head_dim / 2), DType::F32, &device).unwrap();
+        let sin = Tensor::zeros((batch, heads, seq, head_dim / 2), DType::F32, &device).unwrap();
+
+        let out = super::apply_split_rotary_emb(&x, &cos, &sin, heads, head_dim).unwrap();
+
+        assert_eq!(out.dims(), &[batch, seq, heads * head_dim]);
+        assert_tensors_close(&x, &out, 1e-6);
+    }
+
+    #[test]
+    fn split_rotary_swaps_halves_for_quarter_turn() {
+        let device = Device::Cpu;
+        let (batch, seq, heads, head_dim) = (1usize, 2usize, 2usize, 4usize);
+        let x = Tensor::from_vec(
+            patterned_values(batch * seq * heads * head_dim, 59),
+            (batch, seq, heads * head_dim),
+            &device,
+        )
+        .unwrap();
+        let cos = Tensor::zeros((batch, heads, seq, head_dim / 2), DType::F32, &device).unwrap();
+        let sin = Tensor::ones((batch, heads, seq, head_dim / 2), DType::F32, &device).unwrap();
+
+        let out = super::apply_split_rotary_emb(&x, &cos, &sin, heads, head_dim).unwrap();
+
+        // cos = 0, sin = 1 rotates each head's (first, second) half pair to
+        // (-second, first).
+        let heads_view = x.reshape((batch, seq, heads, head_dim)).unwrap();
+        let first = heads_view.narrow(3, 0, head_dim / 2).unwrap();
+        let second = heads_view.narrow(3, head_dim / 2, head_dim / 2).unwrap();
+        let expected = Tensor::cat(&[&second.neg().unwrap(), &first], 3)
+            .unwrap()
+            .reshape((batch, seq, heads * head_dim))
+            .unwrap();
+
+        assert_tensors_close(&expected, &out, 1e-6);
+    }
+
+    #[test]
+    fn attention_query_chunk_size_targets_a_tile_byte_budget() {
+        let heads = 32usize;
+        let key_chunk = 1_024usize;
+
+        let chunk = super::attention_query_chunk_size(1, heads, 13_312, key_chunk);
+
+        assert_eq!(
+            chunk,
+            (super::ATTENTION_TILE_TARGET_BYTES / (heads * key_chunk * 4) as u64) as usize
+        );
+        assert!(
+            chunk >= 512,
+            "expected a wide query tile at stage-2 shapes, got {chunk}"
+        );
+    }
+
+    #[test]
+    fn attention_query_chunk_size_is_clamped_to_bounds_and_query_length() {
+        assert_eq!(super::attention_query_chunk_size(1, 1, 8, 8), 8);
+        assert_eq!(
+            super::attention_query_chunk_size(64, 64, 65_536, 65_536),
+            super::MIN_ATTENTION_QUERY_CHUNK
+        );
+        assert_eq!(
+            super::attention_query_chunk_size(1, 1, 1_000_000, 1),
+            super::MAX_ATTENTION_QUERY_CHUNK
+        );
     }
 }

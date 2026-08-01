@@ -46,8 +46,8 @@ use crate::adaptive_offload::{
     plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
 };
 use crate::device::{
-    activation_bytes, dtype_bytes, fmt_gb, free_vram_bytes, thread_gpu_ordinal,
-    try_synchronize_device, usable_free_vram_bytes, ActivationFamily,
+    dtype_bytes, fmt_gb, free_vram_bytes, ltx2_activation_budget_bytes, thread_gpu_ordinal,
+    try_synchronize_device, usable_free_vram_bytes, PhaseVramProbe, PhaseVramReport,
 };
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
@@ -529,13 +529,20 @@ impl Ltx2RuntimeSession {
                 prompt_encoder.device().clone()
             };
             let prompt_encode_start = Instant::now();
-            let prompt = move_prompt_encoding_to_device(
-                prompt_encoder.encode_prompt_pair_with_unconditional(
-                    &plan.prompt_tokens,
-                    encode_unconditional_prompt,
-                )?,
-                &prepared_device,
-            )?;
+            let prompt_probe = PhaseVramProbe::enter_if("prompt_encode", prompt_device_is_cuda);
+            // Closure so an encode that dies of OOM is still reported before
+            // the error leaves `prepare`.
+            let encoded = (|| -> Result<NativePromptEncoding> {
+                move_prompt_encoding_to_device(
+                    prompt_encoder.encode_prompt_pair_with_unconditional(
+                        &plan.prompt_tokens,
+                        encode_unconditional_prompt,
+                    )?,
+                    &prepared_device,
+                )
+            })();
+            log_ltx2_phase_vram_result(prompt_probe.finish(), &encoded, None, "");
+            let prompt = encoded?;
             emit_phase_done(
                 progress,
                 ProgressPhase::PromptEncode,
@@ -596,14 +603,23 @@ impl Ltx2RuntimeSession {
         };
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
-            if self.device.is_none() {
-                let _ = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
-                self.device = Some(new_native_cuda_device(self.gpu_ordinal)?);
-            } else if let Some(device) = self.device.as_ref() {
-                if device.is_cuda() {
-                    device.synchronize()?;
+            // The conditioning handoff: the encoder's device is released and
+            // the render device is (re)acquired. Measured because this is
+            // where a stale encoder allocation shows up as a smaller card.
+            let handoff_probe = PhaseVramProbe::enter("device_handoff");
+            let handoff = (|| -> Result<()> {
+                if self.device.is_none() {
+                    let _ = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
+                    self.device = Some(new_native_cuda_device(self.gpu_ordinal)?);
+                } else if let Some(device) = self.device.as_ref() {
+                    if device.is_cuda() {
+                        device.synchronize()?;
+                    }
                 }
-            }
+                Ok(())
+            })();
+            log_ltx2_phase_vram_result(handoff_probe.finish(), &handoff, None, "");
+            handoff?;
         }
         log_timing("prepare.device_handoff", device_handoff_start);
         let positions_start = Instant::now();
@@ -1530,6 +1546,16 @@ fn append_condition_from_video_latents(
     })
 }
 
+/// Whether a stage has any visual conditioning to ingest at all.
+///
+/// Also the probe predicate: a run with no conditioning does no GPU work here
+/// and must not emit a phase line claiming it did.
+fn stage_conditioning_is_empty(plan: &Ltx2GeneratePlan, include_reference_video: bool) -> bool {
+    plan.conditioning.images.is_empty()
+        && plan.conditioning.latents.is_empty()
+        && !include_reference_video
+}
+
 fn maybe_load_stage_video_conditioning(
     plan: &Ltx2GeneratePlan,
     pixel_shape: VideoPixelShape,
@@ -1538,10 +1564,39 @@ fn maybe_load_stage_video_conditioning(
     include_reference_video: bool,
     progress: Option<&ProgressCallback>,
 ) -> Result<StageVideoConditioning> {
-    if plan.conditioning.images.is_empty()
-        && plan.conditioning.latents.is_empty()
-        && !include_reference_video
-    {
+    if stage_conditioning_is_empty(plan, include_reference_video) {
+        return Ok(StageVideoConditioning::default());
+    }
+    // The image-to-video source encode: a VAE load plus one encode pass, which
+    // is where a conditioned run first outgrows an unconditioned one.
+    let probe = PhaseVramProbe::enter_if(
+        format!(
+            "conditioning_encode[{}x{}x{}]",
+            pixel_shape.width, pixel_shape.height, pixel_shape.frames
+        ),
+        device.is_cuda(),
+    );
+    let result = maybe_load_stage_video_conditioning_inner(
+        plan,
+        pixel_shape,
+        device,
+        dtype,
+        include_reference_video,
+        progress,
+    );
+    log_ltx2_phase_vram_result(probe.finish(), &result, None, "");
+    result
+}
+
+fn maybe_load_stage_video_conditioning_inner(
+    plan: &Ltx2GeneratePlan,
+    pixel_shape: VideoPixelShape,
+    device: &candle_core::Device,
+    dtype: DType,
+    include_reference_video: bool,
+    progress: Option<&ProgressCallback>,
+) -> Result<StageVideoConditioning> {
+    if stage_conditioning_is_empty(plan, include_reference_video) {
         return Ok(StageVideoConditioning::default());
     }
 
@@ -2149,7 +2204,9 @@ fn render_real_distilled_av(
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer = load_ltx2_av_transformer(plan, device, progress)?;
+    let stage1_stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
+    let stage1_transformer =
+        load_ltx2_av_transformer_with_loras(plan, stage1_stage_shape, device, &[], None, progress)?;
     log_timing(
         "distilled.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2158,39 +2215,58 @@ fn render_real_distilled_av(
         log_debug_vram("after_stage1_transformer_load");
     }
     let stage1_denoise_start = Instant::now();
-    let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
-        &stage1_transformer,
-        prepared.video_latent_shape,
-        audio_shape,
-        &stage1_video_noise,
-        &stage1_video_conditioning,
-        None,
-        stage1_audio_noise.as_ref(),
-        None,
-        &prompt_inputs.video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        None,
-        prompt_inputs.alt_context.as_ref(),
-        prompt_inputs.audio_context.as_ref(),
-        None,
-        prompt_inputs.alt_audio_context.as_ref(),
-        cond_mask,
-        None,
-        alt_mask,
-        None,
-        stage1_guidance_scale,
-        DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
-        stage_sampler_mode(plan, 0)?,
-        Some(&stage1_video_noise),
-        stage1_audio_noise.as_ref(),
-        None,
-        None,
-        Some("distilled.stage1"),
-        debug_enabled.then_some("stage1"),
-        progress,
-        cancellation,
-    )?;
+    let ((stage1_video_latents, stage1_audio_latents), stage1_transformer) =
+        run_denoise_stage_with_oom_recovery(
+            "distilled.stage1",
+            stage1_transformer,
+            device,
+            |budget| {
+                load_ltx2_av_transformer_with_loras(
+                    plan,
+                    stage1_stage_shape,
+                    device,
+                    &[],
+                    Some(budget),
+                    progress,
+                )
+            },
+            |transformer| {
+                run_real_distilled_stage(
+                    transformer,
+                    prepared.video_latent_shape,
+                    audio_shape,
+                    &stage1_video_noise,
+                    &stage1_video_conditioning,
+                    None,
+                    stage1_audio_noise.as_ref(),
+                    None,
+                    &prompt_inputs.video_positions,
+                    prompt_inputs.audio_positions.as_ref(),
+                    &prompt_inputs.cond_context,
+                    None,
+                    prompt_inputs.alt_context.as_ref(),
+                    prompt_inputs.audio_context.as_ref(),
+                    None,
+                    prompt_inputs.alt_audio_context.as_ref(),
+                    cond_mask,
+                    None,
+                    alt_mask,
+                    None,
+                    stage1_guidance_scale,
+                    DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+                    stage_sampler_mode(plan, 0)?,
+                    Some(&stage1_video_noise),
+                    stage1_audio_noise.as_ref(),
+                    None,
+                    None,
+                    Some("distilled.stage1"),
+                    debug_enabled.then_some("stage1"),
+                    progress,
+                    cancellation,
+                )
+            },
+            progress,
+        )?;
     log_timing("distilled.stage1.denoise", stage1_denoise_start);
     if debug_enabled {
         log_debug_vram("after_stage1_denoise");
@@ -2304,7 +2380,9 @@ fn render_real_distilled_av(
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer = load_ltx2_av_transformer(plan, device, progress)?;
+    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(plan, stage2_pixel_shape);
+    let stage2_transformer =
+        load_ltx2_av_transformer_with_loras(plan, stage2_stage_shape, device, &[], None, progress)?;
     log_timing(
         "distilled.stage2.transformer_load",
         stage2_transformer_load_start,
@@ -2313,38 +2391,56 @@ fn render_real_distilled_av(
         log_debug_vram("after_stage2_transformer_load");
     }
     let stage2_denoise_start = Instant::now();
-    let (latents, audio_latents) = run_real_distilled_stage(
-        &stage2_transformer,
-        stage2_video_latent_shape,
-        audio_shape,
-        &stage2_video_start,
-        &stage2_video_conditioning,
-        None,
-        stage2_audio_start.as_ref(),
-        None,
-        &stage2_video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        None,
-        prompt_inputs.alt_context.as_ref(),
-        prompt_inputs.audio_context.as_ref(),
-        None,
-        prompt_inputs.alt_audio_context.as_ref(),
-        cond_mask,
-        None,
-        alt_mask,
-        None,
-        stage_guidance_scale(plan, 1)?,
-        DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
-        stage_sampler_mode(plan, 1)?,
-        Some(&stage2_video_noise),
-        stage2_audio_noise.as_ref(),
-        None,
-        None,
-        Some("distilled.stage2"),
-        debug_enabled.then_some("stage2"),
+    let ((latents, audio_latents), stage2_transformer) = run_denoise_stage_with_oom_recovery(
+        "distilled.stage2",
+        stage2_transformer,
+        device,
+        |budget| {
+            load_ltx2_av_transformer_with_loras(
+                plan,
+                stage2_stage_shape,
+                device,
+                &[],
+                Some(budget),
+                progress,
+            )
+        },
+        |transformer| {
+            run_real_distilled_stage(
+                transformer,
+                stage2_video_latent_shape,
+                audio_shape,
+                &stage2_video_start,
+                &stage2_video_conditioning,
+                None,
+                stage2_audio_start.as_ref(),
+                None,
+                &stage2_video_positions,
+                prompt_inputs.audio_positions.as_ref(),
+                &prompt_inputs.cond_context,
+                None,
+                prompt_inputs.alt_context.as_ref(),
+                prompt_inputs.audio_context.as_ref(),
+                None,
+                prompt_inputs.alt_audio_context.as_ref(),
+                cond_mask,
+                None,
+                alt_mask,
+                None,
+                stage_guidance_scale(plan, 1)?,
+                DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
+                stage_sampler_mode(plan, 1)?,
+                Some(&stage2_video_noise),
+                stage2_audio_noise.as_ref(),
+                None,
+                None,
+                Some("distilled.stage2"),
+                debug_enabled.then_some("stage2"),
+                progress,
+                cancellation,
+            )
+        },
         progress,
-        cancellation,
     )?;
     log_timing("distilled.stage2.denoise", stage2_denoise_start);
     if debug_enabled {
@@ -2363,7 +2459,6 @@ fn render_real_distilled_av(
         log_tensor_stats("final_video_latents", &latents)?;
     }
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let decode_start = Instant::now();
     // Chain-stage hook: capture the pre-decode F32 latents so
     // `Ltx2Engine::render_chain_stage` can narrow the tail off for the next
     // stage's conditioning. Cheap shallow clone (candle tensors are
@@ -2374,26 +2469,17 @@ fn render_real_distilled_av(
             *guard = Some(latents.clone());
         }
     }
-    let decode_latents = latents.to_dtype(dtype)?;
-    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
-    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
-    if debug_enabled {
-        log_tensor_stats("decoded_video", &video)?;
-    }
-    let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
-    if device.is_cuda() {
-        device.synchronize()?;
-    }
-    drop(video);
-    drop(vae);
-    let decode_elapsed = decode_start.elapsed();
-    emit_phase_done(
+    let frames = decode_video_frames_with_telemetry(
+        "distilled",
+        &mut vae,
+        &latents,
+        requested_pixel_shape,
+        dtype,
+        device,
+        debug_enabled,
         progress,
-        ProgressPhase::Vae,
-        "Decoding video frames",
-        decode_elapsed,
-    );
-    log_timing("distilled.decode_video", decode_start);
+    )?;
+    drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     log_timing("distilled.render_audio", audio_render_start);
@@ -2505,8 +2591,15 @@ fn render_real_two_stage_av(
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer =
-        load_ltx2_av_transformer_with_loras(plan, device, &stage1_context.loras, progress)?;
+    let stage1_stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
+    let stage1_transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage1_stage_shape,
+        device,
+        &stage1_context.loras,
+        None,
+        progress,
+    )?;
     log_timing(
         "two_stage.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2516,49 +2609,68 @@ fn render_real_two_stage_av(
         .map(|audio| &audio.latents)
         .or(stage1_audio_noise.as_ref());
     let stage1_denoise_start = Instant::now();
-    let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
-        &stage1_transformer,
-        prepared.video_latent_shape,
-        audio_shape,
-        &stage1_video_noise,
-        &stage1_video_conditioning,
-        None,
-        stage1_audio_start,
-        None,
-        &prompt_inputs.video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        stage1_context
-            .requires_unconditional_context
-            .then_some(prompt_inputs.uncond_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_context.as_ref(),
-        prompt_inputs.audio_context.as_ref(),
-        stage1_context
-            .requires_unconditional_context
-            .then_some(prompt_inputs.uncond_audio_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_audio_context.as_ref(),
-        cond_mask,
-        if stage1_context.requires_unconditional_context {
-            uncond_mask
-        } else {
-            None
-        },
-        alt_mask,
-        stage1_context.multimodal_guidance.clone(),
-        stage1_context.guidance_scale,
-        &stage1_context.sigmas_no_terminal,
-        stage1_context.sampler_mode,
-        Some(&stage1_video_noise),
-        stage1_audio_noise.as_ref(),
-        None,
-        frozen_audio_denoise_mask.as_ref(),
-        Some("two_stage.stage1"),
-        debug_enabled.then_some("stage1"),
-        progress,
-        cancellation,
-    )?;
+    let ((stage1_video_latents, stage1_audio_latents), stage1_transformer) =
+        run_denoise_stage_with_oom_recovery(
+            "two_stage.stage1",
+            stage1_transformer,
+            device,
+            |budget| {
+                load_ltx2_av_transformer_with_loras(
+                    plan,
+                    stage1_stage_shape,
+                    device,
+                    &stage1_context.loras,
+                    Some(budget),
+                    progress,
+                )
+            },
+            |transformer| {
+                run_real_distilled_stage(
+                    transformer,
+                    prepared.video_latent_shape,
+                    audio_shape,
+                    &stage1_video_noise,
+                    &stage1_video_conditioning,
+                    None,
+                    stage1_audio_start,
+                    None,
+                    &prompt_inputs.video_positions,
+                    prompt_inputs.audio_positions.as_ref(),
+                    &prompt_inputs.cond_context,
+                    stage1_context
+                        .requires_unconditional_context
+                        .then_some(prompt_inputs.uncond_context.as_ref())
+                        .flatten(),
+                    prompt_inputs.alt_context.as_ref(),
+                    prompt_inputs.audio_context.as_ref(),
+                    stage1_context
+                        .requires_unconditional_context
+                        .then_some(prompt_inputs.uncond_audio_context.as_ref())
+                        .flatten(),
+                    prompt_inputs.alt_audio_context.as_ref(),
+                    cond_mask,
+                    if stage1_context.requires_unconditional_context {
+                        uncond_mask
+                    } else {
+                        None
+                    },
+                    alt_mask,
+                    stage1_context.multimodal_guidance.clone(),
+                    stage1_context.guidance_scale,
+                    &stage1_context.sigmas_no_terminal,
+                    stage1_context.sampler_mode,
+                    Some(&stage1_video_noise),
+                    stage1_audio_noise.as_ref(),
+                    None,
+                    frozen_audio_denoise_mask.as_ref(),
+                    Some("two_stage.stage1"),
+                    debug_enabled.then_some("stage1"),
+                    progress,
+                    cancellation,
+                )
+            },
+            progress,
+        )?;
     log_timing("two_stage.stage1.denoise", stage1_denoise_start);
     drop(stage1_transformer);
     device.synchronize()?;
@@ -2669,55 +2781,80 @@ fn render_real_two_stage_av(
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer =
-        load_ltx2_av_transformer_with_loras(plan, device, &stage2_context.loras, progress)?;
+    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(plan, stage2_pixel_shape);
+    let stage2_transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage2_stage_shape,
+        device,
+        &stage2_context.loras,
+        None,
+        progress,
+    )?;
     log_timing(
         "two_stage.stage2.transformer_load",
         stage2_transformer_load_start,
     );
     let stage2_denoise_start = Instant::now();
-    let (latents, audio_latents) = run_real_distilled_stage(
-        &stage2_transformer,
-        stage2_video_latent_shape,
-        audio_shape,
-        &stage2_video_start,
-        &stage2_video_conditioning,
-        None,
-        stage2_audio_start.as_ref(),
-        None,
-        &stage2_video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        stage2_context
-            .requires_unconditional_context
-            .then_some(prompt_inputs.uncond_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_context.as_ref(),
-        prompt_inputs.audio_context.as_ref(),
-        stage2_context
-            .requires_unconditional_context
-            .then_some(prompt_inputs.uncond_audio_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_audio_context.as_ref(),
-        cond_mask,
-        if stage2_context.requires_unconditional_context {
-            uncond_mask
-        } else {
-            None
+    let ((latents, audio_latents), stage2_transformer) = run_denoise_stage_with_oom_recovery(
+        "two_stage.stage2",
+        stage2_transformer,
+        device,
+        |budget| {
+            load_ltx2_av_transformer_with_loras(
+                plan,
+                stage2_stage_shape,
+                device,
+                &stage2_context.loras,
+                Some(budget),
+                progress,
+            )
         },
-        alt_mask,
-        stage2_context.multimodal_guidance.clone(),
-        stage2_context.guidance_scale,
-        &stage2_context.sigmas_no_terminal,
-        stage2_context.sampler_mode,
-        Some(&stage2_video_noise),
-        stage2_audio_noise.as_ref(),
-        None,
-        frozen_audio_denoise_mask.as_ref(),
-        Some("two_stage.stage2"),
-        debug_enabled.then_some("stage2"),
+        |transformer| {
+            run_real_distilled_stage(
+                transformer,
+                stage2_video_latent_shape,
+                audio_shape,
+                &stage2_video_start,
+                &stage2_video_conditioning,
+                None,
+                stage2_audio_start.as_ref(),
+                None,
+                &stage2_video_positions,
+                prompt_inputs.audio_positions.as_ref(),
+                &prompt_inputs.cond_context,
+                stage2_context
+                    .requires_unconditional_context
+                    .then_some(prompt_inputs.uncond_context.as_ref())
+                    .flatten(),
+                prompt_inputs.alt_context.as_ref(),
+                prompt_inputs.audio_context.as_ref(),
+                stage2_context
+                    .requires_unconditional_context
+                    .then_some(prompt_inputs.uncond_audio_context.as_ref())
+                    .flatten(),
+                prompt_inputs.alt_audio_context.as_ref(),
+                cond_mask,
+                if stage2_context.requires_unconditional_context {
+                    uncond_mask
+                } else {
+                    None
+                },
+                alt_mask,
+                stage2_context.multimodal_guidance.clone(),
+                stage2_context.guidance_scale,
+                &stage2_context.sigmas_no_terminal,
+                stage2_context.sampler_mode,
+                Some(&stage2_video_noise),
+                stage2_audio_noise.as_ref(),
+                None,
+                frozen_audio_denoise_mask.as_ref(),
+                Some("two_stage.stage2"),
+                debug_enabled.then_some("stage2"),
+                progress,
+                cancellation,
+            )
+        },
         progress,
-        cancellation,
     )?;
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
@@ -2725,24 +2862,17 @@ fn render_real_two_stage_av(
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let decode_start = Instant::now();
-    let decode_latents = latents.to_dtype(dtype)?;
-    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
-    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
-    let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
-    if device.is_cuda() {
-        device.synchronize()?;
-    }
-    drop(video);
-    drop(vae);
-    let decode_elapsed = decode_start.elapsed();
-    emit_phase_done(
+    let frames = decode_video_frames_with_telemetry(
+        "two_stage",
+        &mut vae,
+        &latents,
+        requested_pixel_shape,
+        dtype,
+        device,
+        false,
         progress,
-        ProgressPhase::Vae,
-        "Decoding video frames",
-        decode_elapsed,
-    );
-    log_timing("two_stage.decode_video", decode_start);
+    )?;
+    drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
         conditioned_audio.original_track.clone()
@@ -2857,51 +2987,70 @@ fn render_real_one_stage_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
+    let stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
+    let transformer = load_ltx2_av_transformer(plan, stage_shape, device, progress)?;
     if debug_enabled {
         log_debug_vram("after_one_stage_transformer_load");
     }
     let stage1_requires_uncond = stage_requires_unconditional_context(plan, 0)?;
-    let (latents, stage1_audio_latents) = run_real_distilled_stage(
-        &transformer,
-        prepared.video_latent_shape,
-        audio_shape,
-        &stage1_video_noise,
-        &stage1_video_conditioning,
-        None,
-        stage1_audio_noise.as_ref(),
-        None,
-        &prompt_inputs.video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        stage1_requires_uncond
-            .then_some(prompt_inputs.uncond_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_context.as_ref(),
-        prompt_inputs.audio_context.as_ref(),
-        stage1_requires_uncond
-            .then_some(prompt_inputs.uncond_audio_context.as_ref())
-            .flatten(),
-        prompt_inputs.alt_audio_context.as_ref(),
-        cond_mask,
-        if stage1_requires_uncond {
-            uncond_mask
-        } else {
-            None
+    let ((latents, stage1_audio_latents), transformer) = run_denoise_stage_with_oom_recovery(
+        "one_stage",
+        transformer,
+        device,
+        |budget| {
+            load_ltx2_av_transformer_with_loras(
+                plan,
+                stage_shape,
+                device,
+                &[],
+                Some(budget),
+                progress,
+            )
         },
-        alt_mask,
-        None,
-        stage1_guidance_scale,
-        DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
-        stage_sampler_mode(plan, 0)?,
-        Some(&stage1_video_noise),
-        stage1_audio_noise.as_ref(),
-        None,
-        None,
-        Some("one_stage"),
-        debug_enabled.then_some("one-stage"),
+        |transformer| {
+            run_real_distilled_stage(
+                transformer,
+                prepared.video_latent_shape,
+                audio_shape,
+                &stage1_video_noise,
+                &stage1_video_conditioning,
+                None,
+                stage1_audio_noise.as_ref(),
+                None,
+                &prompt_inputs.video_positions,
+                prompt_inputs.audio_positions.as_ref(),
+                &prompt_inputs.cond_context,
+                stage1_requires_uncond
+                    .then_some(prompt_inputs.uncond_context.as_ref())
+                    .flatten(),
+                prompt_inputs.alt_context.as_ref(),
+                prompt_inputs.audio_context.as_ref(),
+                stage1_requires_uncond
+                    .then_some(prompt_inputs.uncond_audio_context.as_ref())
+                    .flatten(),
+                prompt_inputs.alt_audio_context.as_ref(),
+                cond_mask,
+                if stage1_requires_uncond {
+                    uncond_mask
+                } else {
+                    None
+                },
+                alt_mask,
+                None,
+                stage1_guidance_scale,
+                DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+                stage_sampler_mode(plan, 0)?,
+                Some(&stage1_video_noise),
+                stage1_audio_noise.as_ref(),
+                None,
+                None,
+                Some("one_stage"),
+                debug_enabled.then_some("one-stage"),
+                progress,
+                cancellation,
+            )
+        },
         progress,
-        cancellation,
     )?;
     if debug_enabled {
         log_debug_vram("after_one_stage_denoise");
@@ -2914,17 +3063,16 @@ fn render_real_one_stage_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let decode_latents = latents.to_dtype(dtype)?;
-    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
-    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
-    if debug_enabled {
-        log_tensor_stats("decoded_video", &video)?;
-    }
-    let frames = decoded_video_to_frames(&video, prepared.video_pixel_shape)?;
-    if device.is_cuda() {
-        device.synchronize()?;
-    }
-    drop(video);
+    let frames = decode_video_frames_with_telemetry(
+        "one_stage",
+        &mut vae,
+        &latents,
+        prepared.video_pixel_shape,
+        dtype,
+        device,
+        debug_enabled,
+        progress,
+    )?;
     drop(vae);
     let audio_track =
         maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
@@ -3038,39 +3186,58 @@ fn render_real_retake_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading retake transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
-    let (latents, audio_latents) = run_real_distilled_stage(
-        &transformer,
-        prepared.video_latent_shape,
-        audio_shape,
-        &stage1_video_noise,
-        &stage_video_conditioning,
-        Some(&source_video.latents),
-        stage1_audio_noise.as_ref(),
-        conditioned_audio.as_ref().map(|audio| &audio.latents),
-        &prompt_inputs.video_positions,
-        prompt_inputs.audio_positions.as_ref(),
-        &prompt_inputs.cond_context,
-        None,
-        None,
-        prompt_inputs.audio_context.as_ref(),
-        None,
-        None,
-        cond_mask,
-        None,
-        None,
-        None,
-        stage_guidance_scale(plan, 0)?,
-        DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
-        stage_sampler_mode(plan, 0)?,
-        Some(&stage1_video_noise),
-        stage1_audio_noise.as_ref(),
-        Some(&video_retake_mask),
-        audio_retake_mask.as_ref(),
-        Some("retake.stage1"),
-        debug_enabled.then_some("retake"),
+    let stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
+    let transformer = load_ltx2_av_transformer(plan, stage_shape, device, progress)?;
+    let ((latents, audio_latents), transformer) = run_denoise_stage_with_oom_recovery(
+        "retake",
+        transformer,
+        device,
+        |budget| {
+            load_ltx2_av_transformer_with_loras(
+                plan,
+                stage_shape,
+                device,
+                &[],
+                Some(budget),
+                progress,
+            )
+        },
+        |transformer| {
+            run_real_distilled_stage(
+                transformer,
+                prepared.video_latent_shape,
+                audio_shape,
+                &stage1_video_noise,
+                &stage_video_conditioning,
+                Some(&source_video.latents),
+                stage1_audio_noise.as_ref(),
+                conditioned_audio.as_ref().map(|audio| &audio.latents),
+                &prompt_inputs.video_positions,
+                prompt_inputs.audio_positions.as_ref(),
+                &prompt_inputs.cond_context,
+                None,
+                None,
+                prompt_inputs.audio_context.as_ref(),
+                None,
+                None,
+                cond_mask,
+                None,
+                None,
+                None,
+                stage_guidance_scale(plan, 0)?,
+                DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+                stage_sampler_mode(plan, 0)?,
+                Some(&stage1_video_noise),
+                stage1_audio_noise.as_ref(),
+                Some(&video_retake_mask),
+                audio_retake_mask.as_ref(),
+                Some("retake.stage1"),
+                debug_enabled.then_some("retake"),
+                progress,
+                cancellation,
+            )
+        },
         progress,
-        cancellation,
     )?;
     drop(transformer);
     if device.is_cuda() {
@@ -3078,14 +3245,16 @@ fn render_real_retake_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let decode_latents = latents.to_dtype(dtype)?;
-    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
-    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
-    let frames = decoded_video_to_frames(&video, prepared.video_pixel_shape)?;
-    if device.is_cuda() {
-        device.synchronize()?;
-    }
-    drop(video);
+    let frames = decode_video_frames_with_telemetry(
+        "retake",
+        &mut vae,
+        &latents,
+        prepared.video_pixel_shape,
+        dtype,
+        device,
+        debug_enabled,
+        progress,
+    )?;
     drop(vae);
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
@@ -4572,16 +4741,63 @@ fn guided_velocity_from_cfg(
 
 fn load_ltx2_av_transformer(
     plan: &Ltx2GeneratePlan,
+    stage: Ltx2StageShape,
     device: &candle_core::Device,
     progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
-    load_ltx2_av_transformer_with_loras(plan, device, &[], progress)
+    load_ltx2_av_transformer_with_loras(plan, stage, device, &[], None, progress)
 }
 
+/// Load the transformer and record what the load actually cost.
+///
+/// The residency plan is the prediction for this phase, so the measured peak
+/// and `peak_bytes()` land on one line — the comparison issue #641 needed and
+/// nobody had.
 fn load_ltx2_av_transformer_with_loras(
     plan: &Ltx2GeneratePlan,
+    stage: Ltx2StageShape,
     device: &candle_core::Device,
     loras: &[LoraWeight],
+    vram_budget_override: Option<u64>,
+    progress: Option<&ProgressCallback>,
+) -> Result<Ltx2AvTransformer3DModel> {
+    // Clear first: a streaming or eager build must not be reported against the
+    // previous stage's adaptive plan.
+    record_ltx2_residency_plan(None);
+    // The shape is part of the label: a two-stage render loads twice at two
+    // different shapes, and two identically named lines would be useless.
+    let probe = PhaseVramProbe::enter_if(
+        format!(
+            "transformer_load[{}x{}x{}]",
+            stage.width, stage.height, stage.frames
+        ),
+        device.is_cuda(),
+    );
+    let result = load_ltx2_av_transformer_with_loras_inner(
+        plan,
+        stage,
+        device,
+        loras,
+        vram_budget_override,
+        progress,
+    );
+    let residency = last_ltx2_residency_plan();
+    let report = probe.finish_with_predicted(residency.as_ref().map(|plan| plan.peak_bytes()));
+    log_ltx2_phase_vram_result(
+        report,
+        &result,
+        residency.as_ref(),
+        &ltx2_residency_detail(residency.as_ref()),
+    );
+    result
+}
+
+fn load_ltx2_av_transformer_with_loras_inner(
+    plan: &Ltx2GeneratePlan,
+    stage: Ltx2StageShape,
+    device: &candle_core::Device,
+    loras: &[LoraWeight],
+    vram_budget_override: Option<u64>,
     progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
     let force_streaming = ltx2_force_streaming_enabled();
@@ -4597,7 +4813,12 @@ fn load_ltx2_av_transformer_with_loras(
     // placement; stream blocks so the planner never prices packed bytes as GPU
     // residency.
     let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
-    let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan);
+    // One header pass feeds both the fp8 probe and the residency sizing; the
+    // packed backends read their own layout and don't consult it.
+    let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
+        .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
+        .flatten();
+    let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
     let vb = if checkpoint_is_nvfp4 {
         let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
         VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
@@ -4638,35 +4859,44 @@ fn load_ltx2_av_transformer_with_loras(
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else if device.is_cuda() && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
-        let free_vram = usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        match ltx2_transformer_block_sizes_from_safetensors(
-            Path::new(&plan.checkpoint_path),
-            config.num_layers,
-        ) {
-            Ok(block_sizes)
+        let free_vram = match vram_budget_override {
+            Some(budget) => budget,
+            None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
+        };
+        let weights = header
+            .as_ref()
+            .context("LTX-2 checkpoint header is required for adaptive residency")
+            .and_then(|header| header.transformer_weight_sizes(config.num_layers));
+        match weights {
+            Ok(weights)
                 if select_ltx2_transformer_residency_mode(
                     device.is_cuda(),
                     checkpoint_is_fp8,
                     force_eager,
                     force_streaming,
-                    block_sizes.iter().any(|size| *size > 0),
+                    weights.blocks.iter().any(|size| *size > 0),
                     free_vram,
                 ) == Ltx2TransformerResidencyMode::Adaptive =>
             {
                 let mut residency_plan =
-                    ltx2_adaptive_transformer_plan(plan, &block_sizes, free_vram);
+                    ltx2_adaptive_transformer_plan(plan, stage, &weights, free_vram);
                 emit_info(
                     progress,
                     format!(
-                        "LTX-2 adaptive offload: {} resident / {} streamed blocks (resident {}, streamed {} per denoise pass, reserve {})",
+                        "LTX-2 adaptive offload: {} resident / {} streamed blocks (resident {}, streamed {} per denoise pass, non-block weights {}, reserve {})",
                         residency_plan.resident_count(),
                         residency_plan.streamed_count(),
                         fmt_gb(residency_plan.resident_bytes),
                         fmt_gb(residency_plan.streamed_bytes),
+                        fmt_gb(residency_plan.fixed_resident_bytes),
                         fmt_gb(residency_plan.reserved_bytes()),
                     ),
                 );
                 loop {
+                    // Record before each attempt so the phase report — and an
+                    // OOM diagnosis — describes the plan actually attempted,
+                    // including every demotion rung.
+                    record_ltx2_residency_plan(Some(residency_plan.clone()));
                     match Ltx2AvTransformer3DModel::new_adaptive(
                         &config,
                         vb.clone(),
@@ -4677,6 +4907,7 @@ fn load_ltx2_av_transformer_with_loras(
                         Err(err)
                             if device.is_cuda()
                                 && residency_plan.resident_count() > 0
+                                && !ltx2_error_is_fatal_cuda(&err)
                                 && is_cuda_oom(&err) =>
                         {
                             emit_info(
@@ -4687,7 +4918,7 @@ fn load_ltx2_av_transformer_with_loras(
                                 ),
                             );
                             try_synchronize_device(gpu_ordinal)?;
-                            if !residency_plan.demote_largest_resident(&block_sizes) {
+                            if !residency_plan.demote_largest_resident(&weights.blocks) {
                                 return Err(err.into());
                             }
                         }
@@ -4733,30 +4964,193 @@ fn emit_phase_done(
     }
 }
 
-fn ltx2_video_activation_budget(plan: &Ltx2GeneratePlan) -> u64 {
-    let dtype = DType::BF16;
-    let base = activation_bytes(
-        plan.width,
-        plan.height,
-        1,
-        dtype_bytes(dtype),
-        ActivationFamily::Ltx2Video,
-    );
-    let latent_frames = ((plan.num_frames.max(1) - 1) / 8 + 1) as u64;
-    base.saturating_mul(latent_frames.max(1))
+/// The shape a single denoise stage actually renders at.
+///
+/// Two-stage and Distilled pipelines render stage 1 at a fraction of the
+/// requested resolution (`derive_stage1_render_shape`) and only stage 2 at the
+/// full frame, so budgeting every stage against `plan.width`/`plan.height`
+/// over-charges stage 1 by 4× at the usual ×2 spatial upsample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ltx2StageShape {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frames: u32,
+    /// Whether the run carries per-token conditioning (source image,
+    /// keyframes, source video, or an extend carryover), which materializes
+    /// the per-token AdaLN modulation instead of one broadcast row.
+    pub(crate) conditioned: bool,
+}
+
+impl Ltx2StageShape {
+    /// The shape a stage renders, taken from the stage's own pixel shape.
+    /// For a one-stage pipeline that is the requested frame; for a two-stage
+    /// or Distilled one it is the reduced stage-1 render and then the
+    /// upsampled stage-2 frame.
+    fn from_pixel_shape(plan: &Ltx2GeneratePlan, shape: VideoPixelShape) -> Self {
+        Self {
+            width: shape.width as u32,
+            height: shape.height as u32,
+            frames: shape.frames as u32,
+            conditioned: plan_is_conditioned(plan),
+        }
+    }
+}
+
+fn plan_is_conditioned(plan: &Ltx2GeneratePlan) -> bool {
+    !plan.conditioning.images.is_empty()
+        || !plan.conditioning.latents.is_empty()
+        || plan.conditioning.video_path.is_some()
+}
+
+fn ltx2_video_activation_budget(stage: Ltx2StageShape) -> u64 {
+    ltx2_activation_budget_bytes(stage.width, stage.height, stage.frames, stage.conditioned)
+}
+
+/// The VRAM the adaptive planner may spend on this transformer.
+///
+/// Sampled free VRAM is an upper bound, never an entitlement: when the
+/// scheduler admitted the job at a predicted peak the engine must size itself
+/// against that grant, otherwise a plan admitted at 11.5 GB quietly fills a
+/// 24 GB card and dies at the first denoise step.
+fn ltx2_transformer_vram_budget(grant: Option<u64>, usable_free_vram: u64) -> u64 {
+    match grant {
+        Some(grant) => grant.min(usable_free_vram),
+        None => usable_free_vram,
+    }
 }
 
 fn ltx2_adaptive_transformer_plan(
     plan: &Ltx2GeneratePlan,
-    block_sizes: &[usize],
+    stage: Ltx2StageShape,
+    weights: &Ltx2TransformerWeightSizes,
     free_vram: u64,
 ) -> AdaptiveResidencyPlan {
     plan_adaptive_residency(
-        block_sizes,
-        free_vram,
-        ltx2_video_activation_budget(plan),
+        &weights.blocks,
+        ltx2_transformer_vram_budget(plan.vram_grant_bytes, free_vram),
+        weights.non_block_bytes,
+        ltx2_video_activation_budget(stage),
         ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
     )
+}
+
+/// Shrink the VRAM budget for a denoise-stage OOM retry.
+///
+/// Each rung gives the planner a quarter less to work with, which demotes
+/// blocks *and* keeps the activation reserve intact. Returns `None` once the
+/// budget is below the point where any residency is worth attempting — the
+/// caller then rebuilds in full-streaming mode, which is what a budget under
+/// the base reserve produces anyway.
+fn ltx2_denoise_retry_vram_budget(previous: u64) -> Option<u64> {
+    const FLOOR: u64 = ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM;
+    let next = previous / 4 * 3;
+    (next > FLOOR).then_some(next)
+}
+
+/// Detect CUDA errors that invalidate the process-owned context.
+///
+/// Mirrors `mold-server`'s `is_fatal_cuda_error` (that crate isn't a
+/// dependency of `mold-inference`). These must never be retried: `CLAUDE.md`
+/// requires the worker be quarantined and the process restarted, because
+/// candle/cudarc objects still hold primary-context handles.
+fn ltx2_error_is_fatal_cuda(err: &impl std::fmt::Display) -> bool {
+    let message = err.to_string();
+    [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_ASSERT",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+        "CUDA_ERROR_INVALID_PC",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// Whether a denoise-stage failure is a recoverable OOM.
+///
+/// A fatal context error wins over the OOM substrings — an illegal address can
+/// surface alongside an allocation message, and retrying a dead context is the
+/// one thing we must never do.
+fn ltx2_denoise_error_is_recoverable_oom(err: &anyhow::Error) -> bool {
+    !ltx2_error_is_fatal_cuda(&format!("{err:#}")) && is_cuda_oom(&format!("{err:#}"))
+}
+
+/// Maximum denoise-stage rebuild attempts after the first OOM.
+const LTX2_DENOISE_OOM_MAX_RETRIES: usize = 2;
+
+/// Run one denoise stage, rebuilding the transformer with a smaller VRAM
+/// budget if it hits CUDA OOM.
+///
+/// The transformer is moved in and returned so the failing engine can actually
+/// be dropped (and the device synchronized) before the retry allocates
+/// anything — the whole point of the ladder. Construction already had an OOM
+/// ladder; the denoise loop, which is where the 24 GB card actually dies, had
+/// none.
+fn run_denoise_stage_with_oom_recovery<T>(
+    label: &str,
+    transformer: Ltx2AvTransformer3DModel,
+    device: &candle_core::Device,
+    mut rebuild: impl FnMut(u64) -> Result<Ltx2AvTransformer3DModel>,
+    mut run: impl FnMut(&Ltx2AvTransformer3DModel) -> Result<T>,
+    progress: Option<&ProgressCallback>,
+) -> Result<(T, Ltx2AvTransformer3DModel)> {
+    let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
+    let mut transformer = transformer;
+    let mut budget: Option<u64> = None;
+    for attempt in 0..=LTX2_DENOISE_OOM_MAX_RETRIES {
+        // One line per stage per attempt — never per denoise step.
+        let probe = PhaseVramProbe::enter_if(format!("{label}.denoise"), device.is_cuda());
+        let outcome = run(&transformer);
+        let residency = last_ltx2_residency_plan();
+        let report = probe.finish_with_predicted(residency.as_ref().map(|plan| plan.peak_bytes()));
+        log_ltx2_phase_vram_result(
+            report,
+            &outcome,
+            residency.as_ref(),
+            &ltx2_residency_detail(residency.as_ref()),
+        );
+        match outcome {
+            Ok(value) => return Ok((value, transformer)),
+            Err(err) => {
+                if !device.is_cuda()
+                    || attempt == LTX2_DENOISE_OOM_MAX_RETRIES
+                    || !ltx2_denoise_error_is_recoverable_oom(&err)
+                {
+                    return Err(err);
+                }
+                // Drop first: free VRAM sampled while the failing engine is
+                // still resident describes what is left over, not what the
+                // rebuild may spend.
+                drop(transformer);
+                try_synchronize_device(gpu_ordinal)?;
+                let ceiling = match budget {
+                    Some(previous) => previous,
+                    None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
+                };
+                let Some(next_budget) = ltx2_denoise_retry_vram_budget(ceiling) else {
+                    return Err(err);
+                };
+                budget = Some(next_budget);
+                emit_info(
+                    progress,
+                    format!(
+                        "LTX-2 {label}: denoise ran out of VRAM; rebuilding the transformer \
+                         within {} (attempt {} of {})",
+                        fmt_gb(next_budget),
+                        attempt + 2,
+                        LTX2_DENOISE_OOM_MAX_RETRIES + 1,
+                    ),
+                );
+                transformer = rebuild(next_budget)?;
+            }
+        }
+    }
+    unreachable!("the loop returns on the final attempt")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4807,6 +5201,18 @@ fn load_ltx2_video_vae(
     dtype: DType,
     progress: Option<&ProgressCallback>,
 ) -> Result<AutoencoderKLLtx2Video> {
+    let probe = PhaseVramProbe::enter_if("vae_load", device.is_cuda());
+    let result = load_ltx2_video_vae_inner(plan, device, dtype, progress);
+    log_ltx2_phase_vram_result(probe.finish(), &result, None, "");
+    result
+}
+
+fn load_ltx2_video_vae_inner(
+    plan: &Ltx2GeneratePlan,
+    device: &candle_core::Device,
+    dtype: DType,
+    progress: Option<&ProgressCallback>,
+) -> Result<AutoencoderKLLtx2Video> {
     let vb = load_safetensors_with_progress_callback(
         std::slice::from_ref(&Path::new(&plan.vae_checkpoint_path)),
         dtype,
@@ -4823,6 +5229,53 @@ fn load_ltx2_video_vae(
         ltx2_video_vae_config(plan),
         vb,
     )?)
+}
+
+/// Decode video latents to frames as one measured, reported VAE phase.
+///
+/// Every pipeline decodes through here. Besides the memory telemetry this
+/// closes a real gap: the one-stage and retake paths emitted neither a
+/// `ProgressPhase::Vae` nor a decode timing, so the scheduler never learned a
+/// `vae_ms` for them and planned their decode as free.
+fn decode_video_frames_with_telemetry(
+    pipeline: &str,
+    vae: &mut AutoencoderKLLtx2Video,
+    latents: &Tensor,
+    pixel_shape: VideoPixelShape,
+    dtype: DType,
+    device: &candle_core::Device,
+    debug_enabled: bool,
+    progress: Option<&ProgressCallback>,
+) -> Result<Vec<RgbImage>> {
+    let decode_start = Instant::now();
+    let probe = PhaseVramProbe::enter_if(format!("{pipeline}.vae_decode"), device.is_cuda());
+    // Closure so a decode that dies of OOM is reported before it propagates.
+    let decoded = (|| -> Result<Vec<RgbImage>> {
+        let decode_latents = latents.to_dtype(dtype)?;
+        configure_ltx2_vae_decode_memory_mode(vae, &decode_latents, device)?;
+        let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
+        if debug_enabled {
+            log_tensor_stats("decoded_video", &video)?;
+        }
+        let frames = decoded_video_to_frames(&video, pixel_shape)?;
+        if device.is_cuda() {
+            device.synchronize()?;
+        }
+        drop(video);
+        Ok(frames)
+    })();
+    log_ltx2_phase_vram_result(probe.finish(), &decoded, None, "");
+    if decoded.is_ok() {
+        let elapsed = decode_start.elapsed();
+        emit_phase_done(
+            progress,
+            ProgressPhase::Vae,
+            "Decoding video frames",
+            elapsed,
+        );
+        log_elapsed_secs(&format!("{pipeline}.decode_video"), elapsed.as_secs_f64());
+    }
+    decoded
 }
 
 fn configure_ltx2_vae_decode_memory_mode(
@@ -4939,24 +5392,11 @@ fn transformer_weight_dtype(_plan: &Ltx2GeneratePlan, device: &candle_core::Devi
     gpu_dtype(device)
 }
 
-fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan) -> bool {
+fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan, header: Option<&Ltx2CheckpointHeader>) -> bool {
     if plan.checkpoint_path.to_ascii_lowercase().contains("fp8") {
         return true;
     }
-    let Ok(tensors) = (unsafe {
-        candle_core::safetensors::MmapedSafetensors::multi(&[Path::new(&plan.checkpoint_path)])
-    }) else {
-        return false;
-    };
-    for key in [
-        "model.diffusion_model.transformer_blocks.1.attn1.to_q.weight",
-        "model.diffusion_model.transformer_blocks.1.ff.net.0.proj.weight",
-    ] {
-        if let Ok(tensor) = tensors.load(key, &candle_core::Device::Cpu) {
-            return tensor.dtype() == DType::F8E4M3;
-        }
-    }
-    false
+    header.is_some_and(|header| header.transformer_is_fp8())
 }
 
 fn ltx2_video_vae_config(plan: &Ltx2GeneratePlan) -> AutoencoderKLLtx2VideoConfig {
@@ -5007,41 +5447,93 @@ struct SafetensorsHeaderTensor {
     data_offsets: (usize, usize),
 }
 
-fn ltx2_transformer_block_sizes_from_safetensors(
-    path: &Path,
-    num_layers: usize,
-) -> Result<Vec<usize>> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open LTX-2 checkpoint {}", path.display()))?;
-    let mut header_len_bytes = [0u8; 8];
-    file.read_exact(&mut header_len_bytes).with_context(|| {
-        format!(
-            "failed to read safetensors header length from {}",
-            path.display()
-        )
-    })?;
-    let header_len = u64::from_le_bytes(header_len_bytes) as usize;
-    let mut header = vec![0u8; header_len];
-    file.read_exact(&mut header).with_context(|| {
-        format!(
-            "failed to read safetensors metadata header from {}",
-            path.display()
-        )
-    })?;
-    let tensors: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)
-        .with_context(|| {
+/// Top-level prefixes inside an LTX-2 single-file checkpoint that are *not*
+/// transformer weights. A combined 19B export carries ~2.4 GB of `vae.*` next
+/// to the transformer; charging those to the transformer's GPU residency would
+/// be as wrong as charging its non-block tensors nothing.
+const LTX2_NON_TRANSFORMER_PREFIXES: &[&str] = &[
+    "vae",
+    "audio_vae",
+    "vocoder",
+    "text_encoders",
+    "conditioner",
+    "first_stage_model",
+    "cond_stage_model",
+    "latent_upsampler",
+    "spatial_upsampler",
+    "temporal_upsampler",
+];
+
+fn ltx2_tensor_is_non_transformer(name: &str) -> bool {
+    let core = name.strip_prefix("model.diffusion_model.").unwrap_or(name);
+    let head = core.split('.').next().unwrap_or_default();
+    LTX2_NON_TRANSFORMER_PREFIXES.contains(&head)
+}
+
+/// Transformer weight byte totals read from one safetensors header pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Ltx2TransformerWeightSizes {
+    /// Per-block totals, indexed by transformer block.
+    blocks: Vec<usize>,
+    /// Transformer tensors outside every block — `patchify_proj`,
+    /// `adaln_single.linear`, `caption_projection`, the audio/video
+    /// connectors, and `proj_out`. `new_with_block_source` allocates these on
+    /// the GPU *after* every resident block, so they are unconditionally
+    /// resident and must be reserved, not discovered.
+    non_block_bytes: u64,
+}
+
+/// The parsed safetensors header of an LTX-2 checkpoint.
+///
+/// The load path used to mmap and enumerate this 27 GB file three to four
+/// times per transformer load (fp8 probe, block sizing, and the loaders
+/// themselves). One header read now feeds every predicate that only needs
+/// tensor metadata.
+struct Ltx2CheckpointHeader {
+    tensors: HashMap<String, SafetensorsHeaderTensor>,
+}
+
+impl Ltx2CheckpointHeader {
+    fn read(path: &Path) -> Result<Self> {
+        let mut file = File::open(path)
+            .with_context(|| format!("failed to open LTX-2 checkpoint {}", path.display()))?;
+        let mut header_len_bytes = [0u8; 8];
+        file.read_exact(&mut header_len_bytes).with_context(|| {
             format!(
-                "failed to parse safetensors metadata header from {}",
+                "failed to read safetensors header length from {}",
                 path.display()
             )
         })?;
-    let mut sizes = vec![0usize; num_layers];
-    for (name, value) in tensors {
-        if name == "__metadata__" {
-            continue;
+        let header_len = u64::from_le_bytes(header_len_bytes) as usize;
+        let mut header = vec![0u8; header_len];
+        file.read_exact(&mut header).with_context(|| {
+            format!(
+                "failed to read safetensors metadata header from {}",
+                path.display()
+            )
+        })?;
+        let raw: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)
+            .with_context(|| {
+                format!(
+                    "failed to parse safetensors metadata header from {}",
+                    path.display()
+                )
+            })?;
+        let mut tensors = HashMap::with_capacity(raw.len());
+        for (name, value) in raw {
+            if name == "__metadata__" {
+                continue;
+            }
+            let tensor: SafetensorsHeaderTensor =
+                serde_json::from_value(value).with_context(|| {
+                    format!("failed to parse safetensors tensor metadata for {name}")
+                })?;
+            tensors.insert(name, tensor);
         }
-        let tensor: SafetensorsHeaderTensor = serde_json::from_value(value)
-            .with_context(|| format!("failed to parse safetensors tensor metadata for {name}"))?;
+        Ok(Self { tensors })
+    }
+
+    fn tensor_bytes(name: &str, tensor: &SafetensorsHeaderTensor) -> Result<usize> {
         let tensor_bytes = tensor
             .data_offsets
             .1
@@ -5058,14 +5550,64 @@ fn ltx2_transformer_block_sizes_from_safetensors(
                 "safetensors tensor {name} reports {tensor_bytes} bytes but shape/dtype imply {expected_bytes}"
             );
         }
-        let remapped = remap_ltx2_transformer_key(&name);
-        if let Some(index) = ltx2_transformer_block_index(&remapped) {
-            if let Some(size) = sizes.get_mut(index) {
-                *size = size.saturating_add(tensor_bytes);
+        Ok(tensor_bytes)
+    }
+
+    /// Whether the transformer weights are stored as float8.
+    ///
+    /// Probes the same two block tensors the old mmap-based check loaded, but
+    /// from header metadata — no 27 GB mapping just to read a dtype.
+    fn transformer_is_fp8(&self) -> bool {
+        for key in [
+            "transformer_blocks.1.attn1.to_q.weight",
+            "transformer_blocks.1.ff.net.0.proj.weight",
+        ] {
+            let prefixed = format!("model.diffusion_model.{key}");
+            if let Some(tensor) = self
+                .tensors
+                .get(&prefixed)
+                .or_else(|| self.tensors.get(key))
+            {
+                return tensor.dtype == safetensors::Dtype::F8_E4M3;
             }
         }
+        false
     }
-    Ok(sizes)
+
+    fn transformer_weight_sizes(&self, num_layers: usize) -> Result<Ltx2TransformerWeightSizes> {
+        let mut blocks = vec![0usize; num_layers];
+        let mut non_block_bytes = 0u64;
+        for (name, tensor) in &self.tensors {
+            if ltx2_tensor_is_non_transformer(name) {
+                continue;
+            }
+            let tensor_bytes = Self::tensor_bytes(name, tensor)?;
+            let remapped = remap_ltx2_transformer_key(name);
+            match ltx2_transformer_block_index(&remapped) {
+                Some(index) => {
+                    if let Some(size) = blocks.get_mut(index) {
+                        *size = size.saturating_add(tensor_bytes);
+                    }
+                }
+                None => non_block_bytes = non_block_bytes.saturating_add(tensor_bytes as u64),
+            }
+        }
+        Ok(Ltx2TransformerWeightSizes {
+            blocks,
+            non_block_bytes,
+        })
+    }
+}
+
+/// Read-and-size in one call. The load path holds a
+/// [`Ltx2CheckpointHeader`] and reuses it for every predicate, so this exists
+/// for tests that only care about the sizing result.
+#[cfg(test)]
+fn ltx2_transformer_block_sizes_from_safetensors(
+    path: &Path,
+    num_layers: usize,
+) -> Result<Ltx2TransformerWeightSizes> {
+    Ltx2CheckpointHeader::read(path)?.transformer_weight_sizes(num_layers)
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -5102,11 +5644,103 @@ fn ltx_debug_timings_enabled() -> bool {
     env::var_os("MOLD_LTX2_DEBUG_TIMINGS").is_some()
 }
 
+// ── Phase VRAM telemetry ─────────────────────────────────────────────────────
+//
+// LTX-2 requests run for minutes, so a handful of always-on lines per request
+// is free — and issue #641 (a 24 GB card admitted, loaded for two minutes, then
+// OOMed) was expensive precisely because nothing recorded what each phase
+// actually cost. Every line is diagnostics: the scheduler's frozen grant stays
+// the memory authority, and no probe result is ever fed back into admission.
+
+const LTX2_VRAM_TARGET: &str = "mold::ltx2::vram";
+
+thread_local! {
+    /// The residency plan the most recent transformer build on this thread
+    /// used. Stashed rather than threaded through the call graph because the
+    /// plan is chosen deep inside the loader while the phases that need it for
+    /// diagnosis (load, denoise) sit above it.
+    static LAST_RESIDENCY_PLAN: std::cell::RefCell<Option<AdaptiveResidencyPlan>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn record_ltx2_residency_plan(plan: Option<AdaptiveResidencyPlan>) {
+    LAST_RESIDENCY_PLAN.with(|slot| *slot.borrow_mut() = plan);
+}
+
+fn last_ltx2_residency_plan() -> Option<AdaptiveResidencyPlan> {
+    LAST_RESIDENCY_PLAN.with(|slot| slot.borrow().clone())
+}
+
+/// The full residency decision, so an OOM report needs no reproduction.
+fn ltx2_residency_summary(plan: Option<&AdaptiveResidencyPlan>) -> String {
+    let Some(plan) = plan else {
+        return "residency=unknown".to_string();
+    };
+    format!(
+        "residency: resident_count={} streamed_count={} resident_bytes={} \
+         activation_budget={} runtime_headroom={} largest_streamed_block={} \
+         fixed_resident_bytes={} planned_peak={}",
+        plan.resident_count(),
+        plan.streamed_count(),
+        fmt_gb(plan.resident_bytes),
+        fmt_gb(plan.activation_budget),
+        fmt_gb(plan.runtime_headroom),
+        fmt_gb(plan.largest_streamed_block),
+        fmt_gb(plan.fixed_resident_bytes),
+        fmt_gb(plan.peak_bytes()),
+    )
+}
+
+/// Plan detail carried beside a measured peak on the healthy path, so
+/// predicted-versus-actual is one line rather than two.
+fn ltx2_residency_detail(plan: Option<&AdaptiveResidencyPlan>) -> String {
+    match plan {
+        Some(plan) => format!(
+            " resident_blocks={} fixed_resident={}",
+            plan.resident_count(),
+            fmt_gb(plan.fixed_resident_bytes),
+        ),
+        None => String::new(),
+    }
+}
+
+fn log_ltx2_phase_vram(report: &PhaseVramReport, detail: &str) {
+    tracing::info!(target: LTX2_VRAM_TARGET, "[ltx2-vram] {report}{detail}");
+}
+
+/// Report one finished phase, escalating to an error line that carries the
+/// whole residency plan when the phase died of CUDA OOM. Logged before the
+/// error propagates so the diagnosis survives whatever the caller does next.
+fn log_ltx2_phase_vram_result<T>(
+    report: PhaseVramReport,
+    result: &Result<T>,
+    plan: Option<&AdaptiveResidencyPlan>,
+    detail: &str,
+) {
+    match result {
+        Err(error) if is_cuda_oom(&format!("{error:#}")) => {
+            tracing::error!(
+                target: LTX2_VRAM_TARGET,
+                "[ltx2-vram] {report}{detail} OUT-OF-MEMORY {} error={error:#}",
+                ltx2_residency_summary(plan),
+            );
+        }
+        _ => log_ltx2_phase_vram(&report, detail),
+    }
+}
+
 fn log_debug_vram(label: &str) {
-    if let Some(free) = free_vram_bytes(0) {
-        eprintln!("[ltx2-debug] {label} free_vram={}", fmt_gb(free));
+    // Read the GPU this thread is actually bound to. Hard-coding ordinal 0
+    // reported another card's free memory on every multi-GPU host, which makes
+    // the whole triage trace fiction.
+    let ordinal = thread_gpu_ordinal().unwrap_or(0);
+    if let Some(free) = free_vram_bytes(ordinal) {
+        eprintln!(
+            "[ltx2-debug] {label} gpu={ordinal} free_vram={}",
+            fmt_gb(free)
+        );
     } else {
-        eprintln!("[ltx2-debug] {label} free_vram=unavailable");
+        eprintln!("[ltx2-debug] {label} gpu={ordinal} free_vram=unavailable");
     }
 }
 
@@ -5805,6 +6439,7 @@ mod tests {
         );
         Ltx2GeneratePlan {
             guidance_overrides: None,
+            vram_grant_bytes: None,
             pipeline: PipelineKind::Distilled,
             preset,
             checkpoint_is_distilled: req.model.contains("distilled"),
@@ -5837,6 +6472,44 @@ mod tests {
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
         }
+    }
+
+    /// A Distilled FP8 plan at an explicit render shape.
+    fn ltx2_plan_at(width: u32, height: u32, frames: u32) -> Ltx2GeneratePlan {
+        let mut request = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        request.width = width;
+        request.height = height;
+        request.frames = Some(frames);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&request, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&request.model).unwrap();
+        build_plan(&request, preset, conditioning)
+    }
+
+    fn stage_shape(
+        plan: &Ltx2GeneratePlan,
+        width: u32,
+        height: u32,
+        frames: u32,
+    ) -> super::Ltx2StageShape {
+        super::Ltx2StageShape::from_pixel_shape(
+            plan,
+            VideoPixelShape {
+                batch: 1,
+                frames: frames as usize,
+                height: height as usize,
+                width: width as usize,
+                fps: plan.frame_rate as f32,
+            },
+        )
+    }
+
+    /// The 19B FP8 block set as measured from the checkpoint header: 6 BF16
+    /// blocks (block 0 included) and 42 FP8 blocks.
+    fn ltx2_19b_fp8_blocks() -> Vec<usize> {
+        let mut blocks = vec![772_284_416usize; 6];
+        blocks.extend(std::iter::repeat_n(386_408_672usize, 42));
+        blocks
     }
 
     #[test]
@@ -6779,7 +7452,171 @@ mod tests {
 
         let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 3).unwrap();
 
-        assert_eq!(sizes, vec![16, 20, 0]);
+        assert_eq!(sizes.blocks, vec![16, 20, 0]);
+    }
+
+    /// Everything under the transformer that isn't a block — `patchify_proj`,
+    /// `adaln_single.linear`, `caption_projection`, the connectors, `proj_out`
+    /// — is allocated on the GPU after every resident block. The 19B FP8
+    /// checkpoint carries 2.1 GB of it; discarding the total is how the
+    /// planner overshot a 24 GB card by exactly that much.
+    #[test]
+    fn block_sizes_from_safetensors_reports_non_block_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltx2-non-block.safetensors");
+        let block0 = vec![0u8; 4 * SafeDtype::F32.size()];
+        let patchify = vec![0u8; 6 * SafeDtype::F32.size()];
+        let adaln = vec![0u8; 8 * SafeDtype::F32.size()];
+        let vae = vec![0u8; 32 * SafeDtype::F32.size()];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2], &block0).unwrap(),
+        );
+        tensors.insert(
+            "model.diffusion_model.patchify_proj.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 3], &patchify).unwrap(),
+        );
+        tensors.insert(
+            "model.diffusion_model.adaln_single.linear.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 4], &adaln).unwrap(),
+        );
+        // A combined export also carries the VAE; it is not transformer
+        // residency and must not be charged to it.
+        tensors.insert(
+            "vae.encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![8, 4], &vae).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 1).unwrap();
+
+        assert_eq!(sizes.blocks, vec![16]);
+        assert_eq!(
+            sizes.non_block_bytes,
+            24 + 32,
+            "patchify_proj + adaln_single must be reported, vae must not"
+        );
+    }
+
+    /// The residency planner must reserve those non-block weights instead of
+    /// allocating them after a plan that already filled the card.
+    #[test]
+    fn ltx2_adaptive_plan_reserves_non_block_transformer_weights() {
+        let plan = ltx2_plan_at(1024, 1024, 97);
+        let stage = stage_shape(&plan, 1024, 1024, 97);
+        let weights = super::Ltx2TransformerWeightSizes {
+            blocks: ltx2_19b_fp8_blocks(),
+            non_block_bytes: 2_107_091_456,
+        };
+        const FREE_VRAM: u64 = 25_339_395_072;
+
+        let residency = super::ltx2_adaptive_transformer_plan(&plan, stage, &weights, FREE_VRAM);
+
+        assert_eq!(residency.fixed_resident_bytes, weights.non_block_bytes);
+        let true_demand = residency.resident_bytes
+            + weights.non_block_bytes
+            + super::ltx2_video_activation_budget(stage)
+            + super::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM
+            + residency.largest_streamed_block;
+        assert!(
+            true_demand <= FREE_VRAM,
+            "true demand {true_demand} must fit {FREE_VRAM}"
+        );
+    }
+
+    /// Stage 1 of a Distilled 1024² plan renders at 512²; charging it the
+    /// full-frame budget reserved 4× the tokens it actually uses.
+    #[test]
+    fn ltx2_activation_budget_uses_stage_shape() {
+        let plan = ltx2_plan_at(1024, 1024, 97);
+        let stage1 = stage_shape(&plan, 512, 512, 97);
+        let stage2 = stage_shape(&plan, 1024, 1024, 97);
+
+        let stage1_budget = super::ltx2_video_activation_budget(stage1);
+        let stage2_budget = super::ltx2_video_activation_budget(stage2);
+
+        assert_eq!(
+            stage1_budget,
+            super::ltx2_activation_budget_bytes(512, 512, 97, stage1.conditioned)
+        );
+        assert!(
+            stage1_budget < stage2_budget,
+            "half-resolution stage 1 ({stage1_budget}) must cost less than stage 2 ({stage2_budget})"
+        );
+    }
+
+    /// Sampled free VRAM is a ceiling, not an entitlement. A job admitted at a
+    /// smaller peak must size itself to that grant.
+    #[test]
+    fn ltx2_transformer_budget_respects_scheduler_grant() {
+        assert_eq!(super::ltx2_transformer_vram_budget(None, 25_000), 25_000);
+        assert_eq!(
+            super::ltx2_transformer_vram_budget(Some(11_000), 25_000),
+            11_000
+        );
+        // A grant above what the card actually has is still bounded by the card.
+        assert_eq!(
+            super::ltx2_transformer_vram_budget(Some(40_000), 25_000),
+            25_000
+        );
+    }
+
+    /// The grant has to change the plan, not just the arithmetic.
+    #[test]
+    fn ltx2_grant_produces_fewer_resident_blocks_than_free_vram() {
+        const FREE_VRAM: u64 = 25_339_395_072;
+        let weights = super::Ltx2TransformerWeightSizes {
+            blocks: ltx2_19b_fp8_blocks(),
+            non_block_bytes: 2_107_091_456,
+        };
+        let ungranted = ltx2_plan_at(1024, 1024, 97);
+        let stage = stage_shape(&ungranted, 1024, 1024, 97);
+        let mut granted = ungranted.clone();
+        granted.vram_grant_bytes = Some(16_000_000_000);
+
+        let without = super::ltx2_adaptive_transformer_plan(&ungranted, stage, &weights, FREE_VRAM);
+        let with = super::ltx2_adaptive_transformer_plan(&granted, stage, &weights, FREE_VRAM);
+
+        assert!(
+            with.resident_count() < without.resident_count(),
+            "grant of 16 GB must keep fewer than the {} blocks a 25 GB card allows, got {}",
+            without.resident_count(),
+            with.resident_count()
+        );
+        assert!(with.peak_bytes() <= 16_000_000_000);
+    }
+
+    /// The denoise ladder shrinks the budget and eventually gives up instead
+    /// of looping forever.
+    #[test]
+    fn ltx2_denoise_retry_vram_budget_shrinks_then_stops() {
+        let first = super::ltx2_denoise_retry_vram_budget(24_000_000_000).unwrap();
+        assert!(first < 24_000_000_000);
+        let second = super::ltx2_denoise_retry_vram_budget(first).unwrap();
+        assert!(second < first);
+        assert_eq!(super::ltx2_denoise_retry_vram_budget(0), None);
+        assert_eq!(
+            super::ltx2_denoise_retry_vram_budget(super::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM),
+            None
+        );
+    }
+
+    /// A fatal CUDA fault must never be treated as a recoverable OOM — the
+    /// quarantine-and-stop rule is unchanged.
+    #[test]
+    fn ltx2_denoise_never_retries_a_fatal_cuda_error() {
+        let oom = anyhow::anyhow!("DriverError(CUDA_ERROR_OUT_OF_MEMORY, out of memory)");
+        assert!(super::ltx2_denoise_error_is_recoverable_oom(&oom));
+
+        let fatal = anyhow::anyhow!(
+            "DriverError(CUDA_ERROR_ILLEGAL_ADDRESS) while allocating; out of memory"
+        );
+        assert!(super::ltx2_error_is_fatal_cuda(&format!("{fatal:#}")));
+        assert!(!super::ltx2_denoise_error_is_recoverable_oom(&fatal));
+
+        let ordinary = anyhow::anyhow!("shape mismatch");
+        assert!(!super::ltx2_denoise_error_is_recoverable_oom(&ordinary));
     }
 
     #[test]
@@ -6797,24 +7634,21 @@ mod tests {
         );
     }
 
+    /// The budget still scales with every simultaneously live latent frame —
+    /// 97 pixel frames produce 13 of them — but the per-frame cost is now the
+    /// real token slope rather than the pixel-area heuristic.
     #[test]
     fn ltx2_adaptive_residency_reserves_every_live_latent_frame() {
-        let req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
-        let temp_dir = tempfile::tempdir().unwrap();
-        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
-        let preset = preset_for_model(&req.model).unwrap();
-        let plan = build_plan(&req, preset, conditioning);
-        let per_latent_frame = super::activation_bytes(
-            plan.width,
-            plan.height,
-            1,
-            super::dtype_bytes(DType::BF16),
-            super::ActivationFamily::Ltx2Video,
-        );
+        let plan = ltx2_plan_at(1024, 1024, 97);
+        let budget =
+            |frames| super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames));
 
+        // 1 pixel frame → 1 latent frame; 9 → 2; 97 → 13.
+        let one_latent_frame = budget(9) - budget(1);
+        assert!(one_latent_frame > 0);
         assert_eq!(
-            super::ltx2_video_activation_budget(&plan),
-            per_latent_frame * 13,
+            budget(97) - budget(1),
+            one_latent_frame * 12,
             "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
@@ -7927,5 +8761,150 @@ mod tests {
             .unwrap()
             .device()
             .is_cuda());
+    }
+
+    // ── Phase VRAM telemetry ────────────────────────────────────────────
+    //
+    // The instrumented boundaries are minutes-long GPU phases that no unit
+    // test can execute, so the contract is asserted structurally against this
+    // file's own source — the pattern already used for the Z-Image staged
+    // load/drop ordering.
+
+    fn runtime_function_source(signature: &str) -> &'static str {
+        let source = include_str!("runtime.rs");
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("runtime.rs should define `{signature}`"));
+        let indent: String = signature.chars().take_while(|c| *c == ' ').collect();
+        let terminator = format!("\n{indent}}}\n");
+        let rest = &source[start..];
+        let end = rest
+            .find(&terminator)
+            .unwrap_or_else(|| panic!("`{signature}` should end at its own closing brace"));
+        &rest[..end]
+    }
+
+    #[test]
+    fn every_ltx2_phase_boundary_opens_a_vram_probe() {
+        for signature in [
+            "fn load_ltx2_av_transformer_with_loras(",
+            "fn load_ltx2_video_vae(",
+            "fn maybe_load_stage_video_conditioning(",
+            "fn run_denoise_stage_with_oom_recovery<T>(",
+            "fn decode_video_frames_with_telemetry(",
+        ] {
+            assert!(
+                runtime_function_source(signature).contains("PhaseVramProbe::enter"),
+                "`{signature}` must measure its GPU memory phase"
+            );
+        }
+        // Prompt encode and the CUDA device handoff live in the progress-aware
+        // `prepare` body that plain `prepare` delegates to.
+        let prepare = runtime_function_source("    pub fn prepare_with_progress(");
+        assert!(
+            prepare.contains("PhaseVramProbe::enter_if(\"prompt_encode\"")
+                && prepare.contains("PhaseVramProbe::enter(\"device_handoff\")"),
+            "prompt encoding and the conditioning device handoff must be measured"
+        );
+    }
+
+    #[test]
+    fn phase_vram_lines_use_the_dedicated_tracing_target() {
+        let source = include_str!("runtime.rs");
+        assert!(
+            source.contains("tracing::info!(target: LTX2_VRAM_TARGET"),
+            "phase reports are always-on info lines on the LTX-2 VRAM target"
+        );
+        assert!(
+            source.contains("tracing::error!(target: LTX2_VRAM_TARGET"),
+            "OOM diagnoses are error lines on the same target"
+        );
+        assert!(
+            source.contains("const LTX2_VRAM_TARGET: &str = \"mold::ltx2::vram\";"),
+            "the documented target string must not drift"
+        );
+    }
+
+    #[test]
+    fn oom_diagnosis_reports_the_whole_residency_plan() {
+        let plan = crate::adaptive_offload::AdaptiveResidencyPlan {
+            resident: vec![true, false, true],
+            resident_bytes: 3_000_000_000,
+            streamed_bytes: 1_000_000_000,
+            largest_streamed_block: 700_000_000,
+            fixed_resident_bytes: 2_107_000_000,
+            activation_budget: 4_000_000_000,
+            runtime_headroom: crate::adaptive_offload::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+        };
+        let summary = super::ltx2_residency_summary(Some(&plan));
+
+        for field in [
+            "resident_count=2",
+            "streamed_count=1",
+            "resident_bytes=",
+            "activation_budget=",
+            "runtime_headroom=",
+            "largest_streamed_block=",
+            "fixed_resident_bytes=",
+        ] {
+            assert!(
+                summary.contains(field),
+                "residency summary must carry `{field}` so an OOM needs no reproduction: {summary}"
+            );
+        }
+        assert_eq!(super::ltx2_residency_summary(None), "residency=unknown");
+    }
+
+    #[test]
+    fn cuda_oom_failures_log_before_the_error_propagates() {
+        for signature in [
+            "fn load_ltx2_av_transformer_with_loras(",
+            "fn run_denoise_stage_with_oom_recovery<T>(",
+            "fn decode_video_frames_with_telemetry(",
+        ] {
+            assert!(
+                runtime_function_source(signature).contains("log_ltx2_phase_vram_result("),
+                "`{signature}` must route its result through the OOM-aware phase logger"
+            );
+        }
+        assert!(
+            runtime_function_source("fn log_ltx2_phase_vram_result(")
+                .contains("ltx2_residency_summary("),
+            "the OOM branch must attach the residency plan"
+        );
+    }
+
+    #[test]
+    fn one_stage_decode_reports_a_vae_phase_and_a_decode_timing() {
+        let helper = runtime_function_source("fn decode_video_frames_with_telemetry(");
+        assert!(
+            helper.contains("ProgressPhase::Vae") && helper.contains("decode_video"),
+            "the shared decode path must emit the scheduler's VAE phase and a timing line"
+        );
+        for (signature, label) in [
+            ("fn render_real_one_stage_av(", "\"one_stage\""),
+            ("fn render_real_distilled_av(", "\"distilled\""),
+            ("fn render_real_two_stage_av(", "\"two_stage\""),
+            ("fn render_real_retake_av(", "\"retake\""),
+        ] {
+            let body = runtime_function_source(signature);
+            assert!(
+                body.contains("decode_video_frames_with_telemetry("),
+                "`{signature}` must decode through the instrumented path"
+            );
+            assert!(
+                body.contains(label),
+                "`{signature}` must keep its own `{label}` phase label"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_vram_lines_follow_the_thread_gpu_binding() {
+        let body = runtime_function_source("fn log_debug_vram(");
+        assert!(
+            body.contains("thread_gpu_ordinal()") && !body.contains("free_vram_bytes(0)"),
+            "debug VRAM lines must sample the GPU this thread is bound to"
+        );
     }
 }

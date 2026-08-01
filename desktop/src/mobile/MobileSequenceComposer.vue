@@ -26,6 +26,7 @@ import {
 } from "@studio/lib/sequence";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { sequenceOpeningImageError } from "@studio/lib/sequenceForm";
+import { promptOptional } from "@studio/lib/promptRequirement";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
@@ -120,11 +121,21 @@ const stages = computed<SequenceStage[]>(() =>
   })),
 );
 const duration = computed(() => sequenceDuration(stages.value, props.fps, motionTail.value));
+// The opening image conditions clip 1, and every later clip inherits the
+// previous clip's motion tail — the same handoff extend uses — so a
+// promptless-capable family can render the whole sequence undescribed.
+const clipPromptOptional = computed(() =>
+  promptOptional({
+    family: props.selectedModel?.family ?? null,
+    sourceImage: draft.openingImage,
+  }),
+);
 const validation = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: props.chainLimits?.max_total_frames ?? Number.MAX_SAFE_INTEGER,
     motionTailFrames: motionTail.value,
+    promptOptional: clipPromptOptional.value,
   }),
 );
 /** Desktop parity: a model the server says can't chain names its reason

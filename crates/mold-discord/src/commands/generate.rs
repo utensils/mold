@@ -349,12 +349,24 @@ fn looks_like_png_or_jpeg(bytes: &[u8]) -> bool {
     is_png || is_jpeg
 }
 
+/// Whether `/generate` must reject the interaction up front for a missing prompt.
+///
+/// The slash command runs this before deferring, so the model family isn't
+/// resolved yet — only the attachment is known. A source image is enough to
+/// let the run through unprompted (LTX-2 image-to-video conditions on the
+/// frame); the server's family-aware validator is the backstop that still
+/// rejects an empty prompt for image families.
+fn prompt_missing_before_defer(prompt: Option<&str>, has_source_image: bool) -> bool {
+    !has_source_image && prompt.is_none_or(|p| p.trim().is_empty())
+}
+
 /// Generate an image (PNG) or video (MP4 by default, GIF on request).
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn generate(
     ctx: Context<'_>,
-    #[description = "Text prompt describing the image or video to generate"] prompt: String,
+    #[description = "Text prompt — optional for image-to-video when a source image is attached"]
+    prompt: Option<String>,
     #[description = "Model to use (e.g. flux-schnell:q8, ltx-2-19b-distilled:fp8)"]
     #[autocomplete = "autocomplete_model"]
     model: Option<String>,
@@ -381,15 +393,19 @@ pub async fn generate(
     negative_prompt: Option<String>,
 ) -> Result<()> {
     // Validate prompt before deferring (avoids wasting the interaction)
-    if prompt.trim().is_empty() {
+    if prompt_missing_before_defer(prompt.as_deref(), source_image.is_some()) {
         ctx.send(
             poise::CreateReply::default()
-                .content("Prompt cannot be empty.")
+                .content(
+                    "Prompt cannot be empty. \
+                     (It's optional only for image-to-video — attach a source image.)",
+                )
                 .ephemeral(true),
         )
         .await?;
         return Ok(());
     }
+    let prompt = prompt.unwrap_or_default();
 
     // Check authorization (block list, roles, cooldown, quota)
     let user_id = ctx.author().id.get();
@@ -1110,5 +1126,30 @@ mod tests {
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
+    }
+
+    #[test]
+    fn prompt_rejected_up_front_only_without_a_source_image() {
+        // No attachment: an absent or blank prompt is rejected before the
+        // interaction is deferred.
+        assert!(prompt_missing_before_defer(None, false));
+        assert!(prompt_missing_before_defer(Some("   "), false));
+        assert!(!prompt_missing_before_defer(Some("a cat"), false));
+
+        // With a source image the run may be unprompted — LTX-2 image-to-video
+        // conditions on the frame. Non-video families are still rejected, by
+        // the server's family-aware validator.
+        assert!(!prompt_missing_before_defer(None, true));
+        assert!(!prompt_missing_before_defer(Some("  "), true));
+        assert!(!prompt_missing_before_defer(Some("a cat"), true));
+    }
+
+    #[test]
+    fn absent_prompt_builds_an_empty_prompt_request() {
+        let req = build_generate_request(BuildParams {
+            source_image: Some(vec![0x89, 0x50, 0x4E, 0x47]),
+            ..base_params("", "ltx-2-19b-distilled:fp8")
+        });
+        assert_eq!(req.prompt, "");
     }
 }

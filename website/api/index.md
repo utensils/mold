@@ -336,8 +336,33 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
 }
 ```
 
-Only `prompt` is required. All other fields have defaults or model-specific
-validation.
+`prompt` is the only field without a default, and it is required in every case
+but one. All other fields have defaults or model-specific validation.
+
+::: tip Optional prompt (LTX-2 / LTX-Video image-to-video)
+An empty or whitespace-only `prompt` is accepted **only** when both of these
+hold:
+
+1. the resolved model family is `ltx2` or `ltx-video`, and
+2. the request carries visual conditioning — `source_image`, a non-empty
+   `keyframes[]`, `source_video` / `source_video_path`, or `extend_video` /
+   `extend_video_path`.
+
+Anything else — pure text-to-video, or any image family even with a
+`source_image` — still fails with `prompt must not be empty`. For `cv:` / `hf:`
+catalog IDs the family comes from the server's catalog resolution, so a
+promptless request works only on a host that can resolve the model to one of
+those two families.
+
+LTX-2's Gemma encoder pads to a fixed 1,024-token context and replaces padded
+positions with learned register embeddings, so `""` is a trained context rather
+than a degenerate one. Two consequences worth passing on to your users: it
+**does not reduce VRAM use** (the prompt context is a fixed-size tensor), and it
+usually yields near-static output because nothing describes the motion. An
+empty prompt also suppresses prompt expansion (`expand` is forced to `false`
+rather than letting the expander invent a prompt) and is not written to prompt
+history.
+:::
 
 Authoritative Scheduler V2 servers with gallery output enabled advertise
 `queue.server_batch = true` and `queue.server_batch_max_outputs = 64` from

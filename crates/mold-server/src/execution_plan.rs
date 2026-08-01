@@ -734,6 +734,15 @@ pub struct ResolvedExecutionPlan {
     /// Exact effective capacity against which this candidate was admitted:
     /// current sampled free VRAM plus only owner-reclaimable resident bytes.
     pub admitted_available_vram_bytes: u64,
+    /// Decayed observed high-water envelope for this exact estimate bucket.
+    ///
+    /// Scheduler admission already reserves `max(static, learned)` capacity
+    /// (`mold_scheduler::estimates`), but the worker's pre-load recheck only
+    /// looked at `predicted_vram_peak_bytes`. Carrying the envelope lets the
+    /// worker recheck the larger of the two and reject an impossible load in
+    /// milliseconds instead of after another two-minute load (#641). `0` means
+    /// no learned evidence.
+    pub learned_vram_envelope_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub determinism_class: DeterminismClass,
     pub execution_environment: ExecutionEnvironmentDescriptor,
@@ -905,8 +914,16 @@ pub enum ExecutionPlanError {
     UnavailableDevice(String),
     #[error("component placement spans multiple devices: {0}")]
     CrossDevicePlacement(String),
-    #[error("no device has enough effective VRAM capacity for a safe execution plan")]
-    InsufficientVram,
+    #[error("no device has enough effective VRAM capacity for a safe execution plan: {reason}")]
+    InsufficientVram {
+        /// Per-device explanation, so a rejection names which device fell
+        /// short by how much — and, for LTX-2, a shape that would fit.
+        reason: String,
+        /// Smallest predicted peak across the rejected devices. The scheduler
+        /// compares this against device *total* VRAM: a peak no device could
+        /// ever hold is terminal, anything else is transient pressure.
+        required_peak_bytes: u64,
+    },
     #[error("execution plan was invalidated before CUDA work: {0}")]
     PlanInvalidated(String),
     #[error("prepared execution inputs are stale: {0}")]
@@ -1105,6 +1122,7 @@ fn resolve_execution_plans_with_policy(
         ));
     }
     let hard_device = hard_devices.into_iter().next();
+    let mut rejections: Vec<DeviceInfeasibility> = Vec::new();
     let candidates = devices
         .iter()
         .filter(|device| hard_device.as_ref().is_none_or(|hard| hard == &device.id))
@@ -1145,13 +1163,73 @@ fn resolve_execution_plans_with_policy(
                 offload_requested,
                 equivalence_cache_only: fact_policy == EquivalenceFactPolicy::CacheOnly,
             };
-            build_plan(&context, device)
+            build_plan(&context, device, &mut rejections)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if candidates.is_empty() {
-        return Err(ExecutionPlanError::InsufficientVram);
+        return Err(insufficient_vram_error(&rejections));
     }
     Ok(candidates)
+}
+
+/// LTX-2 rejections name a shape that does fit on this device, so the user is
+/// not left to guess which of resolution or frame count to reduce (#641).
+fn ltx2_shape_advice(context: &PlanContext<'_>, device: &DeviceFact) -> Option<String> {
+    if context.family != "ltx2" {
+        return None;
+    }
+    let facts = crate::ltx2_admission::checkpoint_facts_cached(&context.paths.transformer)?;
+    crate::ltx2_admission::supported_shape_advice(
+        &facts,
+        crate::ltx2_admission::Ltx2ShapeHint::from_request(context.request),
+        device.available_vram_bytes,
+    )
+}
+
+/// Why one device could not host this request. Collected per candidate so the
+/// rejection names the shortfall instead of the bare
+/// "no device has enough effective VRAM capacity".
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceInfeasibility {
+    pub(crate) device_id: String,
+    pub(crate) predicted_peak_bytes: u64,
+    pub(crate) available_bytes: u64,
+    /// Family-specific remediation, e.g. an LTX-2 shape that does fit.
+    pub(crate) advice: Option<String>,
+}
+
+pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> ExecutionPlanError {
+    if rejections.is_empty() {
+        return ExecutionPlanError::InsufficientVram {
+            reason: "no request-eligible device produced a concrete execution plan".to_string(),
+            required_peak_bytes: 0,
+        };
+    }
+    let reason = rejections
+        .iter()
+        .map(|rejection| {
+            let advice = rejection
+                .advice
+                .as_ref()
+                .map(|advice| format!(" ({advice})"))
+                .unwrap_or_default();
+            format!(
+                "{} needs ~{:.1} GB of ~{:.1} GB usable{advice}",
+                rejection.device_id,
+                rejection.predicted_peak_bytes as f64 / 1_000_000_000.0,
+                rejection.available_bytes as f64 / 1_000_000_000.0,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    ExecutionPlanError::InsufficientVram {
+        reason,
+        required_peak_bytes: rejections
+            .iter()
+            .map(|rejection| rejection.predicted_peak_bytes)
+            .min()
+            .unwrap_or(0),
+    }
 }
 
 pub(crate) fn preparation_authority_fingerprint(
@@ -1224,6 +1302,14 @@ pub(crate) fn warm_execution_equivalence_cache(
     }
     for path in paths {
         let _ = artifact_facts_path_with_policy(&path, false);
+    }
+    // LTX-2 admission needs the checkpoint's per-block weight layout. Reading
+    // the safetensors header is blocking work, so it is warmed here (already
+    // on the blocking pool) and only ever read from cache by the coordinator.
+    if family == "ltx2" {
+        for inputs in prepared.by_device.values() {
+            crate::ltx2_admission::warm_checkpoint_facts(&inputs.engine_paths.transformer);
+        }
     }
 }
 
@@ -1608,6 +1694,7 @@ struct PlanContext<'a> {
 fn build_plan(
     context: &PlanContext<'_>,
     device: &DeviceFact,
+    rejections: &mut Vec<DeviceInfeasibility>,
 ) -> Option<Result<ResolvedExecutionPlan, ExecutionPlanError>> {
     // These compatibility tokens preserve candidate-v1 exact lease identity.
     // They are never used as precision authority or equivalence facts.
@@ -1634,11 +1721,22 @@ fn build_plan(
         Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal))
             if ordinal == device.ordinal
     );
+    // A CUDA OOM on this exact (model, shape, GPU) leaves a reduced grant
+    // behind. Planning the retry against it is what makes the retry
+    // conservative instead of an identical repeat of the failing plan (#641).
+    let device_budget = crate::gpu_pool::reduced_vram_grant(
+        context.model,
+        &crate::gpu_pool::oom_shape_bucket(context.request),
+        device.ordinal,
+    )
+    .map_or(device.available_vram_bytes, |grant| {
+        grant.min(device.available_vram_bytes)
+    });
     let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
         context.request,
         context.paths,
         hint,
-        Some(device.available_vram_bytes),
+        Some(device_budget),
         context.offload_requested,
         request_has_lora,
         gemma_competes,
@@ -1694,7 +1792,7 @@ fn build_plan(
         context.request,
         &gpu_paths,
         hint,
-        Some(device.available_vram_bytes),
+        Some(device_budget),
         initial_memory.block_offload && !transformer_on_cpu,
         request_has_lora,
         gemma_competes,
@@ -1714,13 +1812,19 @@ fn build_plan(
             context.request,
             &gpu_paths,
             hint,
-            Some(device.available_vram_bytes),
+            Some(device_budget),
             initial_memory.block_offload && !transformer_on_cpu,
             request_has_lora,
             gemma_competes,
         );
     }
     if memory.fits_available_memory != Some(true) {
+        rejections.push(DeviceInfeasibility {
+            device_id: device.id.clone(),
+            predicted_peak_bytes: memory.peak_memory_bytes,
+            available_bytes: device.available_vram_bytes,
+            advice: ltx2_shape_advice(context, device),
+        });
         return None;
     }
     // Missing preview dependencies have no filesystem metadata yet. Mirror
@@ -1744,6 +1848,12 @@ fn build_plan(
         .max()
         .unwrap_or(0);
     if pending_dependency_peak > device.available_vram_bytes {
+        rejections.push(DeviceInfeasibility {
+            device_id: device.id.clone(),
+            predicted_peak_bytes: pending_dependency_peak,
+            available_bytes: device.available_vram_bytes,
+            advice: None,
+        });
         return None;
     }
 
@@ -1874,6 +1984,7 @@ fn build_plan(
         offload_mode,
         predicted_vram_peak_bytes: predicted_vram,
         admitted_available_vram_bytes: device.available_vram_bytes,
+        learned_vram_envelope_bytes: 0,
         predicted_host_increment_bytes: predicted_host,
         determinism_class,
         execution_environment,
@@ -3599,10 +3710,10 @@ mod tests {
         }));
 
         let unsupported = config(root.path(), "unknown-family", None);
-        assert_eq!(
+        assert!(matches!(
             resolve_execution_plans(&unsupported, &request(None), &devices(&[3 * GIB]), false,),
-            Err(ExecutionPlanError::InsufficientVram)
-        );
+            Err(ExecutionPlanError::InsufficientVram { .. })
+        ));
     }
 
     #[test]
@@ -3656,9 +3767,11 @@ mod tests {
             }),
         });
 
-        assert_eq!(
-            resolve_execution_plans(&config, &request, &devices(&[12 * GIB]), false),
-            Err(ExecutionPlanError::InsufficientVram),
+        assert!(
+            matches!(
+                resolve_execution_plans(&config, &request, &devices(&[12 * GIB]), false),
+                Err(ExecutionPlanError::InsufficientVram { .. })
+            ),
             "automatic CPU fallback must never override an explicit VAE GPU pin"
         );
     }
@@ -3706,10 +3819,10 @@ mod tests {
             let plans = resolve_execution_plans(&config, &request(None), &facts, false).unwrap();
             assert_eq!(plans.len(), count);
         }
-        assert_eq!(
+        assert!(matches!(
             resolve_execution_plans(&config, &request(None), &[], false),
-            Err(ExecutionPlanError::InsufficientVram)
-        );
+            Err(ExecutionPlanError::InsufficientVram { .. })
+        ));
     }
 
     #[test]
@@ -3740,10 +3853,10 @@ mod tests {
     fn missing_free_vram_never_falls_back_to_total_capacity() {
         let root = TempDir::new().unwrap();
         let (config, request) = sized_config(root.path(), "sd15", 1, 1, 1);
-        assert_eq!(
+        assert!(matches!(
             resolve_execution_plans(&config, &request, &devices(&[0]), false),
-            Err(ExecutionPlanError::InsufficientVram)
-        );
+            Err(ExecutionPlanError::InsufficientVram { .. })
+        ));
     }
 
     #[test]

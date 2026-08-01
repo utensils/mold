@@ -3,6 +3,7 @@ use crate::progress::ProgressReporter;
 use mold_core::types::{GpuBackend, GpuSelection, GpuSelector};
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 /// A CUDA memory observation failed before Mold could make a safe admission
 /// decision.
@@ -61,6 +62,34 @@ pub fn clear_thread_gpu_ordinal() {
 /// Returns the currently-bound ordinal, if any.
 pub fn thread_gpu_ordinal() -> Option<usize> {
     THREAD_GPU_ORDINAL.with(|c| c.get())
+}
+
+thread_local! {
+    static THREAD_VRAM_GRANT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Bind the scheduler's admitted VRAM peak for the job this thread is about to
+/// run.
+///
+/// The frozen execution plan owns the memory authority (`CLAUDE.md`: "Frozen
+/// execution plans remain authoritative at worker dispatch"), but engines that
+/// self-size against sampled free VRAM never saw it. Workers set this around a
+/// dispatch and clear it afterwards; engines read it through
+/// [`thread_vram_grant_bytes`]. `None` means no scheduler authority (CLI local
+/// runs, tests) and engines keep their free-VRAM-only behaviour.
+pub fn init_thread_vram_grant_bytes(bytes: u64) {
+    THREAD_VRAM_GRANT.with(|c| c.set(Some(bytes)));
+}
+
+/// Clear the thread's VRAM grant. Workers call this when a dispatch ends so a
+/// later job can't inherit a stale grant.
+pub fn clear_thread_vram_grant_bytes() {
+    THREAD_VRAM_GRANT.with(|c| c.set(None));
+}
+
+/// The scheduler-admitted VRAM peak for the job on this thread, if any.
+pub fn thread_vram_grant_bytes() -> Option<u64> {
+    THREAD_VRAM_GRANT.with(|c| c.get())
 }
 
 /// Panic in debug builds if `ordinal` doesn't match the thread's bound GPU.
@@ -778,6 +807,103 @@ pub fn dtype_bytes(dt: candle_core::DType) -> u32 {
     }
 }
 
+// ── LTX-2 token-based activation budget ──────────────────────────────────────
+//
+// The pixel-area heuristic in `activation_bytes` is wrong for LTX-2 in both
+// directions: the video transformer works over *tokens*, and the token count
+// is a 3D quantity (latent frames × patch grid), not `w × h`. Charging
+// `area × latent_frames` over-estimates a half-resolution stage-1 render by 4×
+// and under-estimates the feed-forward peak at stage 2. The helpers below
+// price the real tensors instead.
+
+/// LTX-2 video VAE temporal compression — 8 pixel frames per latent frame,
+/// plus the ungrouped first frame.
+const LTX2_TEMPORAL_STRIDE: u64 = 8;
+/// Pixels per token along each spatial axis: 8× VAE spatial downsample followed
+/// by the transformer's 4×4 latent patchify.
+const LTX2_PIXELS_PER_TOKEN_AXIS: u64 = 32;
+/// Transformer inner dim (`patchify_proj` output width) for the 19B/22B
+/// presets.
+const LTX2_INNER_DIM: u64 = 4096;
+/// Feed-forward hidden width (`ff.net.0.proj` output) — 4× the inner dim.
+const LTX2_FF_HIDDEN_DIM: u64 = 16_384;
+/// Per-token AdaLN width (`adaln_single.linear` output) — 6 × inner dim, only
+/// materialized per token when the run is conditioned.
+const LTX2_ADALN_DIM: u64 = 24_576;
+const BF16_BYTES: u64 = 2;
+const F32_BYTES: u64 = 4;
+
+/// Token-independent LTX-2 denoise workspace.
+///
+/// Covers the chunked feed-forward's two live F32 `[chunk, 16384]` staging
+/// buffers, the RoPE cos/sin tables held for the whole denoise loop, the video
+/// (and optional audio) latent/noise tensors, and cuBLAS/cuDNN scratch. None of
+/// these grow with the token count, so they are a flat term rather than part of
+/// the per-token slope.
+const LTX2_FIXED_WORKSPACE_BYTES: u64 = 1_073_741_824;
+
+/// Number of simultaneously live `[1, T, inner]` BF16 buffers in a block's
+/// residual stream (input, normed, attention output, gated residual, and the
+/// feed-forward's residual copy).
+const LTX2_RESIDUAL_LIVE_BUFFERS: u64 = 5;
+
+/// Token count for an LTX-2 render at `width × height × frames`.
+///
+/// `frames` is in pixel space; the VAE groups them 8:1 after the ungrouped
+/// first frame, and each latent frame contributes a `(h/32) × (w/32)` patch
+/// grid.
+pub fn ltx2_token_count(width: u32, height: u32, frames: u32) -> u64 {
+    let latent_frames = (frames.max(1) as u64 - 1) / LTX2_TEMPORAL_STRIDE + 1;
+    let grid_h = (height as u64 / LTX2_PIXELS_PER_TOKEN_AXIS).max(1);
+    let grid_w = (width as u64 / LTX2_PIXELS_PER_TOKEN_AXIS).max(1);
+    latent_frames.saturating_mul(grid_h).saturating_mul(grid_w)
+}
+
+/// Peak activation bytes for one LTX-2 transformer forward at this shape.
+///
+/// Derived from the real tensor shapes in
+/// `crates/mold-inference/src/ltx2/model/video_transformer.rs`, per token of
+/// the `[1, T, 4096]` hidden state:
+///
+/// * residual stream — 5 live `[1, T, 4096]` BF16 buffers → `5 × 4096 × 2`
+/// * attention — `q`/`k`/`v` BF16 `[1, T, 4096]` plus the F32 output
+///   accumulator → `3 × 4096 × 2 + 4096 × 4`. `chunked_attention` narrows and
+///   upcasts one tile at a time, so its F32 staging is flat, not per-token
+/// * feed-forward — the BF16 `[1, T, 16384]` projection. The F32 GELU work is
+///   chunked (two `[chunk, 16384]` buffers) and therefore priced in
+///   [`LTX2_FIXED_WORKSPACE_BYTES`], not per token
+/// * AdaLN — the per-token `[1, T, 24576]` BF16 modulation, materialized only
+///   when `conditioned` (source image, keyframes, or extend carryover) makes
+///   the modulation token-varying rather than a single broadcast row
+///
+/// That is 112 KiB/token unconditioned and 160 KiB/token conditioned, plus the
+/// flat workspace. Anchors: 1024² × 97 frames (13,312 tokens) → 2.60 GB
+/// unconditioned / 3.25 GB conditioned; the 512² stage-1 render of the same
+/// job (3,328 tokens) → 1.46 GB.
+pub fn ltx2_activation_budget_bytes(
+    width: u32,
+    height: u32,
+    frames: u32,
+    conditioned: bool,
+) -> u64 {
+    let residual = LTX2_RESIDUAL_LIVE_BUFFERS * LTX2_INNER_DIM * BF16_BYTES;
+    // `chunked_attention` narrows q/k/v and upcasts per tile, so the only
+    // per-token attention cost is the caller's three BF16 projections plus the
+    // F32 output accumulator. The tile buffers are flat and priced in
+    // `LTX2_FIXED_WORKSPACE_BYTES`.
+    let attention = 3 * LTX2_INNER_DIM * BF16_BYTES + LTX2_INNER_DIM * F32_BYTES;
+    let feed_forward = LTX2_FF_HIDDEN_DIM * BF16_BYTES;
+    let adaln = if conditioned {
+        LTX2_ADALN_DIM * BF16_BYTES
+    } else {
+        0
+    };
+    let per_token = residual + attention + feed_forward + adaln;
+    ltx2_token_count(width, height, frames)
+        .saturating_mul(per_token)
+        .saturating_add(LTX2_FIXED_WORKSPACE_BYTES)
+}
+
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
 /// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
 /// unknown slugs — the FLUX factor is the most common diffusion default and
@@ -876,11 +1002,26 @@ pub fn select_expand_device_with_preference(
 
 // ── LTX-2 Gemma encoder placement ────────────────────────────────────────────
 
-/// Minimum free VRAM (bytes) needed to land Gemma 3 12B BF16 on a single GPU
-/// alongside its activation workspace. ~23 GB resident weights + ~1 GB
-/// activation overhead. Encoder isn't streamed — picking GPU means the whole
-/// thing is co-resident with the LTX-2 transformer phase.
-pub const LTX2_GEMMA_VRAM_THRESHOLD: u64 = 24_000_000_000;
+/// Minimum free VRAM (bytes) needed to land the LTX-2 Gemma 3 12B prompt
+/// encoder on a single GPU alongside its activation workspace.
+///
+/// This tracks *streaming* residency, not the ~24 GB the BF16 weights occupy
+/// on disk. [`crate::ltx2::text::GemmaHiddenStateEncoder::load_from_assets`]
+/// builds through `new_streaming`, and `forward_hidden_states` constructs each
+/// of the 48 `DecoderLayer`s inside the forward loop and drops it before the
+/// next — so the layers are never co-resident. What stays live is the token
+/// embedding table (262,208 × 3,840 BF16 ≈ 2.01 GB), at most two decoder
+/// layers in flight (≈ 0.45 GB each), and the 49 retained hidden states
+/// (≈ 0.39 GB at the fixed 1,024-token context) — a peak near 3.3 GB.
+///
+/// 6 GB leaves roughly 2× headroom over that peak while keeping a 24 GB
+/// consumer card eligible. The previous value was 24 GB, which described the
+/// long-removed eager loader and made the encoder unplaceable on exactly the
+/// cards that need it most: it pinned Gemma to CPU on a 4090, where prompt
+/// encoding cost ~93 s of a ~180 s render.
+///
+/// Placement stays advisory — [`crate::ltx2`]'s OOM path retries on CPU.
+pub const LTX2_GEMMA_VRAM_THRESHOLD: u64 = 6_000_000_000;
 
 /// Resolved placement for the LTX-2 Gemma 3 12B prompt encoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1484,6 +1625,413 @@ pub fn total_vram_bytes(_ordinal: usize) -> Option<u64> {
 /// device was already using.
 pub fn vram_load_delta(ordinal: usize, baseline: u64) -> u64 {
     vram_in_use_bytes(ordinal).saturating_sub(baseline)
+}
+
+// ── Phase VRAM telemetry ─────────────────────────────────────────────────────
+//
+// `cuMemGetInfo` alone cannot describe what one inference phase spent. Candle
+// allocates through cudarc's stream-ordered pool (`cuMemAllocAsync`) and Mold
+// never trims that pool, so free VRAM does not recover when tensors drop: a
+// free-delta reads every transient buffer as permanent retention, and a phase
+// that reused pooled memory reads as spending nothing.
+//
+// The memory-pool attributes are the right authority. They are process-local
+// (correct in containers, MIG, and WSL2 where the global number describes
+// other tenants), they carry a driver-maintained high-water mark, and writing
+// `0` to a `*_HIGH` attribute rearms it — which is exactly a per-phase peak.
+//
+// This is diagnostics only. Per the memory-authority rule, a phase report is
+// never fed back into admission: the scheduler's frozen grant stays the
+// authority even when a probe measures something different.
+
+/// Which memory authority produced a [`PhaseVramReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VramAttribution {
+    /// CUDA memory-pool attributes were readable: the peaks are real,
+    /// process-local high-water marks for this phase.
+    Pool,
+    /// Only `cuMemGetInfo` was readable. Free VRAM is device-global and
+    /// includes every other process, so it is reported as context and
+    /// deliberately never promoted into a peak.
+    GlobalOnly,
+    /// No GPU memory observation was available (non-CUDA build, driver error,
+    /// or a device without memory-pool support).
+    Unavailable,
+}
+
+impl VramAttribution {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pool => "pool",
+            Self::GlobalOnly => "global-only",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// One raw GPU memory observation. Every field is optional because each
+/// underlying query can independently be unavailable, and a missing sample
+/// must never be substituted with a zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VramSample {
+    /// `CU_MEMPOOL_ATTR_USED_MEM_CURRENT` — bytes currently held by live
+    /// pool allocations.
+    pub pool_used_bytes: Option<u64>,
+    /// `CU_MEMPOOL_ATTR_USED_MEM_HIGH` — high-water mark since the last reset.
+    pub pool_used_high_bytes: Option<u64>,
+    /// `CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH` — high-water mark of physical
+    /// memory the pool reserved from the driver (used plus pool overhead).
+    pub pool_reserved_high_bytes: Option<u64>,
+    /// `cuMemGetInfo` free bytes — device-global, all processes.
+    pub global_free_bytes: Option<u64>,
+    /// `cuMemGetInfo` total bytes.
+    pub global_total_bytes: Option<u64>,
+}
+
+/// What one inference phase actually cost on the GPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseVramReport {
+    /// Phase label, e.g. `distilled.stage2.denoise`.
+    pub phase: String,
+    /// Peak pool bytes in use during the phase. `None` unless the
+    /// attribution is [`VramAttribution::Pool`].
+    pub peak_pool_used: Option<u64>,
+    /// Peak pool bytes reserved from the driver during the phase.
+    pub peak_pool_reserved: Option<u64>,
+    /// Signed change in live pool bytes across the phase. Negative means the
+    /// phase released more than it retained — a real and useful outcome that
+    /// a saturating unsigned delta would hide.
+    pub delta_pool_used: Option<i64>,
+    pub global_free_entry: Option<u64>,
+    pub global_free_exit: Option<u64>,
+    pub global_total: Option<u64>,
+    /// What the planner said this phase would cost, when the caller knows.
+    pub predicted_bytes: Option<u64>,
+    pub elapsed: Duration,
+    pub attribution: VramAttribution,
+}
+
+impl PhaseVramReport {
+    /// Whether this report carries a peak Mold can attribute to itself.
+    ///
+    /// False for [`VramAttribution::GlobalOnly`] and
+    /// [`VramAttribution::Unavailable`]: a device-global free delta is not a
+    /// process-local peak and must not be presented (or reasoned about) as one.
+    pub fn has_authoritative_peak(&self) -> bool {
+        matches!(self.attribution, VramAttribution::Pool) && self.peak_pool_used.is_some()
+    }
+
+    /// How far device-global free VRAM fell across the phase, saturating at
+    /// zero when the phase ended with more free memory than it started with.
+    pub fn global_free_drop(&self) -> Option<u64> {
+        match (self.global_free_entry, self.global_free_exit) {
+            (Some(entry), Some(exit)) => Some(entry.saturating_sub(exit)),
+            _ => None,
+        }
+    }
+}
+
+fn fmt_gb_opt(bytes: Option<u64>) -> String {
+    bytes.map(fmt_gb).unwrap_or_else(|| "n/a".to_string())
+}
+
+impl std::fmt::Display for PhaseVramReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} peak={} reserved={} predicted={} free {}->{} of {} attribution={} {}ms",
+            self.phase,
+            fmt_gb_opt(self.peak_pool_used),
+            fmt_gb_opt(self.peak_pool_reserved),
+            fmt_gb_opt(self.predicted_bytes),
+            fmt_gb_opt(self.global_free_entry),
+            fmt_gb_opt(self.global_free_exit),
+            fmt_gb_opt(self.global_total),
+            self.attribution.as_str(),
+            self.elapsed.as_millis(),
+        )
+    }
+}
+
+/// Build a phase report from two raw observations.
+///
+/// Kept pure and free of CUDA bindings so the attribution rules are unit
+/// testable without a GPU, mirroring `post_drop_free_vram_bytes_with`.
+pub fn phase_vram_report_from(
+    phase: impl Into<String>,
+    entry: VramSample,
+    exit: VramSample,
+    predicted_bytes: Option<u64>,
+    elapsed: Duration,
+) -> PhaseVramReport {
+    let pool_authoritative = exit.pool_used_high_bytes.is_some();
+    let attribution = if pool_authoritative {
+        VramAttribution::Pool
+    } else if entry.global_free_bytes.is_some() || exit.global_free_bytes.is_some() {
+        VramAttribution::GlobalOnly
+    } else {
+        VramAttribution::Unavailable
+    };
+    let delta_pool_used = match (entry.pool_used_bytes, exit.pool_used_bytes) {
+        (Some(entry_used), Some(exit_used)) if pool_authoritative => {
+            Some(exit_used as i64 - entry_used as i64)
+        }
+        _ => None,
+    };
+    PhaseVramReport {
+        phase: phase.into(),
+        peak_pool_used: pool_authoritative
+            .then_some(exit.pool_used_high_bytes)
+            .flatten(),
+        peak_pool_reserved: pool_authoritative
+            .then_some(exit.pool_reserved_high_bytes)
+            .flatten(),
+        delta_pool_used,
+        global_free_entry: entry.global_free_bytes,
+        global_free_exit: exit.global_free_bytes,
+        global_total: exit.global_total_bytes.or(entry.global_total_bytes),
+        predicted_bytes,
+        elapsed,
+        attribution,
+    }
+}
+
+/// Sample GPU memory for the calling thread's bound device.
+///
+/// `rearm_high_water` resets `CU_MEMPOOL_ATTR_USED_MEM_HIGH` and
+/// `CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH` to the pool's current usage after
+/// reading them, so the next sample's high-water marks describe only the
+/// interval that just started.
+#[cfg(feature = "cuda")]
+fn sample_phase_vram(ordinal: usize, rearm_high_water: bool) -> VramSample {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys, CudaContext};
+
+    let mut sample = VramSample::default();
+    let Ok(context) = CudaContext::new(ordinal) else {
+        return sample;
+    };
+    if let Ok((free, total)) = context.mem_get_info() {
+        sample.global_free_bytes = Some(free as u64);
+        sample.global_total_bytes = Some(total as u64);
+    }
+    // Without pool-backed allocation, cudarc allocates with `cuMemAlloc` and
+    // the pool attributes describe an empty pool. Reporting those zeros as a
+    // measured peak would be worse than reporting nothing.
+    if !context.has_async_alloc() {
+        return sample;
+    }
+    // SAFETY: `context.cu_device()` is a live CUdevice owned by the retained
+    // cudarc context, and this is the pool `cuMemAllocAsync` allocates from.
+    let Ok(pool) = (unsafe { result::device::get_mem_pool(context.cu_device()) }) else {
+        return sample;
+    };
+    sample.pool_used_bytes = pool_attribute(
+        pool,
+        sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+    );
+    sample.pool_used_high_bytes = pool_attribute(
+        pool,
+        sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+    );
+    sample.pool_reserved_high_bytes = pool_attribute(
+        pool,
+        sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+    );
+    if rearm_high_water {
+        // Writing zero does not zero the counter: CUDA resets each high-water
+        // mark to the pool's *current* value, which is precisely the baseline
+        // the next interval should measure against.
+        reset_pool_high_water(
+            pool,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+        );
+        reset_pool_high_water(
+            pool,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+        );
+    }
+    sample
+}
+
+#[cfg(feature = "cuda")]
+fn pool_attribute(
+    pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool,
+    attribute: candle_core::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
+) -> Option<u64> {
+    use candle_core::cuda_backend::cudarc::driver::result;
+
+    let mut value: u64 = 0;
+    // SAFETY: `pool` is a live pool handle from the driver and `value` is a
+    // writable `cuuint64_t`, the documented type for every `*_MEM_*` pool
+    // attribute queried here.
+    unsafe {
+        result::mem_pool::get_attribute(
+            pool,
+            attribute,
+            (&mut value) as *mut u64 as *mut std::ffi::c_void,
+        )
+        .ok()?;
+    }
+    Some(value)
+}
+
+#[cfg(feature = "cuda")]
+fn reset_pool_high_water(
+    pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool,
+    attribute: candle_core::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
+) {
+    use candle_core::cuda_backend::cudarc::driver::result;
+
+    let mut value: u64 = 0;
+    // SAFETY: same contract as `pool_attribute`; the driver reads one
+    // `cuuint64_t` from `value`.
+    unsafe {
+        let _ = result::mem_pool::set_attribute(
+            pool,
+            attribute,
+            (&mut value) as *mut u64 as *mut std::ffi::c_void,
+        );
+    }
+}
+
+/// Non-CUDA builds have no per-phase GPU memory authority.
+#[cfg(not(feature = "cuda"))]
+fn sample_phase_vram(_ordinal: usize, _rearm_high_water: bool) -> VramSample {
+    VramSample::default()
+}
+
+thread_local! {
+    /// Peak floors for the probes currently open on this thread.
+    ///
+    /// The device high-water mark is a single per-pool counter, so a nested
+    /// probe's rearm would otherwise erase whatever its parent had already
+    /// peaked at (LTX-2 nests a VAE load inside the conditioning encode).
+    /// Each open probe therefore carries a `(used, reserved)` floor that its
+    /// children fold their observations into.
+    static PROBE_PEAK_FLOORS: std::cell::RefCell<Vec<(u64, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn raise_open_probe_floor(used: Option<u64>, reserved: Option<u64>) {
+    let (Some(used), reserved) = (used, reserved.unwrap_or(0)) else {
+        return;
+    };
+    PROBE_PEAK_FLOORS.with(|floors| {
+        if let Some(parent) = floors.borrow_mut().last_mut() {
+            parent.0 = parent.0.max(used);
+            parent.1 = parent.1.max(reserved);
+        }
+    });
+}
+
+/// A live measurement of one inference phase's GPU memory cost.
+///
+/// `enter` samples the thread's bound GPU (see [`thread_gpu_ordinal`]) and
+/// rearms the pool high-water marks; `finish` samples again and reports the
+/// interval. Diagnostics only — never an admission input.
+#[derive(Debug)]
+pub struct PhaseVramProbe {
+    phase: String,
+    entry: VramSample,
+    started: Instant,
+    predicted_bytes: Option<u64>,
+    ordinal: usize,
+    depth: usize,
+}
+
+impl PhaseVramProbe {
+    pub fn enter(phase: impl Into<String>) -> Self {
+        Self::enter_if(phase, true)
+    }
+
+    /// Open a probe only when the phase actually runs on CUDA.
+    ///
+    /// Sampling retains a CUDA context, which on a CPU-only run would create
+    /// one — hundreds of MB of VRAM claimed by a run that asked for none. An
+    /// inert probe reports [`VramAttribution::Unavailable`] and touches no
+    /// driver call.
+    pub fn enter_if(phase: impl Into<String>, sample: bool) -> Self {
+        let ordinal = thread_gpu_ordinal().unwrap_or(0);
+        if !sample {
+            return Self {
+                phase: phase.into(),
+                entry: VramSample::default(),
+                started: Instant::now(),
+                predicted_bytes: None,
+                ordinal,
+                depth: usize::MAX,
+            };
+        }
+        // Sampling reads the current high-water marks and then rearms them.
+        // Hand what was read to the enclosing probe first: that peak belongs
+        // to its interval and the rearm is about to discard it.
+        let entry = sample_phase_vram(ordinal, true);
+        raise_open_probe_floor(entry.pool_used_high_bytes, entry.pool_reserved_high_bytes);
+        let depth = PROBE_PEAK_FLOORS.with(|floors| {
+            let mut floors = floors.borrow_mut();
+            floors.push((0, 0));
+            floors.len() - 1
+        });
+        Self {
+            phase: phase.into(),
+            entry,
+            started: Instant::now(),
+            predicted_bytes: None,
+            ordinal,
+            depth,
+        }
+    }
+
+    /// Attach the planner's prediction for this phase so one log line carries
+    /// predicted-versus-actual.
+    pub fn with_predicted(mut self, predicted_bytes: Option<u64>) -> Self {
+        self.predicted_bytes = predicted_bytes;
+        self
+    }
+
+    pub fn phase(&self) -> &str {
+        &self.phase
+    }
+
+    pub fn finish(self) -> PhaseVramReport {
+        let predicted = self.predicted_bytes;
+        self.finish_with_predicted(predicted)
+    }
+
+    /// Finish with a prediction that only became known while the phase ran
+    /// (an adaptive residency plan, for instance).
+    pub fn finish_with_predicted(self, predicted_bytes: Option<u64>) -> PhaseVramReport {
+        let elapsed = self.started.elapsed();
+        if self.depth == usize::MAX {
+            // Inert probe: it never sampled, never rearmed a counter, and owns
+            // no slot on the floor stack. Timing is still real.
+            return phase_vram_report_from(
+                self.phase,
+                VramSample::default(),
+                VramSample::default(),
+                predicted_bytes,
+                elapsed,
+            );
+        }
+        let mut exit = sample_phase_vram(self.ordinal, false);
+        // Fold in what nested probes observed, then repair the stack: a
+        // truncate also discards any child probe that was dropped without
+        // finishing, so one leak cannot desynchronize later phases.
+        let floor = PROBE_PEAK_FLOORS.with(|floors| {
+            let mut floors = floors.borrow_mut();
+            let mine = floors.get(self.depth).copied().unwrap_or((0, 0));
+            if floors.len() > self.depth {
+                floors.truncate(self.depth);
+            }
+            mine
+        });
+        exit.pool_used_high_bytes = exit.pool_used_high_bytes.map(|high| high.max(floor.0));
+        exit.pool_reserved_high_bytes = exit.pool_reserved_high_bytes.map(|high| high.max(floor.1));
+        // The enclosing phase's counter was rearmed by this probe's `enter`,
+        // so it needs this interval's peak as its own floor.
+        raise_open_probe_floor(exit.pool_used_high_bytes, exit.pool_reserved_high_bytes);
+        phase_vram_report_from(self.phase, self.entry, exit, predicted_bytes, elapsed)
+    }
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
@@ -2606,6 +3154,53 @@ mod tests {
         );
     }
 
+    // ── LTX-2 token-based activation budget ────────────────────────────
+
+    /// The 1024² × 97-frame stage-2 render is 13,312 tokens; the 512² stage-1
+    /// render of the same job is 3,328. Token count is what the transformer
+    /// actually sees — not `w × h`.
+    #[test]
+    fn ltx2_token_count_matches_latent_patch_grid() {
+        assert_eq!(ltx2_token_count(1024, 1024, 97), 13_312);
+        assert_eq!(ltx2_token_count(512, 512, 97), 3_328);
+        // Single frame still yields one latent frame.
+        assert_eq!(ltx2_token_count(1024, 1024, 1), 1_024);
+    }
+
+    /// Golden per-token slopes: 128 KiB/token unconditioned, 176 KiB/token
+    /// conditioned (the extra 48 KiB is the per-token AdaLN row), plus the
+    /// flat 1 GiB workspace.
+    #[test]
+    fn ltx2_activation_budget_models_ff_and_adaln() {
+        let uncond = ltx2_activation_budget_bytes(1024, 1024, 97, false);
+        let cond = ltx2_activation_budget_bytes(1024, 1024, 97, true);
+        assert_eq!(uncond, 13_312 * 114_688 + 1_073_741_824);
+        assert_eq!(cond, 13_312 * 163_840 + 1_073_741_824);
+        assert_eq!(uncond, 2_600_468_480);
+        assert_eq!(cond, 3_254_779_904);
+        assert_eq!(cond - uncond, 13_312 * LTX2_ADALN_DIM * BF16_BYTES);
+    }
+
+    /// A half-resolution stage-1 render costs a quarter of the tokens, so it
+    /// must cost a quarter of the *token* term — the old pixel-area heuristic
+    /// charged it the full-resolution budget.
+    #[test]
+    fn ltx2_activation_budget_scales_with_tokens_not_pixels() {
+        let stage1 = ltx2_activation_budget_bytes(512, 512, 97, false);
+        let stage2 = ltx2_activation_budget_bytes(1024, 1024, 97, false);
+        assert_eq!(stage1, 3_328 * 114_688 + 1_073_741_824);
+        let stage1_tokens = stage1 - 1_073_741_824;
+        let stage2_tokens = stage2 - 1_073_741_824;
+        assert_eq!(stage2_tokens, stage1_tokens * 4);
+    }
+
+    /// Even a degenerate shape reserves the flat workspace.
+    #[test]
+    fn ltx2_activation_budget_floors_at_fixed_workspace() {
+        let tiny = ltx2_activation_budget_bytes(0, 0, 0, false);
+        assert!(tiny >= 1_073_741_824, "got {tiny}");
+    }
+
     /// Tiny inputs return at least 256 MB (kernel-workspace floor).
     #[test]
     fn activation_bytes_floors_at_256mb() {
@@ -2875,11 +3470,51 @@ mod tests {
     }
 
     /// `LTX2_GEMMA_VRAM_THRESHOLD` is the headline knob; pin its bytes so
-    /// edits go through the constant rather than scattering literal 24-GB
-    /// figures across call sites.
+    /// edits go through the constant rather than scattering literal figures
+    /// across call sites.
+    ///
+    /// The value tracks *streaming* residency, not the 24 GB of BF16 weights:
+    /// [`GemmaHiddenStateEncoder::load_from_assets`] builds via `new_streaming`,
+    /// whose `forward_hidden_states` constructs and drops one `DecoderLayer`
+    /// per iteration, so the 48 layers are never co-resident.
     #[test]
-    fn ltx2_gemma_vram_threshold_is_24gb() {
-        assert_eq!(LTX2_GEMMA_VRAM_THRESHOLD, 24_000_000_000);
+    fn ltx2_gemma_vram_threshold_covers_streaming_residency() {
+        // Derived from `ltx_gemma_config()` in ltx2/text/encoder.rs.
+        const HIDDEN: u64 = 3_840;
+        const VOCAB: u64 = 262_208;
+        const INTERMEDIATE: u64 = 15_360;
+        const LAYERS: u64 = 48;
+        const SEQ: u64 = 1_024;
+        const BF16: u64 = 2;
+
+        // Permanently resident: the token embedding table and final norm.
+        let embed = VOCAB * HIDDEN * BF16;
+        // One decoder layer: q/k/v/o attention projections + the gated MLP.
+        let attn = HIDDEN * (16 * 256) * 2 + HIDDEN * (8 * 256) * 2;
+        let mlp = 3 * HIDDEN * INTERMEDIATE;
+        let layer = (attn + mlp) * BF16;
+        // Every layer's output is retained to feed the connectors.
+        let hidden_states = (LAYERS + 1) * SEQ * HIDDEN * BF16;
+
+        // Two layers in flight bounds the construct-then-drop overlap.
+        let peak = embed + 2 * layer + hidden_states;
+
+        assert!(
+            peak < 4 * GB,
+            "streaming Gemma should peak under 4 GB, computed {peak} bytes"
+        );
+        assert!(
+            LTX2_GEMMA_VRAM_THRESHOLD > peak,
+            "threshold {LTX2_GEMMA_VRAM_THRESHOLD} must clear the {peak}-byte streaming peak"
+        );
+        // ...with headroom for the encode workspace, but well under a 24 GB
+        // card so the most common consumer GPU can host the encoder.
+        const {
+            assert!(
+                LTX2_GEMMA_VRAM_THRESHOLD < 12 * GB,
+                "threshold must leave a 24 GB card eligible for GPU Gemma"
+            )
+        };
     }
 
     // ── resolve_ltx2_gemma_device_override ───────────────────────────────
@@ -3335,5 +3970,243 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ── Phase VRAM telemetry ────────────────────────────────────────────
+
+    fn pool_sample(used: u64, used_high: u64, reserved_high: u64, free: u64) -> VramSample {
+        VramSample {
+            pool_used_bytes: Some(used),
+            pool_used_high_bytes: Some(used_high),
+            pool_reserved_high_bytes: Some(reserved_high),
+            global_free_bytes: Some(free),
+            global_total_bytes: Some(24 * GB),
+        }
+    }
+
+    #[test]
+    fn pool_samples_attribute_the_phase_peak_to_the_pool_high_water_mark() {
+        let report = phase_vram_report_from(
+            "transformer_load",
+            pool_sample(2 * GB, 2 * GB, 3 * GB, 20 * GB),
+            pool_sample(9 * GB, 11 * GB, 12 * GB, 12 * GB),
+            Some(10 * GB),
+            Duration::from_millis(41_821),
+        );
+
+        assert_eq!(report.attribution, VramAttribution::Pool);
+        // The peak is the exit high-water mark, not the exit current usage and
+        // not a free-VRAM delta.
+        assert_eq!(report.peak_pool_used, Some(11 * GB));
+        assert_eq!(report.peak_pool_reserved, Some(12 * GB));
+        assert_eq!(report.delta_pool_used, Some(7 * GB as i64));
+        assert_eq!(report.global_free_entry, Some(20 * GB));
+        assert_eq!(report.global_free_exit, Some(12 * GB));
+        assert_eq!(report.global_total, Some(24 * GB));
+        assert_eq!(report.predicted_bytes, Some(10 * GB));
+        assert_eq!(report.elapsed, Duration::from_millis(41_821));
+        assert!(report.has_authoritative_peak());
+    }
+
+    #[test]
+    fn global_only_samples_never_promote_a_free_delta_into_a_peak() {
+        let entry = VramSample {
+            global_free_bytes: Some(20 * GB),
+            global_total_bytes: Some(24 * GB),
+            ..VramSample::default()
+        };
+        let exit = VramSample {
+            global_free_bytes: Some(12 * GB),
+            global_total_bytes: Some(24 * GB),
+            ..VramSample::default()
+        };
+
+        let report =
+            phase_vram_report_from("vae_load", entry, exit, None, Duration::from_millis(10));
+
+        assert_eq!(report.attribution, VramAttribution::GlobalOnly);
+        assert_eq!(report.peak_pool_used, None);
+        assert_eq!(report.peak_pool_reserved, None);
+        assert_eq!(report.delta_pool_used, None);
+        assert!(
+            !report.has_authoritative_peak(),
+            "a global free delta is not a Mold-attributable peak"
+        );
+        assert_eq!(report.global_free_drop(), Some(8 * GB));
+    }
+
+    #[test]
+    fn absent_samples_report_unavailable_without_a_zero_valued_peak() {
+        let report = phase_vram_report_from(
+            "denoise",
+            VramSample::default(),
+            VramSample::default(),
+            Some(5 * GB),
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(report.attribution, VramAttribution::Unavailable);
+        assert_eq!(report.peak_pool_used, None);
+        assert_eq!(report.peak_pool_reserved, None);
+        assert_eq!(report.delta_pool_used, None);
+        assert_eq!(report.global_free_entry, None);
+        assert_eq!(report.global_free_exit, None);
+        assert_eq!(report.global_total, None);
+        assert_eq!(report.global_free_drop(), None);
+        assert!(!report.has_authoritative_peak());
+        // Still renders, and never claims a measured zero.
+        assert!(report.to_string().contains("attribution=unavailable"));
+        assert!(!report.to_string().contains("peak=0.0 GB"));
+    }
+
+    #[test]
+    fn a_phase_that_releases_memory_reports_a_negative_delta_and_no_free_underflow() {
+        let report = phase_vram_report_from(
+            "prompt_encode",
+            pool_sample(9 * GB, 9 * GB, 10 * GB, 12 * GB),
+            pool_sample(2 * GB, 9 * GB, 10 * GB, 20 * GB),
+            None,
+            Duration::from_millis(5),
+        );
+
+        assert_eq!(report.delta_pool_used, Some(-(7 * GB as i64)));
+        // Exit free above entry free must saturate, never underflow.
+        assert_eq!(report.global_free_drop(), Some(0));
+    }
+
+    #[test]
+    fn a_probe_on_a_gpuless_build_finishes_as_unavailable() {
+        let probe = PhaseVramProbe::enter("vae_decode");
+        let report = probe.finish();
+
+        assert_eq!(report.phase, "vae_decode");
+        #[cfg(not(feature = "cuda"))]
+        {
+            assert_eq!(report.attribution, VramAttribution::Unavailable);
+            assert_eq!(report.peak_pool_used, None);
+        }
+    }
+
+    /// Live check that the pool attributes really describe Mold's own
+    /// allocations. Skipped (not failed) when no CUDA device is present, the
+    /// same pattern the LTX-2 CUDA handoff test uses.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_cuda_probe_measures_the_allocation_made_inside_the_phase() {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
+            return;
+        };
+        let probe = PhaseVramProbe::enter("test_alloc");
+        let tensor =
+            candle_core::Tensor::zeros((256, 1024, 1024), candle_core::DType::F32, &device)
+                .expect("1 GB allocation");
+        device.synchronize().ok();
+        let report = probe.finish_with_predicted(Some(1_073_741_824));
+        drop(tensor);
+
+        assert_eq!(
+            report.attribution,
+            VramAttribution::Pool,
+            "cudarc allocates through the stream-ordered pool on CUDA: {report}"
+        );
+        let peak = report.peak_pool_used.expect("pool peak");
+        assert!(
+            peak >= 1_073_741_824,
+            "the phase peak must cover the 1 GB allocated inside it: {report}"
+        );
+        assert!(
+            report.delta_pool_used.unwrap_or(0) >= 1_073_741_824,
+            "the tensor is still live at finish, so the delta must show it: {report}"
+        );
+    }
+
+    /// The reason this is pool-attributed rather than `cuMemGetInfo`-attributed:
+    /// a later phase must not inherit an earlier phase's peak, even though the
+    /// pool keeps the freed memory reserved and device-global free VRAM never
+    /// recovers.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn each_cuda_phase_measures_only_its_own_peak() {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
+            return;
+        };
+        let big = PhaseVramProbe::enter("big");
+        {
+            let _tensor =
+                candle_core::Tensor::zeros((512, 1024, 1024), candle_core::DType::F32, &device)
+                    .expect("2 GB allocation");
+            device.synchronize().ok();
+        }
+        let big_report = big.finish();
+        device.synchronize().ok();
+
+        let small = PhaseVramProbe::enter("small");
+        let _small_tensor =
+            candle_core::Tensor::zeros((64, 1024, 1024), candle_core::DType::F32, &device)
+                .expect("256 MB allocation");
+        device.synchronize().ok();
+        let small_report = small.finish();
+
+        assert!(
+            big_report.peak_pool_used.expect("big peak") >= 2_147_483_648,
+            "the first phase owns its own 2 GB: {big_report}"
+        );
+        assert!(
+            small_report.peak_pool_used.expect("small peak") < 2_147_483_648,
+            "the high-water mark must be rearmed per phase, so the second phase \
+             never inherits the first's peak: {small_report}"
+        );
+    }
+
+    /// A CPU-only run must not pay for telemetry it cannot use: sampling
+    /// retains a CUDA context, which on a GPU box would claim VRAM for a run
+    /// that asked for none.
+    #[test]
+    fn an_inert_probe_reports_timing_without_touching_the_driver() {
+        let probe = PhaseVramProbe::enter_if("cpu_denoise", false);
+        let report = probe.finish();
+
+        assert_eq!(report.phase, "cpu_denoise");
+        assert_eq!(report.attribution, VramAttribution::Unavailable);
+        assert_eq!(report.peak_pool_used, None);
+        assert_eq!(report.global_free_entry, None);
+        // A probe opened after it must still be well-formed: the inert probe
+        // owns no slot on the nesting stack.
+        let next = PhaseVramProbe::enter_if("next", false).finish();
+        assert_eq!(next.attribution, VramAttribution::Unavailable);
+    }
+
+    /// LTX-2 nests a VAE load inside the conditioning encode, and the device
+    /// high-water mark is one counter: without folding, the inner probe's
+    /// rearm would silently erase the outer phase's peak.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_nested_cuda_probe_never_erases_its_parents_peak() {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
+            return;
+        };
+        let outer = PhaseVramProbe::enter("outer");
+        {
+            let _tensor =
+                candle_core::Tensor::zeros((512, 1024, 1024), candle_core::DType::F32, &device)
+                    .expect("2 GB allocation");
+            device.synchronize().ok();
+        }
+        let inner = PhaseVramProbe::enter("inner");
+        let _small = candle_core::Tensor::zeros((16, 1024, 1024), candle_core::DType::F32, &device)
+            .expect("64 MB allocation");
+        device.synchronize().ok();
+        let inner_report = inner.finish();
+        let outer_report = outer.finish();
+
+        assert!(
+            inner_report.peak_pool_used.expect("inner peak") < 2_147_483_648,
+            "the nested phase reports only its own work: {inner_report}"
+        );
+        assert!(
+            outer_report.peak_pool_used.expect("outer peak") >= 2_147_483_648,
+            "the enclosing phase keeps the peak it reached before the nested \
+             probe rearmed the counter: {outer_report}"
+        );
     }
 }

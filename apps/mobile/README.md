@@ -62,6 +62,16 @@ pushed screen opened from the header.
   additive `guidance_overrides` contract (STG scale/blocks, CFG rescale,
   modality scale, and skip stride), validates before queueing, counts the group
   in its badge, and keeps empty fields absent so pipeline defaults remain exact.
+  The **prompt is optional** for an `ltx2` / `ltx-video` model once the form
+  carries visual conditioning (source image, keyframes, source video, or a
+  continuation): Develop enables, the pre-submit guard stops requiring text, and
+  the prompt placeholder says so. Every other model — including image families
+  with a source image — still requires a prompt. This follows the shared
+  `@studio/lib/promptRequirement` rule and its shared copy, so iPhone, desktop,
+  and web cannot set different expectations; `MobileSequenceComposer` applies
+  the same rule to clip rails through `SequenceLimits.promptOptional`. A blank
+  prompt saves no VRAM and usually renders near-static motion — never imply
+  otherwise in native copy.
   **Continue a video** appears only when the selected model advertises additive
   `supports_extend`, so a host that predates continuation shows nothing rather
   than offering a request it would reject. The attached clip counts toward the

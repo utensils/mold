@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
 import Keycap from "@ui/components/Keycap.vue";
 import Icon from "@ui/components/Icon.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
@@ -40,6 +41,14 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ generate: []; expand: []; restore: [] }>();
+
+// A conditioned LTX-2 render may go out undescribed. The placeholder says so,
+// and Generate must not stay disabled on a request the server would admit —
+// the view's `generate()` early return moves with this in lockstep.
+const promptMissing = computed(() => promptRequired(props.form) && !props.form.prompt.trim());
+const placeholder = computed(() =>
+  promptPlaceholder(props.form, "Describe the image you want to create…"),
+);
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
@@ -112,7 +121,7 @@ defineExpose({ focus, expand, record });
         data-selectable
         rows="2"
         aria-label="Prompt"
-        placeholder="Describe the image you want to create…"
+        :placeholder="placeholder"
         class="ms-composer__input"
         @keydown="onKeydown"
         @input="
@@ -147,7 +156,7 @@ defineExpose({ focus, expand, record });
           type="button"
           data-test="generate-button"
           class="ms-composer__generate"
-          :disabled="!form.prompt.trim() || !form.model || chainReject || hasPrepared || submitting"
+          :disabled="promptMissing || !form.model || chainReject || hasPrepared || submitting"
           @click="emit('generate')"
         >
           <Icon name="sparkle" :size="16" />

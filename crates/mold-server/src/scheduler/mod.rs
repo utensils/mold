@@ -1355,7 +1355,10 @@ impl Coordinator {
         let queue_rank = self.synthetic_id;
         self.synthetic_id = self.synthetic_id.saturating_add(1);
         let id = job.id.clone();
-        if let Some(error) = crate::gpu_pool::model_unschedulable_message(&job.request.model) {
+        let shape_bucket = crate::gpu_pool::oom_shape_bucket(&job.request);
+        if let Some(error) =
+            crate::gpu_pool::model_unschedulable_message(&job.request.model, Some(&shape_bucket))
+        {
             reject_generation(&self.state, job, error);
             return;
         }
@@ -2423,6 +2426,19 @@ impl Coordinator {
         snapshots
     }
 
+    /// Largest physical VRAM capacity in the pool. A predicted peak above this
+    /// can never be satisfied by waiting, no matter how much other work
+    /// finishes.
+    fn largest_total_vram_bytes(&self) -> u64 {
+        self.state
+            .gpu_pool
+            .workers
+            .iter()
+            .map(|worker| worker.gpu.total_vram_bytes)
+            .max()
+            .unwrap_or(0)
+    }
+
     fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
         self.device_facts_from_snapshots(&self.device_snapshots())
     }
@@ -2589,6 +2605,7 @@ impl Coordinator {
                         offload_mode: crate::execution_plan::OffloadMode::None,
                         predicted_vram_peak_bytes: estimate,
                         admitted_available_vram_bytes: device.available_vram_bytes,
+                        learned_vram_envelope_bytes: 0,
                         predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
                         determinism_class,
                         execution_environment: environment,
@@ -2598,9 +2615,17 @@ impl Coordinator {
                 })
                 .collect());
         }
+        let largest_total_vram_bytes = self.largest_total_vram_bytes();
         resolved.map_err(|error| match error {
-            crate::execution_plan::ExecutionPlanError::InsufficientVram => {
-                GenerationPlanFailure::Transient(error.to_string())
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                required_peak_bytes,
+                ..
+            } => {
+                if insufficient_vram_is_terminal(required_peak_bytes, largest_total_vram_bytes) {
+                    GenerationPlanFailure::Terminal(error)
+                } else {
+                    GenerationPlanFailure::Transient(error.to_string())
+                }
             }
             crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
                 GenerationPlanFailure::StalePreparation(error.to_string())
@@ -2809,7 +2834,7 @@ impl Coordinator {
             };
             if matches!(
                 error,
-                crate::execution_plan::ExecutionPlanError::InsufficientVram
+                crate::execution_plan::ExecutionPlanError::InsufficientVram { .. }
             ) {
                 continue;
             }
@@ -2918,6 +2943,8 @@ impl Coordinator {
             } else {
                 (estimate.vram_bytes, estimate.host_bytes)
             };
+            let planned_vram_bytes =
+                planned_vram_bytes.max(failure_only_vram_floor(&self.estimates, &key));
             CandidatePlacement::new(
                 device_id.clone(),
                 ExecutionFingerprint::new(execution_fingerprint),
@@ -4326,7 +4353,7 @@ impl Coordinator {
                     let execution_plan = generation_plans
                         .get(&id)
                         .and_then(|plans| exact_leased_execution_plan(plans, lease));
-                    let Some(execution_plan) = execution_plan else {
+                    let Some(mut execution_plan) = execution_plan else {
                         self.pending.insert(id.clone(), pending);
                         worker.release_in_flight();
                         self.state_version = self.state_version.saturating_add(1);
@@ -4345,6 +4372,13 @@ impl Coordinator {
                         &pending.job.request,
                         &execution_plan.execution_fingerprint,
                     );
+                    // Admission reserved `max(static, learned)`; carry the
+                    // learned half so the worker rechecks the same number.
+                    execution_plan.learned_vram_envelope_bytes = self
+                        .estimates
+                        .exact(&estimate_key)
+                        .and_then(|bucket| bucket.vram_conservative_bytes)
+                        .unwrap_or(0);
                     let fallback_reason = execution_fallback_reason(&execution_plan);
                     let gpu_job = gpu_job_from_generation(
                         &self.state,
@@ -5642,6 +5676,42 @@ fn device_class(worker: &GpuWorker) -> String {
     );
     let gib = worker.gpu.total_vram_bytes.div_ceil(1 << 30);
     format!("{backend}:{capability}:{gib}gb")
+}
+
+/// Memory floor implied by a failure-only `scheduler_estimates` row.
+///
+/// `EstimateStore::estimate` only promotes buckets with completion samples,
+/// which is right for timing and wrong for memory: a row with
+/// `sample_count = 0` and `last_outcome = Failure` records the high-water mark
+/// of an attempt that *died*, so it is a lower bound on what the shape needs —
+/// never evidence that the shape fits. The #641 host carried
+/// `vram_high_water_bytes = 24,884,805,632` (96.6% of a 24 GB card) against
+/// three failures and zero samples, and admission still said yes.
+fn failure_only_vram_floor(estimates: &EstimateStore, key: &EstimateKey) -> u64 {
+    estimates
+        .exact(key)
+        .filter(|bucket| {
+            bucket.sample_count == 0
+                && bucket.failure_count > 0
+                && bucket.last_outcome == EstimateOutcome::Failure
+        })
+        .and_then(|bucket| bucket.vram_conservative_bytes)
+        .unwrap_or(0)
+}
+
+/// Split `InsufficientVram` into terminal and transient halves.
+///
+/// Before #641 every insufficient-VRAM rejection was transient, which was
+/// harmless while the LTX-2 estimate was far below the true peak. With an
+/// honest estimate an impossible shape would otherwise sit in the queue
+/// forever, re-resolving on every scheduler tick and never becoming feasible.
+///
+/// A peak above the largest device's *physical* capacity can never be
+/// satisfied by waiting; a peak that only exceeds what is currently free is
+/// ordinary pressure and stays transient. An unknown capacity (`0`) stays
+/// transient — never reject on missing evidence.
+fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_bytes: u64) -> bool {
+    largest_total_vram_bytes > 0 && required_peak_bytes > largest_total_vram_bytes
 }
 
 fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
@@ -12577,5 +12647,103 @@ mod tests {
             !sibling.is_cancelled(),
             "attempt cancellation must not leak to a sibling or retry"
         );
+    }
+
+    /// #641: an honest LTX-2 estimate makes an impossible shape's predicted
+    /// peak exceed the card. Left as `Transient`, that job would re-resolve on
+    /// every scheduler tick and queue forever.
+    #[test]
+    fn insufficient_vram_is_terminal_when_peak_exceeds_total() {
+        const RTX_4090_TOTAL: u64 = 25_757_220_864;
+
+        assert!(
+            insufficient_vram_is_terminal(33_474_340_818, RTX_4090_TOTAL),
+            "a peak no device could ever hold must be terminal"
+        );
+        assert!(
+            !insufficient_vram_is_terminal(20_000_000_000, RTX_4090_TOTAL),
+            "a peak that only exceeds what is currently free stays transient"
+        );
+        assert!(
+            !insufficient_vram_is_terminal(33_474_340_818, 0),
+            "unknown capacity must never reject on missing evidence"
+        );
+    }
+
+    /// #641: `mold.db` held a `scheduler_estimates` row for the failing shape
+    /// with `vram_high_water_bytes = 24,884,805,632` (96.6% of the card),
+    /// `sample_count = 0`, `failure_count = 3`, `last_outcome = 'failure'` —
+    /// and admission still said yes, because `EstimateStore::estimate` drops
+    /// buckets with no completion samples.
+    #[test]
+    fn failure_only_estimate_is_not_usable() {
+        let key = EstimateKey {
+            device_class: "cuda:sm89:24gb".to_string(),
+            model_family: "ltx-2-19b-distilled:fp8".to_string(),
+            model_fingerprint: "ltx-2-19b-distilled:fp8".to_string(),
+            work_kind: "generation".to_string(),
+            shape_bucket: "1024x1024:s8:f97:fps24:a0:src1:edit0:lora0:b1".to_string(),
+            execution_fingerprint: "fingerprint".to_string(),
+        };
+        let failure_only = mold_scheduler::EstimateBucket {
+            key: key.clone(),
+            sample_count: 0,
+            ewma_total_ms: 0.0,
+            ewma_runtime_ms: None,
+            ewma_load_ms: None,
+            ewma_warm_reload_ms: None,
+            ewma_prompt_encode_ms: None,
+            ewma_denoise_ms: None,
+            ewma_vae_ms: None,
+            ewma_upscale_ms: None,
+            vram_conservative_bytes: Some(24_884_805_632),
+            host_conservative_bytes: None,
+            failure_count: 3,
+            invalidated_count: 0,
+            last_outcome: EstimateOutcome::Failure,
+            last_fallback_reason: None,
+            last_invalidated_plan_reason: None,
+            last_observed_at_unix_s: 0,
+        };
+        let store = EstimateStore::from_buckets([failure_only.clone()]);
+
+        assert_eq!(
+            store
+                .estimate(&key, static_generation_estimate_for_test())
+                .vram_bytes,
+            1_000_000_000,
+            "the store still discards a failure-only bucket for its own estimate"
+        );
+        assert_eq!(
+            failure_only_vram_floor(&store, &key),
+            24_884_805_632,
+            "a failure-only high water is a lower bound on demand, never evidence of fit"
+        );
+
+        let succeeded = mold_scheduler::EstimateBucket {
+            sample_count: 4,
+            last_outcome: EstimateOutcome::Success,
+            ..failure_only
+        };
+        assert_eq!(
+            failure_only_vram_floor(&EstimateStore::from_buckets([succeeded]), &key),
+            0,
+            "a bucket with completion samples is ordinary learned evidence"
+        );
+        assert_eq!(
+            failure_only_vram_floor(&EstimateStore::from_buckets([]), &key),
+            0
+        );
+    }
+
+    fn static_generation_estimate_for_test() -> StaticEstimate {
+        StaticEstimate {
+            total_ms: 1,
+            cold_setup_ms: 1,
+            warm_setup_ms: 1,
+            predicted_run_ms: 1,
+            vram_bytes: 1_000_000_000,
+            host_bytes: 1_000_000_000,
+        }
     }
 }

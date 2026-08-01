@@ -32,6 +32,7 @@ import {
   sequenceMotionTailFrames,
   type OutputMode,
 } from "@studio/lib/sequence";
+import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
@@ -781,6 +782,11 @@ const stepsError = computed(() => stepsValidationError(form.steps));
 const guidanceError = computed(() => guidanceValidationError(form.guidance));
 const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
+// Desktop parity: a conditioned LTX-2 render may go out undescribed, so the
+// Develop button and the pre-submit guard both stop demanding a prompt the
+// host would accept. The placeholder carries the same news.
+const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
+const promptFieldPlaceholder = computed(() => promptPlaceholder(form, "Describe the print…"));
 const estimateRequest = computed(() => {
   if (!form.model) return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family);
@@ -2389,7 +2395,7 @@ async function generate(): Promise<void> {
     !host ||
     !route ||
     !target ||
-    !form.prompt.trim() ||
+    promptMissing.value ||
     !selectedModelAvailable.value ||
     !seedValid.value ||
     !parameterValid.value ||
@@ -3536,7 +3542,7 @@ onBeforeUnmount(() => {
                 id="mobile-prompt"
                 v-model="form.prompt"
                 class="control"
-                placeholder="Describe the print…"
+                :placeholder="promptFieldPlaceholder"
               />
             </label>
             <MobileStyleChips v-model="form.stylePreset" />
@@ -3789,7 +3795,7 @@ onBeforeUnmount(() => {
               class="primary-button"
               type="button"
               :disabled="
-                !form.prompt.trim() ||
+                promptMissing ||
                 !selectedModelAvailable ||
                 !seedValid ||
                 !parameterValid ||
