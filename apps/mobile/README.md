@@ -104,8 +104,12 @@ pushed screen opened from the header.
   actions to the owning or selected host. Detail-sheet variant chips select an exact manifest
   `base:tag` target before pulling. Pull actions progress through `Connecting...`, `Starting...`,
   `Queued`, and `Pulling N%`; active downloads can be cancelled.
-- **Machines** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and
-  Tailscale MagicDNS. Host detail shows telemetry, models-disk usage, queue,
+- **Machines** starts with native QR scanning for the recommended pairing path,
+  then retains Bonjour discovery, manual IP/hostname/HTTPS entry, and Tailscale
+  MagicDNS as fallbacks. Desktop and web Settings mint a random, one-use,
+  two-minute ticket containing the reachable host address but never the durable
+  API key. iPhone redeems it against the exact instance before host dedupe and
+  Keychain storage. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions. Still-queued generation rows have
@@ -235,6 +239,13 @@ WebView local storage contains non-secret mobile state:
 Per-host API keys live in the iOS Keychain under
 `com.utensils.mold.remote-api-key`. Never move them into local storage, query
 parameters, logs, or generated project files.
+
+Mobile pairing uses authenticated `POST /api/pairing/sessions` and the
+one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
+only unauthenticated credential handoff: tokens are 256-bit random values,
+stored server-side only as an HMAC, capped, single-use, and expire after two
+minutes. Both responses are `no-store`; the QR must never contain the durable
+API key.
 
 Authenticated gallery media uses `POST /api/gallery/media-token` to exchange
 the normal `X-Api-Key` request for a short-lived, read-only URL scoped to one

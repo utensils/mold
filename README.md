@@ -43,7 +43,9 @@ macOS and Linux:
 - **Machines** connects this device, LAN/Tailscale hosts, and RunPod while
   showing GPU telemetry, queues, downloads, and installed models.
 - **Settings** includes Mold and Safelight themes, Stable/Nightly updates, local
-  performance controls, and secure provider credentials.
+  performance controls, secure provider credentials, and a two-minute,
+  one-time QR flow for pairing Mold for iPhone without placing the API key in
+  the code.
 
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)

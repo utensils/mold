@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Mold mobile capability set",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "platforms": ["iOS"],
+  "permissions": [
+    "core:default",
+    "barcode-scanner:allow-scan",
+    "barcode-scanner:allow-cancel"
+  ]
 }

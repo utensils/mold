@@ -9,8 +9,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tracing::warn;
@@ -18,6 +19,9 @@ use tracing::warn;
 const GALLERY_MEDIA_TOKEN_CONTEXT: &[u8] = b"mold-gallery-media-v2\nGET\n";
 pub(crate) const GALLERY_MEDIA_TOKEN_TTL_SECS: u64 = 15 * 60;
 const GALLERY_SIGNING_SECRET_BYTES: usize = 32;
+const PAIRING_TOKEN_BYTES: usize = 32;
+pub(crate) const PAIRING_TOKEN_TTL_SECS: u64 = 2 * 60;
+const MAX_PAIRING_SESSIONS: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -28,6 +32,12 @@ pub type AuthState = Option<Arc<ApiKeySet>>;
 pub struct ApiKeySet {
     keys: HashSet<String>,
     gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
+    pairing_sessions: Mutex<HashMap<[u8; 32], PairingSession>>,
+}
+
+struct PairingSession {
+    api_key: String,
+    expires_at: u64,
 }
 
 impl ApiKeySet {
@@ -41,6 +51,7 @@ impl ApiKeySet {
         Ok(Self {
             keys,
             gallery_signing_secret,
+            pairing_sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -52,6 +63,7 @@ impl ApiKeySet {
         Self {
             keys,
             gallery_signing_secret,
+            pairing_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -110,6 +122,69 @@ impl ApiKeySet {
         )
     }
 
+    /// Create a one-time, short-lived handoff for the API key that authorized
+    /// the Settings request. Only the HMAC of the random token is retained;
+    /// the bearer value exists solely in the no-store response and QR code.
+    pub(crate) fn issue_pairing_token(
+        &self,
+        api_key: String,
+    ) -> Result<(String, u64), getrandom::Error> {
+        let mut token_bytes = [0_u8; PAIRING_TOKEN_BYTES];
+        getrandom::fill(&mut token_bytes)?;
+        let token = URL_SAFE_NO_PAD.encode(token_bytes);
+        let token_hash = self.pairing_token_hash(&token);
+        let now = unix_timestamp();
+        let expires_at = now.saturating_add(PAIRING_TOKEN_TTL_SECS);
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions.retain(|_, session| session.expires_at > now);
+        if sessions.len() >= MAX_PAIRING_SESSIONS {
+            if let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.expires_at)
+                .map(|(hash, _)| *hash)
+            {
+                sessions.remove(&oldest);
+            }
+        }
+        sessions.insert(
+            token_hash,
+            PairingSession {
+                api_key,
+                expires_at,
+            },
+        );
+        Ok((token, expires_at))
+    }
+
+    /// Consume a pairing token exactly once. Removal happens before the API
+    /// key is returned so concurrent redemption attempts cannot both win.
+    pub(crate) fn claim_pairing_token(&self, token: &str) -> Option<String> {
+        let token_hash = self.pairing_token_hash(token);
+        let now = unix_timestamp();
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions.retain(|_, session| session.expires_at > now);
+        sessions
+            .remove(&token_hash)
+            .filter(|session| session.expires_at > now)
+            .map(|session| session.api_key)
+    }
+
+    fn pairing_token_hash(&self, token: &str) -> [u8; 32] {
+        // Reusing the process-random gallery secret is intentional: the
+        // versioned context below gives pairing an independent HMAC domain.
+        let mut mac = HmacSha256::new_from_slice(&self.gallery_signing_secret)
+            .expect("HMAC-SHA256 accepts keys of any length");
+        mac.update(b"mold-mobile-pairing-v1\n");
+        mac.update(token.as_bytes());
+        mac.finalize().into_bytes().into()
+    }
+
     #[cfg(test)]
     pub(crate) fn sign_gallery_media_token_for_tests(
         &self,
@@ -128,6 +203,14 @@ pub(crate) struct ApiKeyAuthenticated {
     /// random signing secret, so neither the API key nor an offline-comparable
     /// digest enters logs.
     pub(crate) identity: String,
+}
+
+/// Present only on an authenticated pairing-session creation request. It is
+/// deliberately scoped to that exact route so ordinary handlers never gain
+/// access to a caller's durable credential.
+#[derive(Clone)]
+pub(crate) struct PairingAuthority {
+    pub(crate) api_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +261,12 @@ pub fn load_api_keys() -> anyhow::Result<AuthState> {
 }
 
 /// Paths that are exempt from API key authentication.
-const EXEMPT_PATHS: &[&str] = &["/health", "/api/docs", "/api/openapi.json"];
+const EXEMPT_PATHS: &[&str] = &[
+    "/health",
+    "/api/docs",
+    "/api/openapi.json",
+    "/api/pairing/claim",
+];
 
 /// Axum middleware that enforces API key authentication.
 pub async fn require_api_key(request: Request, next: Next) -> Response {
@@ -218,12 +306,19 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
     // Check the X-Api-Key header.
     match request.headers().get("x-api-key") {
         Some(value) => {
-            let candidate = value.to_str().unwrap_or("");
-            if key_set.contains(candidate) {
-                let identity = key_set.audit_identity(candidate);
+            let candidate = value.to_str().unwrap_or("").to_string();
+            if key_set.contains(&candidate) {
+                let identity = key_set.audit_identity(&candidate);
                 request
                     .extensions_mut()
                     .insert(ApiKeyAuthenticated { identity });
+                if request.method() == Method::POST
+                    && request.uri().path() == "/api/pairing/sessions"
+                {
+                    request
+                        .extensions_mut()
+                        .insert(PairingAuthority { api_key: candidate });
+                }
                 next.run(request).await
             } else {
                 warn!("rejected request with invalid API key");
@@ -528,6 +623,47 @@ mod tests {
         assert!(ks.contains(WEAK_API_KEY));
     }
 
+    #[test]
+    fn pairing_token_is_random_url_safe_and_single_use() {
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from(["phone-key".to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let (token, expires_at) = ks.issue_pairing_token("phone-key".to_string()).unwrap();
+
+        assert_eq!(token.len(), 43);
+        assert!(token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+        assert!(expires_at > unix_timestamp());
+        assert_eq!(ks.claim_pairing_token(&token).as_deref(), Some("phone-key"));
+        assert_eq!(ks.claim_pairing_token(&token), None);
+        assert_eq!(ks.claim_pairing_token("not-the-token"), None);
+    }
+
+    #[test]
+    fn expired_pairing_token_is_rejected_and_removed() {
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from(["phone-key".to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let (token, _) = ks.issue_pairing_token("phone-key".to_string()).unwrap();
+        let token_hash = ks.pairing_token_hash(&token);
+        ks.pairing_sessions
+            .lock()
+            .unwrap()
+            .get_mut(&token_hash)
+            .unwrap()
+            .expires_at = unix_timestamp();
+
+        assert_eq!(ks.claim_pairing_token(&token), None);
+        assert!(!ks
+            .pairing_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&token_hash));
+    }
+
     fn protected_test_app(auth_state: AuthState) -> axum::Router {
         axum::Router::new()
             .route(
@@ -539,6 +675,68 @@ mod tests {
                 auth_state,
                 inject_auth_state,
             ))
+    }
+
+    fn pairing_test_app(auth_state: AuthState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/pairing/sessions",
+                axum::routing::post(
+                    |authority: Option<axum::extract::Extension<PairingAuthority>>| async move {
+                        if authority.is_some() {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/pairing/claim",
+                axum::routing::post(|| async { StatusCode::OK }),
+            )
+            .layer(axum::middleware::from_fn(require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                inject_auth_state,
+            ))
+    }
+
+    #[tokio::test]
+    async fn pairing_creation_requires_auth_but_claim_uses_the_one_time_token() {
+        let auth = Some(Arc::new(ApiKeySet::new(HashSet::from([
+            "correct-key".to_string()
+        ]))));
+        let missing = pairing_test_app(auth.clone())
+            .oneshot(
+                Request::post("/api/pairing/sessions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let created = pairing_test_app(auth.clone())
+            .oneshot(
+                Request::post("/api/pairing/sessions")
+                    .header("x-api-key", "correct-key")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+
+        let claimed = pairing_test_app(auth)
+            .oneshot(
+                Request::post("/api/pairing/claim")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
     }
 
     #[tokio::test]

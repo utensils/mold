@@ -8,6 +8,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import MobilePairingCard from "@studio/components/MobilePairingCard.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import type { DeviceInfo } from "@studio/api/devices";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
@@ -49,6 +50,11 @@ const appearanceOptions: SegmentOption<Theme>[] = [
   { value: "dark", label: "Dark" },
   { value: "light", label: "Light" },
 ];
+const pairingHost = computed(() => originHost());
+const pairingTarget = computed(() => ({
+  baseUrl: pairingHost.value.url,
+  apiKey: pairingHost.value.apiKey ?? null,
+}));
 
 function setFamily(value: ThemeFamily) {
   themeFamily.value = value;
@@ -256,6 +262,13 @@ onBeforeUnmount(() => {
         />
       </div>
     </CardSurface>
+
+    <p class="kicker">Mobile pairing</p>
+    <MobilePairingCard
+      :target="pairingTarget"
+      :suggested-base-url="pairingHost.url"
+      host-label="This server"
+    />
 
     <p v-if="devices !== null || queuePlan !== null" class="kicker">
       Scheduler plan

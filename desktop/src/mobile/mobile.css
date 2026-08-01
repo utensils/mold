@@ -2129,6 +2129,29 @@ button.mobile-generate-disclosure {
   background: transparent;
 }
 
+.mobile-pair-button {
+  width: 100%;
+  min-height: 50px;
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  font-size: 16px;
+}
+
+.mobile-pair-button span {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.mobile-pair-note {
+  margin: 8px 0 16px;
+  color: var(--ink-3);
+  font-size: 12px;
+  text-align: center;
+}
+
 .danger-button {
   border: 1px solid var(--stop);
   background: transparent;

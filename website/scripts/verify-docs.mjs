@@ -223,6 +223,8 @@ if (!loraMatch?.groups?.body) {
 const apiDocs = readRel('api/index.md')
 const requiredApiEndpoints = [
   '/api/gallery/media-token',
+  '/api/pairing/sessions',
+  '/api/pairing/claim',
   '/api/gallery/preview/:name',
   '/api/downloads',
   '/api/downloads/:id',

@@ -202,6 +202,8 @@ use crate::queue::clean_error_message;
         unload_model,
         delete_model,
         create_gallery_media_token,
+        create_pairing_session,
+        claim_pairing_session,
         import_gallery_file,
         server_status,
         list_devices,
@@ -262,6 +264,9 @@ use crate::queue::clean_error_message;
         mold_core::ModelInfo,
         mold_core::LoraInfo,
         mold_core::ServerStatus,
+        PairingSessionResponse,
+        PairingClaimRequest,
+        PairingClaimResponse,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
         mold_core::DeviceState,
@@ -420,6 +425,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route("/api/gallery/media-token", post(create_gallery_media_token))
+        .route("/api/pairing/sessions", post(create_pairing_session))
+        .route("/api/pairing/claim", post(claim_pairing_session))
         .route(
             "/api/gallery/import/:filename",
             put(import_gallery_file).layer(DefaultBodyLimit::max(
@@ -4813,6 +4820,141 @@ pub(crate) struct GalleryMediaTokenResponse {
     pub(crate) auth_required: bool,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct PairingSessionResponse {
+    pub(crate) token: Option<String>,
+    pub(crate) expires_at: Option<u64>,
+    pub(crate) auth_required: bool,
+    pub(crate) instance_id: String,
+    pub(crate) hostname: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(crate) struct PairingClaimRequest {
+    pub(crate) token: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct PairingClaimResponse {
+    pub(crate) api_key: Option<String>,
+    pub(crate) instance_id: String,
+    pub(crate) hostname: Option<String>,
+}
+
+fn pairing_hostname() -> Option<String> {
+    hostname::get()
+        .ok()
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Start a two-minute, one-use mobile pairing handoff. The durable key never
+/// enters the QR payload; the scanner receives it only after redeeming the
+/// high-entropy token against this exact server.
+#[utoipa::path(
+    post,
+    path = "/api/pairing/sessions",
+    tag = "server",
+    responses(
+        (status = 200, description = "Short-lived one-time mobile pairing session", body = PairingSessionResponse),
+        (status = 401, description = "API key authentication is required"),
+    )
+)]
+async fn create_pairing_session(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    authority: Option<Extension<crate::auth::PairingAuthority>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let key_set = auth_state.and_then(|Extension(state)| state);
+    let (token, expires_at, auth_required) = match key_set {
+        Some(key_set) => {
+            let Extension(authority) = authority.ok_or_else(|| {
+                ApiError::with_code(
+                    "API key authentication is required to start mobile pairing",
+                    "UNAUTHORIZED",
+                    StatusCode::UNAUTHORIZED,
+                )
+            })?;
+            let (token, expires_at) =
+                key_set
+                    .issue_pairing_token(authority.api_key)
+                    .map_err(|error| {
+                        ApiError::internal(format!(
+                            "failed to create a secure pairing token: {error}"
+                        ))
+                    })?;
+            (Some(token), Some(expires_at), true)
+        }
+        None => (None, None, false),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((
+        headers,
+        Json(PairingSessionResponse {
+            token,
+            expires_at,
+            auth_required,
+            instance_id: (*state.instance_id).clone(),
+            hostname: pairing_hostname(),
+        }),
+    ))
+}
+
+/// Redeem the QR bearer once. This is the sole unauthenticated API route that
+/// can return a durable key; its random token is single-use, short-lived, kept
+/// only as an HMAC server-side, and the response is explicitly non-cacheable.
+#[utoipa::path(
+    post,
+    path = "/api/pairing/claim",
+    tag = "server",
+    request_body = PairingClaimRequest,
+    responses(
+        (status = 200, description = "Pairing credential redeemed", body = PairingClaimResponse),
+        (status = 401, description = "Pairing token is invalid, expired, or already used"),
+    )
+)]
+async fn claim_pairing_session(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    Json(request): Json<PairingClaimRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let key_set = auth_state.and_then(|Extension(state)| state);
+    let api_key = match key_set {
+        Some(key_set) => {
+            let token = request
+                .token
+                .as_deref()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| {
+                    ApiError::with_code(
+                        "pairing token is missing, expired, or already used",
+                        "PAIRING_TOKEN_INVALID",
+                        StatusCode::UNAUTHORIZED,
+                    )
+                })?;
+            Some(key_set.claim_pairing_token(token).ok_or_else(|| {
+                ApiError::with_code(
+                    "pairing token is missing, expired, or already used",
+                    "PAIRING_TOKEN_INVALID",
+                    StatusCode::UNAUTHORIZED,
+                )
+            })?)
+        }
+        None => None,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((
+        headers,
+        Json(PairingClaimResponse {
+            api_key,
+            instance_id: (*state.instance_id).clone(),
+            hostname: pairing_hostname(),
+        }),
+    ))
+}
+
 /// Issue a short-lived credential for a browser media element.
 ///
 /// The endpoint itself always uses normal `X-Api-Key` authentication. The
@@ -5980,6 +6122,97 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn production_pairing_handlers_issue_claim_and_reject_replay() {
+        let state = AppState::for_tests();
+        let key_set = Arc::new(crate::auth::ApiKeySet::new(
+            std::collections::HashSet::from(["phone-key".to_string()]),
+        ));
+        let auth_state = Some(key_set.clone());
+        let created = create_pairing_session(
+            State(state.clone()),
+            Some(Extension(auth_state.clone())),
+            Some(Extension(crate::auth::PairingAuthority {
+                api_key: "phone-key".to_string(),
+            })),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(
+            created.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let created = response_json(created).await;
+        assert_eq!(created["auth_required"], true);
+        assert_eq!(created["instance_id"], *state.instance_id);
+        let token = created["token"].as_str().unwrap().to_string();
+
+        let claimed = claim_pairing_session(
+            State(state.clone()),
+            Some(Extension(auth_state.clone())),
+            Json(PairingClaimRequest {
+                token: Some(token.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(claimed.status(), StatusCode::OK);
+        assert_eq!(
+            claimed.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let claimed = response_json(claimed).await;
+        assert_eq!(claimed["api_key"], "phone-key");
+        assert_eq!(claimed["instance_id"], *state.instance_id);
+
+        let replay = match claim_pairing_session(
+            State(state),
+            Some(Extension(auth_state)),
+            Json(PairingClaimRequest { token: Some(token) }),
+        )
+        .await
+        {
+            Ok(_) => panic!("a consumed pairing token must not be accepted twice"),
+            Err(error) => error.into_response(),
+        };
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response_json(replay).await["code"], "PAIRING_TOKEN_INVALID");
+    }
+
+    #[tokio::test]
+    async fn production_pairing_handlers_keep_open_hosts_credential_free() {
+        let state = AppState::for_tests();
+        let created = create_pairing_session(State(state.clone()), Some(Extension(None)), None)
+            .await
+            .unwrap()
+            .into_response();
+        let created = response_json(created).await;
+        assert_eq!(created["token"], serde_json::Value::Null);
+        assert_eq!(created["auth_required"], false);
+
+        let claimed = claim_pairing_session(
+            State(state),
+            Some(Extension(None)),
+            Json(PairingClaimRequest { token: None }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let claimed = response_json(claimed).await;
+        assert_eq!(claimed["api_key"], serde_json::Value::Null);
+    }
 
     #[tokio::test]
     async fn control_planning_is_read_only_and_freezes_the_exact_artifact_path() {

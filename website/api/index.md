@@ -38,6 +38,8 @@ clients, and custom integrations on one generation contract.
 | `DELETE` | `/api/models/:model`                          | Remove a downloaded model (keeps components shared with other models)                                             |
 | `GET`    | `/api/gallery`                                | List saved images                                                                                                 |
 | `POST`   | `/api/gallery/media-token`                    | Mint a short-lived, read-only ticket for one full-size gallery path                                               |
+| `POST`   | `/api/pairing/sessions`                       | Mint an authenticated, one-use, two-minute iPhone pairing ticket                                                  |
+| `POST`   | `/api/pairing/claim`                          | Redeem a pairing ticket once; the durable key is never present in the QR                                          |
 | `GET`    | `/api/gallery/image/:name`                    | Fetch a saved image                                                                                               |
 | `DELETE` | `/api/gallery/image/:name`                    | Delete a saved image                                                                                              |
 | `GET`    | `/api/gallery/thumbnail/:name`                | Fetch a cached thumbnail                                                                                          |
@@ -166,6 +168,19 @@ media, or call any other endpoint. The signing secret is per server process,
 the response is `no-store`, and request tracing omits the bearer query. When API
 authentication is disabled, the endpoint returns `auth_required: false` and
 the direct media URL needs no ticket.
+
+### iPhone pairing tickets
+
+An authenticated desktop or web Settings client calls
+`POST /api/pairing/sessions`. Its `no-store` response includes a 256-bit random
+token, two-minute Unix expiry, server instance ID, and hostname. The QR adds
+the operator-confirmed reachable base URL; it does not include the API key.
+Mold for iPhone posts the token to `/api/pairing/claim`, verifies that the
+returned instance ID matches the scanned envelope, and stores the returned key
+in the iOS Keychain. A token is removed before a successful response, so a
+second or concurrent redemption fails with `PAIRING_TOKEN_INVALID`. When API
+authentication is disabled, both token and returned key are `null` because the
+host requires no credential.
 
 ## Rate Limiting
 

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import MobilePairingCard from "@studio/components/MobilePairingCard.vue";
 import AppearanceCard from "../components/settings/AppearanceCard.vue";
 import UpdatesSection from "../components/settings/UpdatesSection.vue";
 import AboutSection from "../components/settings/AboutSection.vue";
@@ -25,6 +26,11 @@ import { useSettingsConfigStore } from "../stores/settingsConfig";
 const conn = useConnectionStore();
 const config = useSettingsConfigStore();
 const models = useModelStore();
+
+const pairingTarget = computed(() =>
+  conn.baseUrl ? { baseUrl: conn.baseUrl, apiKey: conn.apiKey } : null,
+);
+const pairingBaseUrl = computed(() => conn.baseUrl ?? "http://127.0.0.1:7680");
 
 const query = ref("");
 /** Which "All settings" accordion is open (one at a time) when not searching. */
@@ -109,6 +115,15 @@ function toggle(id: SectionId): void {
           <section data-test="appearance-card">
             <div class="edge-code mb-2.5 uppercase">Appearance</div>
             <AppearanceCard />
+          </section>
+
+          <section data-test="mobile-pairing-region">
+            <div class="edge-code mb-2.5 uppercase">Mobile pairing</div>
+            <MobilePairingCard
+              :target="pairingTarget"
+              :suggested-base-url="pairingBaseUrl"
+              host-label="This device"
+            />
           </section>
 
           <section data-test="updates-card">
