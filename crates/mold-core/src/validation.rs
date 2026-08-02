@@ -942,7 +942,7 @@ pub fn validate_generate_request_with_family(
             match pipeline {
                 Ltx2PipelineMode::A2Vid => {
                     if req.audio_file.is_none() && req.audio_file_path.is_none() {
-                        return Err("pipeline=a2vid requires audio_file".to_string());
+                        return Err("pipeline=a2-vid requires audio_file".to_string());
                     }
                 }
                 Ltx2PipelineMode::Retake => {

@@ -529,6 +529,21 @@ pub enum Ltx2PipelineMode {
 }
 
 impl Ltx2PipelineMode {
+    /// Every variant, in wire order. The Studio surfaces mirror this list as a
+    /// TypeScript string union, and
+    /// `ltx2_pipeline_typescript_unions_match_the_wire_contract` pins them to
+    /// it — a member that does not deserialize 422s the whole request.
+    pub const ALL: [Self; 8] = [
+        Self::OneStage,
+        Self::TwoStage,
+        Self::TwoStageHq,
+        Self::Distilled,
+        Self::IcLora,
+        Self::Keyframe,
+        Self::A2Vid,
+        Self::Retake,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OneStage => "one-stage",
@@ -3366,18 +3381,71 @@ mod tests {
 
     #[test]
     fn ltx2_pipeline_display_matches_the_wire_contract() {
-        for (mode, expected) in [
-            (Ltx2PipelineMode::OneStage, "one-stage"),
-            (Ltx2PipelineMode::TwoStage, "two-stage"),
-            (Ltx2PipelineMode::TwoStageHq, "two-stage-hq"),
-            (Ltx2PipelineMode::Distilled, "distilled"),
-            (Ltx2PipelineMode::IcLora, "ic-lora"),
-            (Ltx2PipelineMode::Keyframe, "keyframe"),
-            (Ltx2PipelineMode::A2Vid, "a2-vid"),
-            (Ltx2PipelineMode::Retake, "retake"),
-        ] {
+        // Exhaustive by construction: no wildcard arm, so a new variant fails
+        // to compile until its wire string is spelled out here too.
+        fn expected_wire(mode: Ltx2PipelineMode) -> &'static str {
+            match mode {
+                Ltx2PipelineMode::OneStage => "one-stage",
+                Ltx2PipelineMode::TwoStage => "two-stage",
+                Ltx2PipelineMode::TwoStageHq => "two-stage-hq",
+                Ltx2PipelineMode::Distilled => "distilled",
+                Ltx2PipelineMode::IcLora => "ic-lora",
+                Ltx2PipelineMode::Keyframe => "keyframe",
+                Ltx2PipelineMode::A2Vid => "a2-vid",
+                Ltx2PipelineMode::Retake => "retake",
+            }
+        }
+
+        for mode in Ltx2PipelineMode::ALL {
+            let expected = expected_wire(mode);
+            assert_eq!(mode.as_str(), expected);
             assert_eq!(mode.to_string(), expected);
             assert_eq!(serde_json::to_value(mode).unwrap(), expected);
+            // Deserialization is the direction that actually bit us: a client
+            // sending "a2vid" instead of "a2-vid" 422s on the request body.
+            assert_eq!(
+                serde_json::from_value::<Ltx2PipelineMode>(serde_json::json!(expected)).unwrap(),
+                mode,
+            );
+        }
+    }
+
+    /// Every Studio surface mirrors `Ltx2PipelineMode` as a TypeScript string
+    /// union. A member that does not deserialize is not a cosmetic drift — the
+    /// request 422s on `Option<Ltx2PipelineMode>` — so pin the unions to the
+    /// Rust wire strings here, next to the authority.
+    #[test]
+    fn ltx2_pipeline_typescript_unions_match_the_wire_contract() {
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for path in ["web/src/types.ts", "desktop/src/lib/api/types.ts"] {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+            let union = source
+                .split_once("export type Ltx2PipelineMode =")
+                .unwrap_or_else(|| panic!("{path} must declare `export type Ltx2PipelineMode`"))
+                .1
+                .split_once(';')
+                .unwrap_or_else(|| panic!("{path} Ltx2PipelineMode union must end in `;`"))
+                .0;
+
+            let members: Vec<&str> = union
+                .split('|')
+                .map(str::trim)
+                .filter(|member| !member.is_empty())
+                .map(|member| member.trim_matches('"'))
+                .collect();
+            let expected: Vec<&str> = Ltx2PipelineMode::ALL.iter().map(|m| m.as_str()).collect();
+
+            assert_eq!(
+                members, expected,
+                "{path} Ltx2PipelineMode union must match mold-core's wire strings exactly; \
+                 a mismatched member makes every request using it fail with 422"
+            );
         }
     }
 

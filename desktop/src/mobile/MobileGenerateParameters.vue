@@ -222,7 +222,7 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "distilled",
   "ic-lora",
   "keyframe",
-  "a2vid",
+  "a2-vid",
   "retake",
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
@@ -925,7 +925,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           </p>
         </div>
 
-        <div v-if="form.pipeline === 'a2vid'" class="mobile-generate-file-field">
+        <div v-if="form.pipeline === 'a2-vid'" class="mobile-generate-file-field">
           <span class="mobile-generate-label">Conditioning audio</span>
           <div v-if="form.audioFile" class="mobile-generate-picked-file">
             <span>{{ form.audioFile.filename }}</span>

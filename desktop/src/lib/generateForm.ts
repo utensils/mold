@@ -449,7 +449,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     const guidanceOverrides = guidanceOverridesToWire(form.guidanceOverrides);
     if (guidanceOverrides) req.guidance_overrides = guidanceOverrides;
     // a2vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
-    if (form.pipeline === "a2vid" && form.audioFile) req.audio_file = form.audioFile.base64;
+    if (form.pipeline === "a2-vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
   return pruneRequestForFamily(req, form.family, form.model);

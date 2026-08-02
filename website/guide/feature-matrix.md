@@ -143,7 +143,7 @@ complete workflows.
 - LTX-2's multimodal guider exposes optional per-request overrides for STG
   scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
   stride on the CLI and in web, desktop, and iPhone Advanced video controls. They apply to the
-  `two-stage`, `two-stage-hq`, `keyframe`, and `a2vid` pipelines; unset fields
+  `two-stage`, `two-stage-hq`, `keyframe`, and `a2-vid` pipelines; unset fields
   keep each pipeline's own constants. The TUI still keeps those guidance and
   pipeline controls at their defaults, but its Video accordion now exposes the
   shared `enable_audio` contract as checkpoint-aware default/on/off choices.

@@ -286,7 +286,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(false);
-    await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2-vid");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(true);
   });
 

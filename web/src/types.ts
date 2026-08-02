@@ -19,7 +19,7 @@ export type Ltx2PipelineMode =
   | "distilled"
   | "ic-lora"
   | "keyframe"
-  | "a2vid"
+  | "a2-vid"
   | "retake";
 
 export type Ltx2SpatialUpscale = "x1-5" | "x2";

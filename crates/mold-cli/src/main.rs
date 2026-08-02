@@ -58,7 +58,10 @@ pub(crate) enum Ltx2PipelineArg {
     IcLora,
     #[value(name = "keyframe")]
     Keyframe,
-    #[value(name = "a2vid")]
+    // Canonically `a2-vid`, matching the wire enum every other surface uses.
+    // The original `a2vid` spelling stays accepted so existing scripts keep
+    // working.
+    #[value(name = "a2-vid", alias = "a2vid")]
     A2Vid,
     #[value(name = "retake")]
     Retake,

@@ -138,7 +138,7 @@ export function advancedVideoValidationError(form: GenerateForm): string | null 
   }
 
   switch (form.pipeline) {
-    case "a2vid":
+    case "a2-vid":
       if (!form.audioFile) return "Audio-to-video requires a conditioning audio file.";
       return form.audioFile.base64 ? null : "Conditioning audio cannot be empty.";
     case "retake":

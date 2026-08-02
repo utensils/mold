@@ -173,19 +173,19 @@ describe("buildRequest — LTX-2 advanced video", () => {
     form.pipeline = "keyframe";
     expect(buildRequest(form).audio_file).toBeUndefined();
     // a2vid → the conditioning audio ships as base64.
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     expect(buildRequest(form).audio_file).toBe("AUDIOB64");
   });
 
   it("omits audio_file for a2vid when no audio was picked", () => {
     const form = ltx2Form();
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     expect("audio_file" in buildRequest(form)).toBe(false);
   });
 
   it("does not ship audio_file for a non-ltx2 family", () => {
     const form = ltx2Form();
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     form.audioFile = { filename: "voice.wav", base64: "AUDIOB64" };
     form.family = "flux";
     expect(buildRequest(form).audio_file).toBeUndefined();

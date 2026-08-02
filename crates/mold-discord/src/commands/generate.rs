@@ -105,7 +105,7 @@ impl VideoFormat {
 
 /// Slash-command facing LTX-2 pipeline selector. Only pipelines that are
 /// fully satisfiable from the Discord command surface are exposed — modes
-/// like `a2vid` / `retake` / `ic-lora` / `keyframe` require extra inputs
+/// like `a2-vid` / `retake` / `ic-lora` / `keyframe` require extra inputs
 /// (`audio_file`, `source_video`, LoRA stacks, ≥2 keyframes) that the slash
 /// command doesn't collect, and server validation would reject them outright.
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]

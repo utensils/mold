@@ -233,7 +233,7 @@ describe("MobileGenerateParameters", () => {
     const child = wrapper.getComponent(MobileGenerateParameters);
     await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     expect(wrapper.get("[data-test='mobile-ltx2-validation-error']").text()).toContain(
       "conditioning audio file",
     );
@@ -338,7 +338,7 @@ describe("MobileGenerateParameters", () => {
     expect(wrapper.get("[data-test='mobile-ltx2-media-error']").text()).toContain("64 MiB");
     expect(fileToBase64).not.toHaveBeenCalled();
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     const oversizedAudio = new File(["a"], "large.wav", { type: "audio/wav" });
     Object.defineProperty(oversizedAudio, "size", { value: 64 * 1024 * 1024 + 1 });
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", oversizedAudio);
@@ -397,7 +397,7 @@ describe("MobileGenerateParameters", () => {
     await wrapper.get("[data-test='mobile-ltx2-keyframe-frame-0']").setValue("24");
     expect(form.keyframes[0]?.frame).toBe(24);
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     expect(form.retakeRange).toBeNull();
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", new File(["a"], "voice.wav"));
     expect(form.audioFile).toEqual({ filename: "voice.wav", base64: "b64:voice.wav" });
