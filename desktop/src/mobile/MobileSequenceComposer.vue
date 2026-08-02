@@ -374,7 +374,9 @@ function sourceImageMime(filename: string): string {
       <span v-for="(stage, index) in validationPlan.stages" :key="index">
         Clip {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
         {{ transitionLabel(stage.transition, validationPlan.motion_tail_frames) }}
-        <template v-if="stage.has_source_image"> · Opening image</template>
+        <template v-if="stage.has_source_image">
+          · {{ index === 0 ? "Opening image" : "Source image" }}
+        </template>
         <template v-if="stage.has_negative_prompt"> · Negative prompt</template>
       </span>
       <span v-if="validationPlan.vram_estimate">

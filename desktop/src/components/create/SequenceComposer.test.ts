@@ -195,7 +195,7 @@ describe("SequenceComposer — footer", () => {
           output_frames: 25,
           transition: "smooth",
           fade_frames: null,
-          has_source_image: false,
+          has_source_image: true,
           has_negative_prompt: false,
         },
         {
@@ -204,7 +204,7 @@ describe("SequenceComposer — footer", () => {
           output_frames: 25,
           transition: "smooth",
           fade_frames: null,
-          has_source_image: false,
+          has_source_image: true,
           has_negative_prompt: true,
         },
       ],
@@ -236,6 +236,12 @@ describe("SequenceComposer — footer", () => {
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
       "Join normalized",
     );
+    const planText = wrapper
+      .get("[data-test='sequence-validation-plan']")
+      .text()
+      .replace(/\s+/g, " ");
+    expect(planText).toContain("Clip 1 · 25f in / 25f out · Join · Opening image");
+    expect(planText).toContain("Clip 2 · 25f in / 25f out · Join · Source image");
     expect(wrapper.emitted("submit")).toBeUndefined();
 
     await wrapper.get("[data-test='clip-prompt']").setValue("edited opening");

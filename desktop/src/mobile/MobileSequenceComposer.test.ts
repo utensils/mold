@@ -325,7 +325,7 @@ describe("MobileSequenceComposer guardrails", () => {
           output_frames: 97,
           transition: "smooth",
           fade_frames: null,
-          has_source_image: false,
+          has_source_image: true,
           has_negative_prompt: false,
         },
         {
@@ -334,7 +334,7 @@ describe("MobileSequenceComposer guardrails", () => {
           output_frames: 80,
           transition: "smooth",
           fade_frames: null,
-          has_source_image: false,
+          has_source_image: true,
           has_negative_prompt: false,
         },
       ],
@@ -365,6 +365,12 @@ describe("MobileSequenceComposer guardrails", () => {
     expect(wrapper!.get("[data-test='mobile-sequence-validation-plan']").text()).toContain(
       "Validated · 2 clips · 177f · 7.4s",
     );
+    const planText = wrapper!
+      .get("[data-test='mobile-sequence-validation-plan']")
+      .text()
+      .replace(/\s+/g, " ");
+    expect(planText).toContain("Clip 1 · 97f in / 97f out · Smooth · Opening image");
+    expect(planText).toContain("Clip 2 · 97f in / 80f out · Smooth · Source image");
     expect(wrapper!.emitted("submit")).toBeUndefined();
 
     await wrapper!
