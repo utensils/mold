@@ -328,20 +328,31 @@ describe("MobileApp sequence generation", () => {
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
-    previewChainPlacement.mockResolvedValueOnce({
-      version: 1,
-      authoritative: false,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "unsupported",
-      candidate: null,
-    });
+    let finishPreview!: (value: Awaited<ReturnType<typeof previewChainPlacement>>) => void;
+    previewChainPlacement.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishPreview = resolve;
+      }),
+    );
     wrapper = mountMobileApp();
     await flushPromises();
     const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
     await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
     await prompts[1]!.setValue("Fireflies gather as the sky brightens");
+    const sequenceForm = wrapper.getComponent({ name: "MobileSequenceComposer" }).props("form") as {
+      strength: number;
+    };
+    const tappedStrength = sequenceForm.strength;
     await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+    sequenceForm.strength = 0.12;
+    await prompts[0]!.setValue("A later edit that belongs to the next submission");
+    finishPreview({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
     await flushPromises();
 
     expect(previewChainPlacement).toHaveBeenCalledWith(target, expect.anything());
@@ -353,6 +364,12 @@ describe("MobileApp sequence generation", () => {
         body: expect.stringContaining("A paper boat crosses a moonlit pond"),
       }),
     );
+    const createCall = apiJsonTo.mock.calls.find(
+      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
+    );
+    const request = JSON.parse(String((createCall?.[2] as RequestInit)?.body));
+    expect(request.strength).toBe(tappedStrength);
+    expect(request.stages[0].prompt).toBe("A paper boat crosses a moonlit pond");
     const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
     expect(JSON.parse(recovery ?? "null")).toEqual({
       hostId: "studio-id",

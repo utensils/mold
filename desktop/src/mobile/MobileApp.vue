@@ -1509,13 +1509,20 @@ async function submitMobileSequence(): Promise<void> {
     target,
     instanceId: host.instanceId ?? null,
   };
+  // Freeze all request-affecting values at the tap boundary. Source fitting
+  // and placement preview are asynchronous; edits during either await belong
+  // to the next submission.
+  const requestForm = cloneGenerateForm(form);
+  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
+  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  const enableAudio = draft.enableAudio;
+  const motionTailFrames = sequenceMotionTail.value;
   sequenceStarting.value = true;
   sequenceError.value = "";
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
     if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
-    const requestForm = cloneGenerateForm(form);
-    requestForm.sourceImage = draft.openingImage?.base64 ?? null;
+    requestForm.sourceImage = openingSnapshot?.base64 ?? null;
     requestForm.maskImage = null;
     if (requestForm.sourceImage) {
       const result = await applySourceFitPreprocess(
@@ -1534,12 +1541,12 @@ async function submitMobileSequence(): Promise<void> {
       );
       requestForm.sourceImage = result.source;
     }
-    const openingImage = draft.openingImage
-      ? { ...draft.openingImage, base64: requestForm.sourceImage }
+    const openingImage = openingSnapshot
+      ? { ...openingSnapshot, base64: requestForm.sourceImage }
       : null;
-    const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
-      motionTailFrames: sequenceMotionTail.value,
-      enableAudio: draft.enableAudio,
+    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
+      motionTailFrames,
+      enableAudio,
       openingImage,
     });
     let preview: GenerationPlacementPreview | null = null;
@@ -1568,7 +1575,7 @@ async function submitMobileSequence(): Promise<void> {
     persistSequenceRecovery(host, response.job_id);
     watchSequenceJob(host.id, target, response.job_id, {
       model: entry.name,
-      stageCount: draft.clips.length,
+      stageCount: clips.length,
     });
   } catch (error) {
     sequenceError.value = describeTransportError(error, host.name);
