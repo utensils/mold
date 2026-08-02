@@ -104,6 +104,29 @@ describe("StatusPopover host-aware display", () => {
     expect(streamCalls.at(-1)?.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
+  it("reports an offline selected host instead of presenting missing telemetry as status", async () => {
+    const wrapper = mountPopover();
+    const hosts = addRemoteHost();
+    const remote = hosts.extras.find((host) => host.id === "hal9000-7680")!;
+    remote.label = "Parity Fixture";
+    remote.status = "error";
+    remote.error = "connection refused";
+    delete hosts.telemetry[remote.id];
+    useAppPrefsStore().settings = { generateTargetHost: remote.id } as never;
+
+    await flushPromises();
+    await openPopover(wrapper);
+
+    const trigger = wrapper.get("[data-test='status-trigger']");
+    expect(wrapper.get("[role='dialog']").text()).toContain("Parity Fixture · offline");
+    expect(wrapper.get("[role='dialog']").text()).toContain("Machine is offline");
+    expect(wrapper.get("[role='dialog']").text()).not.toContain("no gpu telemetry");
+    expect(trigger.text()).toContain("offline");
+    expect(trigger.text()).toContain("—");
+    expect(trigger.get("span").classes()).toContain("bg-stop");
+    expect(streamCalls.at(-1)?.target ?? null).toBeNull();
+  });
+
   it("keeps showing a concrete Create host selection while another host has a live job", async () => {
     const wrapper = mountPopover();
     addRemoteHost();
