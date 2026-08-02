@@ -126,7 +126,7 @@ export interface GenerateForm {
   temporalUpscale: Ltx2TemporalUpscale | null;
   /** Optional LTX-2 guider overrides. Empty values preserve pipeline defaults. */
   guidanceOverrides: Ltx2GuidanceOverridesState;
-  /** Conditioning audio for the a2vid pipeline; base64 on the wire. */
+  /** Conditioning audio for the a2-vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
   /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
    * explicit `.safetensors` path; null = off. Ships as a `loras[]` entry
@@ -448,7 +448,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
     const guidanceOverrides = guidanceOverridesToWire(form.guidanceOverrides);
     if (guidanceOverrides) req.guidance_overrides = guidanceOverrides;
-    // a2vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
+    // a2-vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
     if (form.pipeline === "a2-vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
