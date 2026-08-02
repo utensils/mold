@@ -5002,8 +5002,14 @@ fn plan_is_conditioned(plan: &Ltx2GeneratePlan) -> bool {
         || plan.conditioning.video_path.is_some()
 }
 
-fn ltx2_video_activation_budget(stage: Ltx2StageShape) -> u64 {
-    ltx2_activation_budget_bytes(stage.width, stage.height, stage.frames, stage.conditioned)
+fn ltx2_video_activation_budget(stage: Ltx2StageShape, adaln_dim: Option<u64>) -> u64 {
+    ltx2_activation_budget_bytes(
+        stage.width,
+        stage.height,
+        stage.frames,
+        stage.conditioned,
+        adaln_dim,
+    )
 }
 
 /// The VRAM the adaptive planner may spend on this transformer.
@@ -5029,7 +5035,7 @@ fn ltx2_adaptive_transformer_plan(
         &weights.blocks,
         ltx2_transformer_vram_budget(plan.vram_grant_bytes, free_vram),
         weights.non_block_bytes,
-        ltx2_video_activation_budget(stage),
+        ltx2_video_activation_budget(stage, weights.adaln_dim),
         ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
     )
 }
@@ -5481,6 +5487,11 @@ struct Ltx2TransformerWeightSizes {
     /// the GPU *after* every resident block, so they are unconditionally
     /// resident and must be reserved, not discovered.
     non_block_bytes: u64,
+    /// The checkpoint's `adaln_single.linear` output width, which sets the
+    /// per-token AdaLN cost of a conditioned render. Not a constant across
+    /// LTX-2: the 19B ships six components (24,576) and LTX-2.3's 22B ships
+    /// nine (36,864). `None` when the tensor is absent from the header.
+    adaln_dim: Option<u64>,
 }
 
 /// The parsed safetensors header of an LTX-2 checkpoint.
@@ -5577,12 +5588,22 @@ impl Ltx2CheckpointHeader {
     fn transformer_weight_sizes(&self, num_layers: usize) -> Result<Ltx2TransformerWeightSizes> {
         let mut blocks = vec![0usize; num_layers];
         let mut non_block_bytes = 0u64;
+        let mut adaln_dim = None;
         for (name, tensor) in &self.tensors {
             if ltx2_tensor_is_non_transformer(name) {
                 continue;
             }
             let tensor_bytes = Self::tensor_bytes(name, tensor)?;
             let remapped = remap_ltx2_transformer_key(name);
+            // The video branch's own modulation table. `audio_adaln_single`
+            // and the `av_ca_*` gates share the suffix, so match the exact key
+            // rather than a contains().
+            if remapped.ends_with("adaln_single.linear.weight")
+                && !remapped.contains("audio")
+                && !remapped.contains("av_ca_")
+            {
+                adaln_dim = tensor.shape.first().map(|dim| *dim as u64);
+            }
             match ltx2_transformer_block_index(&remapped) {
                 Some(index) => {
                     if let Some(size) = blocks.get_mut(index) {
@@ -5595,6 +5616,7 @@ impl Ltx2CheckpointHeader {
         Ok(Ltx2TransformerWeightSizes {
             blocks,
             non_block_bytes,
+            adaln_dim,
         })
     }
 }
@@ -7508,6 +7530,7 @@ mod tests {
         let weights = super::Ltx2TransformerWeightSizes {
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
+            adaln_dim: Some(24_576),
         };
         const FREE_VRAM: u64 = 25_339_395_072;
 
@@ -7516,7 +7539,7 @@ mod tests {
         assert_eq!(residency.fixed_resident_bytes, weights.non_block_bytes);
         let true_demand = residency.resident_bytes
             + weights.non_block_bytes
-            + super::ltx2_video_activation_budget(stage)
+            + super::ltx2_video_activation_budget(stage, weights.adaln_dim)
             + super::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM
             + residency.largest_streamed_block;
         assert!(
@@ -7533,12 +7556,12 @@ mod tests {
         let stage1 = stage_shape(&plan, 512, 512, 97);
         let stage2 = stage_shape(&plan, 1024, 1024, 97);
 
-        let stage1_budget = super::ltx2_video_activation_budget(stage1);
-        let stage2_budget = super::ltx2_video_activation_budget(stage2);
+        let stage1_budget = super::ltx2_video_activation_budget(stage1, None);
+        let stage2_budget = super::ltx2_video_activation_budget(stage2, None);
 
         assert_eq!(
             stage1_budget,
-            super::ltx2_activation_budget_bytes(512, 512, 97, stage1.conditioned)
+            super::ltx2_activation_budget_bytes(512, 512, 97, stage1.conditioned, None)
         );
         assert!(
             stage1_budget < stage2_budget,
@@ -7569,6 +7592,7 @@ mod tests {
         let weights = super::Ltx2TransformerWeightSizes {
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
+            adaln_dim: Some(24_576),
         };
         let ungranted = ltx2_plan_at(1024, 1024, 97);
         let stage = stage_shape(&ungranted, 1024, 1024, 97);
@@ -7640,8 +7664,9 @@ mod tests {
     #[test]
     fn ltx2_adaptive_residency_reserves_every_live_latent_frame() {
         let plan = ltx2_plan_at(1024, 1024, 97);
-        let budget =
-            |frames| super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames));
+        let budget = |frames| {
+            super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames), None)
+        };
 
         // 1 pixel frame → 1 latent frame; 9 → 2; 97 → 13.
         let one_latent_frame = budget(9) - budget(1);
