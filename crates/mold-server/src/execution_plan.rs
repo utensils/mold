@@ -928,6 +928,10 @@ pub enum ExecutionPlanError {
     PlanInvalidated(String),
     #[error("prepared execution inputs are stale: {0}")]
     PreparedInputsStale(String),
+    #[error(
+        "camera-motion preset '{alias}' does not resolve to an installed adapter for this model"
+    )]
+    UnresolvableLora { alias: String },
 }
 
 pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
@@ -981,6 +985,9 @@ pub fn eligible_devices_for_request(
         .unwrap_or_else(|| "unknown".to_string());
     let capabilities = capabilities_for_family(&family);
     let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    if let Some(alias) = unresolvable_camera_control_alias(config, request) {
+        return Err(ExecutionPlanError::UnresolvableLora { alias });
+    }
     let loras = effective_loras(config, request);
     let artifacts = concrete_artifacts_for_family(&paths, &family, &loras, &engine_config);
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
@@ -1097,6 +1104,9 @@ fn resolve_execution_plans_with_policy(
     }
 
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
+    if let Some(alias) = unresolvable_camera_control_alias(config, request) {
+        return Err(ExecutionPlanError::UnresolvableLora { alias });
+    }
     let effective_loras = effective_loras(config, request);
     let admission_engine_config =
         mold_inference::FrozenEngineConfig::resolve(&request.model, config);
@@ -1521,9 +1531,46 @@ fn concrete_artifacts_for_family(
     artifacts
 }
 
-fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLora> {
-    const ZERO_SCALE_EPS: f64 = 1e-8;
-    let requested = request
+/// The first `camera-control:<id>` alias in the request that does not resolve
+/// to an installed adapter, if any.
+///
+/// `effective_loras` deliberately leaves such an alias in place as its own
+/// "path" so plan fingerprints stay stable and self-consistent. That is fine
+/// for hashing and cache comparison, but it must never reach a device plan:
+/// a relative path named `camera-control:dolly-in` fingerprints as "missing"
+/// and then agrees with itself everywhere, so the render proceeds with the
+/// preset silently absent. Admission calls this first and refuses instead.
+fn unresolvable_camera_control_alias(config: &Config, request: &GenerateRequest) -> Option<String> {
+    effective_lora_requests(config, request)
+        .into_iter()
+        .find_map(|lora| {
+            let id = lora.path.strip_prefix("camera-control:")?;
+            resolved_camera_control_path(config, id)
+                .is_none()
+                .then(|| lora.path.clone())
+        })
+}
+
+/// Resolve a `camera-control:<id>` alias to the adapter's on-disk path.
+fn resolved_camera_control_path(config: &Config, id: &str) -> Option<PathBuf> {
+    let preset = mold_core::ltx2_camera::resolve_camera_control_preset(id).ok()?;
+    let manifest = mold_core::manifest::find_manifest(preset.download_model)?;
+    let file = manifest.files.first()?;
+    Some(
+        config
+            .resolved_models_dir()
+            .join(mold_core::manifest::storage_path(manifest, file)),
+    )
+}
+
+/// The LoRA stack a request actually asks for, before alias resolution:
+/// explicit `loras`, else the legacy single `lora`, else the model config's
+/// own default.
+fn effective_lora_requests(
+    config: &Config,
+    request: &GenerateRequest,
+) -> Vec<mold_core::LoraWeight> {
+    request
         .loras
         .as_ref()
         .filter(|stack| !stack.is_empty())
@@ -1536,24 +1583,19 @@ fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLor
                 .map(|(path, scale)| mold_core::LoraWeight { path, scale })
                 .map(|lora| vec![lora])
         })
-        .unwrap_or_default();
-    requested
+        .unwrap_or_default()
+}
+
+fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLora> {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    effective_lora_requests(config, request)
         .into_iter()
         .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
         .map(|lora| {
             let path = lora
                 .path
                 .strip_prefix("camera-control:")
-                .and_then(|id| mold_core::ltx2_camera::resolve_camera_control_preset(id).ok())
-                .and_then(|preset| {
-                    let manifest = mold_core::manifest::find_manifest(preset.download_model)?;
-                    let file = manifest.files.first()?;
-                    Some(
-                        config
-                            .resolved_models_dir()
-                            .join(mold_core::manifest::storage_path(manifest, file)),
-                    )
-                })
+                .and_then(|id| resolved_camera_control_path(config, id))
                 .unwrap_or_else(|| PathBuf::from(lora.path));
             PlannedLora {
                 content_fingerprint: fingerprint_path(&path),
@@ -4063,6 +4105,69 @@ mod tests {
             .remove(0);
         assert_eq!(plan.effective_loras[0].path, expected);
         assert!(plan.components.contains_key(&ComponentRole::Lora(0)));
+    }
+
+    /// An alias that does not resolve must be refused, never planned as a
+    /// literal path. `PathBuf::from("camera-control:no-such-move")` is a
+    /// *relative path*: it fingerprints as "missing" and then agrees with
+    /// itself through the plan fingerprint, the equivalence cache, and
+    /// `validate_before_cuda`, so nothing ever fires and the render silently
+    /// proceeds without the preset the user asked for.
+    #[test]
+    fn unresolvable_camera_control_alias_is_refused_not_planned_as_a_literal_path() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let mut config = config(root.path(), "ltx2", None);
+        config.models_dir = root.path().display().to_string();
+
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: "camera-control:no-such-move".into(),
+            scale: 1.0,
+        }]);
+
+        let err = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect_err("an unresolvable camera-control alias must not produce a plan");
+        assert!(
+            matches!(&err, ExecutionPlanError::UnresolvableLora { alias }
+                if alias == "camera-control:no-such-move"),
+            "expected UnresolvableLora, got {err:?}"
+        );
+
+        assert!(
+            matches!(
+                eligible_devices_for_request(&config, &request, &devices(&[24 * GIB])),
+                Err(ExecutionPlanError::UnresolvableLora { .. })
+            ),
+            "device eligibility must refuse the same alias"
+        );
+    }
+
+    /// A plain filesystem path is not an alias and must keep passing through
+    /// untouched — the refusal above is scoped to `camera-control:` only.
+    #[test]
+    fn a_plain_lora_path_is_never_treated_as_an_unresolvable_alias() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let mut config = config(root.path(), "ltx2", None);
+        config.models_dir = root.path().display().to_string();
+
+        let lora_path = root.path().join("user.safetensors");
+        std::fs::write(&lora_path, b"lora").unwrap();
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: lora_path.display().to_string(),
+            scale: 1.0,
+        }]);
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_eq!(plan.effective_loras[0].path, lora_path);
     }
 
     #[test]

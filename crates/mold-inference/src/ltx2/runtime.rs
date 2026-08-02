@@ -2,7 +2,7 @@
 
 use crate::audio::NativeAudioTrack;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::sampling::{
@@ -804,15 +804,12 @@ impl Ltx2RuntimeSession {
         progress: Option<&ProgressCallback>,
         cancellation: Option<&InferenceCancellationToken>,
     ) -> Result<Option<NativeRenderedVideo>> {
-        if !supports_real_video_path(plan) {
-            if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-                eprintln!(
-                    "[ltx2-debug] real path rejected by supports_real_video_path pipeline={:?}",
-                    plan.pipeline
-                );
-            }
-            return Ok(None);
-        }
+        // Order matters. A missing checkpoint means there are no weights to
+        // render with — the synthetic path is the only thing left, and the
+        // unit tests rely on it. But once real weights are on disk, refusing
+        // the real path and quietly returning plausible-looking placeholder
+        // frames is worse than any error: the user gets a file that looks
+        // like a render and is not one.
         if !Path::new(&plan.checkpoint_path).is_file() {
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
@@ -821,6 +818,29 @@ impl Ltx2RuntimeSession {
                 );
             }
             return Ok(None);
+        }
+        if !supports_real_video_path(plan) {
+            if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+                eprintln!(
+                    "[ltx2-debug] real path rejected by supports_real_video_path pipeline={:?}",
+                    plan.pipeline
+                );
+            }
+            bail!(
+                "the LTX-2 {:?} pipeline cannot render this combination of inputs \
+                 (spatial upscale: {:?}, temporal upscale: {:?}, source video: {}, \
+                 conditioning audio: {}, reference-video conditioning: {}, retake \
+                 masking: {}, LoRAs: {}). Choose a pipeline that supports them, or drop \
+                 the unsupported input.",
+                plan.pipeline,
+                plan.spatial_upscale,
+                plan.temporal_upscale,
+                plan.conditioning.video_path.is_some(),
+                plan.conditioning.audio_path.is_some(),
+                plan.execution_graph.uses_reference_video_conditioning,
+                plan.execution_graph.uses_retake_masking,
+                plan.loras.len(),
+            );
         }
         let render = match plan.pipeline {
             PipelineKind::Distilled => render_real_distilled_av(
@@ -1326,6 +1346,15 @@ fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Re
     })
 }
 
+/// Whether the native runtime can render this plan for real, as opposed to
+/// falling back to `render_native_video`'s synthetic placeholder frames.
+///
+/// This is a statement about *conditioning shapes*, never about LoRAs. Every
+/// renderer threads `stage_lora_stack` into its transformer loads, so a plan
+/// carrying user LoRAs — which is what a camera-motion preset is, once the
+/// server resolves `camera-control:<id>` to a path — renders normally. The
+/// one exception is `native_ic_lora`, where a LoRA is *required* rather than
+/// merely tolerated.
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
     let native_plain_or_image_conditioning = plan.conditioning.audio_path.is_none()
         && plan.conditioning.video_path.is_none()
@@ -1337,11 +1366,9 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.execution_graph.uses_audio_conditioning
         && !plan.execution_graph.uses_reference_video_conditioning
         && !plan.execution_graph.uses_retake_masking
-        && plan.loras.is_empty()
         && plan.spatial_upscale.is_none();
     let native_retake = plan.conditioning.video_path.is_some()
         && plan.execution_graph.uses_retake_masking
-        && plan.loras.is_empty()
         && plan.spatial_upscale.is_none()
         && plan.temporal_upscale.is_none();
     let native_ic_lora = plan.conditioning.audio_path.is_none()
@@ -3001,7 +3028,15 @@ fn render_real_one_stage_av(
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
     let stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
-    let transformer = load_ltx2_av_transformer(plan, stage_shape, device, progress)?;
+    let stage_loras = stage_lora_stack(plan, 0)?;
+    let transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage_shape,
+        device,
+        &stage_loras,
+        None,
+        progress,
+    )?;
     if debug_enabled {
         log_debug_vram("after_one_stage_transformer_load");
     }
@@ -3015,7 +3050,7 @@ fn render_real_one_stage_av(
                 plan,
                 stage_shape,
                 device,
-                &[],
+                &stage_loras,
                 Some(budget),
                 progress,
             )
@@ -3200,7 +3235,15 @@ fn render_real_retake_av(
         eprintln!("[ltx2-debug] loading retake transformer");
     }
     let stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
-    let transformer = load_ltx2_av_transformer(plan, stage_shape, device, progress)?;
+    let stage_loras = stage_lora_stack(plan, 0)?;
+    let transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage_shape,
+        device,
+        &stage_loras,
+        None,
+        progress,
+    )?;
     let ((latents, audio_latents), transformer) = run_denoise_stage_with_oom_recovery(
         "retake",
         transformer,
@@ -3210,7 +3253,7 @@ fn render_real_retake_av(
                 plan,
                 stage_shape,
                 device,
-                &[],
+                &stage_loras,
                 Some(budget),
                 progress,
             )
@@ -4750,15 +4793,6 @@ fn guided_velocity_from_cfg(
         .affine(guidance_scale - 1.0, 0.0)?;
     let guided_x0 = conditional_x0.broadcast_add(&guidance_delta)?;
     convert_x0_to_velocity(sample, &guided_x0, sigma)
-}
-
-fn load_ltx2_av_transformer(
-    plan: &Ltx2GeneratePlan,
-    stage: Ltx2StageShape,
-    device: &candle_core::Device,
-    progress: Option<&ProgressCallback>,
-) -> Result<Ltx2AvTransformer3DModel> {
-    load_ltx2_av_transformer_with_loras(plan, stage, device, &[], None, progress)
 }
 
 /// Load the transformer and record what the load actually cost.
@@ -8265,6 +8299,61 @@ mod tests {
         assert!(super::supports_real_video_path(&plan));
     }
 
+    /// A camera-motion preset rides as an ordinary user LoRA
+    /// (`camera-control:<id>` resolved to a path by the server). The renderers
+    /// apply it, so refusing the real path here does not disable the LoRA — it
+    /// silently swaps the whole render for synthetic placeholder frames.
+    #[test]
+    fn supports_real_video_path_accepts_a_user_lora_on_distilled() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Distilled;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_a_user_lora_on_two_stage() {
+        let mut req = req("ltx-2-19b-dev:fp8", OutputFormat::Mp4, Some(false));
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_a_user_lora_on_one_stage() {
+        let mut req = req("ltx-2-19b-dev:fp8", OutputFormat::Mp4, Some(false));
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::OneStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
     #[test]
     fn supports_real_video_path_accepts_a2vid_two_stage_runs() {
         let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
@@ -8843,6 +8932,35 @@ mod tests {
             .find(&terminator)
             .unwrap_or_else(|| panic!("`{signature}` should end at its own closing brace"));
         &rest[..end]
+    }
+
+    /// Every renderer must build its transformer from `stage_lora_stack`.
+    ///
+    /// Passing a literal empty slice silently drops the user's LoRAs — which
+    /// is how camera-motion presets came to render synthetic placeholder
+    /// frames: `supports_real_video_path` refused any plan carrying a LoRA
+    /// precisely because these renderers would have ignored it.
+    #[test]
+    fn every_ltx2_renderer_loads_the_stage_lora_stack() {
+        for signature in [
+            "fn render_real_distilled_av(",
+            "fn render_real_two_stage_av(",
+            "fn render_real_one_stage_av(",
+            "fn render_real_retake_av(",
+        ] {
+            let body = runtime_function_source(signature);
+            assert!(
+                body.contains("stage_lora_stack(plan,") || body.contains("_context.loras"),
+                "`{signature}` must build its transformer from the stage LoRA stack"
+            );
+            assert!(
+                !body.contains("device,\n                    &[],")
+                    && !body.contains("device,\n                &[],")
+                    && !body.contains("device, &[],"),
+                "`{signature}` passes an empty LoRA slice, which silently drops user LoRAs \
+                 such as camera-motion presets"
+            );
+        }
     }
 
     #[test]

@@ -69,7 +69,7 @@ import type {
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
-import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import { isCameraMotionPreset, parseCameraControlAvailability } from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import {
   buildAutoChainRequest,
@@ -506,11 +506,15 @@ const selectedTarget = computed<ApiTarget | null>(() => {
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
+const cameraUnsupportedReason = ref<string | null>(null);
 let controlAdaptersEpoch = 0;
 watch(
   [selectedHostId, () => form.model, () => selectedHost.value?.online],
   async () => {
     const epoch = ++controlAdaptersEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    cameraUnsupportedReason.value = null;
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;
@@ -535,13 +539,16 @@ watch(
         controlAdapters.value = [];
         form.icLoraControl = null;
       });
-    const cameraRequest = apiJsonTo<Ltx2CameraControlInfo[]>(
+    const cameraRequest = apiJsonTo<unknown>(
       target,
-      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(form.model)}`,
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(form.model)}&detail=1`,
     )
-      .then((cameras) => {
+      .then((body) => {
         if (epoch !== controlAdaptersEpoch) return;
+        const availability = parseCameraControlAvailability(body);
+        const cameras = availability.controls;
         cameraControls.value = cameras;
+        cameraUnsupportedReason.value = availability.unsupportedReason;
         cameraControlsLoaded.value = true;
         const compatible = (value: string | null) =>
           !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
@@ -553,6 +560,7 @@ watch(
       .catch(() => {
         if (epoch !== controlAdaptersEpoch) return;
         cameraControls.value = [];
+        cameraUnsupportedReason.value = null;
         cameraControlsLoaded.value = false;
       });
     await Promise.allSettled([controlsRequest, cameraRequest]);
@@ -3582,6 +3590,7 @@ onBeforeUnmount(() => {
               :settings-summary="sequenceSettingsSummary"
               :camera-controls="cameraControls"
               :camera-controls-loaded="cameraControlsLoaded"
+              :camera-unsupported-reason="cameraUnsupportedReason"
               @submit="submitMobileSequence"
             >
               <template #settings>
@@ -3801,6 +3810,7 @@ onBeforeUnmount(() => {
                 :control-adapters="controlAdapters"
                 :camera-controls="cameraControls"
                 :camera-controls-loaded="cameraControlsLoaded"
+                :camera-unsupported-reason="cameraUnsupportedReason"
                 @validity-change="parameterValid = $event"
               />
               <label v-if="form.model && caps.supportsNegativePrompt" class="field">

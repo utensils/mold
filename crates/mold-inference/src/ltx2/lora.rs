@@ -178,12 +178,19 @@ pub(crate) fn camera_control_preset(
     mold_core::ltx2_camera::resolve_camera_control_preset(name).ok()
 }
 
-pub(crate) fn resolve_camera_control_preset_path(model_name: &str, name: &str) -> Result<PathBuf> {
-    if model_name.contains("ltx-2.3") {
-        bail!(
-            "camera-control presets are currently published for LTX-2 19B only; pass an explicit .safetensors path for LTX-2.3"
-        );
-    }
+pub(crate) fn resolve_camera_control_preset_path(
+    paths: &mold_core::ModelPaths,
+    name: &str,
+) -> Result<PathBuf> {
+    // Sniff the resolved artifacts, not the model name: an opaque `cv:` /
+    // `hf:` catalog ID for an LTX-2.3 checkpoint contains no architecture at
+    // all, so a name-substring test both accepted 2.3 and rejected 19B.
+    mold_core::ltx2_camera::camera_profile_for_artifact_paths([
+        paths.transformer.to_str(),
+        paths.vae.to_str(),
+        paths.spatial_upscaler.as_deref().and_then(|p| p.to_str()),
+    ])
+    .map_err(|reason| anyhow!("{reason}; pass an explicit .safetensors path instead"))?;
 
     let preset =
         mold_core::ltx2_camera::resolve_camera_control_preset(name).map_err(anyhow::Error::msg)?;
@@ -196,11 +203,14 @@ pub(crate) fn resolve_camera_control_preset_path(model_name: &str, name: &str) -
     .map_err(|err| anyhow!("failed to download camera-control preset '{name}': {err}"))
 }
 
-pub(crate) fn resolve_loras(model_name: &str, req: &GenerateRequest) -> Result<Vec<LoraWeight>> {
+pub(crate) fn resolve_loras(
+    paths: &mold_core::ModelPaths,
+    req: &GenerateRequest,
+) -> Result<Vec<LoraWeight>> {
     let mut loras = normalize_loras(req);
     for lora in &mut loras {
         if let Some(name) = lora.path.strip_prefix("camera-control:") {
-            let resolved = resolve_camera_control_preset_path(model_name, name)?;
+            let resolved = resolve_camera_control_preset_path(paths, name)?;
             lora.path = resolved.to_string_lossy().to_string();
         }
     }

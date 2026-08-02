@@ -3933,6 +3933,30 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
 #[derive(Debug, Deserialize)]
 struct Ltx2ControlAdaptersQuery {
     model: String,
+    /// Opt into the `Ltx2CameraControlAvailability` envelope. Absent keeps the
+    /// bare-array response older clients parse, byte for byte.
+    ///
+    /// Deliberately a string: `serde_urlencoded` only accepts `true`/`false`
+    /// for a `bool`, so a plain `?detail=1` would 400 the whole request.
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+impl Ltx2ControlAdaptersQuery {
+    /// `?detail=1`, `?detail=true`, and a bare `?detail` all opt in.
+    fn wants_detail(&self) -> bool {
+        matches!(self.detail.as_deref(), Some("1" | "true" | "yes" | ""))
+    }
+}
+
+/// Either shape of `/api/capabilities/ltx2-camera-controls`, chosen by
+/// `?detail=`. `untagged` means the list arm serializes as a bare JSON array,
+/// exactly as before.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+enum Ltx2CameraControlsResponse {
+    List(Vec<mold_core::Ltx2CameraControlInfo>),
+    Detailed(mold_core::Ltx2CameraControlAvailability),
 }
 
 #[utoipa::path(
@@ -3985,16 +4009,43 @@ async fn capabilities_ltx2_control_adapters(
     get,
     path = "/api/capabilities/ltx2-camera-controls",
     tag = "generation",
-    params(("model" = String, Query, description = "Installed LTX-2 model ID")),
+    params(
+        ("model" = String, Query, description = "Installed LTX-2 model ID"),
+        (
+            "detail" = Option<String>,
+            Query,
+            description = "`1`, `true`, or bare to return the availability envelope with the                            host's reason instead of a bare array"
+        ),
+    ),
     responses(
-        (status = 200, description = "Compatible built-in camera controls", body = Vec<mold_core::Ltx2CameraControlInfo>),
+        (status = 200, description = "Compatible built-in camera controls; a bare array, or an availability envelope for `detail=1`", body = Ltx2CameraControlsResponse),
         (status = 422, description = "Model is not an LTX-2 model")
     )
 )]
 async fn capabilities_ltx2_camera_controls(
     State(state): State<AppState>,
     Query(query): Query<Ltx2ControlAdaptersQuery>,
-) -> Result<Json<Vec<mold_core::Ltx2CameraControlInfo>>, ApiError> {
+) -> Result<Json<Ltx2CameraControlsResponse>, ApiError> {
+    let detail = query.wants_detail();
+    // The bare array cannot carry a reason, so for an older client the
+    // 19B-only case stays an empty list — exactly what it returns today. Every
+    // other failure keeps its existing status for that client (unknown
+    // architecture still 422s) rather than being silently flattened here. A
+    // `detail=1` client gets the reason instead of guessing at server policy.
+    let unsupported = |reason: String| -> Result<Json<Ltx2CameraControlsResponse>, ApiError> {
+        if detail {
+            Ok(Json(Ltx2CameraControlsResponse::Detailed(
+                mold_core::Ltx2CameraControlAvailability {
+                    controls: Vec::new(),
+                    supported: false,
+                    unsupported_reason: Some(reason),
+                },
+            )))
+        } else {
+            Ok(Json(Ltx2CameraControlsResponse::List(Vec::new())))
+        }
+    };
+
     let config = state.config.read().await;
     let effective_config =
         crate::model_manager::resolve_existing_model_authority(&query.model, &config)?
@@ -4004,8 +4055,12 @@ async fn capabilities_ltx2_camera_controls(
         match mold_core::ltx2_camera::camera_profile_for_model(&query.model, &model_config) {
             Ok(profile) => profile,
             Err(error) if error.contains("published for LTX-2 19B only") => {
-                return Ok(Json(Vec::new()));
+                return unsupported(error);
             }
+            // An unknown architecture is a legitimate "no presets here"
+            // answer, not a client error. It used to 422, which every client
+            // caught into an unexplained empty picker.
+            Err(error) if detail => return unsupported(error),
             Err(error) => return Err(ApiError::validation(error)),
         };
     let models_dir = config.resolved_models_dir();
@@ -4029,7 +4084,15 @@ async fn capabilities_ltx2_camera_controls(
             }
         })
         .collect();
-    Ok(Json(controls))
+    Ok(Json(if detail {
+        Ltx2CameraControlsResponse::Detailed(mold_core::Ltx2CameraControlAvailability {
+            supported: true,
+            unsupported_reason: None,
+            controls,
+        })
+    } else {
+        Ltx2CameraControlsResponse::List(controls)
+    }))
 }
 
 fn device_capabilities(
