@@ -12,6 +12,19 @@ describe("ResultCanvas", () => {
     expect(wrapper.text()).toContain("runs on your own machine");
   });
 
+  // The empty state is the only place a first-time user is told what to do,
+  // so it must not insist on a prompt the server would not require — while
+  // staying honest that a blank prompt costs the same memory and moves less.
+  it("swaps the empty-state guidance when the prompt is optional", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "empty", promptOptional: true },
+    });
+    expect(wrapper.text()).toContain("the prompt is optional");
+    expect(wrapper.text()).toContain("near-static motion");
+    expect(wrapper.text()).toContain("does not reduce memory use");
+    expect(wrapper.text()).not.toContain("Describe an image below");
+  });
+
   it("renders the generating bed with the stage line", () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "generating", progress: 42, stage: "Developing 12 / 28" },

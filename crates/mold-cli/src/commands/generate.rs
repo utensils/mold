@@ -87,6 +87,21 @@ fn resolve_family(model: &str, config: &Config) -> Option<String> {
         .or_else(|| manifest::find_manifest(model).map(|m| m.family.clone()))
 }
 
+/// Validate a request on the forced-local path.
+///
+/// Feeds the config/manifest-resolved family through as a hint so `cv:` / `hf:`
+/// catalog IDs keep their family-gated features (audio, keyframes, retake,
+/// optional prompts, …) instead of failing with `unknown model family`. This
+/// mirrors what the HTTP server does with its catalog family hint.
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> {
+    mold_core::validate_generate_request_with_family(
+        req,
+        resolve_family(&req.model, config).as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
 fn effective_dimensions(
     config: &Config,
     model_cfg: &mold_core::ModelConfig,
@@ -1155,7 +1170,6 @@ async fn prepare_local_request(
     super::local_engine::EngineOverrides,
 )> {
     use super::local_engine::{resolve_or_pull_model, EngineOverrides};
-    use mold_core::validate_generate_request;
 
     let model_name = req.model.clone();
     let mut req = req.clone();
@@ -1184,7 +1198,7 @@ async fn prepare_local_request(
         );
     }
 
-    validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
+    validate_local_request(&req, &effective_config)?;
 
     let overrides = EngineOverrides {
         gpus,
@@ -2789,5 +2803,140 @@ mod tests {
         assert_eq!(preview_loop_count(Duration::from_millis(2999)), 2);
         assert_eq!(preview_loop_count(Duration::from_millis(3000)), 1);
         assert_eq!(preview_loop_count(Duration::from_secs(30)), 1);
+    }
+
+    #[test]
+    fn forced_local_validation_passes_family_hint() {
+        // `cv:` / `hf:` catalog IDs are absent from the static manifest, so the
+        // forced-local path must feed the config-resolved family through or
+        // every family-gated LTX-2 feature fails with "unknown model family".
+        let mut config = Config::default();
+        config.models.insert(
+            "cv:2781713".to_string(),
+            ModelConfig {
+                family: Some("ltx2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a red apple",
+            "model": "cv:2781713",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "enable_audio": true
+        }))
+        .unwrap();
+
+        // Sanity: without the hint the family gate rejects it.
+        assert!(mold_core::validate_generate_request(&request).is_err());
+        validate_local_request(&request, &config).unwrap();
+    }
+
+    #[test]
+    fn forced_local_validation_still_rejects_invalid_requests() {
+        let config = Config::default();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "",
+            "model": "flux-dev:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+
+        assert!(validate_local_request(&request, &config)
+            .unwrap_err()
+            .to_string()
+            .contains("prompt"));
+    }
+
+    /// Metadata must survive a zero-length prompt on every embedded surface.
+    ///
+    /// `mold-inference`'s `add_metadata_chunks` writes `mold:prompt` as an
+    /// UNCONDITIONAL iTXt chunk (unlike the neighbouring `Option`-guarded
+    /// fields), and the JPEG COM writer interpolates the prompt unconditionally
+    /// too. This pins both encoders' tolerance of `""` so an optional-prompt
+    /// image-to-video run can't silently lose its provenance. The JPEG XMP
+    /// packet is not covered here — nothing in mold reads it back, and an empty
+    /// `<mold:prompt></mold:prompt>` element is well-formed XML.
+    #[test]
+    fn empty_prompt_metadata_round_trips_through_png_and_jpeg() {
+        use std::io::Write;
+
+        // `OutputMetadata` has no `Default`; start from the synthesized shape
+        // and fill in the fields the round-trip asserts on.
+        let mut metadata = mold_db::metadata_io::synthesize_from_filename("mold-ltx2-1.png", 1);
+        metadata.prompt = String::new();
+        metadata.model = "ltx-2-19b-distilled:fp8".to_string();
+        metadata.seed = 7;
+        metadata.steps = 8;
+        metadata.guidance = 3.0;
+        metadata.width = 64;
+        metadata.height = 64;
+        metadata.version = "test".to_string();
+        let json = serde_json::to_string(&metadata).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // PNG: zero-length iTXt payloads must encode and decode.
+        let png_path = dir.path().join("still.png");
+        {
+            let file = std::fs::File::create(&png_path).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .add_itxt_chunk("mold:prompt".to_string(), metadata.prompt.clone())
+                .unwrap();
+            encoder
+                .add_itxt_chunk("mold:parameters".to_string(), json.clone())
+                .unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0u8, 0, 0]).unwrap();
+            writer.finish().unwrap();
+        }
+        let recovered =
+            mold_db::metadata_io::read_embedded(&png_path, mold_core::OutputFormat::Png)
+                .expect("png metadata should decode with an empty prompt");
+        assert_eq!(recovered.prompt, "");
+        assert_eq!(recovered.model, "ltx-2-19b-distilled:fp8");
+
+        // JPEG: the COM marker carries `mold:parameters {json}` verbatim, so an
+        // empty prompt only shortens the JSON.
+        let jpeg_path = dir.path().join("still.jpg");
+        {
+            let comment = format!("mold:parameters {json}");
+            let mut out = vec![0xFF, 0xD8];
+            out.push(0xFF);
+            out.push(0xFE);
+            let len = (comment.len() + 2) as u16;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(comment.as_bytes());
+            out.extend_from_slice(&minimal_jpeg_body());
+            std::fs::File::create(&jpeg_path)
+                .unwrap()
+                .write_all(&out)
+                .unwrap();
+        }
+        let recovered =
+            mold_db::metadata_io::read_embedded(&jpeg_path, mold_core::OutputFormat::Jpeg)
+                .expect("jpeg metadata should decode with an empty prompt");
+        assert_eq!(recovered.prompt, "");
+        assert_eq!(recovered.seed, 7);
+    }
+
+    /// A 1x1 baseline JPEG minus its leading SOI marker, produced by the
+    /// `image` crate so the COM-marker test has a real scan to append.
+    fn minimal_jpeg_body() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(1, 1)
+            .write_with_encoder(image::codecs::jpeg::JpegEncoder::new(&mut buf))
+            .unwrap();
+        buf.into_inner()[2..].to_vec()
     }
 }

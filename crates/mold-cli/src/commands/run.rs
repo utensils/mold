@@ -33,7 +33,8 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 ///   (the async catalog bridge runs ahead of this) → use it as the model.
 /// - If model_or_prompt looks like a model name but isn't known → error with suggestions.
 /// - Else → (config default_model, all args joined as prompt).
-/// - Empty prompt → None (error: prompt required).
+/// - Empty prompt → None. Whether that is fatal is decided later by
+///   [`require_prompt`], which lets conditioned video runs proceed unprompted.
 fn resolve_run_args(
     model_or_prompt: Option<&str>,
     prompt_rest: &[String],
@@ -103,6 +104,33 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
         .family
         .or_else(|| mold_core::manifest::find_manifest(model_name).map(|m| m.family.clone()))
         .unwrap_or_else(|| "flux".to_string())
+}
+
+/// Resolve the final prompt for a run.
+///
+/// A video family that already carries visual conditioning (source image,
+/// keyframes, source video, or an extend) may run unprompted — LTX-2's text
+/// encoder pads to a fixed-width context, so `""` is a trained input rather
+/// than a degenerate one. Expect near-static, micro-motion output; it saves no
+/// VRAM, since the prompt-context tensor is a fixed size either way. Every
+/// other case still needs a prompt.
+fn require_prompt(
+    prompt: Option<String>,
+    family: &str,
+    has_visual_conditioning: bool,
+) -> Result<String> {
+    if let Some(prompt) = prompt {
+        return Ok(prompt);
+    }
+    if !mold_core::prompt_required_with_conditioning(Some(family), has_visual_conditioning) {
+        return Ok(String::new());
+    }
+    Err(anyhow::anyhow!(
+        "no prompt provided\n\n\
+         Usage: mold run [MODEL] <PROMPT>\n\
+         Example: mold run flux-dev:q4 \"a turtle in the desert\"\n\
+         Stdin:   echo \"a turtle\" | mold run flux-dev:q4"
+    ))
 }
 
 #[derive(Default, Clone, Copy)]
@@ -752,18 +780,19 @@ pub async fn run(
         None => None,
     };
 
-    let prompt = prompt.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no prompt provided\n\n\
-             Usage: mold run [MODEL] <PROMPT>\n\
-             Example: mold run flux-dev:q4 \"a turtle in the desert\"\n\
-             Stdin:   echo \"a turtle\" | mold run flux-dev:q4"
-        )
-    })?;
+    let has_visual_conditioning = source_image.is_some()
+        || keyframes.as_ref().is_some_and(|k| !k.is_empty())
+        || source_video_bytes.is_some()
+        || extend_video_bytes.is_some();
+    let prompt = require_prompt(prompt, &family, has_visual_conditioning)?;
 
     // --- Prompt expansion ---
+    // An unprompted conditioned video run has nothing to expand; handing "" to
+    // the expander would let it invent the prompt (matches the server's
+    // `maybe_expand_prompt` guard). `expand.enabled` must not turn that on
+    // behind the user's back either, so the check covers both switches.
     let expand_settings = config.expand.clone().with_env_overrides();
-    let should_expand = if no_expand {
+    let should_expand = if no_expand || prompt.trim().is_empty() {
         false
     } else {
         expand || expand_settings.enabled
@@ -1942,5 +1971,30 @@ mod tests {
         .into_overrides()
         .unwrap_err();
         assert!(err.to_string().contains("at least one"), "got: {err}");
+    }
+
+    #[test]
+    fn prompt_stays_required_without_visual_conditioning() {
+        let err = require_prompt(None, "ltx2", false).unwrap_err().to_string();
+        assert!(err.contains("no prompt provided"), "got: {err}");
+        assert!(require_prompt(None, "flux", true).is_err());
+        assert_eq!(
+            require_prompt(Some("a turtle".to_string()), "flux", false).unwrap(),
+            "a turtle"
+        );
+    }
+
+    #[test]
+    fn prompt_optional_for_conditioned_video_families() {
+        // An LTX-2 / LTX-Video request that already carries a source image,
+        // keyframes, a source video, or an extend may run unprompted.
+        for family in ["ltx2", "ltx-video"] {
+            assert_eq!(require_prompt(None, family, true).unwrap(), "");
+        }
+        // An explicit prompt still wins.
+        assert_eq!(
+            require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),
+            "a turtle"
+        );
     }
 }

@@ -503,11 +503,13 @@ fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: 
     }
 }
 
-/// Peak GPU residency for streaming-transformer families. Mirrors the
-/// Sequential strategy in `device::estimate_peak_memory` but replaces the
-/// `transformer_size + vae_size` term with a `STREAMING_TRANSFORMER_CAP`
-/// that bounds "block-streaming overhead, fully-resident top-level weights,
-/// and VAE."
+/// Peak GPU residency for streaming-transformer families when the checkpoint's
+/// own weight layout is not available.
+///
+/// Mirrors the Sequential strategy in `device::estimate_peak_memory` but
+/// replaces the `transformer_size + vae_size` term with a
+/// `STREAMING_TRANSFORMER_CAP` that bounds "block-streaming overhead,
+/// fully-resident top-level weights, and VAE."
 ///
 /// When the encoder does not compete with the transformer GPU, `encoder_total`
 /// is dropped from the max because the prompt encoder lives in system RAM or
@@ -516,10 +518,13 @@ fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: 
 /// Mistral3 prefix. When it does compete, the encoder phase pays the full file
 /// total because those encoders load whole before being dropped for denoise.
 ///
-/// The cap is conservative: at 22B BF16 with `streaming_prefetch_count=2`,
-/// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
-/// ≈ 2.3 GB. The 6 GB cap leaves room for activation workspace, OS
-/// fragmentation, and future LTX presets without revisiting this file.
+/// This cap is deliberately shape-blind and is now only the fallback: it was
+/// the sole LTX-2 estimate until #641 showed it under-counts the real peak by
+/// more than 10x (the 19B FP8 preset carries 2.1 GB of non-block transformer
+/// weights and a 2.4 GB VAE, not the ~200 MB each this cap assumed, and the
+/// engine's adaptive planner then keeps ~19 GB of blocks resident on top).
+/// [`crate::ltx2_admission`] owns the real model whenever the checkpoint's
+/// header has been read.
 fn streaming_transformer_peak(
     paths: &ModelPaths,
     gemma_competes_with_transformer_gpu: bool,
@@ -1141,16 +1146,38 @@ pub(crate) fn estimate_generation_memory_for_request(
             ActivationFamily::FluxDit | ActivationFamily::Flux2Dit
         )
     }) && block_offload;
-    let base_peak = base_peak_memory_for_paths(
-        paths,
-        hint,
-        streaming,
-        flux_offload,
-        qwen_quantized,
-        gemma_competes,
-    );
-    let peak = base_peak.saturating_add(activation);
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
+    // LTX-2: when the checkpoint's weight layout has already been read, the
+    // adaptive-residency model in `ltx2_admission` is authoritative — it counts
+    // the non-block transformer weights, the bundled VAE, the resident block
+    // set the engine will actually keep, and a fragmentation margin. The flat
+    // streaming cap below is only the cold-cache fallback.
+    let ltx2 = streaming
+        .then(|| crate::ltx2_admission::Ltx2ShapeHint::from_request(req))
+        .zip(available_memory_bytes)
+        .and_then(|(shape, available)| {
+            crate::ltx2_admission::checkpoint_facts_cached(&paths.transformer)
+                .map(|facts| (facts, shape, available))
+        });
+    let (peak, activation) = match &ltx2 {
+        Some((facts, shape, available)) => {
+            let activation = crate::ltx2_admission::ltx2_activation_bytes(*shape);
+            let estimate = crate::ltx2_admission::ltx2_peak_estimate(facts, activation, *available);
+            (estimate.peak_bytes, activation)
+        }
+        None => {
+            let base_peak = base_peak_memory_for_paths(
+                paths,
+                hint,
+                streaming,
+                flux_offload,
+                qwen_quantized,
+                gemma_competes,
+            );
+            let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+            (base_peak.saturating_add(activation), activation)
+        }
+    };
     let load_strategy = request_aware_load_strategy(
         select_server_load_strategy_for_budget(paths, available_memory_bytes, hint),
         paths,
@@ -1189,28 +1216,25 @@ fn request_sensitive_activation_memory(
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
 ) -> u64 {
-    let base = activation_memory_for_estimate(hint, qwen_quantized);
     let batch = u64::from(req.batch_size.max(1));
-    let video_frames = u64::from(req.frames.unwrap_or(1).max(1));
-    let video_factor = if hint.is_some_and(|h| h.family.streaming_transformer()) {
-        // LTX-2 keeps the temporally-compressed latent volume live while its
-        // transformer blocks stream through the GPU. Price every latent frame
-        // (8x temporal compression), matching the adaptive-residency planner,
-        // so it does not spend that memory on resident blocks.
-        (video_frames.saturating_sub(1) / 8 + 1).max(1)
-    } else {
-        1
-    };
     let cfg_factor = if req.guidance > 1.0 && req.negative_prompt.is_some() {
         2
     } else {
         1
     };
+    // LTX-2's activation working set is a function of transformer tokens, not
+    // of image pixel area: the pixel-area heuristic scaled by latent frames
+    // under-counted the 1024x1024 x 97 frame stage-2 shape by several GB
+    // (#641). Price it from the same token model admission uses.
+    let base = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+        crate::ltx2_admission::ltx2_activation_bytes(
+            crate::ltx2_admission::Ltx2ShapeHint::from_request(req),
+        )
+    } else {
+        activation_memory_for_estimate(hint, qwen_quantized)
+    };
 
-    let mut activation = base
-        .saturating_mul(batch)
-        .saturating_mul(video_factor)
-        .saturating_mul(cfg_factor);
+    let mut activation = base.saturating_mul(batch).saturating_mul(cfg_factor);
 
     if hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
         if let Some(images) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
@@ -1278,7 +1302,7 @@ mod fail_closed_tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
     use std::io::Cursor;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = ImageBuffer::from_pixel(width, height, Rgb([1u8, 2, 3]));
@@ -1639,9 +1663,10 @@ mod fail_closed_tests {
         );
     }
 
-    #[test]
-    fn ltx2_activation_budget_scales_with_temporally_compressed_frames() {
-        let request: GenerateRequest = serde_json::from_str(
+    /// The #641 incident request: `ltx-2-19b-distilled:fp8` image-to-video at
+    /// 1024x1024 x 97 frames.
+    fn ltx2_incident_request() -> GenerateRequest {
+        let mut request: GenerateRequest = serde_json::from_str(
             r#"{
                 "prompt": "Bring this image to life",
                 "model": "ltx-2-19b-distilled:fp8",
@@ -1653,14 +1678,139 @@ mod fail_closed_tests {
             }"#,
         )
         .unwrap();
-        let hint = ActivationHint::from_request(&request, "ltx2");
-        let per_latent_frame = hint.budget_bytes();
+        request.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        request
+    }
 
+    /// Updated for #641: the LTX-2 activation budget was a pixel-area estimate
+    /// multiplied by the live latent-frame count, which under-counted the
+    /// two-stage 1024x1024 shape. It is now the token model that
+    /// `ltx2_admission` and the engine share.
+    #[test]
+    fn ltx2_activation_budget_is_token_based() {
+        let request = ltx2_incident_request();
+        let hint = ActivationHint::from_request(&request, "ltx2");
+
+        // The token budget, plus the existing decoded source-frame buffer that
+        // every conditioned request pays regardless of family.
+        let source_frame_bytes = 1024u64 * 1024 * 4;
         assert_eq!(
             request_sensitive_activation_memory(&request, Some(hint), false),
-            per_latent_frame * 13,
-            "97 pixel frames produce 13 simultaneously live latent frames"
+            crate::ltx2_admission::ltx2_activation_budget_bytes(1024, 1024, 97, true)
+                + source_frame_bytes,
         );
+        // 97 frames produce 13 live latent frames; a 49-frame clip produces 7.
+        let shorter = GenerateRequest {
+            frames: Some(49),
+            ..request.clone()
+        };
+        assert!(
+            request_sensitive_activation_memory(&shorter, Some(hint), false)
+                < request_sensitive_activation_memory(&request, Some(hint), false),
+            "the budget must still scale with the temporally-compressed frame count"
+        );
+    }
+
+    /// LTX-2 paths for the admission tests: a header-only checkpoint whose
+    /// weight layout matches the measured `ltx-2-19b-distilled:fp8` preset.
+    fn ltx2_paths(dir: &Path) -> ModelPaths {
+        let checkpoint = dir.join("ltx2").join("ltx-2-19b-distilled-fp8.safetensors");
+        std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+        crate::ltx2_admission::test_support::write_header_only_checkpoint(
+            &checkpoint,
+            &crate::ltx2_admission::test_support::ltx2_19b_fp8_facts(),
+        );
+        crate::ltx2_admission::warm_checkpoint_facts(&checkpoint)
+            .expect("the fixture checkpoint header must parse");
+        ModelPaths {
+            transformer: checkpoint,
+            ..paths("/models/unused.safetensors")
+        }
+    }
+
+    /// RTX 4090 free reading from the #641 incident host.
+    const RTX_4090_AVAILABLE: u64 = 25_757_220_864;
+
+    #[test]
+    fn ltx2_peak_includes_resident_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = ltx2_incident_request();
+        let hint = ActivationHint::from_request(&request, "ltx2");
+
+        let budget = estimate_generation_memory_for_request(
+            &request,
+            &ltx2_paths(dir.path()),
+            Some(hint),
+            Some(RTX_4090_AVAILABLE),
+            false,
+            false,
+            false,
+        );
+
+        // Before #641 this returned 11,548,381,184 — a flat 6 GB streaming cap
+        // plus 2 GB headroom plus a pixel-area activation guess, with none of
+        // the 20.9 GB of transformer blocks the engine keeps resident.
+        assert!(
+            budget.peak_memory_bytes > 20_000_000_000,
+            "predicted peak {} must account for resident transformer blocks",
+            budget.peak_memory_bytes
+        );
+    }
+
+    /// Issue #641's primary acceptance criterion. The incident shape must be
+    /// admitted on a 24 GB card and run by streaming most of the transformer;
+    /// the honest estimate exists to bound the plan, not to refuse the
+    /// workload adaptive offload is built for.
+    #[test]
+    fn ltx2_1024x1024x97_is_admissible_on_24gb() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = ltx2_incident_request();
+        let hint = ActivationHint::from_request(&request, "ltx2");
+
+        let budget = estimate_generation_memory_for_request(
+            &request,
+            &ltx2_paths(dir.path()),
+            Some(hint),
+            Some(RTX_4090_AVAILABLE),
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(
+            budget.fits_available_memory,
+            Some(true),
+            "1024x1024 x 97 frames must be admitted on a 24 GB card by streaming \
+             blocks, not refused; predicted peak {}",
+            budget.peak_memory_bytes
+        );
+        assert!(
+            budget.peak_memory_bytes <= RTX_4090_AVAILABLE,
+            "the predicted peak {} must fit the card it was planned against",
+            budget.peak_memory_bytes
+        );
+    }
+
+    #[test]
+    fn ltx2_shorter_clip_still_passes_admission_on_24gb() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = GenerateRequest {
+            frames: Some(49),
+            ..ltx2_incident_request()
+        };
+        let hint = ActivationHint::from_request(&request, "ltx2");
+
+        let budget = estimate_generation_memory_for_request(
+            &request,
+            &ltx2_paths(dir.path()),
+            Some(hint),
+            Some(RTX_4090_AVAILABLE),
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(budget.fits_available_memory, Some(true));
     }
 
     #[test]

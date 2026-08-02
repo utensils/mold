@@ -87,10 +87,49 @@ struct ModelCudaOomState {
     failed_ordinals: BTreeSet<usize>,
     failed_ordinals_retry_at: Option<Instant>,
     unschedulable_until: Option<Instant>,
+    /// Shape buckets that OOMed on this model, each with the ordinals that saw
+    /// it. Recording the shape is what makes a single-GPU host recover: the
+    /// bare `(model, ordinal)` key needed two distinct GPUs before it cooled
+    /// anything down, so a one-GPU box re-admitted the identical failing shape
+    /// forever (#641).
+    failed_shapes: BTreeMap<String, ShapeCudaOomState>,
+}
+
+#[derive(Debug, Default)]
+struct ShapeCudaOomState {
+    ordinals: BTreeSet<usize>,
+    unschedulable_until: Option<Instant>,
+    /// Reduced VRAM grant to retry this shape with, keyed by ordinal.
+    reduced_grants: BTreeMap<usize, u64>,
+    /// The conservative retry is offered once per shape; a second OOM at the
+    /// reduced grant is a real limit, not transient pressure.
+    retried: bool,
 }
 
 static MODEL_CUDA_OOMS: LazyLock<RwLock<HashMap<String, ModelCudaOomState>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Fraction of the observed high-water mark to grant on the conservative
+/// retry. The failing attempt proved the plan cannot have all of what it took;
+/// three quarters leaves the engine's adaptive residency planner room to keep
+/// a useful resident block set while giving the allocator real slack.
+const REDUCED_GRANT_NUMERATOR: u64 = 3;
+const REDUCED_GRANT_DENOMINATOR: u64 = 4;
+
+/// Shape key for OOM cooldowns. Only the dimensions that move VRAM.
+pub(crate) fn oom_shape_bucket(request: &mold_core::GenerateRequest) -> String {
+    format!(
+        "{}x{}:f{}:b{}:src{}",
+        request.width,
+        request.height,
+        request.frames.unwrap_or(1),
+        request.batch_size,
+        // Same definition of "conditioned" the optional-prompt rule uses.
+        // Conditioning changes the VRAM profile, so two requests that differ
+        // here must never share a cooldown or a reduced memory grant.
+        u8::from(mold_core::validation::has_visual_conditioning(request)),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelCudaOomOutcome {
@@ -104,13 +143,47 @@ impl ModelCudaOomOutcome {
     }
 }
 
-pub(crate) fn record_model_cuda_oom(model_name: &str, ordinal: usize) -> ModelCudaOomOutcome {
-    record_model_cuda_oom_at(model_name, ordinal, Instant::now())
+pub(crate) fn record_model_cuda_oom(
+    model_name: &str,
+    shape_bucket: Option<&str>,
+    ordinal: usize,
+) -> ModelCudaOomOutcome {
+    record_model_cuda_oom_at(model_name, shape_bucket, ordinal, Instant::now())
 }
 
-fn record_model_cuda_oom_at(model_name: &str, ordinal: usize, now: Instant) -> ModelCudaOomOutcome {
+fn record_model_cuda_oom_at(
+    model_name: &str,
+    shape_bucket: Option<&str>,
+    ordinal: usize,
+    now: Instant,
+) -> ModelCudaOomOutcome {
     let mut states = MODEL_CUDA_OOMS.write().unwrap();
     let state = states.entry(model_name.to_string()).or_default();
+
+    // A shape that OOMed on one GPU is unschedulable on that GPU immediately.
+    // The whole-model cooldown below still needs two distinct GPUs, because a
+    // model that fits somewhere else must stay schedulable there.
+    let mut shape_unschedulable_until = None;
+    if let Some(bucket) = shape_bucket {
+        let shape = state.failed_shapes.entry(bucket.to_string()).or_default();
+        if shape.unschedulable_until.is_some_and(|until| now >= until) {
+            shape.ordinals.clear();
+            shape.reduced_grants.clear();
+            shape.retried = false;
+            shape.unschedulable_until = None;
+        }
+        shape.ordinals.insert(ordinal);
+        let until = now + MODEL_CUDA_OOM_COOLDOWN;
+        shape.unschedulable_until = Some(until);
+        shape_unschedulable_until = Some(until);
+        tracing::warn!(
+            model = %model_name,
+            shape = %bucket,
+            gpu = ordinal,
+            cooldown_secs = MODEL_CUDA_OOM_COOLDOWN.as_secs(),
+            "model shape marked unschedulable on this GPU after CUDA OOM"
+        );
+    }
 
     if let Some(until) = state.unschedulable_until {
         if now < until {
@@ -146,23 +219,84 @@ fn record_model_cuda_oom_at(model_name: &str, ordinal: usize, now: Instant) -> M
     };
 
     ModelCudaOomOutcome {
-        unschedulable_until,
+        unschedulable_until: unschedulable_until.or(shape_unschedulable_until),
     }
 }
 
-pub(crate) fn model_unschedulable_message(model_name: &str) -> Option<String> {
+/// Record the VRAM grant to retry this `(model, shape, ordinal)` with after a
+/// CUDA OOM, and report whether a conservative retry is still owed.
+///
+/// Returns `None` once the shape has already been retried at a reduced grant —
+/// a second OOM there is a real limit, and repeating it would be the same
+/// two-minute load-and-die loop the first grant was meant to break.
+pub(crate) fn record_reduced_vram_grant(
+    model_name: &str,
+    shape_bucket: &str,
+    ordinal: usize,
+    observed_high_water_bytes: u64,
+) -> Option<u64> {
+    if observed_high_water_bytes == 0 {
+        return None;
+    }
+    let mut states = MODEL_CUDA_OOMS.write().unwrap();
+    let state = states.entry(model_name.to_string()).or_default();
+    let shape = state
+        .failed_shapes
+        .entry(shape_bucket.to_string())
+        .or_default();
+    if shape.retried {
+        return None;
+    }
+    shape.retried = true;
+    let grant = observed_high_water_bytes / REDUCED_GRANT_DENOMINATOR * REDUCED_GRANT_NUMERATOR;
+    shape.reduced_grants.insert(ordinal, grant);
+    Some(grant)
+}
+
+/// The reduced grant recorded for this `(model, shape, ordinal)`, if any.
+pub(crate) fn reduced_vram_grant(
+    model_name: &str,
+    shape_bucket: &str,
+    ordinal: usize,
+) -> Option<u64> {
+    let states = MODEL_CUDA_OOMS.read().unwrap();
+    states
+        .get(model_name)?
+        .failed_shapes
+        .get(shape_bucket)?
+        .reduced_grants
+        .get(&ordinal)
+        .copied()
+}
+
+pub(crate) fn model_unschedulable_message(
+    model_name: &str,
+    shape_bucket: Option<&str>,
+) -> Option<String> {
     let now = Instant::now();
     let mut states = MODEL_CUDA_OOMS.write().unwrap();
     let state = states.get_mut(model_name)?;
-    let until = state.unschedulable_until?;
+    if let Some(until) = state.unschedulable_until {
+        if now >= until {
+            states.remove(model_name);
+            return None;
+        }
+        let remaining = until.saturating_duration_since(now).as_secs().max(1);
+        return Some(format!(
+            "model '{model_name}' is temporarily unschedulable after CUDA OOM on multiple GPUs; \
+             retry in {remaining}s or use a quantized/smaller variant."
+        ));
+    }
+    let bucket = shape_bucket?;
+    let until = state.failed_shapes.get(bucket)?.unschedulable_until?;
     if now >= until {
-        states.remove(model_name);
+        state.failed_shapes.remove(bucket);
         return None;
     }
     let remaining = until.saturating_duration_since(now).as_secs().max(1);
     Some(format!(
-        "model '{model_name}' is temporarily unschedulable after CUDA OOM on multiple GPUs; \
-         retry in {remaining}s or use a quantized/smaller variant."
+        "model '{model_name}' at {bucket} is temporarily unschedulable after CUDA OOM on this \
+         GPU; retry in {remaining}s with a smaller shape or a quantized variant."
     ))
 }
 
@@ -2512,22 +2646,22 @@ mod tests {
         clear_model_cuda_ooms_for_tests();
         let model = "flux2-klein-9b:bf16";
 
-        let first = record_model_cuda_oom(model, 0);
+        let first = record_model_cuda_oom(model, None, 0);
         assert!(
             !first.is_unschedulable(),
             "first OOM only records the failed ordinal"
         );
         assert!(
-            model_unschedulable_message(model).is_none(),
+            model_unschedulable_message(model, None).is_none(),
             "a single-GPU OOM should not cool down the model yet"
         );
 
-        let second = record_model_cuda_oom(model, 1);
+        let second = record_model_cuda_oom(model, None, 1);
         assert!(
             second.is_unschedulable(),
             "OOM on a sibling GPU should mark the model unschedulable"
         );
-        let msg = model_unschedulable_message(model).expect("cooldown message");
+        let msg = model_unschedulable_message(model, None).expect("cooldown message");
         assert!(msg.contains(model), "{msg}");
         assert!(msg.contains("temporarily unschedulable"), "{msg}");
 
@@ -2545,7 +2679,7 @@ mod tests {
         };
         let model = "flux2-klein-9b:bf16";
 
-        record_model_cuda_oom(model, 0);
+        record_model_cuda_oom(model, None, 0);
         let skip = failed_ordinals_for_model(model);
         let picked = pool
             .select_worker_excluding(model, 32_000_000_000, &skip)
@@ -2562,7 +2696,7 @@ mod tests {
         let model = "ltx-2-19b-distilled:fp8";
         let failed_at = Instant::now();
 
-        record_model_cuda_oom_at(model, 0, failed_at);
+        record_model_cuda_oom_at(model, None, 0, failed_at);
         assert_eq!(
             failed_ordinals_for_model_at(model, failed_at + Duration::from_secs(59)),
             vec![0],
@@ -2572,6 +2706,132 @@ mod tests {
             failed_ordinals_for_model_at(model, failed_at + Duration::from_secs(60)).is_empty(),
             "a one-GPU host must eventually retry instead of blocking the model forever"
         );
+        clear_model_cuda_ooms_for_tests();
+    }
+
+    fn incident_request() -> mold_core::GenerateRequest {
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt": "Bring this image to life",
+                "model": "ltx-2-19b-distilled:fp8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 8,
+                "guidance": 3.0,
+                "frames": 97
+            }"#,
+        )
+        .unwrap();
+        request.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        request
+    }
+
+    #[test]
+    fn cuda_oom_records_shape_scoped_cooldown() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
+        clear_model_cuda_ooms_for_tests();
+        let model = "ltx-2-19b-distilled:fp8";
+        let request = incident_request();
+        let bucket = oom_shape_bucket(&request);
+
+        // One GPU, one OOM. The whole-model cooldown needs two distinct GPUs,
+        // so before #641 a single-GPU 4090 never cooled down and re-admitted
+        // the identical shape forever.
+        let outcome = record_model_cuda_oom(model, Some(&bucket), 0);
+        assert!(
+            outcome.is_unschedulable(),
+            "a single-GPU OOM must cool down the shape that failed"
+        );
+        let message = model_unschedulable_message(model, Some(&bucket))
+            .expect("the failing shape must report its cooldown");
+        assert!(message.contains(&bucket), "{message}");
+
+        // A different shape on the same model stays schedulable.
+        let smaller = mold_core::GenerateRequest {
+            frames: Some(49),
+            ..request
+        };
+        assert!(
+            model_unschedulable_message(model, Some(&oom_shape_bucket(&smaller))).is_none(),
+            "cooling down one shape must not block every shape of the model"
+        );
+        clear_model_cuda_ooms_for_tests();
+    }
+
+    /// The bucket's conditioning flag must cover every variant the shared
+    /// predicate treats as visual conditioning. Missing one lets two requests
+    /// with different VRAM profiles share a cooldown and a reduced grant —
+    /// a keyframe or `source_video_path` render would inherit a plain
+    /// text-to-video bucket.
+    #[test]
+    fn shape_bucket_distinguishes_every_conditioning_variant() {
+        let base = mold_core::GenerateRequest {
+            source_image: None,
+            ..incident_request()
+        };
+        let unconditioned = oom_shape_bucket(&base);
+
+        let with_keyframes = mold_core::GenerateRequest {
+            keyframes: Some(vec![mold_core::types::KeyframeCondition {
+                frame: 0,
+                image: vec![0x89, 0x50, 0x4e, 0x47],
+            }]),
+            ..base.clone()
+        };
+        let with_source_video_path = mold_core::GenerateRequest {
+            source_video_path: Some("/tmp/clip.mp4".to_string()),
+            ..base.clone()
+        };
+        let with_source_image = mold_core::GenerateRequest {
+            source_image: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            ..base.clone()
+        };
+
+        for (label, conditioned) in [
+            ("keyframes", &with_keyframes),
+            ("source_video_path", &with_source_video_path),
+            ("source_image", &with_source_image),
+        ] {
+            assert_ne!(
+                oom_shape_bucket(conditioned),
+                unconditioned,
+                "{label} must not share a bucket with an unconditioned render"
+            );
+        }
+    }
+
+    #[test]
+    fn oom_requeues_once_with_reduced_grant() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
+        clear_model_cuda_ooms_for_tests();
+        let model = "ltx-2-19b-distilled:fp8";
+        let bucket = oom_shape_bucket(&incident_request());
+        let observed_high_water = 24_884_805_632u64;
+
+        let grant = record_reduced_vram_grant(model, &bucket, 0, observed_high_water)
+            .expect("the first OOM must offer a conservative retry");
+        assert_eq!(grant, observed_high_water / 4 * 3);
+        assert_eq!(reduced_vram_grant(model, &bucket, 0), Some(grant));
+
+        assert!(
+            record_reduced_vram_grant(model, &bucket, 0, observed_high_water).is_none(),
+            "the conservative retry is offered once; a second OOM at the reduced \
+             grant is a real limit, not transient pressure"
+        );
+        assert_eq!(
+            reduced_vram_grant(model, &bucket, 1),
+            None,
+            "the reduced grant is scoped to the GPU that failed"
+        );
+        clear_model_cuda_ooms_for_tests();
+    }
+
+    #[test]
+    fn reduced_grant_is_not_recorded_without_an_observed_high_water() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
+        clear_model_cuda_ooms_for_tests();
+        assert!(record_reduced_vram_grant("model", "shape", 0, 0).is_none());
+        assert_eq!(reduced_vram_grant("model", "shape", 0), None);
         clear_model_cuda_ooms_for_tests();
     }
 }

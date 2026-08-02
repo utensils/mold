@@ -2022,7 +2022,10 @@ async fn run_queue_dispatcher_with_tuning(
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
 
-        if let Some(err_msg) = crate::gpu_pool::model_unschedulable_message(&model_name) {
+        let shape_bucket = crate::gpu_pool::oom_shape_bucket(&job.request);
+        if let Some(err_msg) =
+            crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
+        {
             tracing::warn!(model = %model_name, "{err_msg}");
             if let Some(tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent {

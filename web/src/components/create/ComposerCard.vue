@@ -17,6 +17,7 @@ import {
   caretOnFirstLine,
   caretOnLastLine,
 } from "@studio/lib/promptCycler";
+import { OPTIONAL_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 
 const props = withDefaults(
   defineProps<{
@@ -34,10 +35,12 @@ const props = withDefaults(
     expanded?: boolean;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
+    /** The visual conditioning lets this render go out undescribed. */
+    promptOptional?: boolean;
     /** Prompt history (newest first) for ↑/↓ recall. */
     history?: string[];
   }>(),
-  { expanded: false, busy: false, history: () => [] },
+  { expanded: false, busy: false, promptOptional: false, history: () => [] },
 );
 
 const emit = defineEmits<{
@@ -58,6 +61,12 @@ const summaryLine = computed(() => {
   const base = `${props.aspectLabel} · ${props.width}×${props.height} · ${props.steps} steps`;
   return props.batchSize > 1 ? `${base} · ×${props.batchSize}` : base;
 });
+
+const placeholder = computed(() =>
+  props.promptOptional
+    ? OPTIONAL_PROMPT_PLACEHOLDER
+    : "Describe the image you want to create…",
+);
 
 const expandLabel = computed(() =>
   props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
@@ -141,7 +150,7 @@ watch(
       class="composer__prompt"
       data-test="composer-prompt"
       :value="prompt"
-      placeholder="Describe the image you want to create…"
+      :placeholder="placeholder"
       rows="2"
       @input="onInput"
       @keydown="onKeydown"
@@ -198,7 +207,7 @@ watch(
         type="button"
         class="composer__expand"
         data-test="composer-expand"
-        :disabled="busy"
+        :disabled="busy || !prompt.trim()"
         @click="emit('expand')"
       >
         <Icon name="sparkle" :size="15" />

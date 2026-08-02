@@ -17,6 +17,15 @@ The first positional argument is treated as the model only when it resolves to a
 known model name. Otherwise it becomes part of the prompt. Prompt text can also
 come from stdin.
 
+`PROMPT` is required, with one exception: an LTX-2 or LTX-Video run that already
+carries visual conditioning — `--image`, `--keyframe`, `--video`, or `--extend` —
+may be left unprompted, so `mold run ltx-2-19b-distilled:fp8 --image still.png
+--frames 97` is a complete command. It buys no VRAM and usually renders
+near-static motion; see
+[the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video). Every
+other run, including img2img on an image family, still errors with
+`no prompt provided`. An empty prompt also skips prompt expansion for that run.
+
 ### Options
 
 | Flag                                                                                         | Description                                                                                        |

@@ -1904,7 +1904,7 @@ mod tests {
                 false,
                 Some(&prepared),
             ),
-            Err(crate::execution_plan::ExecutionPlanError::InsufficientVram)
+            Err(crate::execution_plan::ExecutionPlanError::InsufficientVram { .. })
         ));
         let recovered = crate::execution_plan::resolve_execution_plans_with_prepared(
             &config,

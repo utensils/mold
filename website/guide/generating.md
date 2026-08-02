@@ -213,7 +213,15 @@ mold run ltx-2-19b-distilled:fp8 \
   --frames 97 \
   --keyframe 0:./start.png \
   --keyframe 96:./end.png
+
+# Image-to-video with no prompt at all
+mold run ltx-2-19b-distilled:fp8 --image ./still.png --frames 97 --format mp4
 ```
+
+The prompt is optional for `ltx2` and `ltx-video` — and only for them — when the
+request already carries visual conditioning (`--image`, `--keyframe`, `--video`,
+or `--extend`). It saves no VRAM and usually yields near-static motion; see
+[the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
 
 LTX-2 also adds:
 

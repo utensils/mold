@@ -64,4 +64,14 @@ pub(crate) struct Ltx2GeneratePlan {
     /// Request-level overrides for the multimodal guider. `None` (and any
     /// unset field) keeps the per-(pipeline, stage) constants.
     pub(crate) guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// VRAM the scheduler admitted this job against
+    /// (`predicted_vram_peak_bytes` from the frozen execution plan).
+    ///
+    /// The adaptive residency planner used to size itself against whatever the
+    /// card happened to have free, which meant a job admitted at an 11.5 GB
+    /// peak would quietly self-size to 25 GB and die at the first denoise
+    /// step. When set, the planner budgets `min(grant, usable free VRAM)`.
+    /// `None` keeps the legacy free-VRAM-only behaviour for callers with no
+    /// scheduler authority (CLI local runs, tests).
+    pub(crate) vram_grant_bytes: Option<u64>,
 }

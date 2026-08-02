@@ -88,6 +88,35 @@ describe("SequenceComposer", () => {
     expect(wrapper.text()).toContain("Describe clip 1");
   });
 
+  // An opening image conditions clip 1 and every later clip inherits the
+  // previous clip's motion tail, so a promptless-capable family can render an
+  // undescribed sequence — the same rule the one-shot composer applies.
+  it("allows undescribed clips once an opening image conditions the sequence", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    expect(
+      wrapper.get("[data-test='sequence-generate']").attributes("disabled"),
+    ).toBeDefined();
+
+    store.openingImage = { filename: "opening.png", base64: "QUJD" };
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='sequence-generate']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("keeps clip prompts required for a family that cannot render undescribed", async () => {
+    const wrapper = mountComposer({ family: "ltx-video-unknown" });
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.openingImage = { filename: "opening.png", base64: "QUJD" };
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='sequence-generate']").attributes("disabled"),
+    ).toBeDefined();
+  });
+
   it("gives the filmstrip popover an explicit full-width flex wrapper", async () => {
     const wrapper = mountComposer();
     await flushPromises();

@@ -41,6 +41,7 @@ import {
   modelsForOutput,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
+import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
 import {
   clampClipsToMotionTail,
   isPrintOfChainJob,
@@ -1997,9 +1998,21 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
   );
 }
 
+// Moves in lockstep with ComposerCard's `promptMissing`: one is the disabled
+// Generate button, the other this silent early return, and an enabled control
+// that quietly does nothing is exactly the dead end the prepared-expansion
+// invariant forbids.
+const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
+
+const emptyCanvasGuidance = computed(() =>
+  promptRequired(form)
+    ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
+    : OPTIONAL_PROMPT_GUIDANCE,
+);
+
 async function generate() {
   if (
-    !form.prompt.trim() ||
+    promptMissing.value ||
     !form.model ||
     chainReject.value ||
     preparedSubmitting.value ||
@@ -2896,7 +2909,7 @@ onBeforeUnmount(() => {
             brand
             icon="image"
             headline="Your print develops here"
-            guidance="Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
+            :guidance="emptyCanvasGuidance"
           />
         </div>
 

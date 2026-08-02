@@ -1213,6 +1213,8 @@ impl OffloadedFlux2Transformer {
         let mut plan = plan_adaptive_residency(
             &block_sizes,
             free_vram,
+            // No weights outside the block set on this path.
+            0,
             activation_budget,
             ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
         );

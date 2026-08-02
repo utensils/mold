@@ -128,6 +128,50 @@ describe("sequence authoring", () => {
     ).toEqual(["Describe clip 2 before generating."]);
   });
 
+  // The per-clip prompt gate is the only one in the codebase, so the optional
+  // -prompt rule has to reach it through the limits the composer already
+  // passes down — otherwise a conditioned LTX-2 sequence stays blocked on a
+  // prompt the server would admit.
+  it("allows blank clip prompts only when the limits mark them optional", () => {
+    const stages: SequenceStage[] = [
+      { prompt: "", frames: 97, transition: "smooth" },
+      { prompt: " ", frames: 97, transition: "smooth" },
+    ];
+    expect(
+      sequenceValidation(stages, {
+        maxStages: 16,
+        maxTotalFrames: 1552,
+        motionTailFrames: 25,
+        promptOptional: true,
+      }),
+    ).toEqual([]);
+    expect(
+      sequenceValidation(stages, {
+        maxStages: 16,
+        maxTotalFrames: 1552,
+        motionTailFrames: 25,
+        promptOptional: false,
+      }),
+    ).toEqual(["Describe clip 1 before generating."]);
+  });
+
+  it("still reports the other limits when clip prompts are optional", () => {
+    expect(
+      sequenceValidation(
+        [
+          { prompt: "", frames: 97, transition: "cut" },
+          { prompt: "", frames: 97, transition: "cut" },
+        ],
+        {
+          maxStages: 16,
+          maxTotalFrames: 100,
+          motionTailFrames: 25,
+          promptOptional: true,
+        },
+      ),
+    ).toEqual(["Reduce clip durations to 100 total frames or fewer."]);
+  });
+
   it("uses the seam-pill transition vocabulary", () => {
     // Mold Studio spec §11: the seam control names transitions Smooth /
     // Cut / Fade; the zero-motion-tail fallback (LTX-Video) stays honest

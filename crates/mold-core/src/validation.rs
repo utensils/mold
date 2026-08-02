@@ -279,6 +279,57 @@ fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Opt
         .or_else(|| model_family(model_name))
 }
 
+/// Whether `req` must carry a non-empty prompt.
+///
+/// Video families whose text encoder pads to a fixed-width context (LTX-2's
+/// Gemma connector replaces every padded position with learned register
+/// embeddings, so `""` is a trained context rather than a degenerate one)
+/// accept an empty prompt as long as the request carries visual conditioning
+/// to continue: a source image, keyframes, a source video, or an extend. Pure
+/// text-to-video and every image family keep the prompt required.
+///
+/// Note this buys no VRAM — the Gemma context is a fixed-size tensor whose
+/// footprint is independent of the token count — and an unprompted clip tends
+/// toward near-static micro-motion. Callers should surface that as guidance
+/// rather than synthesising a placeholder prompt.
+///
+/// `family_hint` mirrors [`validate_generate_request_with_family`]: pass the
+/// catalog-resolved family for `cv:` / `hf:` model IDs, whose family the
+/// manifest cannot see.
+pub fn prompt_required_for(req: &GenerateRequest, family_hint: Option<&str>) -> bool {
+    prompt_required_with_conditioning(
+        resolved_family(&req.model, family_hint),
+        has_visual_conditioning(req),
+    )
+}
+
+/// Whether a request carries visual conditioning — a source image, keyframes,
+/// a source video (inline or server-local path), or an extend.
+///
+/// This is the single definition of "conditioned" for the whole request path.
+/// Beyond the optional-prompt rule it also separates OOM cooldown buckets, and
+/// those must agree: two requests with different conditioning have different
+/// VRAM profiles and must never share a cooldown or a reduced memory grant.
+pub fn has_visual_conditioning(req: &GenerateRequest) -> bool {
+    req.source_image.is_some()
+        || req.keyframes.as_ref().is_some_and(|k| !k.is_empty())
+        || req.source_video.is_some()
+        || req.source_video_path.is_some()
+        || req.is_extend()
+}
+
+/// Lower-level form of [`prompt_required_for`] for callers that have not yet
+/// assembled a [`GenerateRequest`] — the CLI, TUI and Discord front-ends build
+/// the request only after the prompt is resolved. `has_visual_conditioning` is
+/// true when the request will carry a source image, keyframes, a source video,
+/// or an extend.
+pub fn prompt_required_with_conditioning(
+    family: Option<&str>,
+    has_visual_conditioning: bool,
+) -> bool {
+    !(matches!(family, Some("ltx2" | "ltx-video")) && has_visual_conditioning)
+}
+
 fn validate_lora_weight(lora: &LoraWeight, field_name: &str) -> Result<(), String> {
     if lora.scale < 0.0 || lora.scale > 2.0 {
         return Err(format!(
@@ -571,7 +622,7 @@ pub fn validate_generate_request_with_family(
 ) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
 
-    if req.prompt.trim().is_empty() {
+    if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
         return Err("prompt must not be empty".to_string());
     }
     validate_generation_dimensions(req.width, req.height, family)?;
@@ -1588,11 +1639,139 @@ mod tests {
 
     #[test]
     fn empty_prompt_rejected() {
+        // The default `valid_req()` is a text-to-image request with no visual
+        // conditioning, so the prompt stays mandatory.
         let mut req = valid_req();
         req.prompt = "   ".to_string();
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("prompt"));
+    }
+
+    /// Baseline LTX-2 video request with no visual conditioning attached.
+    fn ltx2_video_req() -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(24);
+        req.frames = Some(97);
+        req
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_ltx2_with_source_image() {
+        let mut req = ltx2_video_req();
+        req.prompt = String::new();
+        req.source_image = Some(png_bytes());
+        validate_generate_request(&req).unwrap();
+
+        // Whitespace-only is the same case as empty.
+        req.prompt = "  \n ".to_string();
+        validate_generate_request(&req).unwrap();
+
+        // Catalog IDs only resolve to `ltx2` through the family hint.
+        let mut catalog = req.clone();
+        catalog.model = "cv:2781713".to_string();
+        assert!(validate_generate_request(&catalog).is_err());
+        validate_generate_request_with_family(&catalog, Some("ltx2")).unwrap();
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_ltx2_keyframes_video_and_extend() {
+        let mut keyframed = ltx2_video_req();
+        keyframed.prompt = String::new();
+        keyframed.keyframes = Some(vec![KeyframeCondition {
+            frame: 0,
+            image: png_bytes(),
+        }]);
+        validate_generate_request(&keyframed).unwrap();
+
+        let mut from_video = ltx2_video_req();
+        from_video.prompt = String::new();
+        from_video.source_video = Some(vec![0, 0, 0, 0x20, b'f', b't', b'y', b'p']);
+        validate_generate_request(&from_video).unwrap();
+
+        // The server validates before `resolve_server_local_media_paths`, so
+        // the `*_path` variants must count as conditioning too.
+        let mut from_video_path = ltx2_video_req();
+        from_video_path.prompt = String::new();
+        from_video_path.source_video_path = Some("/srv/clips/shot.mp4".to_string());
+        validate_generate_request(&from_video_path).unwrap();
+
+        let mut extended = extend_req();
+        extended.prompt = String::new();
+        validate_generate_request(&extended).unwrap();
+
+        let mut extended_path = ltx2_video_req();
+        extended_path.prompt = String::new();
+        extended_path.extend_video_path = Some("/srv/clips/shot.mp4".to_string());
+        validate_generate_request(&extended_path).unwrap();
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_ltx_video_with_source_image() {
+        let mut req = valid_req();
+        req.model = "ltx-video-0.9.8-2b-distilled:bf16".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.prompt = String::new();
+        req.source_image = Some(png_bytes());
+        validate_generate_request(&req).unwrap();
+    }
+
+    #[test]
+    fn empty_prompt_still_rejected_for_ltx2_text_to_video() {
+        let mut req = ltx2_video_req();
+        req.prompt = String::new();
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("prompt"));
+    }
+
+    #[test]
+    fn empty_prompt_still_rejected_for_flux_and_sd() {
+        // Image families keep the prompt required even with a source image —
+        // an empty img2img prompt is not a trained context there.
+        for model in [
+            "flux-dev:q8",
+            "sd15:fp16",
+            "sdxl:fp16",
+            "z-image-turbo:bf16",
+        ] {
+            let mut req = valid_req();
+            req.model = model.to_string();
+            req.prompt = String::new();
+            req.source_image = Some(png_bytes());
+            assert!(
+                validate_generate_request(&req)
+                    .unwrap_err()
+                    .contains("prompt"),
+                "{model} must still require a prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_required_predicate_matches_validation() {
+        let mut req = ltx2_video_req();
+        assert!(super::prompt_required_for(&req, None));
+        req.source_image = Some(png_bytes());
+        assert!(!super::prompt_required_for(&req, None));
+
+        // Unknown family (catalog ID without a hint) stays required.
+        let mut catalog = req.clone();
+        catalog.model = "hf:Lightricks/LTX-2".to_string();
+        assert!(super::prompt_required_for(&catalog, None));
+        assert!(!super::prompt_required_for(&catalog, Some("ltx2")));
+    }
+
+    #[test]
+    fn prompt_length_limit_still_enforced_without_a_prompt_requirement() {
+        let mut req = ltx2_video_req();
+        req.source_image = Some(png_bytes());
+        req.prompt = "a".repeat(77_001);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("77,000"));
     }
 
     #[test]

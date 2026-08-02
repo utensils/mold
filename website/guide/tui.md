@@ -101,7 +101,9 @@ and switching between all eleven theme presets.
 The main workspace with four panels:
 
 - **Prompt** — Multi-line text area (Shift+Enter for newlines, emacs
-  keybindings)
+  keybindings). Required, except for an LTX-2 / LTX-Video model that already has
+  a source image attached, where an empty prompt is accepted and prompt
+  expansion is skipped for that run
 - **Parameters** — six essentials rows plus the Advanced accordion
 - **Preview** — idle hint, live "Developing…" progress, then the finished
   print with a `model · seed · time · host` caption

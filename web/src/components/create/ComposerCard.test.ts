@@ -127,4 +127,32 @@ describe("ComposerCard", () => {
     await wrapper.get("[data-test='composer-undo']").trigger("click");
     expect(wrapper.emitted("undo-expand")).toHaveLength(1);
   });
+
+  // Desktop parity (`ExpandControl`): expansion rewrites the prompt, so an
+  // empty one has nothing to enrich — and that stays true on the surfaces
+  // where a blank prompt is a legitimate render.
+  it("disables Expand while the prompt is blank", async () => {
+    const wrapper = factory({ prompt: "   " });
+    const expand = wrapper.get("[data-test='composer-expand']");
+    expect(expand.attributes("disabled")).toBeDefined();
+    await wrapper.setProps({ prompt: "a lighthouse" });
+    expect(expand.attributes("disabled")).toBeUndefined();
+  });
+
+  it("keeps Generate available while the prompt is blank", () => {
+    const wrapper = factory({ prompt: "" });
+    expect(
+      wrapper.get("[data-test='composer-submit']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("softens the placeholder once conditioning makes the prompt optional", async () => {
+    const wrapper = factory();
+    const prompt = wrapper.get("[data-test='composer-prompt']");
+    expect(prompt.attributes("placeholder")).toBe(
+      "Describe the image you want to create…",
+    );
+    await wrapper.setProps({ promptOptional: true });
+    expect(prompt.attributes("placeholder")).toContain("optional");
+  });
 });

@@ -31,13 +31,15 @@ training and quality evaluation. Each BF16 checkpoint is about 46.1 GB
 (43.0 GiB); a 48 GB+ CUDA card is the practical target for resident weights.
 On smaller CUDA cards, mold's native LTX-2 runtime adaptively streams
 transformer blocks from host memory, trading speed and substantial system RAM
-for lower VRAM use. The shared gated Gemma encoder and optional upscaler/LoRA
-assets add to download and disk requirements.
+for lower VRAM use — see [Memory on 24 GB cards](#memory-on-24-gb-cards). The
+shared gated Gemma encoder and optional upscaler/LoRA assets add to download and
+disk requirements.
 
 ## Implemented Request Surface
 
 - Text-to-audio+video with synchronized MP4 output
-- First-frame image-to-video via `--image`
+- First-frame image-to-video via `--image`, with an
+  [optional prompt](#the-prompt-is-optional-for-image-to-video)
 - Audio-to-video via `--audio-file`
 - Keyframe interpolation via repeatable `--keyframe`
 - Retake / partial regeneration via `--video` + `--retake`
@@ -108,6 +110,87 @@ should compare generated contact sheets or clips from that fixed seed.
   logs a fresh runtime load rather than reusing stale allocations.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
+
+## The prompt is optional for image-to-video
+
+LTX-2 and the older `ltx-video` family accept an **empty prompt**, but only when
+the request already carries something to animate — a source image, keyframes, a
+source video, or an `--extend` continuation:
+
+```bash
+# Animate a still with no prompt at all
+mold run ltx-2-19b-distilled:fp8 --image portrait.png --frames 97 --format mp4
+```
+
+This is not a mold extension. The Gemma tokenizer pads to a fixed 1,024-token
+context and the embeddings connector replaces every padded position with learned
+register embeddings, so the transformer always sees a full context; `""` is a
+trained input upstream ships itself.
+
+Two things worth being blunt about:
+
+- **It saves no memory.** The prompt context is a fixed `[1, 1024, 4096]`
+  tensor whose size does not depend on how many tokens you typed. Leaving the
+  prompt blank will not make a shape fit that otherwise does not.
+- **Expect near-static output.** With nothing describing the motion, the model
+  tends toward a blink or micro-motion. If you want the subject to _do_
+  something, say so.
+
+Everything else keeps the prompt required: text-to-video with no conditioning,
+and every image family (FLUX, Flux.2, SD1.5/SDXL/SD3.5, Qwen-Image, Z-Image,
+Wuerstchen) even when you pass `--image`. A blank prompt also disables prompt
+expansion for that run — mold will not let the expander invent the prompt that
+then gets recorded in your metadata — and is not written to prompt history.
+
+Web, desktop, and iPhone Create all enable **Generate** once a source image is
+attached to a compatible model and say the same thing in the prompt
+placeholder; sequence clips may be left undescribed under the same rule. On
+Discord, `/generate`'s `prompt` option is optional when you attach a source
+image.
+
+## Memory on 24 GB cards
+
+The 19B and 22B checkpoints are far larger than a consumer card, so the native
+runtime plans residency rather than assuming it. Two mechanisms do the work:
+
+- **Admission** reads the checkpoint's own safetensors header and reconstructs
+  the plan the engine will build — per-block sizes, the non-block transformer
+  weights that streaming never offloads, the bundled video VAE, a token-based
+  activation budget for the exact render shape, runtime headroom, and a
+  fragmentation margin — before anything is loaded. Each chain stage is priced
+  at its own shape, so stage 1 of a two-stage distilled render is charged for
+  its half-resolution render, not the final one.
+- **Adaptive residency** then keeps as many transformer blocks GPU-resident as
+  that budget allows and streams the rest from host memory. When the request
+  came through `mold serve`, the planner is bound by the scheduler's admitted
+  peak (`min(grant, usable free VRAM)`) instead of expanding to fill whatever
+  the card happens to have free.
+
+A shape that cannot run is therefore rejected **before** the two-minute load.
+The rejection names the per-device shortfall and, for LTX-2, resolution/frame
+combinations that do fit on that card — for example:
+
+```
+no device has enough effective VRAM capacity for a safe execution plan:
+cuda:0 needs ~26.4 GB of ~23.0 GB usable (needs ~26.4 GB on a 23.0 GB card;
+1024x1024 at 65 frames, or 896x896 at 97 frames fits)
+```
+
+A predicted peak that no device in the pool could ever hold fails immediately
+instead of waiting forever for pressure that will never clear. A CUDA OOM
+message carries the same "this shape … fits" advice.
+
+If CUDA still runs out of memory, the denoise stage retries at a reduced
+budget, the OOM cooldown is keyed on `(model, shape, GPU)` so a single-GPU host
+stops re-admitting the identical failing shape, and one conservative retry at a
+smaller grant is offered per shape. A _fatal_ CUDA fault (illegal address,
+uncorrectable ECC, launch failure) is never retried — the worker is quarantined
+and the process stops, as everywhere else in mold.
+
+Practical guidance for a 24 GB card: `ltx-2-19b-distilled:fp8` is the intended
+path, and 1024x1024 x 97 frames is close to the ceiling. Lower the resolution
+before the frame count if you need headroom — attention cost grows with the
+square of the token count, and tokens scale with area × latent frames.
 
 ## Examples
 

@@ -30,6 +30,7 @@ import {
   transitionLabel,
   type SequenceStage,
 } from "@studio/lib/sequence";
+import { promptOptional } from "@studio/lib/promptRequirement";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import {
   fetchChainLimits,
@@ -197,11 +198,18 @@ const stages = computed<SequenceStage[]>(() =>
   })),
 );
 const maxStages = computed(() => limits.value?.max_stages ?? 16);
+const clipPromptOptional = computed(() =>
+  promptOptional({ family: props.family, sourceImage: draft.openingImage }),
+);
 const validationErrors = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: limits.value?.max_total_frames ?? 1552,
     motionTailFrames: motionTail.value,
+    // The opening image conditions clip 1, and every later clip inherits the
+    // previous clip's motion tail — the same handoff extend uses — so a
+    // promptless-capable family can render the whole sequence undescribed.
+    promptOptional: clipPromptOptional.value,
   }),
 );
 const duration = computed(() =>

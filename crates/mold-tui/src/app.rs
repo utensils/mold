@@ -595,6 +595,21 @@ impl InferenceMode {
     }
 }
 
+/// Whether a run built from `params` needs a prompt.
+///
+/// LTX-2 / LTX-Video runs that already carry a source image may go unprompted
+/// — their text encoder pads to a fixed-width context, so `""` is a trained
+/// input. Expect near-static, micro-motion output; it saves no VRAM, since the
+/// prompt-context tensor is the same size either way. The TUI Create form has
+/// no keyframe / source-video / extend controls, so the source image is the
+/// only conditioning it can contribute.
+pub(crate) fn prompt_required_for_params(params: &GenerateParams, config: &Config) -> bool {
+    mold_core::prompt_required_with_conditioning(
+        Some(&family_for_model(&params.model, config)),
+        params.source_image_path.is_some(),
+    )
+}
+
 impl GenerateParams {
     pub fn from_config(config: &Config) -> Self {
         let model = config.resolved_default_model();
@@ -5372,7 +5387,8 @@ impl App {
 
     fn start_generation(&mut self) {
         let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
-        if prompt_text.is_empty() {
+        if prompt_text.is_empty() && prompt_required_for_params(&self.generate.params, &self.config)
+        {
             self.generate.error_message = Some("Prompt is empty".to_string());
             return;
         }
@@ -5432,6 +5448,12 @@ impl App {
             .resolve(self.generate.params.seed);
         let mut params = self.generate.params.clone();
         params.seed = Some(resolved_seed);
+        // Nothing to expand when the conditioning carries the shot — expanding
+        // "" would let the model invent the prompt. Mirrors the server's
+        // `maybe_expand_prompt` guard for the remote path.
+        if prompt_text.is_empty() {
+            params.expand = false;
+        }
         if let Some(mode) = route_mode {
             params.inference_mode = mode;
         }
@@ -12608,5 +12630,30 @@ mod tests {
         assert_eq!(app.machines.selected, before);
         app.dispatch_action(Action::FocusPrev);
         assert_eq!(app.machines.focus, crate::hosts::MachinesFocus::HostList);
+    }
+
+    #[test]
+    fn prompt_required_unless_a_video_model_has_a_source_image() {
+        let mut config = Config::default();
+        config.models.insert(
+            "cv:2781713".to_string(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut params = GenerateParams::from_config(&config);
+
+        // Text-to-video: still required.
+        params.model = "cv:2781713".to_string();
+        assert!(prompt_required_for_params(&params, &config));
+
+        // Image-to-video: the source image carries the shot.
+        params.source_image_path = Some("/tmp/first-frame.png".to_string());
+        assert!(!prompt_required_for_params(&params, &config));
+
+        // Image families keep the prompt required even with a source image.
+        params.model = "flux-dev:q4".to_string();
+        assert!(prompt_required_for_params(&params, &config));
     }
 }

@@ -1,0 +1,765 @@
+//! LTX-2 admission memory model.
+//!
+//! The generic streaming-transformer estimate in [`crate::memory_preflight`]
+//! collapses every LTX-2 checkpoint into one flat cap. That was wrong by ~10x
+//! for the 19B FP8 preset: the checkpoint carries 2.1 GB of *non-block*
+//! transformer weights plus a 2.4 GB video VAE that the block-streaming path
+//! never gets to offload, and the engine's adaptive residency planner then
+//! keeps as many transformer blocks resident as the sampled free VRAM allows.
+//!
+//! This module reconstructs that plan at admission time from the checkpoint's
+//! own safetensors header so the scheduler predicts the peak the engine will
+//! actually reach, rejects a shape that cannot be run before two minutes of
+//! loading, and can name a shape that does fit.
+
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+/// Mirrors `mold_inference::adaptive_offload::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM`;
+/// the engine reserves it inside every residency plan.
+pub(crate) const LTX2_RUNTIME_HEADROOM_BYTES: u64 = 2_000_000_000;
+
+/// Floor for the fragmentation margin. Block streaming churns 0.4–0.8 GB
+/// allocations through the CUDA allocator on every denoise step, so the plan
+/// must not be sized to the last byte of the sampled reading.
+const LTX2_MIN_FRAGMENTATION_MARGIN_BYTES: u64 = 1_000_000_000;
+
+/// Share of the sampled reading used as the fragmentation margin when that is
+/// larger than the floor (5%).
+const LTX2_FRAGMENTATION_MARGIN_PERCENT: u64 = 5;
+
+/// The same 90% safety cap `check_model_memory_budget` enforces. Admission
+/// plans residency against the budget it is willing to grant, never against
+/// the whole card — otherwise the predicted peak is unconditionally the size
+/// of the device and every shape looks infeasible.
+const LTX2_ADMISSION_BUDGET_PERCENT: u64 = 90;
+
+// ── Activation budget ───────────────────────────────────────────────────────
+
+/// Peak transformer activation bytes for one LTX-2 render shape.
+///
+/// `mold_inference::device` owns the calibrated per-token model; admission and
+/// the engine must price the same shape identically, so this is a thin
+/// re-export rather than a second estimate.
+pub(crate) fn ltx2_activation_budget_bytes(
+    width: u32,
+    height: u32,
+    frames: u32,
+    conditioned: bool,
+) -> u64 {
+    mold_inference::device::ltx2_activation_budget_bytes(width, height, frames, conditioned)
+}
+
+/// Activation budget for a request shape.
+pub(crate) fn ltx2_activation_bytes(shape: Ltx2ShapeHint) -> u64 {
+    ltx2_activation_budget_bytes(shape.width, shape.height, shape.frames, shape.conditioned)
+}
+
+/// Request shape that drives the LTX-2 activation budget. `ActivationHint`
+/// deliberately stays as-is — it is constructed by name across the server and
+/// carries no video-specific fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ltx2ShapeHint {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frames: u32,
+    /// Source image, keyframes, or extend present.
+    pub(crate) conditioned: bool,
+}
+
+impl Ltx2ShapeHint {
+    pub(crate) fn from_request(req: &mold_core::GenerateRequest) -> Self {
+        Self {
+            width: req.width,
+            height: req.height,
+            frames: req.frames.unwrap_or(1),
+            conditioned: req.source_image.is_some()
+                || req.source_video.is_some()
+                || req.extend_video.is_some()
+                || req.extend_video_path.is_some()
+                || req
+                    .keyframes
+                    .as_ref()
+                    .is_some_and(|keyframes| !keyframes.is_empty()),
+        }
+    }
+}
+
+// ── Checkpoint facts ────────────────────────────────────────────────────────
+
+/// Per-checkpoint weight layout, read once from the safetensors header.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Ltx2CheckpointFacts {
+    /// Per-transformer-block byte sizes, ordered by block index.
+    pub(crate) block_sizes: Vec<u64>,
+    /// Non-block transformer weights (`patchify_proj`, `adaln_single.linear`,
+    /// `caption_projection`, connectors, `proj_out`, norms). These are always
+    /// GPU-resident — block streaming never offloads them.
+    pub(crate) fixed_resident_bytes: u64,
+    /// Bundled video VAE weights, resident for encode and decode while the
+    /// transformer's resident blocks are still held.
+    pub(crate) vae_bytes: u64,
+}
+
+impl Ltx2CheckpointFacts {
+    pub(crate) fn total_block_bytes(&self) -> u64 {
+        self.block_sizes.iter().copied().sum()
+    }
+
+    fn is_usable(&self) -> bool {
+        !self.block_sizes.is_empty() && self.total_block_bytes() > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheKey {
+    len: u64,
+    modified_ns: u128,
+}
+
+type FactsCache = RwLock<HashMap<PathBuf, (CacheKey, Arc<Ltx2CheckpointFacts>)>>;
+
+fn facts_cache() -> &'static FactsCache {
+    static CACHE: std::sync::OnceLock<FactsCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn cache_key(path: &Path) -> Option<CacheKey> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    Some(CacheKey {
+        len: metadata.len(),
+        modified_ns,
+    })
+}
+
+/// Cache-only lookup. Never touches the filesystem body and never parses, so
+/// it is safe on the scheduler coordinator thread and for
+/// `equivalence_cache_only` prepared work.
+pub(crate) fn checkpoint_facts_cached(path: &Path) -> Option<Arc<Ltx2CheckpointFacts>> {
+    let cache = facts_cache().read().ok()?;
+    cache.get(path).map(|(_, facts)| Arc::clone(facts))
+}
+
+/// Parse and cache one checkpoint's weight layout.
+///
+/// Blocking: this reads and JSON-parses the safetensors header. Call it from
+/// `spawn_blocking` or a worker thread, never from the coordinator.
+pub(crate) fn warm_checkpoint_facts(path: &Path) -> Option<Arc<Ltx2CheckpointFacts>> {
+    let key = cache_key(path)?;
+    if let Ok(cache) = facts_cache().read() {
+        if let Some((cached_key, facts)) = cache.get(path) {
+            if cached_key == &key {
+                return Some(Arc::clone(facts));
+            }
+        }
+    }
+
+    let facts = match parse_checkpoint_facts(path) {
+        Ok(facts) if facts.is_usable() => Arc::new(facts),
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::debug!(
+                path = %path.display(),
+                "LTX-2 admission could not read checkpoint weight layout: {error}"
+            );
+            return None;
+        }
+    };
+    if let Ok(mut cache) = facts_cache().write() {
+        cache.insert(path.to_path_buf(), (key, Arc::clone(&facts)));
+    }
+    Some(facts)
+}
+
+#[derive(serde::Deserialize)]
+struct HeaderTensor {
+    data_offsets: (u64, u64),
+}
+
+/// Read the safetensors metadata header and classify every tensor into
+/// per-block transformer weights, always-resident transformer weights, and
+/// VAE weights. Only the header is read — the tensor bodies are never touched.
+pub(crate) fn parse_checkpoint_facts(path: &Path) -> anyhow::Result<Ltx2CheckpointFacts> {
+    let mut file = File::open(path)?;
+    let mut header_len_bytes = [0u8; 8];
+    file.read_exact(&mut header_len_bytes)?;
+    let header_len = u64::from_le_bytes(header_len_bytes);
+    anyhow::ensure!(
+        header_len > 0 && header_len <= 512 * 1024 * 1024,
+        "implausible safetensors header length {header_len}"
+    );
+    let mut header = vec![0u8; header_len as usize];
+    file.read_exact(&mut header)?;
+    let tensors: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)?;
+
+    let mut blocks: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut fixed_resident_bytes = 0u64;
+    let mut vae_bytes = 0u64;
+    for (name, value) in tensors {
+        if name == "__metadata__" {
+            continue;
+        }
+        let Ok(tensor) = serde_json::from_value::<HeaderTensor>(value) else {
+            continue;
+        };
+        let bytes = tensor.data_offsets.1.saturating_sub(tensor.data_offsets.0);
+        match classify_tensor(&name) {
+            TensorRole::Block(index) => {
+                let entry = blocks.entry(index).or_default();
+                *entry = entry.saturating_add(bytes);
+            }
+            TensorRole::FixedTransformer => {
+                fixed_resident_bytes = fixed_resident_bytes.saturating_add(bytes);
+            }
+            TensorRole::Vae => vae_bytes = vae_bytes.saturating_add(bytes),
+            TensorRole::Other => {}
+        }
+    }
+
+    let block_sizes = blocks.into_values().collect();
+    Ok(Ltx2CheckpointFacts {
+        block_sizes,
+        fixed_resident_bytes,
+        vae_bytes,
+    })
+}
+
+enum TensorRole {
+    Block(usize),
+    FixedTransformer,
+    Vae,
+    Other,
+}
+
+fn classify_tensor(name: &str) -> TensorRole {
+    let stripped = name.strip_prefix("model.").unwrap_or(name);
+    if name.starts_with("vae.") || stripped.starts_with("vae.") {
+        return TensorRole::Vae;
+    }
+    // Prompt encoders and tokenizer-side weights are separate phases with
+    // their own placement policy; they never co-reside with the denoise peak.
+    if stripped.starts_with("text_encoder")
+        || stripped.starts_with("prompt_encoder")
+        || stripped.starts_with("tokenizer")
+    {
+        return TensorRole::Other;
+    }
+    match block_index(stripped) {
+        Some(index) => TensorRole::Block(index),
+        None => TensorRole::FixedTransformer,
+    }
+}
+
+fn block_index(name: &str) -> Option<usize> {
+    let mut components = name.split('.');
+    while let Some(component) = components.next() {
+        if component == "transformer_blocks" || component == "blocks" {
+            return components.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+// ── Peak estimate ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ltx2PeakEstimate {
+    /// Predicted GPU peak for the plan the engine will actually run.
+    pub(crate) peak_bytes: u64,
+    /// Everything that is resident before a single transformer block lands.
+    pub(crate) reserve_bytes: u64,
+    pub(crate) resident_block_bytes: u64,
+    pub(crate) streamed_block_bytes: u64,
+    pub(crate) largest_streamed_block_bytes: u64,
+    pub(crate) fragmentation_margin_bytes: u64,
+    /// False when the shape cannot be run at an admissible residency on this
+    /// budget. `peak_bytes` then reports the undegraded demand so the caller's
+    /// feasibility comparison rejects it.
+    pub(crate) viable: bool,
+}
+
+pub(crate) fn fragmentation_margin_bytes(available_bytes: u64) -> u64 {
+    (available_bytes / 100)
+        .saturating_mul(LTX2_FRAGMENTATION_MARGIN_PERCENT)
+        .max(LTX2_MIN_FRAGMENTATION_MARGIN_BYTES)
+}
+
+/// Predict the LTX-2 peak for one shape against one memory budget.
+///
+/// This reconstructs `plan_adaptive_residency`'s choice — maximize resident
+/// block bytes subject to `reserve + resident + largest_streamed_block` fitting
+/// — but against the budget admission is willing to grant rather than the raw
+/// sampled free reading, and with the two terms the engine never counted: the
+/// non-block transformer weights and the bundled VAE.
+pub(crate) fn ltx2_peak_estimate(
+    facts: &Ltx2CheckpointFacts,
+    activation_bytes: u64,
+    available_bytes: u64,
+) -> Ltx2PeakEstimate {
+    let fragmentation_margin_bytes = fragmentation_margin_bytes(available_bytes);
+    let reserve_bytes = facts
+        .fixed_resident_bytes
+        .saturating_add(facts.vae_bytes)
+        .saturating_add(activation_bytes)
+        .saturating_add(LTX2_RUNTIME_HEADROOM_BYTES)
+        .saturating_add(fragmentation_margin_bytes);
+    let total_block_bytes = facts.total_block_bytes();
+    let budget = available_bytes / 100 * LTX2_ADMISSION_BUDGET_PERCENT;
+
+    let mut sorted = facts.block_sizes.clone();
+    sorted.sort_unstable_by(|left, right| right.cmp(left));
+
+    // `reserve + prefix(k) + sorted[k]` is non-decreasing in k, so the first
+    // prefix that does not fit ends the search.
+    let mut resident = 0u64;
+    let mut chosen: Option<(u64, u64)> = None;
+    for index in 0..=sorted.len() {
+        let largest_streamed = sorted.get(index).copied().unwrap_or(0);
+        if reserve_bytes
+            .saturating_add(resident)
+            .saturating_add(largest_streamed)
+            > budget
+        {
+            break;
+        }
+        chosen = Some((resident, largest_streamed));
+        if let Some(size) = sorted.get(index) {
+            resident = resident.saturating_add(*size);
+        }
+    }
+
+    let Some((resident_block_bytes, largest_streamed_block_bytes)) = chosen else {
+        // Not even a fully streamed plan fits: the reserve alone is over
+        // budget. Report the streaming floor, which is the smallest peak this
+        // shape can possibly reach.
+        let largest_block = sorted.first().copied().unwrap_or(0);
+        return Ltx2PeakEstimate {
+            peak_bytes: reserve_bytes.saturating_add(largest_block),
+            reserve_bytes,
+            resident_block_bytes: 0,
+            streamed_block_bytes: total_block_bytes,
+            largest_streamed_block_bytes: largest_block,
+            fragmentation_margin_bytes,
+            viable: false,
+        };
+    };
+
+    // The prefix search only ever accepts a plan that fits the budget, so
+    // reaching here means the shape is runnable. Streaming a large share of
+    // the transformer is the *intended* behaviour of adaptive offload, not a
+    // failure mode: it trades wall-clock for residency so a 19B checkpoint fits
+    // a consumer card at all. Judging feasibility by a streamed-to-resident
+    // ratio would reject exactly the workload offloading exists to serve.
+    let streamed_block_bytes = total_block_bytes.saturating_sub(resident_block_bytes);
+    let peak_bytes = reserve_bytes
+        .saturating_add(resident_block_bytes)
+        .saturating_add(largest_streamed_block_bytes);
+
+    Ltx2PeakEstimate {
+        peak_bytes,
+        reserve_bytes,
+        resident_block_bytes,
+        streamed_block_bytes,
+        largest_streamed_block_bytes,
+        fragmentation_margin_bytes,
+        viable: true,
+    }
+}
+
+/// Whether a shape is admissible on this budget.
+pub(crate) fn ltx2_shape_fits(
+    facts: &Ltx2CheckpointFacts,
+    shape: Ltx2ShapeHint,
+    available_bytes: u64,
+) -> bool {
+    let estimate = ltx2_peak_estimate(facts, ltx2_activation_bytes(shape), available_bytes);
+    estimate.viable && estimate.peak_bytes <= available_bytes / 100 * LTX2_ADMISSION_BUDGET_PERCENT
+}
+
+// ── Supported-shape search (#641 actionable rejection) ──────────────────────
+
+/// LTX-2 frame counts live on the `8n+1` grid.
+fn frame_grid(max_frames: u32) -> Vec<u32> {
+    let mut frames = Vec::new();
+    let mut candidate = 9u32;
+    while candidate <= max_frames {
+        frames.push(candidate);
+        candidate += 8;
+    }
+    frames
+}
+
+/// Resolutions are 32-aligned; step down in 128 px increments so the
+/// suggestion is a shape a user would actually pick.
+fn resolution_grid(width: u32, height: u32) -> Vec<(u32, u32)> {
+    let mut grid = Vec::new();
+    let mut scale = width.min(height);
+    while scale >= 384 {
+        let ratio_w = width as f64 / width.min(height) as f64;
+        let ratio_h = height as f64 / width.min(height) as f64;
+        let candidate_w = (((scale as f64 * ratio_w) as u32) / 32) * 32;
+        let candidate_h = (((scale as f64 * ratio_h) as u32) / 32) * 32;
+        if candidate_w > 0 && candidate_h > 0 {
+            grid.push((candidate_w, candidate_h));
+        }
+        scale = scale.saturating_sub(128);
+    }
+    grid
+}
+
+/// One concrete shape that fits, phrased for a user-facing message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SupportedShape {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frames: u32,
+}
+
+impl std::fmt::Display for SupportedShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}x{} at {} frames",
+            self.width, self.height, self.frames
+        )
+    }
+}
+
+/// Re-run the estimator over the `8n+1` frame grid and the 32-aligned
+/// resolution grid and return the shapes closest to what was requested:
+/// the longest clip at the requested resolution, then the largest resolution
+/// at the requested frame count.
+pub(crate) fn supported_shapes(
+    facts: &Ltx2CheckpointFacts,
+    requested: Ltx2ShapeHint,
+    available_bytes: u64,
+) -> Vec<SupportedShape> {
+    let mut shapes: Vec<SupportedShape> = Vec::new();
+
+    let fits = |width: u32, height: u32, frames: u32| {
+        ltx2_shape_fits(
+            facts,
+            Ltx2ShapeHint {
+                width,
+                height,
+                frames,
+                conditioned: requested.conditioned,
+            },
+            available_bytes,
+        )
+    };
+
+    if let Some(frames) = frame_grid(requested.frames)
+        .into_iter()
+        .rev()
+        .find(|frames| fits(requested.width, requested.height, *frames))
+    {
+        shapes.push(SupportedShape {
+            width: requested.width,
+            height: requested.height,
+            frames,
+        });
+    }
+
+    if let Some((width, height)) = resolution_grid(requested.width, requested.height)
+        .into_iter()
+        .find(|(width, height)| {
+            (*width, *height) != (requested.width, requested.height)
+                && fits(*width, *height, requested.frames)
+        })
+    {
+        shapes.push(SupportedShape {
+            width,
+            height,
+            frames: requested.frames,
+        });
+    }
+
+    shapes
+}
+
+/// Human-readable "needs ~X GB on a Y GB card; <shape> fits, or <shape>"
+/// remediation used by both admission rejection and the CUDA OOM message.
+pub(crate) fn supported_shape_advice(
+    facts: &Ltx2CheckpointFacts,
+    requested: Ltx2ShapeHint,
+    available_bytes: u64,
+) -> Option<String> {
+    let estimate = ltx2_peak_estimate(facts, ltx2_activation_bytes(requested), available_bytes);
+    let shapes = supported_shapes(facts, requested, available_bytes);
+    if shapes.is_empty() {
+        return None;
+    }
+    let alternatives = shapes
+        .iter()
+        .map(SupportedShape::to_string)
+        .collect::<Vec<_>>()
+        .join(", or ");
+    Some(format!(
+        "needs ~{:.1} GB on a {:.1} GB card; {alternatives} fits",
+        estimate.peak_bytes as f64 / 1_000_000_000.0,
+        available_bytes as f64 / 1_000_000_000.0,
+    ))
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::io::Write;
+
+    /// Measured `ltx-2-19b-distilled:fp8` layout (issue #641): 6 BF16 blocks
+    /// (including block 0) at 772,284,416 B, 42 FP8 blocks at 386,408,672 B,
+    /// 2,107,091,456 B of non-block `model.*` weights, and a 2,444,960,482 B
+    /// video VAE.
+    pub(crate) fn ltx2_19b_fp8_facts() -> Ltx2CheckpointFacts {
+        let mut block_sizes = vec![772_284_416u64; 6];
+        block_sizes.extend(std::iter::repeat_n(386_408_672u64, 42));
+        Ltx2CheckpointFacts {
+            block_sizes,
+            fixed_resident_bytes: 2_107_091_456,
+            vae_bytes: 2_444_960_482,
+        }
+    }
+
+    /// Write a header-only safetensors file describing `facts`. The tensor
+    /// bodies are never read by the parser, so the file stays a few KB.
+    pub(crate) fn write_header_only_checkpoint(path: &Path, facts: &Ltx2CheckpointFacts) {
+        let mut tensors = serde_json::Map::new();
+        let mut offset = 0u64;
+        let push = |tensors: &mut serde_json::Map<String, serde_json::Value>,
+                    name: String,
+                    bytes: u64,
+                    offset: &mut u64| {
+            let start = *offset;
+            *offset += bytes;
+            tensors.insert(
+                name,
+                serde_json::json!({
+                    "dtype": "F8_E4M3",
+                    "shape": [bytes],
+                    "data_offsets": [start, *offset],
+                }),
+            );
+        };
+        for (index, bytes) in facts.block_sizes.iter().enumerate() {
+            push(
+                &mut tensors,
+                format!("model.transformer_blocks.{index}.attn1.to_q.weight"),
+                *bytes,
+                &mut offset,
+            );
+        }
+        push(
+            &mut tensors,
+            "model.patchify_proj.weight".to_string(),
+            facts.fixed_resident_bytes,
+            &mut offset,
+        );
+        push(
+            &mut tensors,
+            "vae.decoder.conv_out.weight".to_string(),
+            facts.vae_bytes,
+            &mut offset,
+        );
+
+        let header = serde_json::to_vec(&serde_json::Value::Object(tensors)).unwrap();
+        let mut file = File::create(path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        file.flush().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{ltx2_19b_fp8_facts, write_header_only_checkpoint};
+    use super::*;
+
+    const RTX_4090_AVAILABLE: u64 = 25_757_220_864;
+
+    fn incident_shape() -> Ltx2ShapeHint {
+        Ltx2ShapeHint {
+            width: 1024,
+            height: 1024,
+            frames: 97,
+            conditioned: true,
+        }
+    }
+
+    /// The two-stage Distilled pipeline renders stage 1 at 512² (3,328 tokens)
+    /// and stage 2 at the full 1024² (13,312 tokens).
+    #[test]
+    fn token_count_matches_the_measured_two_stage_shapes() {
+        assert_eq!(
+            mold_inference::device::ltx2_token_count(1024, 1024, 97),
+            13_312
+        );
+        assert_eq!(
+            mold_inference::device::ltx2_token_count(512, 512, 97),
+            3_328
+        );
+    }
+
+    #[test]
+    fn checkpoint_facts_separate_blocks_from_resident_weights_and_vae() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltx2-19b-distilled-fp8.safetensors");
+        let expected = ltx2_19b_fp8_facts();
+        write_header_only_checkpoint(&path, &expected);
+
+        let parsed = parse_checkpoint_facts(&path).unwrap();
+        assert_eq!(parsed.block_sizes.len(), 48);
+        assert_eq!(parsed.total_block_bytes(), 20_862_870_720);
+        assert_eq!(parsed.fixed_resident_bytes, 2_107_091_456);
+        assert_eq!(parsed.vae_bytes, 2_444_960_482);
+    }
+
+    #[test]
+    fn checkpoint_facts_are_cached_per_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.safetensors");
+        write_header_only_checkpoint(&path, &ltx2_19b_fp8_facts());
+
+        assert!(checkpoint_facts_cached(&path).is_none());
+        let warmed = warm_checkpoint_facts(&path).unwrap();
+        let cached = checkpoint_facts_cached(&path).unwrap();
+        assert!(Arc::ptr_eq(&warmed, &cached));
+    }
+
+    #[test]
+    fn peak_counts_non_block_weights_vae_and_resident_blocks() {
+        let facts = ltx2_19b_fp8_facts();
+        let estimate = ltx2_peak_estimate(
+            &facts,
+            ltx2_activation_bytes(incident_shape()),
+            RTX_4090_AVAILABLE,
+        );
+
+        // The old flat LTX-2 arm returned 8 GB regardless of shape, and the
+        // scheduler predicted 11,548,381,184 B for this exact request.
+        assert!(
+            estimate.peak_bytes > 20_000_000_000,
+            "predicted peak {} must account for the transformer's block bytes",
+            estimate.peak_bytes
+        );
+        assert!(estimate.reserve_bytes > facts.fixed_resident_bytes + facts.vae_bytes);
+        assert!(estimate.fragmentation_margin_bytes >= 1_000_000_000);
+    }
+
+    /// Issue #641's headline requirement: the incident shape must *run* on a
+    /// 24 GB card, not be rejected. Streaming more blocks is exactly how
+    /// adaptive offload absorbs a shape whose weights do not fit — upstream's
+    /// own answer for a consumer card is `--offload cpu`. Feasibility is
+    /// therefore "does the fully-streamed floor fit", never a ratio of
+    /// streamed to resident bytes.
+    #[test]
+    fn incident_shape_is_admissible_on_a_24gb_card_by_streaming() {
+        let facts = ltx2_19b_fp8_facts();
+        let estimate = ltx2_peak_estimate(
+            &facts,
+            ltx2_activation_bytes(incident_shape()),
+            RTX_4090_AVAILABLE,
+        );
+
+        assert!(
+            ltx2_shape_fits(&facts, incident_shape(), RTX_4090_AVAILABLE),
+            "1024x1024 x 97 must be admitted on a 24 GB card, got peak {}",
+            estimate.peak_bytes
+        );
+        assert!(
+            estimate.streamed_block_bytes > 0,
+            "the plan must stream to fit; resident {} / streamed {}",
+            estimate.resident_block_bytes,
+            estimate.streamed_block_bytes
+        );
+        // The predicted peak is the plan's own peak and never exceeds the
+        // budget the scheduler is willing to grant.
+        let budget = RTX_4090_AVAILABLE / 100 * LTX2_ADMISSION_BUDGET_PERCENT;
+        assert!(
+            estimate.peak_bytes <= budget,
+            "peak {} must fit the {budget}-byte admission budget",
+            estimate.peak_bytes
+        );
+    }
+
+    /// A shape whose *reserve alone* clears the budget is genuinely
+    /// unrunnable — no amount of streaming recovers it — and must be rejected
+    /// before the engine spends two minutes loading.
+    #[test]
+    fn a_shape_whose_streaming_floor_overflows_is_rejected() {
+        let facts = ltx2_19b_fp8_facts();
+        let huge = Ltx2ShapeHint {
+            width: 2048,
+            height: 2048,
+            frames: 193,
+            ..incident_shape()
+        };
+        assert!(
+            !ltx2_shape_fits(&facts, huge, RTX_4090_AVAILABLE),
+            "a shape past the streaming floor must be refused at admission"
+        );
+    }
+
+    #[test]
+    fn the_same_checkpoint_still_fits_a_smaller_shape() {
+        let facts = ltx2_19b_fp8_facts();
+        let shorter = Ltx2ShapeHint {
+            frames: 49,
+            ..incident_shape()
+        };
+        assert!(
+            ltx2_shape_fits(&facts, shorter, RTX_4090_AVAILABLE),
+            "shortening the clip must recover a runnable plan"
+        );
+    }
+
+    #[test]
+    fn a_large_card_keeps_the_whole_transformer_resident() {
+        let facts = ltx2_19b_fp8_facts();
+        let estimate = ltx2_peak_estimate(
+            &facts,
+            ltx2_activation_bytes(incident_shape()),
+            80_000_000_000,
+        );
+        assert!(estimate.viable);
+        assert_eq!(estimate.resident_block_bytes, facts.total_block_bytes());
+        assert_eq!(estimate.streamed_block_bytes, 0);
+    }
+
+    #[test]
+    fn advice_names_a_concrete_supported_shape() {
+        let facts = ltx2_19b_fp8_facts();
+        let advice = supported_shape_advice(&facts, incident_shape(), RTX_4090_AVAILABLE)
+            .expect("a 24 GB card must have some runnable LTX-2 shape");
+
+        assert!(advice.contains(" GB card"), "got: {advice}");
+        let shapes = supported_shapes(&facts, incident_shape(), RTX_4090_AVAILABLE);
+        assert!(!shapes.is_empty());
+        for shape in shapes {
+            assert!(shape.width % 32 == 0 && shape.height % 32 == 0);
+            assert_eq!(shape.frames % 8, 1);
+            assert!(advice.contains(&shape.to_string()), "got: {advice}");
+        }
+    }
+
+    #[test]
+    fn frame_and_resolution_grids_stay_on_supported_values() {
+        assert_eq!(frame_grid(25), vec![9, 17, 25]);
+        assert!(frame_grid(97).iter().all(|frames| frames % 8 == 1));
+        for (width, height) in resolution_grid(1024, 576) {
+            assert_eq!(width % 32, 0);
+            assert_eq!(height % 32, 0);
+        }
+    }
+}

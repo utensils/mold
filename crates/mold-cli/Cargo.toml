@@ -71,6 +71,9 @@ walkdir = "2.5.0"
 [dev-dependencies]
 assert_cmd = "2"
 filetime = "0.2"
+# Mirrors the encoder version `mold-inference` writes stills with, so the
+# metadata round-trip test exercises the real chunk shapes.
+png = "0.18"
 predicates = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"

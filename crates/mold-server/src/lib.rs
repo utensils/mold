@@ -21,6 +21,7 @@ pub mod gpu_worker;
 pub mod instance;
 pub mod job_registry;
 pub mod logging;
+mod ltx2_admission;
 #[cfg(feature = "mdns")]
 pub mod mdns;
 mod memory_preflight;

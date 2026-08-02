@@ -69,6 +69,33 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
 
+  // A conditioned LTX-2 render may go out undescribed. The disabled Generate
+  // button and `generate()`'s silent early return are the two halves of one
+  // rule; if they ever disagree the enabled control becomes the text-only
+  // dead end the prepared-expansion invariant forbids. Both must read the
+  // shared predicate, and neither may keep a bare `!form.prompt.trim()`.
+  it("gates Generate on the shared prompt-requirement predicate in lockstep", () => {
+    expect(composerCardSource).toContain('from "@studio/lib/promptRequirement"');
+    expect(composerCardSource).toMatch(
+      /const promptMissing = computed\(\s*\(\) => promptRequired\(props\.form\) && !props\.form\.prompt\.trim\(\),?\s*\);/s,
+    );
+    expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="promptMissing ||');
+    expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
+
+    expect(viewSource).toContain('from "@studio/lib/promptRequirement"');
+    expect(viewSource).toMatch(
+      /const promptMissing = computed\(\(\) => promptRequired\(form\) && !form\.prompt\.trim\(\)\);/,
+    );
+    expect(viewSource).toMatch(
+      /async function generate\(\) \{\s*if \(\s*promptMissing\.value \|\|/s,
+    );
+  });
+
+  it("softens the blank-canvas guidance when the prompt is optional", () => {
+    expect(viewSource).toContain(':guidance="emptyCanvasGuidance"');
+    expect(viewSource).toContain("OPTIONAL_PROMPT_GUIDANCE");
+  });
+
   it("aspect-fits the settled sequence video inside the canvas instead of clipping it", () => {
     // The settled result must use the same pure-CSS containment as the
     // develop preview frame: a size-container region and a frame sized to
