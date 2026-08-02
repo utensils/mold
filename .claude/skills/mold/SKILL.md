@@ -274,7 +274,7 @@ mold run ltx-2-19b-distilled:fp8 "a canyon flyover" \
 # Camera-control preset
 mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
 
-# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2vid)
+# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid)
 mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
   --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
 ```
@@ -287,8 +287,8 @@ The five guidance flags (wire: an additive optional `guidance_overrides`
 object) each replace one per-(pipeline, stage) guider constant. Omitting a flag
 keeps its constant, so an unflagged request reproduces earlier outputs exactly.
 They are read only by pipelines that run the multimodal guider — `two-stage`,
-`two-stage-hq`, `keyframe`, `a2vid` — never enable a guider a pipeline
-deliberately disables (`a2vid` audio), and are ignored by chained/sequence
+`two-stage-hq`, `keyframe`, `a2-vid` — never enable a guider a pipeline
+deliberately disables (`a2-vid` audio), and are ignored by chained/sequence
 renders, which say so instead of pretending the flag landed. Non-LTX-2
 families and out-of-range values are rejected with HTTP 422.
 Web, desktop, and iPhone expose the same optional fields in their LTX-2

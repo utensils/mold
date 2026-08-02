@@ -170,7 +170,7 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "distilled",
   "ic-lora",
   "keyframe",
-  "a2vid",
+  "a2-vid",
   "retake",
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
@@ -818,7 +818,7 @@ function reset() {
               </div>
             </template>
 
-            <template v-if="form.pipeline === 'a2vid'">
+            <template v-if="form.pipeline === 'a2-vid'">
               <label class="ms-label ms-label--mt">Conditioning audio</label>
               <div v-if="form.audioFile" class="ms-file-row">
                 <span class="data-mono ms-file-row__name" :title="form.audioFile.filename">{{
@@ -837,7 +837,7 @@ function reset() {
                 data-test="ltx2-audio-file"
                 @change="setAudioFile"
               />
-              <p class="ms-hint">a2vid needs an audio track to drive the video.</p>
+              <p class="ms-hint">a2-vid needs an audio track to drive the video.</p>
             </template>
 
             <label class="ms-label ms-label--mt">Source video</label>

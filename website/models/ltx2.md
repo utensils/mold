@@ -260,13 +260,13 @@ below override one constant each for a single request. Anything you leave
 unset keeps the pipeline's own value, so an unflagged render is bit-for-bit
 what it was before these flags existed.
 
-| Flag                   | Default                                                 | What it does                                                                                                     |
-| ---------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `--stg-scale`          | `1.0` (two-stage, keyframe, a2vid) · `0` (two-stage HQ) | Strength of the perturbed-attention pass. Higher adds motion structure and detail; too high destabilizes motion. |
-| `--stg-blocks`         | `29` on LTX-2 19B · `28` on LTX-2.3 22B                 | Which transformer blocks the perturbed pass skips. Earlier blocks perturb harder. Comma-separated, up to 8.      |
-| `--rescale-scale`      | `0.7` (two-stage, keyframe, a2vid) · `0.45`/`1.0` (HQ)  | CFG-rescale between 0 and 1. Raise it when strong guidance washes out contrast.                                  |
-| `--modality-scale`     | `3.0`                                                   | Audio ↔ video cross-modality guidance. `1.0` turns the isolated-modality pass off.                               |
-| `--guidance-skip-step` | `0` (every step)                                        | With `n`, guidance is applied every `n + 1` steps and the conditional prediction is taken otherwise.             |
+| Flag                   | Default                                                  | What it does                                                                                                     |
+| ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--stg-scale`          | `1.0` (two-stage, keyframe, a2-vid) · `0` (two-stage HQ) | Strength of the perturbed-attention pass. Higher adds motion structure and detail; too high destabilizes motion. |
+| `--stg-blocks`         | `29` on LTX-2 19B · `28` on LTX-2.3 22B                  | Which transformer blocks the perturbed pass skips. Earlier blocks perturb harder. Comma-separated, up to 8.      |
+| `--rescale-scale`      | `0.7` (two-stage, keyframe, a2-vid) · `0.45`/`1.0` (HQ)  | CFG-rescale between 0 and 1. Raise it when strong guidance washes out contrast.                                  |
+| `--modality-scale`     | `3.0`                                                    | Audio ↔ video cross-modality guidance. `1.0` turns the isolated-modality pass off.                               |
+| `--guidance-skip-step` | `0` (every step)                                         | With `n`, guidance is applied every `n + 1` steps and the conditional prediction is taken otherwise.             |
 
 ```bash
 # Softer STG on an earlier block, with a stronger rescale
@@ -280,10 +280,10 @@ mold run ltx-2-19b-distilled:fp8 \
 Three limits are worth knowing before you reach for these:
 
 - **Only pipelines that run the multimodal guider read them.** That is
-  `two-stage`, `two-stage-hq`, `keyframe`, and `a2vid`. The `distilled`,
+  `two-stage`, `two-stage-hq`, `keyframe`, and `a2-vid`. The `distilled`,
   `one-stage`, `ic-lora`, and `retake` pipelines pin guidance to their own
   path and the overrides are inert there.
-- **They never switch a guider on.** `a2vid` runs audio positive-only by
+- **They never switch a guider on.** `a2-vid` runs audio positive-only by
   design; an override tunes the video guider and leaves the audio guider off
   rather than buying an extra transformer pass you did not ask for.
 - **Sequences ignore them.** Chain stages render through their own pipeline

@@ -143,7 +143,7 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
   "distilled",
   "ic-lora",
   "keyframe",
-  "a2vid",
+  "a2-vid",
   "retake",
 ];
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
@@ -668,7 +668,7 @@ function removeKeyframe(index: number) {
       </div>
       <p class="ltx2__hint">
         Empty keeps this checkpoint's pipeline defaults. Only two-stage,
-        two-stage HQ, keyframe, and a2vid renders use these.
+        two-stage HQ, keyframe, and a2-vid renders use these.
       </p>
       <div class="ltx2__pair">
         <label class="ltx2__sublabel">

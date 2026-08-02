@@ -897,7 +897,7 @@ pub fn validate_generate_request_with_family(
             return Err("ic_lora_control requires pipeline=ic-lora".to_string());
         }
         if req.source_video.is_none() && req.source_video_path.is_none() {
-            return Err("ic_lora_control requires source_video".to_string());
+            return Err("ic_lora_control requires source_video or source_video_path".to_string());
         }
         let user_loras = usize::from(req.lora.is_some()) + req.loras.as_ref().map_or(0, Vec::len);
         if user_loras + 1 > 4 {
@@ -921,7 +921,10 @@ pub fn validate_generate_request_with_family(
             && req.source_video.is_none()
             && req.source_video_path.is_none()
         {
-            return Err("retake_range requires source_video to also be provided".to_string());
+            return Err(
+                "retake_range requires source_video or source_video_path to also be provided"
+                    .to_string(),
+            );
         }
 
         if let Some(range) = &req.retake_range {
@@ -942,12 +945,15 @@ pub fn validate_generate_request_with_family(
             match pipeline {
                 Ltx2PipelineMode::A2Vid => {
                     if req.audio_file.is_none() && req.audio_file_path.is_none() {
-                        return Err("pipeline=a2vid requires audio_file".to_string());
+                        return Err(
+                            "pipeline=a2-vid requires audio_file or audio_file_path".to_string()
+                        );
                     }
                 }
                 Ltx2PipelineMode::Retake => {
                     if req.source_video.is_none() && req.source_video_path.is_none() {
-                        return Err("pipeline=retake requires source_video".to_string());
+                        return Err("pipeline=retake requires source_video or source_video_path"
+                            .to_string());
                     }
                     if req.retake_range.is_none() {
                         return Err("pipeline=retake requires retake_range".to_string());
@@ -961,7 +967,10 @@ pub fn validate_generate_request_with_family(
                 }
                 Ltx2PipelineMode::IcLora => {
                     if req.source_video.is_none() && req.source_video_path.is_none() {
-                        return Err("pipeline=ic-lora requires source_video".to_string());
+                        return Err(
+                            "pipeline=ic-lora requires source_video or source_video_path"
+                                .to_string(),
+                        );
                     }
                     if req.ic_lora_control.is_none()
                         && req.lora.is_none()
