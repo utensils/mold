@@ -551,6 +551,7 @@ pub async fn run(
     };
     if local {
         materialize_local_builtin_control(&mut req, &config).await?;
+        materialize_local_builtin_camera_controls(&mut req, &config).await?;
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -935,6 +936,82 @@ async fn materialize_local_builtin_control(
     Ok(())
 }
 
+/// Download any built-in `camera-control:<id>` adapter the request names.
+///
+/// The server does this in `materialize_builtin_ltx2_camera_controls` before
+/// planning. Forced-local had no counterpart, and
+/// `execution_plan::materialize_request` rewrites the alias to its manifest
+/// path during planning — so by the time the engine's `resolve_loras` runs,
+/// the `camera-control:` prefix is gone and its download never fires. The
+/// render then failed on a missing file. It only ever *looked* fine because
+/// the runtime refused the real path for any plan carrying a LoRA and quietly
+/// emitted placeholder frames instead.
+async fn materialize_local_builtin_camera_controls(
+    request: &mut GenerateRequest,
+    config: &Config,
+) -> Result<()> {
+    let aliases: Vec<String> = request
+        .loras
+        .iter()
+        .flatten()
+        .chain(request.lora.iter())
+        .filter_map(|lora| {
+            lora.path
+                .strip_prefix("camera-control:")
+                .map(str::to_string)
+        })
+        .collect();
+    if aliases.is_empty() {
+        return Ok(());
+    }
+
+    let model_config = config.resolved_model_config(&request.model);
+    mold_core::ltx2_camera::camera_profile_for_model(&request.model, &model_config)
+        .map_err(anyhow::Error::msg)?;
+
+    for alias in aliases {
+        let preset = mold_core::ltx2_camera::resolve_camera_control_preset(&alias)
+            .map_err(anyhow::Error::msg)?;
+        let manifest = mold_core::manifest::find_manifest(preset.download_model)
+            .expect("camera-control registry and hidden manifests must stay in sync");
+        let file = manifest
+            .files
+            .first()
+            .expect("camera-control manifests contain one adapter file");
+        let path = config
+            .resolved_models_dir()
+            .join(mold_core::manifest::storage_path(manifest, file));
+        if local_camera_control_artifact_is_complete(preset, &path) {
+            continue;
+        }
+        mold_core::download::pull_and_configure(
+            preset.download_model,
+            &mold_core::download::PullOptions::default(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to download camera-motion preset '{alias}': {error}")
+        })?;
+        if !local_camera_control_artifact_is_complete(preset, &path) {
+            anyhow::bail!(
+                "camera-motion preset '{alias}' download completed without a verified {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn local_camera_control_artifact_is_complete(
+    preset: &mold_core::ltx2_camera::Ltx2CameraControlPreset,
+    path: &std::path::Path,
+) -> bool {
+    mold_core::download::has_sha256_marker(path)
+        || path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == preset.size_bytes)
+}
+
 fn local_control_artifact_is_complete(
     adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
     path: &std::path::Path,
@@ -1040,6 +1117,7 @@ async fn generate_remote(
                     print_using_local_inference();
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
+                    materialize_local_builtin_camera_controls(&mut local_request, config).await?;
                     generate_local(
                         &local_request,
                         config,
@@ -1124,6 +1202,7 @@ async fn generate_remote_blocking(
                     print_using_local_inference();
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
+                    materialize_local_builtin_camera_controls(&mut local_request, config).await?;
                     generate_local(
                         &local_request,
                         config,

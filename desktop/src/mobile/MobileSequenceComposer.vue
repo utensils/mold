@@ -70,6 +70,7 @@ const props = withDefaults(
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
     upscalers?: ModelEntry[];
+    cameraUnsupportedReason?: string | null;
   }>(),
   {
     target: null,
@@ -80,6 +81,7 @@ const props = withDefaults(
     cameraControls: () => [],
     cameraControlsLoaded: false,
     upscalers: () => [],
+    cameraUnsupportedReason: null,
   },
 );
 
@@ -633,8 +635,10 @@ function sourceImageMime(filename: string): string {
         class="mobile-sequence-camera-note"
         data-test="mobile-sequence-camera-motion-19b-hint"
       >
-        Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA
-        path.
+        {{
+          cameraUnsupportedReason ??
+          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+        }}
       </p>
       <label
         v-if="chainLimits?.supports_audio"

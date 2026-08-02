@@ -389,7 +389,7 @@ impl Ltx2Engine {
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
             .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
-        let loras = lora::resolve_loras(&self.model_name, req)?;
+        let loras = lora::resolve_loras(&self.paths, req)?;
         let preset =
             preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
         let execution_graph =

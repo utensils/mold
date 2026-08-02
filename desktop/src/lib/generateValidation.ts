@@ -88,13 +88,32 @@ export function resolutionValidationError(width: number, height: number): string
     : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below 1.8 MP.`;
 }
 
-export function cameraControlValidationError(form: GenerateForm): string | null {
+/**
+ * `availablePresetIds` is what the selected host advertises for this
+ * checkpoint. Supply it wherever the fetched list is in scope; the submit gate
+ * has no list and omits it, letting the host's own 422 be the authority.
+ *
+ * This used to gate on `!form.model.includes("ltx-2.3")`, which is unsound in
+ * both directions — an opaque `cv:` / `hf:` ID for an LTX-2.3 checkpoint
+ * contains no architecture, so the check passed a preset that cannot resolve
+ * and rejected one on a 19B install reached the same way.
+ */
+export function cameraControlValidationError(
+  form: GenerateForm,
+  availablePresetIds?: readonly string[],
+): string | null {
   if (!generationCapabilitiesForFamily(form.family).supportsAdvancedVideo) return null;
   if (form.cameraControl === null) return null;
   const value = form.cameraControl.trim();
   if (!value) return "Choose a camera motion or enter a custom .safetensors path.";
   if (value.endsWith(".safetensors")) return null;
-  if (!form.model.includes("ltx-2.3") && isCameraMotionPreset(value)) return null;
+  if (availablePresetIds) {
+    if (availablePresetIds.includes(value)) return null;
+    return isCameraMotionPreset(value)
+      ? "This host has no camera-motion preset by that name for the selected model. Use a custom .safetensors path."
+      : "Custom camera motion must be a .safetensors path on the selected host.";
+  }
+  if (isCameraMotionPreset(value)) return null;
   return "Custom camera motion must be a .safetensors path on the selected host.";
 }
 

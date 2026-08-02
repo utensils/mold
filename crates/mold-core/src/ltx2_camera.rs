@@ -126,25 +126,31 @@ pub fn camera_profile_for_config(config: &ModelConfig) -> Result<Ltx2CameraProfi
     if config.family.as_deref() != Some("ltx2") {
         return Err("camera controls require an LTX-2 model".to_string());
     }
-    let architecture_paths = [
+    camera_profile_for_artifact_paths([
         config.transformer.as_deref(),
         config.vae.as_deref(),
         config.spatial_upscaler.as_deref(),
-    ];
-    if architecture_paths
-        .iter()
-        .flatten()
-        .any(|path| path.contains("ltx-2.3"))
-    {
+    ])
+}
+
+/// The architecture sniff behind `camera_profile_for_config`, over resolved
+/// artifact paths rather than a `ModelConfig`.
+///
+/// The engine holds `ModelPaths`, not a `ModelConfig`, and used to make this
+/// call with `model_name.contains("ltx-2.3")` — which is wrong in both
+/// directions for opaque `cv:` / `hf:` catalog IDs, whose names contain no
+/// architecture at all. Routing both callers through one function keeps the
+/// answer identical wherever it is asked.
+pub fn camera_profile_for_artifact_paths<'a>(
+    architecture_paths: impl IntoIterator<Item = Option<&'a str>>,
+) -> Result<Ltx2CameraProfile, String> {
+    let architecture_paths: Vec<&str> = architecture_paths.into_iter().flatten().collect();
+    if architecture_paths.iter().any(|path| path.contains("ltx-2.3")) {
         return Err(
             "camera-control presets are currently published for LTX-2 19B only".to_string(),
         );
     }
-    if architecture_paths
-        .iter()
-        .flatten()
-        .any(|path| path.contains("ltx-2"))
-    {
+    if architecture_paths.iter().any(|path| path.contains("ltx-2")) {
         return Ok(Ltx2CameraProfile::Ltx2_19b);
     }
     Err("the installed checkpoint architecture is unknown; select an LTX-2 19B profile".to_string())
@@ -184,11 +190,91 @@ pub struct Ltx2CameraControlInfo {
     pub download_sha256: String,
 }
 
+/// The detailed form of `/api/capabilities/ltx2-camera-controls`, returned
+/// only for `?detail=1`.
+///
+/// The bare-array form cannot distinguish "this checkpoint has no published
+/// presets" from "the request failed", so every client hard-coded its own
+/// guess at the server's policy — and guessed wrong for the
+/// unknown-architecture case, which used to 422 into a silent empty picker.
+/// This carries the server's own reason instead. It is opt-in so the array
+/// response older clients parse stays byte-identical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Ltx2CameraControlAvailability {
+    pub controls: Vec<Ltx2CameraControlInfo>,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// `studio/lib/cameraMotion.ts` mirrors this registry so a clip's camera
+    /// choice can be recovered from a chain script or a saved print with no
+    /// server in the loop. That matching falls back to the human label, so a
+    /// drifted label silently stops restoring the user's choice.
+    #[test]
+    fn camera_motion_ts_mirror_matches_the_rust_registry() {
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{workspace}/studio/lib/cameraMotion.ts");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let list = source
+            .split_once("export const CAMERA_MOTION_PRESETS = [")
+            .expect("cameraMotion.ts must declare CAMERA_MOTION_PRESETS")
+            .1
+            .split_once("] as const;")
+            .expect("CAMERA_MOTION_PRESETS must end in `] as const;`")
+            .0;
+
+        for preset in LTX2_CAMERA_CONTROLS {
+            let entry = format!("{{ id: \"{}\", label: \"{}\" }}", preset.id, preset.label);
+            assert!(
+                list.contains(&entry),
+                "studio/lib/cameraMotion.ts is missing `{entry}`"
+            );
+        }
+        assert_eq!(
+            list.matches("{ id:").count(),
+            LTX2_CAMERA_CONTROLS.len(),
+            "studio/lib/cameraMotion.ts declares a different number of presets than the registry"
+        );
+    }
+
+    /// Compatibility comes from the resolved artifacts, never the model name.
+    /// An opaque catalog ID carries no architecture, so a name-substring test
+    /// both admitted LTX-2.3 and rejected a 19B install reached that way.
+    #[test]
+    fn camera_profile_reads_artifact_paths_not_the_model_name() {
+        assert!(
+            camera_profile_for_artifact_paths([Some(
+                "/models/cv-2752735/ltx-2.3-22b-distilled.safetensors"
+            )])
+            .unwrap_err()
+            .contains("LTX-2 19B only"),
+            "an opaque catalog ID pointing at LTX-2.3 artifacts must be rejected"
+        );
+        assert_eq!(
+            camera_profile_for_artifact_paths([Some(
+                "/models/cv-3063794/ltx-2-19b-distilled-fp8.safetensors"
+            )])
+            .unwrap(),
+            Ltx2CameraProfile::Ltx2_19b,
+            "an opaque catalog ID pointing at 19B artifacts must be accepted"
+        );
+        assert!(
+            camera_profile_for_artifact_paths([Some("/models/mystery/weights.safetensors")])
+                .unwrap_err()
+                .contains("unknown")
+        );
+    }
 
     #[test]
     fn registry_has_unique_normalized_ids_and_download_models() {

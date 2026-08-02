@@ -55,6 +55,7 @@ const props = withDefaults(
     controlAdapters?: Ltx2ControlAdapterInfo[];
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
+    cameraUnsupportedReason?: string | null;
   }>(),
   {
     selectedModel: null,
@@ -63,6 +64,7 @@ const props = withDefaults(
     controlAdapters: () => [],
     cameraControls: () => [],
     cameraControlsLoaded: false,
+    cameraUnsupportedReason: null,
   },
 );
 const MAX_BATCH_SIZE = 10_000;
@@ -114,7 +116,12 @@ const chainCompatibilityError = computed(() => {
 
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
 const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
-const cameraError = computed(() => cameraControlValidationError(props.form));
+const cameraError = computed(() =>
+  cameraControlValidationError(
+    props.form,
+    props.cameraControlsLoaded ? props.cameraControls.map((c) => c.id) : undefined,
+  ),
+);
 const mediaReadError = ref("");
 
 const valid = computed(
@@ -689,8 +696,10 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         class="mobile-generate-note"
         data-test="mobile-camera-motion-19b-hint"
       >
-        Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA
-        path.
+        {{
+          cameraUnsupportedReason ??
+          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+        }}
       </p>
       <p
         v-if="cameraError"

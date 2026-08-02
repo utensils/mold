@@ -27,6 +27,7 @@ import { blobToBase64 } from "../../../lib/base64";
 import {
   cameraMotionMode,
   isCameraMotionPreset,
+  parseCameraControlAvailability,
 } from "@studio/lib/cameraMotion";
 import {
   DEFAULT_EXTEND_OVERLAP_FRAMES,
@@ -60,6 +61,7 @@ const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
+const cameraUnsupportedReason = ref<string | null>(null);
 let controlEpoch = 0;
 watch(
   () => props.modelValue.model,
@@ -67,6 +69,7 @@ watch(
     const epoch = ++controlEpoch;
     controlAdapters.value = [];
     cameraControls.value = [];
+    cameraUnsupportedReason.value = null;
     cameraControlsLoaded.value = false;
     if (!model) return;
     const read = async <T,>(path: string): Promise<T> => {
@@ -94,12 +97,15 @@ watch(
         controlAdapters.value = [];
         patch({ icLoraControl: null });
       });
-    const camerasRequest = read<Ltx2CameraControlInfo[]>(
-      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(model)}`,
+    const camerasRequest = read<unknown>(
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(model)}&detail=1`,
     )
-      .then((cameras) => {
+      .then((body) => {
         if (epoch !== controlEpoch) return;
+        const availability = parseCameraControlAvailability(body);
+        const cameras = availability.controls;
         cameraControls.value = cameras;
+        cameraUnsupportedReason.value = availability.unsupportedReason;
         cameraControlsLoaded.value = true;
         if (
           props.modelValue.cameraControl &&
@@ -114,6 +120,7 @@ watch(
       .catch(() => {
         if (epoch !== controlEpoch) return;
         cameraControls.value = [];
+        cameraUnsupportedReason.value = null;
         cameraControlsLoaded.value = false;
       });
     await Promise.allSettled([controlsRequest, camerasRequest]);
@@ -452,8 +459,10 @@ function removeKeyframe(index: number) {
         class="ltx2__hint"
         data-test="ltx2-camera-motion-19b-hint"
       >
-        Built-in camera motions are available for LTX-2 19B only. This model
-        accepts a custom LoRA path.
+        {{
+          cameraUnsupportedReason ??
+          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+        }}
       </p>
     </div>
 

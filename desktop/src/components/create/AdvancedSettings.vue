@@ -65,6 +65,7 @@ const props = withDefaults(
     controlAdapters?: Ltx2ControlAdapterInfo[];
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
+    cameraUnsupportedReason?: string | null;
   }>(),
   {
     selectedModel: null,
@@ -72,6 +73,7 @@ const props = withDefaults(
     controlAdapters: () => [],
     cameraControls: () => [],
     cameraControlsLoaded: false,
+    cameraUnsupportedReason: null,
   },
 );
 
@@ -139,7 +141,12 @@ const chainCompatibilityError = computed(() => {
 const fpsError = computed(() =>
   caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
 );
-const cameraError = computed(() => cameraControlValidationError(props.form));
+const cameraError = computed(() =>
+  cameraControlValidationError(
+    props.form,
+    props.cameraControlsLoaded ? props.cameraControls.map((c) => c.id) : undefined,
+  ),
+);
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
 const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
 
@@ -560,8 +567,10 @@ function reset() {
             data-test="camera-motion-19b-hint"
             class="ms-hint"
           >
-            Built-in camera motions are available for LTX-2 19B only. Use a custom LoRA path for
-            this model.
+            {{
+          cameraUnsupportedReason ??
+          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+        }}
           </p>
           <p v-if="cameraError" data-test="camera-motion-error" class="ms-error" role="alert">
             {{ cameraError }}
