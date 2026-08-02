@@ -76,13 +76,14 @@ export function newSequenceClip(frames: number): SequenceClipForm {
   };
 }
 
-function stageForWire(
+function serializeStage(
   clip: SequenceClipForm,
   idx: number,
   openingImage: SequenceClipSourceImage | null,
-): ChainStageWire {
+  sourceField: "source_image" | "source_image_b64",
+): ChainStageWire & ChainScript["stages"][number] {
   const transition: SequenceTransition = idx === 0 ? "smooth" : clip.transition;
-  const stage: ChainStageWire = {
+  const stage: ChainStageWire & ChainScript["stages"][number] = {
     prompt: clip.prompt,
     frames: clip.frames,
     transition,
@@ -101,7 +102,7 @@ function stageForWire(
     ];
   }
   const sourceImage = idx === 0 ? openingImage : clip.sourceImage;
-  if (sourceImage?.base64) stage.source_image = sourceImage.base64;
+  if (sourceImage?.base64) stage[sourceField] = sourceImage.base64;
   return stage;
 }
 
@@ -131,7 +132,7 @@ export function buildChainRequest(
   const req: ChainRequestWire = {
     model: shared.model,
     stages: clips.map((clip, idx) =>
-      stageForWire(clip, idx, opts.openingImage ?? null),
+      serializeStage(clip, idx, opts.openingImage ?? null, "source_image"),
     ),
     motion_tail_frames: opts.motionTailFrames,
     width: shared.width,
@@ -232,32 +233,9 @@ export function clipsToChainScript(
       guidance: shared.guidance,
       enable_audio: opts.enableAudio ? true : null,
     },
-    stages: clips.map((clip, idx) => {
-      const stage: ChainScript["stages"][number] = {
-        prompt: clip.prompt,
-        frames: clip.frames,
-        transition: idx === 0 ? "smooth" : clip.transition,
-      };
-      if (idx > 0 && clip.transition === "fade")
-        stage.fade_frames = clip.fadeFrames;
-      if (clip.negativePrompt.trim())
-        stage.negative_prompt = clip.negativePrompt;
-      const cameraControl = clip.cameraControl?.trim();
-      if (cameraControl) {
-        const preset = isCameraMotionPreset(cameraControl);
-        stage.loras = [
-          {
-            path: preset ? `camera-control:${cameraControl}` : cameraControl,
-            scale: 1,
-            name: preset ? cameraMotionLabel(cameraControl) : "Camera motion",
-          },
-        ];
-      }
-      const sourceImage =
-        idx === 0 ? (opts.openingImage ?? null) : clip.sourceImage;
-      if (sourceImage?.base64) stage.source_image_b64 = sourceImage.base64;
-      return stage;
-    }),
+    stages: clips.map((clip, idx) =>
+      serializeStage(clip, idx, opts.openingImage ?? null, "source_image_b64"),
+    ),
   };
 }
 

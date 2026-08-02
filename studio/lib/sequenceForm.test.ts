@@ -140,6 +140,34 @@ describe("buildChainRequest", () => {
 });
 
 describe("script round-trip", () => {
+  it("keeps request and script stage projections equivalent", () => {
+    const clips = [
+      clip({ negativePrompt: "no rain", cameraControl: "dolly-in" }),
+      clip({
+        prompt: "landing",
+        transition: "fade",
+        fadeFrames: 12,
+        cameraControl: "/models/camera/custom.safetensors",
+        sourceImage: { filename: "landing.png", base64: "REVG" },
+      }),
+    ];
+    const options = {
+      motionTailFrames: 17,
+      enableAudio: true,
+      openingImage: { filename: "opening.png", base64: "QUJD" },
+    };
+
+    const requestStages = buildChainRequest(shared(), clips, options).stages;
+    const scriptStages = clipsToChainScript(shared(), clips, options).stages;
+
+    expect(scriptStages).toEqual(
+      requestStages.map(({ source_image, ...stage }) => ({
+        ...stage,
+        ...(source_image ? { source_image_b64: source_image } : {}),
+      })),
+    );
+  });
+
   it("converts a job's effective script into editable clips and back", () => {
     const script: ChainScript = {
       schema: "mold.chain.v1",
