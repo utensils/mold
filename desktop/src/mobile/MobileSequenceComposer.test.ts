@@ -1,6 +1,6 @@
 import { mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SeamPill from "@ui/components/SeamPill.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -9,6 +9,13 @@ import type { ModelEntry } from "../lib/api/types";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
+import { validateChain } from "@studio/api/chains";
+
+vi.mock("@studio/api/chains", () => ({
+  validateChain: vi.fn(),
+}));
+
+const validateChainMock = vi.mocked(validateChain);
 
 installMemoryLocalStorage();
 
@@ -54,6 +61,18 @@ const limits: ChainLimits = {
   supports_sequence: true,
 };
 
+const shared = {
+  model: ltx2.name,
+  family: ltx2.family,
+  width: 768,
+  height: 512,
+  fps: 24,
+  steps: 8,
+  guidance: 3,
+  strength: 1,
+  seed: "",
+};
+
 let wrapper: VueWrapper | null = null;
 
 function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
@@ -62,6 +81,7 @@ function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
       selectedModel: ltx2,
       chainLimits: limits,
       target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+      shared,
       fps: 24,
       submitting: false,
       error: "",
@@ -78,6 +98,7 @@ function clipCards() {
 }
 
 beforeEach(() => {
+  validateChainMock.mockReset();
   localStorage.clear();
   setActivePinia(createPinia());
   const draft = useSequenceDraftStore();
@@ -254,6 +275,110 @@ describe("MobileSequenceComposer seam sheet", () => {
 });
 
 describe("MobileSequenceComposer guardrails", () => {
+  it("discards an in-flight plan when same-named opening-image bytes change", async () => {
+    let resolveValidation!: (value: Awaited<ReturnType<typeof validateChain>>) => void;
+    validateChainMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveValidation = resolve;
+      }),
+    );
+    const draft = useSequenceDraftStore();
+    draft.clips[0]!.prompt = "a paper boat";
+    draft.clips[1]!.prompt = "fireflies gather";
+    draft.openingImage = { filename: "opening.png", base64: "AAAA" };
+    mountComposer();
+
+    await wrapper!.get("[data-test='mobile-sequence-validate']").trigger("click");
+    draft.openingImage = { filename: "opening.png", base64: "BBBB" };
+    await wrapper!.vm.$nextTick();
+    resolveValidation({
+      model: ltx2.name,
+      width: 768,
+      height: 512,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 2,
+      estimated_total_frames: 177,
+      estimated_duration_ms: 7_375,
+      stages: [],
+      warnings: [],
+      vram_estimate: null,
+    });
+    await wrapper!.vm.$nextTick();
+    expect(wrapper!.find("[data-test='mobile-sequence-validation-plan']").exists()).toBe(false);
+  });
+
+  it("validates on the selected host and clears the rendered plan after edits", async () => {
+    validateChainMock.mockResolvedValue({
+      model: ltx2.name,
+      width: 768,
+      height: 512,
+      fps: 24,
+      motion_tail_frames: 17,
+      stage_count: 2,
+      estimated_total_frames: 177,
+      estimated_duration_ms: 7_375,
+      stages: [
+        {
+          prompt: "a paper boat",
+          frames: 97,
+          output_frames: 97,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: true,
+          has_negative_prompt: false,
+        },
+        {
+          prompt: "fireflies gather",
+          frames: 97,
+          output_frames: 80,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: true,
+          has_negative_prompt: false,
+        },
+      ],
+      warnings: [],
+      vram_estimate: null,
+    });
+    const draft = useSequenceDraftStore();
+    draft.clips[0]!.prompt = "a paper boat";
+    draft.clips[1]!.prompt = "fireflies gather";
+    const target = { baseUrl: "http://studio:7680", apiKey: "secret" };
+    mountComposer({ target });
+
+    await wrapper!.get("[data-test='mobile-sequence-validate']").trigger("click");
+    await wrapper!.vm.$nextTick();
+
+    expect(validateChainMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: ltx2.name,
+        width: 768,
+        height: 512,
+        stages: [
+          expect.objectContaining({ prompt: "a paper boat" }),
+          expect.objectContaining({ prompt: "fireflies gather" }),
+        ],
+      }),
+      target,
+    );
+    expect(wrapper!.get("[data-test='mobile-sequence-validation-plan']").text()).toContain(
+      "Validated · 2 clips · 177f · 7.4s",
+    );
+    const planText = wrapper!
+      .get("[data-test='mobile-sequence-validation-plan']")
+      .text()
+      .replace(/\s+/g, " ");
+    expect(planText).toContain("Clip 1 · 97f in / 97f out · Smooth · Opening image");
+    expect(planText).toContain("Clip 2 · 97f in / 80f out · Smooth · Source image");
+    expect(wrapper!.emitted("submit")).toBeUndefined();
+
+    await wrapper!
+      .findAll("[data-test='mobile-sequence-clip'] textarea")[0]!
+      .setValue("edited opening");
+    expect(wrapper!.find("[data-test='mobile-sequence-validation-plan']").exists()).toBe(false);
+  });
+
   it("blocks Generate until every clip is described", async () => {
     const draft = useSequenceDraftStore();
     mountComposer();
@@ -319,6 +444,7 @@ describe("MobileSequenceComposer guardrails", () => {
         selectedModel: ltx2,
         chainLimits: limits,
         target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+        shared,
         fps: 24,
         submitting: false,
         error: "",

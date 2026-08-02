@@ -217,6 +217,13 @@ form fields One shot uses, lent to the bench through its Sequence settings
 disclosure and read live at submit time — there are no private copies to
 drift.
 
+**Validate plan** sends that live draft to the selected Keychain-authenticated
+host's read-only `/api/generate/chain/validate` endpoint. The result names each
+clip's normalized input/output frames, transition, conditioning inputs,
+warnings, and VRAM estimate when available. It never creates a durable job or
+starts downloads/inference, and any draft, shared-setting, model, or host edit
+clears the result and fences an in-flight response.
+
 Durable sequences stream over `/api/chain-jobs/:id/events` (SSE) with a 5s
 snapshot-poll fallback when the stream fails and a forced re-sync when iOS
 wakes the webview, and they appear in the SAME queue list as single prints:

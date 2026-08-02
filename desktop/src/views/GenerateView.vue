@@ -765,6 +765,13 @@ const sequenceCapableModels = computed(() =>
 const selectedSequenceEntry = computed(() =>
   findInstalledModel(sequenceCapableModels.value, form.model),
 );
+const sequenceTarget = computed(() => {
+  const entry = selectedSequenceEntry.value;
+  if (!entry) return null;
+  return draft.editing
+    ? (hosts.resolveRoute(draft.editing.hostId, entry.name)?.target ?? null)
+    : (routeForModel(entry)?.target ?? null);
+});
 const sequenceInventorySettled = computed(() => {
   const target = sequenceTargetHostId.value;
   if (target && target !== "capable") {
@@ -3043,6 +3050,7 @@ onBeforeUnmount(() => {
             :chain-level-dirty="chainLevelDirty"
             :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
             :playing-clip-id="playingSequenceClipId"
+            :target="sequenceTarget"
             @submit="generateSequence"
             @duplicate="duplicateSequenceAsNew"
             @play-clip="playSequenceClip"

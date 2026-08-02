@@ -191,7 +191,8 @@ with prompt, model, seed, and generation metadata.
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
   re-renders only the changed clips, explicit remote-machine routing, and a
-  web dry run that shows the server-normalized plan before anything is queued
+  web/desktop/iPhone preflight that shows the server-normalized plan before
+  anything is queued
 - Quantized model variants, encoder fallback, smart VRAM placement, and FLUX
   block offloading
 - Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated
