@@ -50,6 +50,10 @@ const displayHost = computed(() => {
   return hosts.all.find((h) => h.id === id) ?? hosts.primaryHost;
 });
 const displayingRemote = computed(() => !!displayHost.value && !displayHost.value.primary);
+const displayConnectionStatus = computed<"idle" | "connecting" | "ready" | "error">(() => {
+  if (displayingRemote.value) return displayHost.value!.status;
+  return conn.status === "starting" ? "connecting" : conn.status;
+});
 const anyJobRunning = computed(() =>
   generation.jobs.some((j) => j.status !== "complete" && j.status !== "error"),
 );
@@ -116,9 +120,17 @@ function gpuTone(used: number, total: number) {
 }
 
 const engineChip = computed(() => {
+  if (displayingRemote.value) {
+    const suffix =
+      displayConnectionStatus.value === "error"
+        ? " · offline"
+        : displayConnectionStatus.value === "connecting"
+          ? " · connecting"
+          : "";
+    return `⇄ ${displayHost.value!.label}${suffix}`;
+  }
   if (conn.status === "starting") return "⌁ starting…";
   if (conn.status === "error") return "⌁ engine error";
-  if (displayingRemote.value) return `⇄ ${displayHost.value!.label}`;
   switch (conn.mode) {
     case "local":
       return "⌁ local";
@@ -131,10 +143,31 @@ const engineChip = computed(() => {
 
 /** Trigger dot color mirrors the engine/host status. */
 const dotClass = computed(() => {
-  if (conn.status === "error") return "bg-stop";
-  if (conn.status === "starting") return "bg-halide animate-pulse";
+  if (displayConnectionStatus.value === "error") return "bg-stop";
+  if (displayConnectionStatus.value === "connecting") return "bg-halide animate-pulse";
   if (displayingRemote.value) return "bg-halide";
   return conn.ready ? "bg-success" : "bg-ink-3";
+});
+
+const unavailableTelemetryLabel = computed(() => {
+  if (displayConnectionStatus.value === "error") {
+    return displayingRemote.value ? "Machine is offline" : "Engine error";
+  }
+  if (displayConnectionStatus.value === "connecting") {
+    return displayingRemote.value ? "Connecting to machine…" : "Starting engine…";
+  }
+  if (displayConnectionStatus.value === "idle") return "Engine is off";
+  return "No GPU telemetry";
+});
+
+const triggerStatusLabel = computed(() => {
+  if (displayConnectionStatus.value === "error")
+    return displayingRemote.value ? "offline" : "error";
+  if (displayConnectionStatus.value === "connecting") {
+    return displayingRemote.value ? "connecting" : "starting";
+  }
+  if (displayConnectionStatus.value === "idle") return "off";
+  return "ready";
 });
 
 /** Queue + loaded models for whichever host the status is displaying. */
@@ -183,6 +216,7 @@ function startResourceStream() {
   resourceAbort = new AbortController();
   snapshot.value = null;
   const host = displayHost.value;
+  if (displayingRemote.value && host?.status !== "ready") return;
   void sseStream("/api/resources/stream", {
     signal: resourceAbort.signal,
     ...(displayingRemote.value && host?.baseUrl
@@ -223,7 +257,7 @@ watch(
 // Only the resources stream follows the display host; the status poll stays
 // on the primary (recovery invariant).
 watch(
-  () => displayHost.value?.id,
+  () => `${displayHost.value?.id ?? "none"}:${displayConnectionStatus.value}`,
   () => {
     if (conn.ready) startResourceStream();
   },
@@ -264,9 +298,9 @@ onUnmounted(() => {
         <span
           class="data-mono"
           :class="
-            conn.status === 'error'
+            displayConnectionStatus === 'error'
               ? 'text-stop'
-              : displayingRemote
+              : displayingRemote || displayConnectionStatus === 'connecting'
                 ? 'text-halide'
                 : conn.ready
                   ? 'text-ink-2'
@@ -324,7 +358,7 @@ onUnmounted(() => {
           </div>
         </div>
       </template>
-      <p v-else class="text-caption text-ink-3">no gpu telemetry</p>
+      <p v-else class="text-caption text-ink-3">{{ unavailableTelemetryLabel }}</p>
 
       <div v-if="snapshot" class="mt-2 flex items-center justify-between">
         <span class="edge-code">ram</span>
@@ -360,9 +394,11 @@ onUnmounted(() => {
         <span v-if="gpus.length" class="min-w-0 flex-1">
           <ProgressBar :value="vramPct" :tone="vramTone" :height="4" label="VRAM in use" />
         </span>
-        <span v-else class="flex-1 text-left text-caption text-ink-3">status</span>
+        <span v-else class="flex-1 text-left text-caption text-ink-3">{{
+          triggerStatusLabel
+        }}</span>
         <span class="shrink-0 font-utility text-[9.5px] text-ink-3">
-          {{ displayStatus.queueDepth ?? 0 }}
+          {{ displayStatus.queueDepth ?? "—" }}
         </span>
       </template>
     </button>
