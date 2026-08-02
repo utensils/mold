@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **LTX-2 19B camera controls now download and run through real distilled inference.** The hidden single-file camera adapters no longer enter checkpoint configuration and fail after their verified bytes land. Distilled image-to-video requests with a LoRA stay on the native LTX-2 path and load the ordered adapter stack in both denoising stages, matching upstream, instead of silently producing the synthetic rainbow fallback while preserving only the opening source frame.
+
 ### Added
 
 - **The TUI can now control LTX-2 synchronized audio.** Create → Advanced → Video adds a checkpoint-aware Audio row that cycles `default` / `on` / `off`, preserving the server-owned pipeline default until the user makes an explicit choice. Enabling audio selects MP4, the only supported audio container; checkpoints that advertise missing audio assets omit the row, and the explicit choice now reaches both the generation request and saved output metadata. This is the first bounded part of the broader TUI advanced-video work tracked in [#600](https://github.com/utensils/mold/issues/600).
