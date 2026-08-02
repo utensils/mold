@@ -150,15 +150,22 @@ const dotClass = computed(() => {
 });
 
 const unavailableTelemetryLabel = computed(() => {
-  if (displayConnectionStatus.value === "error") return "Machine is offline";
-  if (displayConnectionStatus.value === "connecting") return "Connecting to machine…";
+  if (displayConnectionStatus.value === "error") {
+    return displayingRemote.value ? "Machine is offline" : "Engine error";
+  }
+  if (displayConnectionStatus.value === "connecting") {
+    return displayingRemote.value ? "Connecting to machine…" : "Starting engine…";
+  }
   if (displayConnectionStatus.value === "idle") return "Engine is off";
   return "No GPU telemetry";
 });
 
 const triggerStatusLabel = computed(() => {
-  if (displayConnectionStatus.value === "error") return "offline";
-  if (displayConnectionStatus.value === "connecting") return "connecting";
+  if (displayConnectionStatus.value === "error")
+    return displayingRemote.value ? "offline" : "error";
+  if (displayConnectionStatus.value === "connecting") {
+    return displayingRemote.value ? "connecting" : "starting";
+  }
   if (displayConnectionStatus.value === "idle") return "off";
   return "ready";
 });

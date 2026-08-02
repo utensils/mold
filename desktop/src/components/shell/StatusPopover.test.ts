@@ -127,6 +127,19 @@ describe("StatusPopover host-aware display", () => {
     expect(streamCalls.at(-1)?.target ?? null).toBeNull();
   });
 
+  it("describes a local engine failure as an engine lifecycle state", async () => {
+    const wrapper = mountPopover();
+    useConnectionStore().status = "error";
+
+    await flushPromises();
+    await openPopover(wrapper);
+
+    expect(wrapper.get("[role='dialog']").text()).toContain("engine error");
+    expect(wrapper.get("[role='dialog']").text()).toContain("Engine error");
+    expect(wrapper.get("[role='dialog']").text()).not.toContain("Machine is offline");
+    expect(wrapper.get("[data-test='status-trigger']").text()).toContain("error");
+  });
+
   it("keeps showing a concrete Create host selection while another host has a live job", async () => {
     const wrapper = mountPopover();
     addRemoteHost();
