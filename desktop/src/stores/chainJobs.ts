@@ -112,8 +112,8 @@ export const useChainJobsStore = defineStore("chainJobs", {
         this.pollTimer = null;
       }
     },
-    async create(hostId: string, req: ChainRequestWire): Promise<string> {
-      const target = this.targetFor(hostId);
+    async create(hostId: string, req: ChainRequestWire, frozenTarget?: ApiTarget): Promise<string> {
+      const target = frozenTarget ?? this.targetFor(hostId);
       const res = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", jsonInit(req));
       await this.fetchHost(hostId);
       this.watch(hostId, res.job_id);
@@ -202,8 +202,13 @@ export const useChainJobsStore = defineStore("chainJobs", {
       this.watch(hostId, jobId);
     },
     /** Edit a durable job in place: the server re-renders only dirty stages. */
-    async amend(hostId: string, jobId: string, req: AmendRequest): Promise<AmendResponse> {
-      const target = this.targetFor(hostId);
+    async amend(
+      hostId: string,
+      jobId: string,
+      req: AmendRequest,
+      frozenTarget?: ApiTarget,
+    ): Promise<AmendResponse> {
+      const target = frozenTarget ?? this.targetFor(hostId);
       const outcome = await apiJsonTo<AmendResponse>(
         target,
         `/api/chain-jobs/${encodeURIComponent(jobId)}/amend`,

@@ -338,8 +338,9 @@ async function amend(
   hostId: string,
   jobId: string,
   req: AmendRequest,
+  frozenTarget?: StreamTarget,
 ): Promise<AmendResponse> {
-  const target = targetFor(hostId) ?? undefined;
+  const target = frozenTarget ?? targetFor(hostId) ?? undefined;
   const response = await amendChainJob(jobId, req, target);
   track(hostId, jobId);
   void fetchHost(hostId);
@@ -430,6 +431,7 @@ export interface UseChainJobs {
     hostId: string,
     jobId: string,
     req: AmendRequest,
+    frozenTarget?: StreamTarget,
   ) => Promise<AmendResponse>;
   clearInactive: () => Promise<{ cleared: number; failed: number }>;
   gc: () => Promise<{

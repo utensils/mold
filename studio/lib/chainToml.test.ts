@@ -72,6 +72,7 @@ describe("serializeChainScript", () => {
     const toml = serializeChainScript(s);
     expect(toml).toContain("strength = 0.75");
     expect(toml).toContain('output_format = "webm"');
+    expect(parseChainScript(toml).chain.strength).toBe(0.75);
   });
 
   it("emits the seed as a bare TOML integer, u64-precise", () => {

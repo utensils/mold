@@ -48,6 +48,7 @@ describe("normalizeServerChainScript", () => {
       fps: 24,
       steps: 8,
       guidance: 3,
+      strength: 1,
       motion_tail_frames: 0,
       seed: "42",
     });
@@ -117,12 +118,12 @@ describe("normalizeServerChainScript", () => {
     expect(off?.chain.enable_audio).toBeUndefined();
   });
 
-  it("drops unknown chain fields and unrecognized transitions", () => {
+  it("keeps supported source strength while dropping unknown chain fields", () => {
     const script = normalizeServerChainScript({
       chain: { model: "m", strength: 1, output_format: "mp4", nonsense: "x" },
       stage: [{ prompt: "a", transition: "sparkle" }],
     });
-    expect(script?.chain).toEqual({ model: "m" });
+    expect(script?.chain).toEqual({ model: "m", strength: 1 });
     expect(script?.stages[0]?.transition).toBeUndefined();
   });
 

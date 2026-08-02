@@ -878,6 +878,8 @@ function selectCurrentMobileSequence(): void {
     if (shared.fps != null) form.fps = shared.fps;
     if (shared.steps != null) form.steps = shared.steps;
     if (shared.guidance != null) form.guidance = shared.guidance;
+    if (shared.strength != null) form.strength = shared.strength;
+    form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
     form.seed = shared.seed ?? "";
     draft.stopEditing();
     draft.output = "sequence";
@@ -1507,15 +1509,45 @@ async function submitMobileSequence(): Promise<void> {
     target,
     instanceId: host.instanceId ?? null,
   };
+  // Freeze all request-affecting values at the tap boundary. Source fitting
+  // and placement preview are asynchronous; edits during either await belong
+  // to the next submission.
+  const requestForm = cloneGenerateForm(form);
+  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
+  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  const enableAudio = draft.enableAudio;
+  const motionTailFrames = sequenceMotionTail.value;
   sequenceStarting.value = true;
   sequenceError.value = "";
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
     if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
-    const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
-      motionTailFrames: sequenceMotionTail.value,
-      enableAudio: draft.enableAudio,
-      openingImage: draft.openingImage,
+    requestForm.sourceImage = openingSnapshot?.base64 ?? null;
+    requestForm.maskImage = null;
+    if (requestForm.sourceImage) {
+      const result = await applySourceFitPreprocess(
+        {
+          source: requestForm.sourceImage,
+          mask: null,
+          policy: coerceSourceFitForMaskless(requestForm.sourceFit),
+          target: { width: requestForm.width, height: requestForm.height },
+        },
+        {
+          ops: domCanvasOps,
+          cache: sourceFitCache,
+          upscale: (image, model) => upscaleImage({ image, model, target }),
+          onStatus: setGenerationStatus,
+        },
+      );
+      requestForm.sourceImage = result.source;
+    }
+    const openingImage = openingSnapshot
+      ? { ...openingSnapshot, base64: requestForm.sourceImage }
+      : null;
+    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
+      motionTailFrames,
+      enableAudio,
+      openingImage,
     });
     let preview: GenerationPlacementPreview | null = null;
     let legacyUnsupported = false;
@@ -1543,7 +1575,7 @@ async function submitMobileSequence(): Promise<void> {
     persistSequenceRecovery(host, response.job_id);
     watchSequenceJob(host.id, target, response.job_id, {
       model: entry.name,
-      stageCount: draft.clips.length,
+      stageCount: clips.length,
     });
   } catch (error) {
     sequenceError.value = describeTransportError(error, host.name);
@@ -3539,6 +3571,8 @@ onBeforeUnmount(() => {
             <MobileSequenceComposer
               v-else
               :selected-model="selectedGenerationModel"
+              :form="form"
+              :upscalers="upscalers"
               :chain-limits="chainLimits"
               :target="selectedTarget"
               :shared="sequenceParams(form, selectedGenerationModel)"

@@ -97,6 +97,35 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(wrapper.find("[data-test='section-video']").exists()).toBe(false);
   });
 
+  it("exposes strength and maskless fit controls for an opening image", async () => {
+    const wrapper = factory(
+      "ltx2",
+      { strength: 0.8, sourceFitPolicy: { mode: "crop-fill" } },
+      { output: "sequence" },
+    );
+    useSequenceDraftStore().openingImage = {
+      filename: "opening.png",
+      base64: "QUJD",
+    };
+    await wrapper.vm.$nextTick();
+
+    expect(
+      wrapper.get("[data-test='sequence-source-strength']").text(),
+    ).toContain("0.80");
+    const fit = wrapper.get("[data-test='sequence-source-fit']");
+    expect((fit.element as HTMLSelectElement).value).toBe("crop-fill");
+    expect(fit.findAll("option").map((option) => option.text())).toEqual([
+      "Crop fill",
+      "Scale to fit",
+      "Resize to fill",
+      "Upscale + crop",
+    ]);
+    await fit.setValue("lanczos-resize");
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      sourceFitPolicy: { mode: "lanczos-resize" },
+    });
+  });
+
   it("edits and resets camera motion on the active clip", async () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,

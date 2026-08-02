@@ -4,7 +4,26 @@ import {
   describeSourceFit,
   maskPaddingRectangles,
   resolveSourceFitTransform,
+  sourceFitPolicyForMode,
 } from "./sourceFit";
+
+describe("sourceFitPolicyForMode", () => {
+  it("builds maskless sequence policies without unrepaintable padding", () => {
+    expect(
+      sourceFitPolicyForMode("upscale-then-fit", {
+        supportsMask: false,
+        upscalerModel: "real-esrgan-x4plus:fp16",
+      }),
+    ).toEqual({
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    });
+    expect(
+      sourceFitPolicyForMode("pad-repaint", { supportsMask: false }),
+    ).toEqual({ mode: "crop-fill", alignX: "center", alignY: "center" });
+  });
+});
 
 describe("source fit policies", () => {
   it("defaults to pad repaint, preserving requested dimensions and repainting added pixels", () => {

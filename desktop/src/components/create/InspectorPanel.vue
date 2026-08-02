@@ -696,6 +696,8 @@ function resetSettings() {
         v-if="advancedExpanded && isSequence"
         id="desktop-inline-advanced"
         :chain-limits="chainLimits"
+        :form="form"
+        :upscalers="models.upscalers"
         :camera-controls-enabled="form.family === 'ltx2'"
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"

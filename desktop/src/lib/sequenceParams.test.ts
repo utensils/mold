@@ -25,6 +25,8 @@ describe("sequenceParams", () => {
       steps: 8,
       guidance: 3,
       strength: 0.9,
+      sourceFitPolicy: { mode: "pad-repaint" },
+      upscalerModel: "",
       seed: "42",
     });
 

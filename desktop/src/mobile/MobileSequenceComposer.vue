@@ -33,9 +33,16 @@ import {
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  SOURCE_FIT_OPTIONS,
+  coerceSourceFitForMaskless,
+  sourceFitPolicyForMode,
+  type SourceFitMode,
+} from "@studio/lib/sourceFit";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
 import type { Ltx2CameraControlInfo, ModelEntry } from "../lib/api/types";
+import type { GenerateForm } from "../lib/generateForm";
 import { base64ToDataUrl } from "../lib/image";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
@@ -45,6 +52,7 @@ import type { ChainValidationResponse } from "@studio/lib/api/chainTypes";
 
 const props = withDefaults(
   defineProps<{
+    form: GenerateForm;
     selectedModel: ModelEntry | null;
     chainLimits: ChainLimits | null;
     target: ApiTarget | null;
@@ -61,6 +69,7 @@ const props = withDefaults(
     settingsSummary?: string;
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
+    upscalers?: ModelEntry[];
   }>(),
   {
     target: null,
@@ -70,6 +79,7 @@ const props = withDefaults(
     settingsSummary: "",
     cameraControls: () => [],
     cameraControlsLoaded: false,
+    upscalers: () => [],
   },
 );
 
@@ -99,6 +109,18 @@ const advancedCount = computed(
     Number(Boolean(activeClip.value?.cameraControl)) +
     Number(draft.enableAudio),
 );
+const fitOptions = SOURCE_FIT_OPTIONS.filter((option) => option.value !== "pad-repaint");
+const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
+const upscalerAvailable = computed(() =>
+  Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
+);
+
+function setSourceFit(mode: SourceFitMode): void {
+  props.form.sourceFit = sourceFitPolicyForMode(mode, {
+    supportsMask: false,
+    upscalerModel: props.form.upscaleModel || props.upscalers[0]?.name || "",
+  });
+}
 
 function setCameraMode(mode: string) {
   const clip = activeClip.value;
@@ -265,6 +287,7 @@ function submit(): void {
 
 function setOpeningImage(image: MobilePickedImage): void {
   draft.openingImage = { filename: image.filename, base64: image.base64 };
+  props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
   imagePickerOpen.value = false;
 }
 
@@ -472,6 +495,8 @@ function sourceImageMime(filename: string): string {
       @reset="
         draft.openingImage = null;
         draft.enableAudio = false;
+        form.strength = 0.75;
+        form.sourceFit = { mode: 'crop-fill', alignX: 'center', alignY: 'center' };
         draft.clips.forEach((clip) => {
           clip.negativePrompt = '';
           clip.cameraControl = null;
@@ -513,6 +538,47 @@ function sourceImageMime(filename: string): string {
         >
           Remove
         </button>
+        <template v-if="draft.openingImage">
+          <label class="mobile-range-field">
+            <span>
+              Source strength
+              <output>{{ form.strength.toFixed(2) }}</output>
+            </span>
+            <input
+              v-model.number="form.strength"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              aria-label="Sequence source strength"
+              data-test="mobile-sequence-source-strength"
+              :disabled="locked"
+            />
+          </label>
+          <label class="field">
+            <span>Fit to video frame</span>
+            <select
+              class="control"
+              :value="fitMode"
+              data-test="mobile-sequence-source-fit"
+              :disabled="locked"
+              @change="setSourceFit(($event.target as HTMLSelectElement).value as SourceFitMode)"
+            >
+              <option
+                v-for="option in fitOptions"
+                :key="option.value"
+                :value="option.value"
+                :disabled="option.value === 'upscale-then-fit' && !upscalerAvailable"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <p v-if="!upscalerAvailable" class="mobile-source-note">
+            Install an upscaler to enable Upscale + crop.
+          </p>
+          <p class="mobile-source-note">Applied to the opening image before clip 1 renders.</p>
+        </template>
       </details>
       <label v-if="activeClip" class="field" data-test="mobile-sequence-advanced-negative">
         <span>Clip {{ activeIndex + 1 }} negative prompt</span>

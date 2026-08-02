@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
+import { newGenerateForm } from "../../lib/generateForm";
 
 const cameraControls = [
   {
@@ -26,12 +27,27 @@ describe("SequenceAdvancedSettings camera motion", () => {
   it("edits the active clip and labels a first-use download", async () => {
     const draft = useSequenceDraftStore();
     const wrapper = mount(SequenceAdvancedSettings, {
-      props: { cameraControls, cameraControlsEnabled: true },
+      props: { form: newGenerateForm(), cameraControls, cameraControlsEnabled: true },
     });
+
     const select = wrapper.get("[data-test='sequence-camera-motion']");
     expect(select.text()).toContain("downloads on first use");
     await select.setValue("dolly-in");
     expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
+  });
+
+  it("disables upscale fit when no upscaler is available", () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    const wrapper = mount(SequenceAdvancedSettings, {
+      props: { form: newGenerateForm() },
+    });
+    const upscale = wrapper
+      .get("[data-test='sequence-source-fit']")
+      .findAll("option")
+      .find((option) => option.attributes("value") === "upscale-then-fit");
+    expect(upscale?.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("Install an upscaler");
   });
 
   it("resets camera motion across the sequence", async () => {
@@ -39,7 +55,7 @@ describe("SequenceAdvancedSettings camera motion", () => {
     draft.clips[0]!.cameraControl = "dolly-in";
     draft.clips[1]!.cameraControl = "/models/camera/custom.safetensors";
     const wrapper = mount(SequenceAdvancedSettings, {
-      props: { cameraControls, cameraControlsEnabled: true },
+      props: { form: newGenerateForm(), cameraControls, cameraControlsEnabled: true },
     });
     await wrapper.get("[data-test='sequence-advanced-reset']").trigger("click");
     expect(draft.clips.map((clip) => clip.cameraControl)).toEqual([null, null]);
@@ -47,8 +63,32 @@ describe("SequenceAdvancedSettings camera motion", () => {
 
   it("hides camera motion outside the LTX-2 family", () => {
     const wrapper = mount(SequenceAdvancedSettings, {
-      props: { cameraControls, cameraControlsEnabled: false },
+      props: { form: newGenerateForm(), cameraControls, cameraControlsEnabled: false },
     });
     expect(wrapper.find("[data-test='sequence-section-camera']").exists()).toBe(false);
+  });
+
+  it("edits opening-image strength and fit with the same live form as one shot", async () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    const form = newGenerateForm();
+    const wrapper = mount(SequenceAdvancedSettings, {
+      props: {
+        form,
+        upscalers: [{ name: "real-esrgan-x4plus:fp16" } as never],
+      },
+    });
+
+    expect(
+      (wrapper.get("[data-test='sequence-source-fit']").element as HTMLSelectElement).value,
+    ).toBe("crop-fill");
+    await wrapper.get("[data-test='sequence-source-strength']").setValue("0.55");
+    expect(form.strength).toBe(0.55);
+    await wrapper.get("[data-test='sequence-source-fit']").setValue("upscale-then-fit");
+    expect(form.sourceFit).toEqual({
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    });
   });
 });

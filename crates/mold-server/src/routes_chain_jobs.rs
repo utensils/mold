@@ -1527,6 +1527,7 @@ mod tests {
             seed: None,
             steps: None,
             guidance: None,
+            strength: None,
             enable_audio: None,
         }
     }
