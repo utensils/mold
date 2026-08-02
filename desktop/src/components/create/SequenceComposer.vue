@@ -6,7 +6,7 @@
  * primary Generate/Update button. Clips live in the shared sequence draft
  * store; shared params stay in the generate form and are read at submit.
  */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import ClipRail from "@ui/components/ClipRail.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
@@ -23,6 +23,7 @@ import {
   type SequenceStage,
 } from "@studio/lib/sequence";
 import {
+  buildChainRequest,
   chainScriptToClips,
   clipsToChainScript,
   sequenceOpeningImageError,
@@ -37,6 +38,9 @@ import type { ModelEntry } from "../../lib/api/types";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import type { ClipRailMedia } from "@ui/components/types";
+import { validateChain } from "@studio/api/chains";
+import type { ApiTarget } from "@studio/api/client";
+import type { ChainValidationResponse } from "@studio/lib/api/chainTypes";
 
 const props = withDefaults(
   defineProps<{
@@ -50,6 +54,8 @@ const props = withDefaults(
     chainLevelDirty?: boolean;
     stageMediaByClipId?: Readonly<Record<string, ClipRailMedia | undefined>> | null;
     playingClipId?: string | null;
+    /** Exact authenticated host that will render this sequence. */
+    target?: ApiTarget | null;
   }>(),
   {
     selectedModel: null,
@@ -59,6 +65,7 @@ const props = withDefaults(
     chainLevelDirty: false,
     stageMediaByClipId: null,
     playingClipId: null,
+    target: null,
   },
 );
 
@@ -188,6 +195,76 @@ const disabledReason = computed(() => {
   if (openingError) return openingError;
   return validation.value[0] ?? null;
 });
+
+const validating = ref(false);
+const validationPlan = ref<ChainValidationResponse | null>(null);
+const validationError = ref("");
+const validationSourceRevision = ref(0);
+watch(
+  () => [
+    draft.openingImage?.base64 ?? null,
+    ...draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+  ],
+  () => {
+    validationSourceRevision.value += 1;
+  },
+);
+const validationInputSignature = computed(() =>
+  JSON.stringify({
+    shared: sequenceParams(props.form, props.selectedModel),
+    motionTail: motionTail.value,
+    enableAudio: draft.enableAudio,
+    sourceRevision: validationSourceRevision.value,
+    openingSourceFilename: draft.openingImage?.filename ?? null,
+    clips: draft.clips.map((clip) => ({
+      id: clip.id,
+      prompt: clip.prompt,
+      frames: clip.frames,
+      transition: clip.transition,
+      fadeFrames: clip.fadeFrames,
+      negativePrompt: clip.negativePrompt,
+      sourceFilename: clip.sourceImage?.filename ?? null,
+      cameraControl: clip.cameraControl,
+    })),
+    target: props.target,
+  }),
+);
+watch(validationInputSignature, () => {
+  validationPlan.value = null;
+  validationError.value = "";
+});
+
+async function validatePlan() {
+  const target = props.target;
+  if (disabledReason.value || props.submitting || validating.value || !target) return;
+  const signature = validationInputSignature.value;
+  validating.value = true;
+  validationPlan.value = null;
+  validationError.value = "";
+  try {
+    const request = buildChainRequest(
+      sequenceParams(props.form, props.selectedModel),
+      draft.clips,
+      {
+        motionTailFrames: motionTail.value,
+        enableAudio: draft.enableAudio,
+        openingImage: draft.openingImage,
+      },
+    );
+    const plan = await validateChain(request, target);
+    if (validationInputSignature.value === signature) validationPlan.value = plan;
+  } catch (error) {
+    if (validationInputSignature.value === signature) {
+      validationError.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    validating.value = false;
+  }
+}
+
+const validationDuration = (plan: ChainValidationResponse) =>
+  `${(plan.estimated_duration_ms / 1_000).toFixed(1)}s`;
+const formatBytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 
 // ── Edit sessions ────────────────────────────────────────────────────────────
 const plan = computed(() => {
@@ -416,6 +493,41 @@ async function copyToml() {
     </div>
 
     <!-- Footer: file tools · audio · validation/fit · primary action -->
+    <section
+      v-if="validationPlan"
+      class="ms-seqbench__plan"
+      data-test="sequence-validation-plan"
+      aria-live="polite"
+    >
+      <strong>
+        Validated · {{ validationPlan.stage_count }} clips ·
+        {{ validationPlan.estimated_total_frames }}f · {{ validationDuration(validationPlan) }}
+      </strong>
+      <span v-for="(stage, index) in validationPlan.stages" :key="index">
+        Clip {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
+        {{ transitionLabel(stage.transition, validationPlan.motion_tail_frames) }}
+        <template v-if="stage.has_source_image">
+          · {{ index === 0 ? "Opening image" : "Source image" }}
+        </template>
+        <template v-if="stage.has_negative_prompt"> · Negative prompt</template>
+      </span>
+      <span v-if="validationPlan.vram_estimate">
+        VRAM {{ formatBytes(validationPlan.vram_estimate.worst_case_bytes) }} ·
+        {{ validationPlan.vram_estimate.fits ? "fits" : "does not fit" }}
+      </span>
+      <span v-for="warning in validationPlan.warnings" :key="warning" class="ms-seqbench__warning">
+        {{ warning }}
+      </span>
+    </section>
+    <p
+      v-if="validationError"
+      class="ms-seqbench__validation-error"
+      data-test="sequence-validation-error"
+      role="alert"
+    >
+      {{ validationError }}
+    </p>
+
     <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
       <input
         ref="tomlInput"
@@ -469,6 +581,16 @@ async function copyToml() {
           </button>
         </div>
       </Popover>
+
+      <button
+        type="button"
+        data-test="sequence-validate"
+        class="ms-seqbench__tool"
+        :disabled="disabledReason !== null || submitting || validating || !target"
+        @click="validatePlan"
+      >
+        {{ validating ? "Validating…" : "Validate plan" }}
+      </button>
 
       <button
         type="button"
@@ -543,6 +665,25 @@ async function copyToml() {
   background: color-mix(in srgb, var(--safelight) 7%, transparent);
   border-radius: 9px;
   padding: 8px 12px;
+}
+.ms-seqbench__plan,
+.ms-seqbench__validation-error {
+  display: grid;
+  flex-shrink: 0;
+  gap: 3px;
+  max-height: 112px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--halide) 35%, var(--ce));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--halide) 8%, transparent);
+  padding: 7px 10px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--ink-2);
+}
+.ms-seqbench__validation-error,
+.ms-seqbench__warning {
+  color: var(--warning);
 }
 .ms-seqbench__banner-text {
   flex: 1;

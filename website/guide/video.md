@@ -109,7 +109,8 @@ in **Library ▸ History ▸ Sequences**, and a sequence print in the Library us
 **Edit sequence** as its primary desktop/web action (re-enter the original job
 with its cached clips). **Duplicate as new** starts a fresh sequence from the
 recorded clips. Desktop and web keep TOML import/export for `mold.chain.v1`
-scripts under the composer's file tools. Web also offers **Validate plan**: it
+scripts under the composer's file tools. Web, desktop, and iPhone also offer
+**Validate plan**: it
 asks the currently selected authenticated host to normalize the live draft,
 then shows each clip's input/output frames, transition, conditioning inputs,
 warnings, and VRAM estimate when available. Validation creates no job and

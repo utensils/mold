@@ -1161,7 +1161,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         });
     let (peak, activation) = match &ltx2 {
         Some((facts, shape, available)) => {
-            let activation = crate::ltx2_admission::ltx2_activation_bytes(*shape);
+            let activation = crate::ltx2_admission::ltx2_activation_bytes(*shape, facts.adaln_dim);
             let estimate = crate::ltx2_admission::ltx2_peak_estimate(facts, activation, *available);
             (estimate.peak_bytes, activation)
         }
@@ -1227,8 +1227,13 @@ fn request_sensitive_activation_memory(
     // under-counted the 1024x1024 x 97 frame stage-2 shape by several GB
     // (#641). Price it from the same token model admission uses.
     let base = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+        // Cold-cache fallback: no checkpoint header has been read here, so the
+        // AdaLN width is unknown and falls back to the six-component default.
+        // The authoritative path in `estimate_generation_memory_for_request`
+        // passes the checkpoint's real width.
         crate::ltx2_admission::ltx2_activation_bytes(
             crate::ltx2_admission::Ltx2ShapeHint::from_request(req),
+            None,
         )
     } else {
         activation_memory_for_estimate(hint, qwen_quantized)
@@ -1696,7 +1701,7 @@ mod fail_closed_tests {
         let source_frame_bytes = 1024u64 * 1024 * 4;
         assert_eq!(
             request_sensitive_activation_memory(&request, Some(hint), false),
-            crate::ltx2_admission::ltx2_activation_budget_bytes(1024, 1024, 97, true)
+            crate::ltx2_admission::ltx2_activation_budget_bytes(1024, 1024, 97, true, None)
                 + source_frame_bytes,
         );
         // 97 frames produce 13 live latent frames; a 49-frame clip produces 7.

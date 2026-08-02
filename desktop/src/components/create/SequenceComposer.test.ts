@@ -11,6 +11,10 @@ vi.mock("../../lib/ipc", () => ({
   },
 }));
 
+vi.mock("@studio/api/chains", () => ({
+  validateChain: vi.fn(),
+}));
+
 import SequenceComposer from "./SequenceComposer.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
@@ -20,6 +24,9 @@ import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ModelEntry } from "../../lib/api/types";
+import { validateChain } from "@studio/api/chains";
+
+const validateChainMock = vi.mocked(validateChain);
 
 const model = { name: "ltx-video", family: "ltx-video" } as ModelEntry;
 
@@ -60,6 +67,7 @@ function mountComposer(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  validateChainMock.mockReset();
   setActivePinia(createPinia());
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
@@ -138,6 +146,109 @@ describe("SequenceComposer — active clip editor", () => {
 });
 
 describe("SequenceComposer — footer", () => {
+  it("discards an in-flight validation when the rendering host changes", async () => {
+    let resolveValidation!: (value: Awaited<ReturnType<typeof validateChain>>) => void;
+    validateChainMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveValidation = resolve;
+      }),
+    );
+    seedDraft();
+    const wrapper = mountComposer({
+      target: { baseUrl: "http://render-one:7680", apiKey: "one" },
+    });
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await wrapper.setProps({
+      target: { baseUrl: "http://render-two:7680", apiKey: "two" },
+    });
+    resolveValidation({
+      model: "ltx-video",
+      width: 512,
+      height: 512,
+      fps: 24,
+      motion_tail_frames: 0,
+      stage_count: 2,
+      estimated_total_frames: 50,
+      estimated_duration_ms: 2_083,
+      stages: [],
+      warnings: [],
+      vram_estimate: null,
+    });
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-validation-plan']").exists()).toBe(false);
+  });
+
+  it("validates the current sequence on its exact host and clears the plan after edits", async () => {
+    validateChainMock.mockResolvedValue({
+      model: "ltx-video",
+      width: 512,
+      height: 512,
+      fps: 24,
+      motion_tail_frames: 0,
+      stage_count: 2,
+      estimated_total_frames: 50,
+      estimated_duration_ms: 2_083,
+      stages: [
+        {
+          prompt: "clip one",
+          frames: 25,
+          output_frames: 25,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: true,
+          has_negative_prompt: false,
+        },
+        {
+          prompt: "clip two",
+          frames: 25,
+          output_frames: 25,
+          transition: "smooth",
+          fade_frames: null,
+          has_source_image: true,
+          has_negative_prompt: true,
+        },
+      ],
+      warnings: ["Join normalized for this checkpoint."],
+      vram_estimate: { worst_case_bytes: 12_884_901_888, fits: true },
+    });
+    const draft = seedDraft();
+    draft.clips[1]!.negativePrompt = "camera shake";
+    const target = { baseUrl: "http://render-box:7680", apiKey: "secret" };
+    const wrapper = mountComposer({ target });
+
+    await wrapper.get("[data-test='sequence-validate']").trigger("click");
+    await flushPromises();
+
+    expect(validateChainMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "ltx-video",
+        stages: [
+          expect.objectContaining({ prompt: "clip one" }),
+          expect.objectContaining({ prompt: "clip two", negative_prompt: "camera shake" }),
+        ],
+      }),
+      target,
+    );
+    expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
+      "Validated · 2 clips · 50f · 2.1s",
+    );
+    expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain("12.0 GiB");
+    expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
+      "Join normalized",
+    );
+    const planText = wrapper
+      .get("[data-test='sequence-validation-plan']")
+      .text()
+      .replace(/\s+/g, " ");
+    expect(planText).toContain("Clip 1 · 25f in / 25f out · Join · Opening image");
+    expect(planText).toContain("Clip 2 · 25f in / 25f out · Join · Source image");
+    expect(wrapper.emitted("submit")).toBeUndefined();
+
+    await wrapper.get("[data-test='clip-prompt']").setValue("edited opening");
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-validation-plan']").exists()).toBe(false);
+  });
+
   it("disables Generate with the first validation message while a clip is blank", () => {
     seedDraft(["described", ""]);
     const wrapper = mountComposer();
