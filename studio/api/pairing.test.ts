@@ -1,23 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { parseMobilePairingPayload } from "./pairing";
+import { mobilePairingUrl, parseMobilePairingPayload } from "./pairing";
+
+const payload = {
+  type: "mold.mobile-pairing" as const,
+  version: 1 as const,
+  base_url: "http://studio.local:7680",
+  token: "one-time",
+  expires_at: 1_900_000_000,
+  instance_id: "server-id",
+  name: "Studio Mac",
+};
 
 describe("parseMobilePairingPayload", () => {
   it("accepts the versioned one-time pairing envelope", () => {
-    expect(
-      parseMobilePairingPayload(
-        JSON.stringify({
-          type: "mold.mobile-pairing",
-          version: 1,
-          base_url: "http://studio.local:7680",
-          token: "one-time",
-          expires_at: 1_900_000_000,
-          instance_id: "server-id",
-          name: "Studio Mac",
-        }),
-      ),
-    ).toMatchObject({
+    expect(parseMobilePairingPayload(JSON.stringify(payload))).toMatchObject({
       base_url: "http://studio.local:7680",
       token: "one-time",
+    });
+  });
+
+  it("round-trips an app-opening mobile pairing URL", () => {
+    const url = mobilePairingUrl(payload);
+
+    expect(url).toMatch(/^mold:\/\/pair\?/);
+    expect(url).not.toContain("api_key");
+    expect(parseMobilePairingPayload(url)).toEqual(payload);
+  });
+
+  it("preserves credential-free pairing in an app-opening URL", () => {
+    const url = mobilePairingUrl({ ...payload, token: null, expires_at: null });
+
+    expect(parseMobilePairingPayload(url)).toEqual({
+      ...payload,
+      token: null,
+      expires_at: null,
     });
   });
 

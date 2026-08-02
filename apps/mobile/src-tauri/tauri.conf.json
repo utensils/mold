@@ -21,12 +21,20 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": ["mold"],
+          "appLink": false
+        }
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [
-      "../../../desktop/src-tauri/icons/icon.png"
-    ],
+    "icon": ["../../../desktop/src-tauri/icons/icon.png"],
     "publisher": "James Brink and Jeffrey Dilley",
     "copyright": "Copyright \u00a9 2026 James Brink and Jeffrey Dilley. MIT License.",
     "category": "GraphicsAndDesign",

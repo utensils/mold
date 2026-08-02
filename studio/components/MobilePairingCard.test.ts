@@ -55,13 +55,21 @@ describe("MobilePairingCard", () => {
     const headers = request[1].headers as Headers;
     expect(headers.get("x-api-key")).toBe("durable-secret");
     expect(qrPayloads[0]).not.toContain("durable-secret");
-    expect(JSON.parse(qrPayloads[0]!)).toMatchObject({
+    const qrUrl = new URL(qrPayloads[0]!);
+    expect(qrUrl.protocol).toBe("mold:");
+    expect(qrUrl.host).toBe("pair");
+    expect(Object.fromEntries(qrUrl.searchParams)).toMatchObject({
       base_url: "http://studio-mac.local:7680",
       token: "one-time-token",
       instance_id: "server-id",
     });
     expect(wrapper.get("img").attributes("src")).toBe(
       "data:image/png;base64,pairing",
+    );
+    expect(wrapper.text()).toContain("Mobile pairing");
+    expect(wrapper.text()).not.toContain("iPhone");
+    expect(wrapper.get("img").attributes("alt")).toBe(
+      "Mold mobile pairing QR code",
     );
   });
 });

@@ -13,6 +13,7 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|_app| {
             #[cfg(target_os = "ios")]
             _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
@@ -82,5 +83,15 @@ mod tests {
         let plist = include_str!("../Info.ios.plist");
         assert!(plist.contains("<key>NSCameraUsageDescription</key>"));
         assert!(plist.contains("Scan a one-time Mold host pairing code."));
+    }
+
+    #[test]
+    fn ios_registers_mobile_pairing_deep_links() {
+        let config = include_str!("../tauri.conf.json");
+        let generated_plist = include_str!("../gen/apple/mold-mobile_iOS/Info.plist");
+        assert!(config.contains("\"deep-link\""));
+        assert!(config.contains("\"scheme\": [\"mold\"]"));
+        assert!(generated_plist.contains("<key>CFBundleURLTypes</key>"));
+        assert!(generated_plist.contains("<string>mold</string>"));
     }
 }

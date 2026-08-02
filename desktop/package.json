@@ -21,6 +21,7 @@
     "@mold/ui": "workspace:*",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.1",
+    "@tauri-apps/plugin-deep-link": "2.4.9",
     "@tauri-apps/plugin-notification": "2.3.3",
     "@tauri-apps/plugin-barcode-scanner": "2.4.5",
     "@tauri-apps/plugin-opener": "2.5.4"
