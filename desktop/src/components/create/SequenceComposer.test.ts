@@ -405,3 +405,36 @@ describe("SequenceComposer — clear sequence", () => {
     expect(wrapper.emitted("duplicate")).toBeUndefined();
   });
 });
+
+describe("SequenceComposer — TOML import", () => {
+  it("restores opening-image strength and clears stale maskless fit state", async () => {
+    seedDraft();
+    const liveForm = form();
+    liveForm.strength = 0.75;
+    liveForm.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: "upscaler",
+      fit: { mode: "crop-fill" },
+    };
+    const wrapper = mountComposer({ form: liveForm });
+    const toml = [
+      'schema = "mold.chain.v1"',
+      "[chain]",
+      'model = "ltx-video"',
+      "strength = 0.4",
+      "[[stage]]",
+      'prompt = "opening"',
+      "frames = 25",
+      'source_image_b64 = "aGk="',
+      "[[stage]]",
+      'prompt = "ending"',
+      "frames = 25",
+    ].join("\n");
+    await wrapper.vm.importTomlText(toml);
+    await flushPromises();
+
+    expect(liveForm.strength).toBe(0.4);
+    expect(liveForm.sourceFit).toEqual({ mode: "crop-fill" });
+    expect(useSequenceDraftStore().openingImage?.base64).toBe("aGk=");
+  });
+});

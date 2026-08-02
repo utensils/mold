@@ -30,6 +30,7 @@ function formState(): GenerateFormState {
     controlModel: "",
     controlScale: 1,
     upscaleModel: "",
+    sourceFitPolicy: { mode: "crop-fill" },
     gifPreview: false,
     audioFile: null,
     audioFilePath: "",
@@ -63,6 +64,8 @@ describe("sequenceSharedParams", () => {
       steps: 8,
       guidance: 3.5,
       strength: 0.9,
+      sourceFitPolicy: { mode: "crop-fill" },
+      upscalerModel: "",
       seed: "",
     });
   });

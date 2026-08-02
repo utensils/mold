@@ -106,6 +106,7 @@ export interface ChainScriptChain {
   seed?: string | null;
   steps?: number;
   guidance?: number;
+  strength?: number;
   enable_audio?: boolean | null;
 }
 
@@ -187,6 +188,7 @@ export interface AmendRequest {
   seed?: string | null;
   steps?: number | null;
   guidance?: number | null;
+  strength?: number | null;
   enable_audio?: boolean | null;
 }
 

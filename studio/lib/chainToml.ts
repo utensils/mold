@@ -232,6 +232,8 @@ export function parseChainScript(text: string): ChainScript {
   if (steps !== undefined) script.chain.steps = steps;
   const guidance = num(c.guidance);
   if (guidance !== undefined) script.chain.guidance = guidance;
+  const strength = num(c.strength);
+  if (strength !== undefined) script.chain.strength = strength;
   const motionTail = num(c.motion_tail_frames);
   if (motionTail !== undefined) script.chain.motion_tail_frames = motionTail;
   const seed = seedString(c.seed);

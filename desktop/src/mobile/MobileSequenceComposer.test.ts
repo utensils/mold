@@ -10,6 +10,7 @@ import MobileSeamSheet from "./MobileSeamSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import { validateChain } from "@studio/api/chains";
+import { newGenerateForm } from "../lib/generateForm";
 
 vi.mock("@studio/api/chains", () => ({
   validateChain: vi.fn(),
@@ -79,6 +80,7 @@ function mountComposer(props: Record<string, unknown> = {}): VueWrapper {
   wrapper = mount(MobileSequenceComposer, {
     props: {
       selectedModel: ltx2,
+      form: newGenerateForm(),
       chainLimits: limits,
       target: { baseUrl: "http://studio:7680", apiKey: "secret" },
       shared,
@@ -116,12 +118,28 @@ describe("MobileSequenceComposer clips", () => {
     const draft = useSequenceDraftStore();
     mountComposer();
     await wrapper!.get("[data-test='mobile-sequence-open-advanced']").trigger("click");
+
     const select = wrapper!.get("[data-test='mobile-sequence-camera-motion']");
     expect(select.text()).toContain("downloads on first use");
     await select.setValue("dolly-in");
     expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
     wrapper!.getComponent(MobileAdvancedSheet).vm.$emit("reset");
     expect(draft.clips[0]?.cameraControl).toBeNull();
+  });
+
+  it("locks source controls while a sequence is submitting", async () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    mountComposer({ submitting: true });
+    await wrapper!.get("[data-test='mobile-sequence-open-advanced']").trigger("click");
+    expect(
+      (wrapper!.get("[data-test='mobile-sequence-source-strength']").element as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (wrapper!.get("[data-test='mobile-sequence-source-fit']").element as HTMLSelectElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("renders the shared draft's clips instead of private component state", async () => {
@@ -442,6 +460,7 @@ describe("MobileSequenceComposer guardrails", () => {
     wrapper = mount(MobileSequenceComposer, {
       props: {
         selectedModel: ltx2,
+        form: newGenerateForm(),
         chainLimits: limits,
         target: { baseUrl: "http://studio:7680", apiKey: "secret" },
         shared,
@@ -480,6 +499,29 @@ describe("MobileSequenceComposer guardrails", () => {
     expect(wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src")).toBe(
       "data:image/jpeg;base64,wire-bytes",
     );
+  });
+
+  it("exposes strength and fit controls after an opening image is attached", async () => {
+    const form = newGenerateForm();
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    mountComposer({
+      form,
+      upscalers: [{ ...ltx2, name: "real-esrgan-x4plus:fp16", family: "upscaler" }],
+    });
+    await wrapper!.get("[data-test='mobile-sequence-open-advanced']").trigger("click");
+
+    expect(
+      (wrapper!.get("[data-test='mobile-sequence-source-fit']").element as HTMLSelectElement).value,
+    ).toBe("crop-fill");
+    await wrapper!.get("[data-test='mobile-sequence-source-strength']").setValue("0.6");
+    expect(form.strength).toBe(0.6);
+    await wrapper!.get("[data-test='mobile-sequence-source-fit']").setValue("upscale-then-fit");
+    expect(form.sourceFit).toEqual({
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    });
   });
 
   it("summarizes the timeline at the form's own frame rate", () => {

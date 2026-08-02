@@ -14,6 +14,7 @@ vi.mock("vue-router", () => ({
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 const apiFetchTo = vi.fn();
+const applySourceFitPreprocess = vi.fn();
 vi.mock("../lib/api/client", () => ({
   apiJson: (...args: unknown[]) => apiJson(...args),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
@@ -31,6 +32,9 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("../lib/sourceFitPreprocess", () => ({
+  applySourceFitPreprocess: (...args: unknown[]) => applySourceFitPreprocess(...args),
+}));
 
 import GenerateView from "./GenerateView.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
@@ -99,6 +103,11 @@ beforeEach(() => {
   );
   apiJsonTo.mockReset();
   apiFetchTo.mockReset();
+  applySourceFitPreprocess
+    .mockReset()
+    .mockImplementation((input) =>
+      Promise.resolve({ source: input.source, mask: input.mask, changed: false }),
+    );
   apiJsonTo.mockImplementation((_target: unknown, path: unknown) => {
     if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
     if (path === "/api/models") return Promise.resolve(installedPayload);
@@ -465,8 +474,90 @@ describe("GenerateView — sequence output", () => {
     expect(amendCalls.length).toBe(1);
     const body = JSON.parse((amendCalls[0] as { body: string }).body);
     expect(body.enable_audio).toBe(false);
+    expect(body.strength).toBe(0.75);
     expect(body.stages[0].source_image).toBe("QUJD");
     expect(body.stages[1].source_image).toBeUndefined();
+  });
+
+  it("fits the opening image before a sequence request is submitted", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "ltx-video";
+    formStore.form.sourceFit = { mode: "lanczos-resize" };
+    formStore.form.strength = 0.55;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    draft.openingImage = { filename: "opening.png", base64: "ORIGINAL" };
+    applySourceFitPreprocess.mockResolvedValue({
+      source: "FITTED",
+      mask: null,
+      changed: true,
+    });
+    const create = vi.spyOn(useChainJobsStore(), "create").mockResolvedValue("job-1");
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "ORIGINAL",
+        mask: null,
+        policy: { mode: "lanczos-resize" },
+      }),
+      expect.any(Object),
+    );
+    expect(create.mock.calls[0]?.[1]).toMatchObject({
+      strength: 0.55,
+      stages: [{ source_image: "FITTED" }, expect.any(Object)],
+    });
+  });
+
+  it("aborts when the sequence route changes during source preprocessing", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "ltx-video";
+    formStore.form.sourceFit = { mode: "lanczos-resize" };
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    draft.openingImage = { filename: "opening.png", base64: "ORIGINAL" };
+    let finishPreprocessing!: (value: { source: string; mask: null; changed: boolean }) => void;
+    applySourceFitPreprocess.mockReturnValue(
+      new Promise((resolve) => {
+        finishPreprocessing = resolve;
+      }),
+    );
+    const create = vi.spyOn(useChainJobsStore(), "create").mockResolvedValue("job-1");
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+    useConnectionStore().info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:8765",
+      apiKey: "replacement-key",
+    };
+    finishPreprocessing({ source: "FITTED", mask: null, changed: true });
+    await flushPromises();
+
+    expect(create).not.toHaveBeenCalled();
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "machine changed during source preparation",
+    );
   });
 
   it("guides to Discover when no chain-capable video model is installed", async () => {

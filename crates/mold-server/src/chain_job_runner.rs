@@ -2488,6 +2488,9 @@ pub(crate) fn amend_candidate_request(
     if let Some(guidance) = req.guidance {
         candidate.guidance = guidance;
     }
+    if let Some(strength) = req.strength {
+        candidate.strength = strength;
+    }
     if let Some(enable_audio) = req.enable_audio {
         candidate.enable_audio = Some(enable_audio);
     }
@@ -2497,7 +2500,7 @@ pub(crate) fn amend_candidate_request(
 /// Longest preserved prefix of per-stage render identity between the old
 /// effective request and the amended candidate (both normalised).
 ///
-/// Chain-level invalidation first: a changed seed/steps/guidance/fps/
+/// Chain-level invalidation first: a changed seed/steps/guidance/strength/fps/
 /// motion_tail_frames, or enable_audio flipping OFF→ON, dirties everything
 /// (ON→OFF preserves — finalize just ignores sidecars). Otherwise the prefix
 /// compares `(prompt, frames, negative_prompt, source_image bytes, LoRA stack,
@@ -2519,6 +2522,17 @@ pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> 
     if old.seed != new.seed
         || old.steps != new.steps
         || old.guidance != new.guidance
+        || (old.strength != new.strength
+            && (old
+                .stages
+                .first()
+                .and_then(|stage| stage.source_image.as_ref())
+                .is_some()
+                || new
+                    .stages
+                    .first()
+                    .and_then(|stage| stage.source_image.as_ref())
+                    .is_some()))
         || old.fps != new.fps
         || old.motion_tail_frames != new.motion_tail_frames
         || (!old_audio && new_audio)
@@ -5717,6 +5731,7 @@ mod tests {
             seed: None,
             steps: None,
             guidance: None,
+            strength: None,
             enable_audio: None,
         }
     }
@@ -5798,6 +5813,16 @@ mod tests {
             mutate(&mut new);
             assert_eq!(preserved_stage_prefix(&base, &new), 0, "chain-level edit");
         }
+
+        let mut source_backed = base.clone();
+        source_backed.stages[0].source_image = Some("source".into());
+        let mut changed_strength = source_backed.clone();
+        changed_strength.strength = 0.55;
+        assert_eq!(preserved_stage_prefix(&source_backed, &changed_strength), 0);
+
+        let mut source_less_strength = base.clone();
+        source_less_strength.strength = 0.55;
+        assert_eq!(preserved_stage_prefix(&base, &source_less_strength), 3);
 
         // enable_audio ON→OFF preserves (finalize ignores sidecars)…
         let mut old = base.clone();

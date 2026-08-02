@@ -338,11 +338,20 @@ async function onTomlFile(event: Event) {
   const file = input.files?.[0];
   input.value = ""; // allow re-picking the same file
   if (!file) return;
+  await importTomlText(await file.text(), file.name);
+}
+
+async function importTomlText(text: string, filename = "sequence.toml") {
   try {
-    const script = parseChainScript(await file.text());
+    const script = parseChainScript(text);
     const loaded = chainScriptToClips(script);
     draft.clips.splice(0, draft.clips.length, ...loaded.clips);
     draft.openingImage = loaded.openingImage;
+    if (loaded.openingImage) {
+      // Imported opening-image bytes are already the script's prepared source;
+      // never inherit a stale client-only upscale policy from the prior draft.
+      props.form.sourceFit = { mode: "crop-fill" };
+    }
     draft.activeClipId = draft.clips[0]?.id ?? null;
     draft.enableAudio = loaded.enableAudio;
     // Shared params flow to the LIVE generate form — the one source of truth.
@@ -353,6 +362,7 @@ async function onTomlFile(event: Event) {
     if (shared.fps != null) props.form.fps = shared.fps;
     if (shared.steps != null) props.form.steps = shared.steps;
     if (shared.guidance != null) props.form.guidance = shared.guidance;
+    if (shared.strength != null) props.form.strength = shared.strength;
     if (shared.seed != null) props.form.seed = shared.seed;
     if (
       shared.model &&
@@ -361,11 +371,13 @@ async function onTomlFile(event: Event) {
     ) {
       toasts.push(`Pull ${shared.model} first`);
     }
-    toasts.push(`Loaded ${file.name}`);
+    toasts.push(`Loaded ${filename}`);
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   }
 }
+
+defineExpose({ importTomlText });
 
 function exportToml() {
   const blob = new Blob([serializeChainScript(currentScript())], { type: "application/toml" });

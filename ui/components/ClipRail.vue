@@ -290,7 +290,7 @@ const dragModel = computed({
 .ms-rail-frame {
   /*
    * Fluid filmstrip geometry: the frame is its own size container, so every
-   * internal measure (paddings, scene, thumb, tile cap) derives from the
+   * internal vertical measure (paddings, scene, thumb) derives from the
    * frame's actual height. Surfaces only ever set the frame height — the
    * desktop bench resizer shrinks it via flex — and the strip re-proportions
    * continuously instead of stepping through fixed density tiers or growing
@@ -306,7 +306,6 @@ const dragModel = computed({
   --filmstrip-thumb-height: calc(
     var(--filmstrip-scene-height) - var(--filmstrip-footer-height)
   );
-  --filmstrip-tile-max: calc(var(--filmstrip-thumb-height) * 16 / 9);
   --filmstrip-seam-width: 46px;
   position: relative;
   height: 188px;

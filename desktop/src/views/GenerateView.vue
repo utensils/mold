@@ -1239,9 +1239,15 @@ async function generateSequence() {
     toasts.push("Choose an installed sequence-capable video model first.", "error");
     return;
   }
-  const hostRoute = draft.editing
-    ? hosts.resolveRoute(draft.editing.hostId, entry.name)
-    : routeForModel(entry);
+  // Freeze the complete request at the click boundary. Preprocessing can be
+  // slow, and edits made while it runs belong to the next submission.
+  const editing = draft.editing ? { ...draft.editing } : null;
+  const requestForm = cloneGenerateForm(form);
+  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
+  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  const enableAudio = draft.enableAudio;
+  const motionTailFrames = sequenceMotionTail.value;
+  const hostRoute = editing ? hosts.resolveRoute(editing.hostId, entry.name) : routeForModel(entry);
   if (!hostRoute) {
     toasts.push("The selected host isn't reachable. Pick another host.", "error");
     return;
@@ -1252,30 +1258,50 @@ async function generateSequence() {
     if (!chainLimits.value || chainLimits.value.model !== entry.name) {
       await loadChainLimits();
     }
-    const request = buildChainRequest(sequenceParams(form, entry), draft.clips, {
-      motionTailFrames: sequenceMotionTail.value,
-      enableAudio: draft.enableAudio,
-      openingImage: draft.openingImage,
+    requestForm.sourceImage = openingSnapshot?.base64 ?? null;
+    requestForm.maskImage = null;
+    if (!(await preprocessSourceFit(hostRoute, requestForm))) return;
+    const openingImage = openingSnapshot
+      ? { ...openingSnapshot, base64: requestForm.sourceImage }
+      : null;
+    const request = buildChainRequest(sequenceParams(requestForm, entry), clips, {
+      motionTailFrames,
+      enableAudio,
+      openingImage,
     });
-    if (draft.editing) {
-      const editing = draft.editing;
+    const currentRoute = hosts.resolveRoute(hostRoute.hostId, entry.name);
+    if (
+      !currentRoute ||
+      currentRoute.hostId !== hostRoute.hostId ||
+      currentRoute.target.baseUrl !== hostRoute.target.baseUrl ||
+      currentRoute.target.apiKey !== hostRoute.target.apiKey ||
+      (currentRoute.instanceId ?? null) !== (hostRoute.instanceId ?? null)
+    ) {
+      toasts.push(
+        "The sequence machine changed during source preparation. Review the machine and Generate again.",
+        "error",
+      );
+      return;
+    }
+    if (editing) {
       const amend: AmendRequest = {
         stages: request.stages,
         motion_tail_frames: request.motion_tail_frames ?? null,
         fps: request.fps ?? null,
-        seed: form.seed.trim() === "" ? null : form.seed.trim(),
+        seed: requestForm.seed.trim() === "" ? null : requestForm.seed.trim(),
         steps: request.steps,
         guidance: request.guidance,
+        strength: request.strength ?? null,
         // Always explicit: null means "keep current" server-side, which
         // would make turning audio OFF impossible through an edit.
-        enable_audio: draft.enableAudio,
+        enable_audio: enableAudio,
       };
       try {
         sequenceStageClipIdsByJob.set(
           `${editing.hostId}:${editing.jobId}`,
-          draft.clips.map((clip) => clip.id),
+          clips.map((clip) => clip.id),
         );
-        const outcome = await chains.amend(editing.hostId, editing.jobId, amend);
+        const outcome = await chains.amend(editing.hostId, editing.jobId, amend, hostRoute.target);
         toasts.push(
           `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
         );
@@ -1292,10 +1318,10 @@ async function generateSequence() {
         throw err;
       }
     } else {
-      const jobId = await chains.create(hostRoute.hostId, request);
+      const jobId = await chains.create(hostRoute.hostId, request, hostRoute.target);
       sequenceStageClipIdsByJob.set(
         `${hostRoute.hostId}:${jobId}`,
-        draft.clips.map((clip) => clip.id),
+        clips.map((clip) => clip.id),
       );
       toasts.push("Sequence queued");
     }
@@ -1348,6 +1374,10 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
     if (shared.fps != null) form.fps = shared.fps;
     if (shared.steps != null) form.steps = shared.steps;
     if (shared.guidance != null) form.guidance = shared.guidance;
+    if (shared.strength != null) form.strength = shared.strength;
+    if (loaded.openingImage) {
+      form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
+    }
     form.seed = shared.seed ?? "";
     if (editing) {
       draft.loadFromJob(

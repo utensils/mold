@@ -46,6 +46,12 @@ import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
 import {
+  SOURCE_FIT_OPTIONS,
+  coerceSourceFitForMaskless,
+  sourceFitPolicyForMode,
+  type SourceFitMode,
+} from "@studio/lib/sourceFit";
+import {
   cameraMotionMode,
   isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
@@ -224,6 +230,23 @@ const fitOptions = [
 const fitMode = computed(
   () => props.modelValue.sourceFitPolicy?.mode ?? "pad-repaint",
 );
+const sequenceFitOptions = SOURCE_FIT_OPTIONS.filter(
+  (option) => option.value !== "pad-repaint",
+);
+const sequenceFitMode = computed(
+  () =>
+    coerceSourceFitForMaskless(
+      props.modelValue.sourceFitPolicy ?? { mode: "crop-fill" },
+    ).mode,
+);
+function setSequenceFit(mode: SourceFitMode) {
+  patch({
+    sourceFitPolicy: sourceFitPolicyForMode(mode, {
+      supportsMask: false,
+      upscalerModel: props.modelValue.upscaleModel || "real-esrgan-x4plus:fp16",
+    }),
+  });
+}
 function setFit(mode: string) {
   if (mode === "upscale-then-fit") {
     patch({
@@ -324,6 +347,7 @@ function resetAdvanced() {
       clip.negativePrompt = "";
       clip.cameraControl = null;
     }
+    patch({ strength: 0.75, sourceFitPolicy: { mode: "crop-fill" } });
     return;
   }
   patch({
@@ -443,6 +467,45 @@ function setSequenceCameraMode(mode: string) {
           >
             Remove opening image
           </button>
+          <template v-if="draft.openingImage">
+            <SliderRow
+              label="Source strength"
+              :model-value="modelValue.strength"
+              :min="0"
+              :max="1"
+              :step="0.01"
+              :value-label="modelValue.strength.toFixed(2)"
+              data-test="sequence-source-strength"
+              @update:model-value="patch({ strength: $event })"
+            />
+            <div class="adv__field">
+              <label class="adv__label" for="sequence-source-fit"
+                >Fit to video frame</label
+              >
+              <select
+                id="sequence-source-fit"
+                class="adv__input"
+                data-test="sequence-source-fit"
+                :value="sequenceFitMode"
+                @change="
+                  setSequenceFit(
+                    ($event.target as HTMLSelectElement).value as SourceFitMode,
+                  )
+                "
+              >
+                <option
+                  v-for="option in sequenceFitOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <p class="adv__hint">
+                Applied to the opening image before the first clip renders.
+              </p>
+            </div>
+          </template>
         </AccordionSection>
 
         <AccordionSection
