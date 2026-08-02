@@ -11,7 +11,7 @@
  * and are read at submit time via `buildChainRequest`; `fps` arrives as a
  * prop only so the duration summary can be honest.
  */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import SeamPill from "@ui/components/SeamPill.vue";
 import {
   defaultClipFrames,
@@ -21,11 +21,16 @@ import {
   sequenceFrameOptions,
   sequenceMotionTailFrames,
   sequenceValidation,
+  transitionLabel,
   type SequenceStage,
   type SequenceTransition,
 } from "@studio/lib/sequence";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { sequenceOpeningImageError } from "@studio/lib/sequenceForm";
+import {
+  buildChainRequest,
+  sequenceOpeningImageError,
+  type SequenceSharedParams,
+} from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -35,12 +40,16 @@ import { base64ToDataUrl } from "../lib/image";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
+import { validateChain } from "@studio/api/chains";
+import type { ChainValidationResponse } from "@studio/lib/api/chainTypes";
 
 const props = withDefaults(
   defineProps<{
     selectedModel: ModelEntry | null;
     chainLimits: ChainLimits | null;
     target: ApiTarget | null;
+    /** Live shared generation parameters owned by MobileApp's form. */
+    shared: SequenceSharedParams;
     /** The generate form's frame rate — shown, never stored here. */
     fps: number;
     submitting?: boolean;
@@ -153,6 +162,71 @@ const blockingReason = computed(
     null,
 );
 const submitError = computed(() => (props.error ? friendlySequenceError(props.error) : ""));
+const validating = ref(false);
+const validationPlan = ref<ChainValidationResponse | null>(null);
+const validationError = ref("");
+const validationSourceRevision = ref(0);
+watch(
+  () => [
+    draft.openingImage?.base64 ?? null,
+    ...draft.clips.map((clip) => clip.sourceImage?.base64 ?? null),
+  ],
+  () => {
+    validationSourceRevision.value += 1;
+  },
+);
+const validationInputSignature = computed(() =>
+  JSON.stringify({
+    shared: props.shared,
+    motionTail: motionTail.value,
+    enableAudio: draft.enableAudio,
+    sourceRevision: validationSourceRevision.value,
+    openingSourceFilename: draft.openingImage?.filename ?? null,
+    clips: draft.clips.map((clip) => ({
+      id: clip.id,
+      prompt: clip.prompt,
+      frames: clip.frames,
+      transition: clip.transition,
+      fadeFrames: clip.fadeFrames,
+      negativePrompt: clip.negativePrompt,
+      sourceFilename: clip.sourceImage?.filename ?? null,
+      cameraControl: clip.cameraControl,
+    })),
+    target: props.target,
+  }),
+);
+watch(validationInputSignature, () => {
+  validationPlan.value = null;
+  validationError.value = "";
+});
+
+async function validatePlan(): Promise<void> {
+  const target = props.target;
+  if (!target || blockingReason.value || locked.value || validating.value) return;
+  const signature = validationInputSignature.value;
+  validating.value = true;
+  validationPlan.value = null;
+  validationError.value = "";
+  try {
+    const request = buildChainRequest(props.shared, draft.clips, {
+      motionTailFrames: motionTail.value,
+      enableAudio: draft.enableAudio,
+      openingImage: draft.openingImage,
+    });
+    const plan = await validateChain(request, target);
+    if (validationInputSignature.value === signature) validationPlan.value = plan;
+  } catch (error) {
+    if (validationInputSignature.value === signature) {
+      validationError.value = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    validating.value = false;
+  }
+}
+
+const validationDuration = (plan: ChainValidationResponse) =>
+  `${(plan.estimated_duration_ms / 1_000).toFixed(1)}s`;
+const formatBytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 
 const clipLabel = (index: number) => (index === 0 ? "opening" : `clip ${index + 1}`);
 
@@ -276,6 +350,52 @@ function sourceImageMime(filename: string): string {
 
     <p class="mobile-sequence-duration" data-test="mobile-sequence-duration">
       {{ formatFrameDuration(duration.frames, fps) }} @ {{ fps }}fps
+    </p>
+
+    <button
+      type="button"
+      class="secondary-button mobile-sequence-validate"
+      data-test="mobile-sequence-validate"
+      :disabled="locked || validating || !!blockingReason || !target"
+      @click="validatePlan"
+    >
+      {{ validating ? "Validating…" : "Validate plan" }}
+    </button>
+    <section
+      v-if="validationPlan"
+      class="mobile-sequence-plan"
+      data-test="mobile-sequence-validation-plan"
+      aria-live="polite"
+    >
+      <strong>
+        Validated · {{ validationPlan.stage_count }} clips ·
+        {{ validationPlan.estimated_total_frames }}f · {{ validationDuration(validationPlan) }}
+      </strong>
+      <span v-for="(stage, index) in validationPlan.stages" :key="index">
+        Clip {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
+        {{ transitionLabel(stage.transition, validationPlan.motion_tail_frames) }}
+        <template v-if="stage.has_source_image"> · Opening image</template>
+        <template v-if="stage.has_negative_prompt"> · Negative prompt</template>
+      </span>
+      <span v-if="validationPlan.vram_estimate">
+        VRAM {{ formatBytes(validationPlan.vram_estimate.worst_case_bytes) }} ·
+        {{ validationPlan.vram_estimate.fits ? "fits" : "does not fit" }}
+      </span>
+      <span
+        v-for="warning in validationPlan.warnings"
+        :key="warning"
+        class="mobile-sequence-warning"
+      >
+        {{ warning }}
+      </span>
+    </section>
+    <p
+      v-if="validationError"
+      class="mobile-sequence-error"
+      data-test="mobile-sequence-validation-error"
+      role="alert"
+    >
+      {{ validationError }}
     </p>
 
     <!-- Shared generation params are OWNED by the host form (one source of
@@ -479,6 +599,23 @@ function sourceImageMime(filename: string): string {
   border: 1px solid var(--edge);
   border-radius: 16px;
   background: var(--bench);
+}
+.mobile-sequence-validate {
+  min-height: 44px;
+}
+.mobile-sequence-plan {
+  display: grid;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--halide) 35%, var(--edge));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--halide) 8%, transparent);
+  padding: 12px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mobile-sequence-warning {
+  color: var(--warning);
 }
 
 .mobile-sequence-clips {

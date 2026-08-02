@@ -43,6 +43,35 @@ export interface ChainRequestWire {
   batch_count?: number | null;
 }
 
+export interface ChainValidationStage {
+  prompt: string;
+  frames: number;
+  output_frames: number;
+  transition: SequenceTransition;
+  fade_frames?: number | null;
+  has_source_image: boolean;
+  has_negative_prompt: boolean;
+}
+
+/** Read-only server normalization returned by
+ * `POST /api/generate/chain/validate`. */
+export interface ChainValidationResponse {
+  model: string;
+  width: number;
+  height: number;
+  fps: number;
+  motion_tail_frames: number;
+  stage_count: number;
+  estimated_total_frames: number;
+  estimated_duration_ms: number;
+  stages: ChainValidationStage[];
+  warnings: string[];
+  vram_estimate?: {
+    worst_case_bytes: number;
+    fits: boolean;
+  } | null;
+}
+
 /**
  * Per-clip provenance recorded into a stitched chain output's gallery
  * metadata (`OutputMetadata.chain.stages`) — the durable record of what each

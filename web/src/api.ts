@@ -26,6 +26,11 @@ import { postSseJsonStream, type StreamError } from "./lib/apiStream";
 import type {
   AmendRequest as AmendRequestWire,
   AmendResponse as AmendResponseWire,
+  ChainValidationResponse,
+} from "@studio/lib/api/chainTypes";
+export type {
+  ChainValidationResponse,
+  ChainValidationStage,
 } from "@studio/lib/api/chainTypes";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
@@ -66,33 +71,6 @@ export interface ChainLimits {
   supports_audio: boolean;
   supports_sequence: boolean;
   sequence_unsupported_reason?: string | null;
-}
-
-export interface ChainValidationStage {
-  prompt: string;
-  frames: number;
-  output_frames: number;
-  transition: "smooth" | "cut" | "fade";
-  fade_frames?: number | null;
-  has_source_image: boolean;
-  has_negative_prompt: boolean;
-}
-
-export interface ChainValidationResponse {
-  model: string;
-  width: number;
-  height: number;
-  fps: number;
-  motion_tail_frames: number;
-  stage_count: number;
-  estimated_total_frames: number;
-  estimated_duration_ms: number;
-  stages: ChainValidationStage[];
-  warnings: string[];
-  vram_estimate?: {
-    worst_case_bytes: number;
-    fits: boolean;
-  } | null;
 }
 
 export function imageUrl(filename: string): string {

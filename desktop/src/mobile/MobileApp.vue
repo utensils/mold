@@ -3512,6 +3512,7 @@ onBeforeUnmount(() => {
               :selected-model="selectedGenerationModel"
               :chain-limits="chainLimits"
               :target="selectedTarget"
+              :shared="sequenceParams(form, selectedGenerationModel)"
               :fps="form.fps"
               :submitting="sequenceStarting"
               :error="sequenceError"
