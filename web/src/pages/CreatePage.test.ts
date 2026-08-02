@@ -1981,7 +1981,7 @@ describe("CreatePage layout and behavior", () => {
           {
             prompt: "one",
             frames: 97,
-            source_image_b64: "QUJD",
+            source_image_b64: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
             source_image_path: "opening.png",
           },
           { prompt: "two", frames: 97, transition: "cut" },
@@ -2009,7 +2009,9 @@ describe("CreatePage layout and behavior", () => {
     expect(draft.clips.map((c) => c.prompt)).toEqual(["one", "two"]);
     expect(draft.openingImage).toEqual({
       filename: "opening image",
-      base64: "QUJD",
+      base64: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
+      width: 640,
+      height: 384,
     });
     expect(draft.clips[1]?.transition).toBe("cut");
     // The job's shared params landed on the LIVE form.
@@ -2040,12 +2042,15 @@ describe("CreatePage layout and behavior", () => {
         stages: [
           expect.objectContaining({
             prompt: "one",
-            source_image: "QUJD",
+            source_image: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
           }),
           expect.objectContaining({ prompt: "two, but stormier" }),
         ],
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
+    );
+    expect(amendChainJobMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ strength: 1 }),
     );
     expect(createChainJobMock).not.toHaveBeenCalled();
     expect(draft.editing).toBeNull();

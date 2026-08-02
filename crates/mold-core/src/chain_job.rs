@@ -680,7 +680,7 @@ pub struct RetakeRequest {
 /// canonical order) replaces the job's stages, plus optional chain-level
 /// overlays (omitted = keep current). NOT amendable — the client must create
 /// a fresh job instead: model, width, height, output_format, placement,
-/// strength, and batch provenance.
+/// and batch provenance.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AmendRequest {
     pub stages: Vec<crate::chain::ChainStage>,
@@ -695,6 +695,8 @@ pub struct AmendRequest {
     pub steps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_audio: Option<bool>,
 }
@@ -1027,6 +1029,7 @@ mod tests {
         assert_eq!(req.motion_tail_frames, None);
         assert_eq!(req.fps, None);
         assert_eq!(req.guidance, None);
+        assert_eq!(req.strength, None);
         assert_eq!(req.enable_audio, None);
         assert_eq!(req.stages.len(), 1);
         assert_eq!(req.stages[0].prompt, "edited clip");

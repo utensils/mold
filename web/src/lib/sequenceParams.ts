@@ -27,6 +27,8 @@ export function sequenceSharedParams(
     steps: state.steps,
     guidance: state.guidance,
     strength: state.strength,
+    sourceFitPolicy: state.sourceFitPolicy,
+    upscalerModel: state.upscaleModel,
     seed:
       state.seedMode === "random" || state.seed === null
         ? ""

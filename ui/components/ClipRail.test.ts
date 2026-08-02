@@ -223,13 +223,8 @@ describe("ClipRail", () => {
     expect(railSource).toMatch(
       /--filmstrip-thumb-height:\s*calc\(\s*var\(--filmstrip-scene-height\) - var\(--filmstrip-footer-height\)\s*\)/,
     );
-    expect(railSource).toMatch(
-      /--filmstrip-tile-max:\s*calc\(var\(--filmstrip-thumb-height\) \* 16 \/ 9\)/,
-    );
     expect(railSource).not.toContain("@container create-bench");
-    expect(pillSource).toContain(
-      "width: min(var(--clip-width), var(--filmstrip-tile-max, 196px))",
-    );
+    expect(pillSource).toContain("width: var(--clip-width)");
   });
 
   it("changes duration on the x axis while every tile keeps the track height", () => {
@@ -253,6 +248,30 @@ describe("ClipRail", () => {
     expect(pillSource).toMatch(
       /\.ms-clip__thumb :deep\(img\),[\s\S]*object-fit:\s*cover/s,
     );
+  });
+
+  it("scales long clips by actual playback duration instead of a fixed frame cap", () => {
+    const wrapper = make({
+      fps: 24,
+      clips: [
+        { ...clips(2)[0]!, frames: 97 },
+        { ...clips(2)[1]!, frames: 481 },
+      ],
+      frameOptions: [97, 193, 289, 385, 481],
+    });
+    const tiles = wrapper.findAll(".ms-clip");
+    expect(tiles[0]!.attributes("style")).toContain("--clip-width: 194px");
+    expect(tiles[1]!.attributes("style")).toContain("--clip-width: 962px");
+    expect(Number(tiles[1]!.attributes("data-frames"))).toBe(481);
+  });
+
+  it("steps clip duration from the resize handle with the keyboard", async () => {
+    const wrapper = make({ frameOptions: [97, 193, 289, 385, 481] });
+    const handles = wrapper.findAll(".ms-clip__resize");
+    await handles[0]!.trigger("keydown", { key: "ArrowRight" });
+    expect(wrapper.emitted("resize")?.at(-1)).toEqual(["c0", 193]);
+    await handles[0]!.trigger("keydown", { key: "End" });
+    expect(wrapper.emitted("resize")?.at(-1)).toEqual(["c0", 481]);
   });
 
   it("keeps playback and removal as separate, keyboard-focusable controls", () => {

@@ -39,16 +39,19 @@ const emit = defineEmits<{
 let resizeStartX = 0;
 let resizeStartFrames = 0;
 
+/** A stable timeline zoom: equal playback time gets equal visual width. */
+const TIMELINE_PIXELS_PER_SECOND = 48;
+const MIN_CLIP_WIDTH = 148;
+
 const sortedFrameOptions = computed(() =>
   [...(props.frameOptions ?? [])].sort((a, b) => a - b),
 );
 const clipWidth = computed(() => {
-  const options = sortedFrameOptions.value;
-  if (options.length < 2) return 196;
-  const min = options[0]!;
-  const max = options.at(-1)!;
-  const progress = (props.frames - min) / Math.max(1, max - min);
-  return Math.round(148 + Math.min(1, Math.max(0, progress)) * 112);
+  const fps = Math.max(1, props.fps);
+  return Math.max(
+    MIN_CLIP_WIDTH,
+    Math.round((props.frames / fps) * TIMELINE_PIXELS_PER_SECOND),
+  );
 });
 
 function stopResize() {
@@ -59,15 +62,36 @@ function stopResize() {
 function onResizeMove(event: PointerEvent) {
   const options = sortedFrameOptions.value;
   if (!options.length) return;
-  const min = options[0]!;
-  const max = options.at(-1)!;
+  const pixelsPerFrame = TIMELINE_PIXELS_PER_SECOND / Math.max(1, props.fps);
   const target =
-    resizeStartFrames +
-    ((event.clientX - resizeStartX) * Math.max(8, max - min)) / 112;
+    resizeStartFrames + (event.clientX - resizeStartX) / pixelsPerFrame;
   const frames = options.reduce((nearest, option) =>
     Math.abs(option - target) < Math.abs(nearest - target) ? option : nearest,
   );
   if (frames !== props.frames) emit("resize", frames);
+}
+
+function onResizeKeydown(event: KeyboardEvent) {
+  const options = sortedFrameOptions.value;
+  if (options.length < 2) return;
+  const currentIndex = options.reduce(
+    (nearest, option, index) =>
+      Math.abs(option - props.frames) <
+      Math.abs(options[nearest]! - props.frames)
+        ? index
+        : nearest,
+    0,
+  );
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowLeft") nextIndex = Math.max(0, currentIndex - 1);
+  else if (event.key === "ArrowRight")
+    nextIndex = Math.min(options.length - 1, currentIndex + 1);
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = options.length - 1;
+  else return;
+  event.preventDefault();
+  const frames = options[nextIndex];
+  if (frames !== undefined && frames !== props.frames) emit("resize", frames);
 }
 
 function startResize(event: PointerEvent) {
@@ -119,6 +143,7 @@ const statusLabel = computed(() => {
     :data-playing="playing ? 'true' : undefined"
     :data-status="media?.status ?? undefined"
     :data-plan="plan ?? undefined"
+    :data-frames="frames"
     :style="{ '--clip-width': `${clipWidth}px` }"
   >
     <button
@@ -221,6 +246,7 @@ const statusLabel = computed(() => {
       :aria-label="`Resize ${label}; currently ${durationLabel}`"
       title="Drag to change scene length"
       @pointerdown="startResize"
+      @keydown="onResizeKeydown"
     >
       <span aria-hidden="true" />
     </button>
@@ -232,7 +258,7 @@ const statusLabel = computed(() => {
   position: relative;
   display: block;
   flex: 0 0 auto;
-  width: min(var(--clip-width), var(--filmstrip-tile-max, 196px));
+  width: var(--clip-width);
 }
 
 .ms-clip__resize {

@@ -21,6 +21,46 @@ export type SourceFitPolicy =
       fit: Exclude<SourceFitPolicy, { mode: "upscale-then-fit" }>;
     };
 
+export type SourceFitMode = SourceFitPolicy["mode"];
+
+/**
+ * Source-fit choices shared by every source-image surface. Sequence video is
+ * maskless, so callers omit Pad + repaint and use the remaining four modes.
+ */
+export const SOURCE_FIT_OPTIONS: readonly {
+  value: SourceFitMode;
+  label: string;
+}[] = [
+  { value: "pad-repaint", label: "Pad + repaint" },
+  { value: "crop-fill", label: "Crop fill" },
+  { value: "pad-fit", label: "Scale to fit" },
+  { value: "lanczos-resize", label: "Resize to fill" },
+  { value: "upscale-then-fit", label: "Upscale + crop" },
+];
+
+/** Build the complete policy represented by a compact mode control. */
+export function sourceFitPolicyForMode(
+  mode: SourceFitMode,
+  options: { supportsMask: boolean; upscalerModel?: string },
+): SourceFitPolicy {
+  if (mode === "crop-fill") {
+    return { mode, alignX: "center", alignY: "center" };
+  }
+  if (mode === "upscale-then-fit") {
+    return {
+      mode,
+      upscalerModel: options.upscalerModel ?? "",
+      fit: options.supportsMask
+        ? { mode: "pad-repaint" }
+        : { mode: "crop-fill", alignX: "center", alignY: "center" },
+    };
+  }
+  if (mode === "pad-repaint" && !options.supportsMask) {
+    return { mode: "crop-fill", alignX: "center", alignY: "center" };
+  }
+  return { mode };
+}
+
 export interface Size {
   width: number;
   height: number;

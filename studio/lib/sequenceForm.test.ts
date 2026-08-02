@@ -179,6 +179,7 @@ describe("script round-trip", () => {
         fps: 24,
         steps: 8,
         guidance: 3,
+        strength: 0.6,
         enable_audio: true,
       },
       stages: [
@@ -209,6 +210,7 @@ describe("script round-trip", () => {
     expect(loaded.enableAudio).toBe(true);
     expect(loaded.shared.model).toBe("ltx-2-19b-distilled:fp8");
     expect(loaded.shared.width).toBe(1216);
+    expect(loaded.shared.strength).toBe(0.6);
 
     const back = clipsToChainScript(shared(), loaded.clips, {
       motionTailFrames: 17,
@@ -221,6 +223,7 @@ describe("script round-trip", () => {
     expect(back.stages[1]?.fade_frames).toBe(8);
     expect(back.stages[0]?.source_image_b64).toBe("QUJD");
     expect(back.stages[0]?.loras?.[0]?.path).toBe("camera-control:dolly-left");
+    expect(back.chain.strength).toBe(1);
   });
 
   it("recovers source dimensions from script media without adding wire fields", () => {

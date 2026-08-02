@@ -122,6 +122,7 @@ import { useQueue } from "../composables/useQueue";
 import { decideGenerateRequestRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
+  coerceSourceFitForMaskless,
   maskPaddingRectangles,
   resolveSourceFitTransform,
 } from "@studio/lib/sourceFit";
@@ -389,9 +390,8 @@ function canvasToSourceImage(
 function drawableFitPolicy(
   policy: SourceFitPolicy | undefined,
 ): SourceFitPolicy {
-  if (!policy || policy.mode === "upscale-then-fit") {
-    return { mode: "pad-repaint" };
-  }
+  if (!policy) return { mode: "pad-repaint" };
+  if (policy.mode === "upscale-then-fit") return policy.fit;
   return policy;
 }
 
@@ -486,6 +486,20 @@ function hostTargetFor(hostId: string): StreamTarget | undefined {
   const host = routing.hosts.value.find((h) => h.id === hostId);
   if (!host) return undefined;
   return { baseUrl: host.url, ...(host.apiKey ? { apiKey: host.apiKey } : {}) };
+}
+
+function hostRouteFor(hostId: string): HostRoute | null {
+  const host = routing.hosts.value.find((candidate) => candidate.id === hostId);
+  if (!host) return null;
+  return {
+    hostId: host.id,
+    label: host.label,
+    target: {
+      baseUrl: host.url,
+      ...(host.apiKey ? { apiKey: host.apiKey } : {}),
+    },
+    instanceId: host.instanceId ?? null,
+  };
 }
 
 const watchedProgress = computed(() => {
@@ -1244,6 +1258,7 @@ function applySharedToForm(shared: Partial<SequenceSharedParams>) {
   if (shared.fps != null) s.fps = shared.fps;
   if (shared.steps != null) s.steps = shared.steps;
   if (shared.guidance != null) s.guidance = shared.guidance;
+  if (shared.strength != null) s.strength = shared.strength;
   if (shared.seed != null && shared.seed !== "") {
     s.seedMode = "static";
     s.seed = Number(shared.seed);
@@ -1260,40 +1275,111 @@ async function onSubmitSequence() {
       "Choose an installed sequence-capable video model on the selected machine.";
     return;
   }
-  const initialRoute = routing.resolve(form.state.value.model || null);
+  // Freeze every request-affecting value at the click boundary. Source
+  // preprocessing may take minutes; edits during that await belong to the
+  // next submission and must not create a hybrid request.
+  const editing = draft.editing ? { ...draft.editing } : null;
+  const shared = {
+    ...sharedParams.value,
+    sourceFitPolicy: sharedParams.value.sourceFitPolicy
+      ? JSON.parse(JSON.stringify(sharedParams.value.sourceFitPolicy))
+      : undefined,
+  } satisfies SequenceSharedParams;
+  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
+  const openingSnapshot = draft.openingImage ? { ...draft.openingImage } : null;
+  const enableAudio = draft.enableAudio;
+  const motionTailFrames = sequenceMotionTail.value;
+  const initialRoute = editing
+    ? hostRouteFor(editing.hostId)
+    : routing.resolve(shared.model || null);
   if (!initialRoute) {
     composerError.value = "The selected sequence host is unavailable.";
     return;
   }
   // Refresh chain limits when stale (30 s cache) — the server still remains
   // the final authority at submission.
-  await fetchChainLimits(form.state.value.model, initialRoute.target).catch(
-    () => {},
-  );
-  const req = buildChainRequest(sharedParams.value, draft.clips, {
-    motionTailFrames: sequenceMotionTail.value,
-    enableAudio: draft.enableAudio,
-    openingImage: draft.openingImage,
+  await fetchChainLimits(shared.model, initialRoute.target).catch(() => {});
+  const preliminaryRequest = buildChainRequest(shared, clips, {
+    motionTailFrames,
+    enableAudio,
+    openingImage: openingSnapshot,
+  });
+  let route = initialRoute;
+  if (!editing) {
+    const feasibility = await routing.resolveFeasibleChain(preliminaryRequest);
+    if (feasibility.kind !== "route") {
+      composerError.value = feasibilityMessage(feasibility, "this sequence");
+      return;
+    }
+    route = feasibility.route;
+  }
+  let openingImage = openingSnapshot;
+  if (openingImage?.base64) {
+    const prepared = await prepareStillSourceToRequest(route, {
+      source: {
+        kind: "upload",
+        filename: openingImage.filename,
+        base64: openingImage.base64,
+        width: openingImage.width,
+        height: openingImage.height,
+        mime: /\.jpe?g$/i.test(openingImage.filename)
+          ? "image/jpeg"
+          : "image/png",
+      },
+      mask: null,
+      maskless: true,
+      settings: {
+        policy: shared.sourceFitPolicy,
+        upscalerModel: shared.upscalerModel,
+        family: shared.family,
+        frames: null,
+        width: shared.width,
+        height: shared.height,
+      },
+    });
+    if (prepared === false) return;
+    openingImage = prepared.source
+      ? {
+          ...openingImage,
+          base64: prepared.source.base64,
+          width: prepared.source.width ?? undefined,
+          height: prepared.source.height ?? undefined,
+        }
+      : openingImage;
+  }
+  const req = buildChainRequest(shared, clips, {
+    motionTailFrames,
+    enableAudio,
+    openingImage,
   });
 
-  const editing = draft.editing;
   if (editing) {
     const amendReq: AmendRequest = {
       stages: req.stages,
       motion_tail_frames: req.motion_tail_frames ?? null,
       fps: req.fps ?? null,
-      seed:
-        sharedParams.value.seed.trim() === "" ? null : sharedParams.value.seed,
+      seed: shared.seed.trim() === "" ? null : shared.seed,
       steps: req.steps,
       guidance: req.guidance,
-      enable_audio: draft.enableAudio ? true : null,
+      strength: req.strength ?? null,
+      enable_audio: enableAudio ? true : null,
     };
     try {
+      if (!sameRoute(route, hostRouteFor(editing.hostId))) {
+        composerError.value =
+          "The sequence machine changed during source preparation. Review the machine and Update again.";
+        return;
+      }
       sequenceStageClipIdsByJob.set(
         `${editing.hostId}:${editing.jobId}`,
-        draft.clips.map((clip) => clip.id),
+        clips.map((clip) => clip.id),
       );
-      await chainJobs.amend(editing.hostId, editing.jobId, amendReq);
+      await chainJobs.amend(
+        editing.hostId,
+        editing.jobId,
+        amendReq,
+        route.target,
+      );
       draft.stopEditing();
       editBaselineShared.value = null;
       toast("info", "Sequence updated — unchanged clips stay cached.");
@@ -1316,14 +1402,17 @@ async function onSubmitSequence() {
   }
 
   try {
-    const feasibility = await routing.resolveFeasibleChain(req);
-    if (feasibility.kind !== "route")
-      throw new Error(feasibilityMessage(feasibility, "this sequence"));
-    const route = feasibility.route;
+    const feasibility = await routing.revalidateFeasibleChain(route, req);
+    if (feasibility.kind !== "route") {
+      throw new Error(
+        feasibilityMessage(feasibility, "this finalized sequence"),
+      );
+    }
+    route = feasibility.route;
     const jobId = await chainJobs.create(route.hostId, req);
     sequenceStageClipIdsByJob.set(
       `${route.hostId}:${jobId}`,
-      draft.clips.map((clip) => clip.id),
+      clips.map((clip) => clip.id),
     );
     if (editing) {
       draft.stopEditing();
@@ -1356,6 +1445,13 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
     if (!script) throw new Error("This sequence job has no editable script.");
     const loaded = chainScriptToClips(script);
     applySharedToForm(loaded.shared);
+    if (loaded.openingImage) {
+      form.state.value.sourceFitPolicy = {
+        mode: "crop-fill",
+        alignX: "center",
+        alignY: "center",
+      };
+    }
     if (editing) {
       draft.loadFromJob(
         {
@@ -1415,6 +1511,11 @@ function onDiscardEdit() {
 
 function onImportShared(shared: Partial<SequenceSharedParams>) {
   applySharedToForm(shared);
+  if (draft.openingImage) {
+    // Imported opening-image bytes are already the script's prepared source;
+    // never inherit a stale client-only upscale policy from the prior draft.
+    form.state.value.sourceFitPolicy = { mode: "crop-fill" };
+  }
 }
 
 function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
@@ -1725,14 +1826,38 @@ const sourceFitCache = new SourceFitPreprocessCache();
 /** Prepare request-only source bytes while preserving the user's editable source. */
 async function prepareStillSourceToRequest(
   route: HostRoute | null,
+  override?: {
+    source: SourceImageState | null;
+    mask: SourceImageState | null;
+    maskless?: boolean;
+    settings?: {
+      policy?: SourceFitPolicy;
+      upscalerModel?: string;
+      family: string;
+      frames: number | null;
+      width: number;
+      height: number;
+    };
+  },
 ): Promise<PreparedStillSource | false> {
-  let source = form.state.value.imageAttachments[0] ?? null;
-  const mask = form.state.value.maskImage;
+  let source = override
+    ? override.source
+    : (form.state.value.imageAttachments[0] ?? null);
+  const mask = override ? override.mask : form.state.value.maskImage;
   if (!source) return { source, mask };
 
-  const outerPolicy = form.state.value.sourceFitPolicy;
+  const configuredPolicy =
+    override?.settings?.policy ??
+    form.state.value.sourceFitPolicy ??
+    ({ mode: "pad-repaint" } as const);
+  const outerPolicy = override?.maskless
+    ? coerceSourceFitForMaskless(configuredPolicy)
+    : configuredPolicy;
   if (outerPolicy?.mode === "upscale-then-fit") {
-    const model = outerPolicy.upscalerModel || form.state.value.upscaleModel;
+    const model =
+      outerPolicy.upscalerModel ||
+      override?.settings?.upscalerModel ||
+      form.state.value.upscaleModel;
     if (model) {
       try {
         const original = source;
@@ -1790,13 +1915,23 @@ async function prepareStillSourceToRequest(
     }
   }
 
-  const family = currentModel.value?.family ?? form.state.value.modelFamily;
-  if (isQwenImageEditFamily(family) || form.state.value.frames)
+  const family =
+    override?.settings?.family ??
+    currentModel.value?.family ??
+    form.state.value.modelFamily;
+  if (
+    isQwenImageEditFamily(family) ||
+    ((override?.settings?.frames ?? form.state.value.frames) &&
+      !override?.maskless)
+  )
     return { source, mask };
   const target = {
-    width: form.state.value.width,
-    height: form.state.value.height,
+    width: override?.settings?.width ?? form.state.value.width,
+    height: override?.settings?.height ?? form.state.value.height,
   };
+  if (source.width === target.width && source.height === target.height) {
+    return { source, mask };
+  }
   const policy = drawableFitPolicy(outerPolicy);
   return sourceFitCache.fit(
     source.base64,
@@ -2463,6 +2598,9 @@ async function onPickSource(v: SourceImageState[]) {
         width: first.width ?? undefined,
         height: first.height ?? undefined,
       };
+      form.state.value.sourceFitPolicy = coerceSourceFitForMaskless(
+        form.state.value.sourceFitPolicy ?? { mode: "crop-fill" },
+      );
     }
     composerError.value = null;
     return;

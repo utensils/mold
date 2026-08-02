@@ -21,6 +21,8 @@ export function sequenceParams(
     steps: form.steps,
     guidance: form.guidance,
     strength: form.strength,
+    sourceFitPolicy: form.sourceFit,
+    upscalerModel: form.upscaleModel,
     seed: form.seed,
   };
 }

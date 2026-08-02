@@ -17,6 +17,7 @@ import type {
 } from "./api/chainTypes";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
 import type { SequenceTransition } from "./sequence";
+import type { SourceFitPolicy } from "./sourceFit";
 import {
   CAMERA_MOTION_PRESETS,
   cameraMotionLabel,
@@ -57,6 +58,10 @@ export interface SequenceSharedParams {
   steps: number;
   guidance: number;
   strength: number;
+  /** Client-side preprocessing policy for an opening image. */
+  sourceFitPolicy?: SourceFitPolicy;
+  /** Preferred source pre-upscaler when the policy requests one. */
+  upscalerModel?: string;
   /** Decimal string; "" means random (matches the generate forms). */
   seed: string;
 }
@@ -200,6 +205,7 @@ export function chainScriptToClips(script: ChainScript): {
   if (chain.fps != null) shared.fps = chain.fps;
   if (chain.steps != null) shared.steps = chain.steps;
   if (chain.guidance != null) shared.guidance = chain.guidance;
+  if (chain.strength != null) shared.strength = chain.strength;
   if (chain.seed != null) shared.seed = String(chain.seed);
   return {
     clips,
@@ -231,6 +237,7 @@ export function clipsToChainScript(
       seed: shared.seed.trim() === "" ? null : shared.seed,
       steps: shared.steps,
       guidance: shared.guidance,
+      strength: shared.strength,
       enable_audio: opts.enableAudio ? true : null,
     },
     stages: clips.map((clip, idx) =>
