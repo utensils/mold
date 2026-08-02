@@ -530,7 +530,7 @@ fn build_request(
         fps: Some(params.fps),
         upscale_model: params.upscale_model.clone(),
         gif_preview: true,
-        enable_audio: None,
+        enable_audio: params.enable_audio,
         audio_file: None,
         audio_file_path: None,
         source_video: None,
@@ -793,5 +793,22 @@ mod tests {
             req.upscale_model.as_deref(),
             Some("real-esrgan-x4plus:fp16")
         );
+    }
+
+    #[test]
+    fn build_request_preserves_explicit_audio_choice() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(
+            build_request(&params, "p", &None).enable_audio,
+            None,
+            "untouched TUI state must preserve the server's pipeline default"
+        );
+
+        params.enable_audio = Some(true);
+        assert_eq!(build_request(&params, "p", &None).enable_audio, Some(true));
+
+        params.enable_audio = Some(false);
+        assert_eq!(build_request(&params, "p", &None).enable_audio, Some(false));
     }
 }

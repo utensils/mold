@@ -13,7 +13,9 @@ use tui_textarea::TextArea;
 
 use crate::action::{Action, View};
 use crate::event::map_event;
-use crate::model_info::{capabilities_for_family, family_for_model, ModelCapabilities};
+#[cfg(test)]
+use crate::model_info::capabilities_for_family;
+use crate::model_info::{capabilities_for_model, family_for_model, ModelCapabilities};
 use crate::ui::theme::Theme;
 
 /// Events sent from background tasks to the main TUI loop.
@@ -410,6 +412,7 @@ pub enum ParamField {
     // Advanced — Video
     Frames,
     Fps,
+    Audio,
 }
 
 impl ParamField {
@@ -434,6 +437,7 @@ impl ParamField {
             Self::ControlModel => "CNet Mdl",
             Self::Frames => "Frames",
             Self::Fps => "FPS",
+            Self::Audio => "Audio",
             Self::ControlScale => "Scale",
         }
     }
@@ -552,6 +556,9 @@ pub struct GenerateParams {
     // Video
     pub frames: u32,
     pub fps: u32,
+    /// `None` preserves the pipeline default; explicit values mirror the
+    /// CLI's `--audio` and `--no-audio` controls.
+    pub enable_audio: Option<bool>,
     // ControlNet
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
@@ -617,6 +624,7 @@ impl GenerateParams {
             mask_image_path: None,
             frames: 25,
             fps: 24,
+            enable_audio: None,
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
@@ -701,6 +709,11 @@ impl GenerateParams {
                 .to_string(),
             ParamField::Frames => self.frames.to_string(),
             ParamField::Fps => self.fps.to_string(),
+            ParamField::Audio => self
+                .enable_audio
+                .map(|enabled| if enabled { "on" } else { "off" })
+                .unwrap_or("default")
+                .to_string(),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
         }
     }
@@ -1429,8 +1442,6 @@ impl App {
             params.host = Some(url.clone());
         }
 
-        let family = family_for_model(&params.model, &config);
-        let mut capabilities = capabilities_for_family(&family);
         // Restore the Advanced accordion where the user left it.
         let advanced = crate::ui::create_form::AdvancedState::load();
 
@@ -1483,15 +1494,21 @@ impl App {
             params.model = model_name;
             // Apply all saved params (width, height, steps, guidance, batch, etc.)
             session.apply_to_params(&mut params);
-            // Re-derive capabilities for the restored model
-            let fam = family_for_model(&params.model, &config);
-            capabilities = capabilities_for_family(&fam);
         } else {
             // Model not found — only apply non-model-specific settings.
             // Skip width/height/steps/guidance/scheduler since they belong to
             // the missing model and would be wrong for the current default.
             session.apply_non_model_params(&mut params);
         }
+
+        let family = family_for_model(&params.model, &config);
+        let capabilities = capabilities_for_model(
+            &family,
+            catalog
+                .iter()
+                .find(|model| model.name == params.model)
+                .and_then(|model| model.supports_audio),
+        );
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
             .and_then(|m| {
@@ -1777,6 +1794,26 @@ impl App {
                 self.generate.model_description = entry.defaults.description.clone();
             }
         }
+        self.sync_generate_capabilities();
+    }
+
+    /// Recompute Create rows from the selected model and the current catalog's
+    /// checkpoint-specific audio fact. An incompatible model clears a stale
+    /// audio override before it can leak into another family.
+    fn sync_generate_capabilities(&mut self) {
+        let model = &self.generate.params.model;
+        let family = family_for_model(model, &self.config);
+        let advertised_audio_support = self
+            .models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == *model)
+            .and_then(|entry| entry.supports_audio);
+        self.generate.capabilities = capabilities_for_model(&family, advertised_audio_support);
+        if !self.generate.capabilities.supports_audio {
+            self.generate.params.enable_audio = None;
+        }
+        self.refresh_create_rows();
     }
 
     /// Spawn a background upscale job for the currently selected gallery image.
@@ -2133,8 +2170,7 @@ impl App {
                 }
             }
         }
-        self.generate.capabilities = capabilities_for_family(&family);
-        self.refresh_create_rows();
+        self.sync_generate_capabilities();
         self.generate.param_index = 0;
 
         // Apply saved per-model prefs last, so a user's explicit choices
@@ -3802,6 +3838,16 @@ impl App {
             ParamField::Fps => {
                 p.fps = (p.fps as i32 + delta).clamp(1, 60) as u32;
             }
+            ParamField::Audio => {
+                p.enable_audio = match (p.enable_audio, delta >= 0) {
+                    (None, true) | (Some(false), false) => Some(true),
+                    (Some(true), true) | (None, false) => Some(false),
+                    (Some(false), true) | (Some(true), false) => None,
+                };
+                if p.enable_audio == Some(true) {
+                    p.format = OutputFormat::Mp4;
+                }
+            }
             ParamField::ControlScale => {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
@@ -3814,6 +3860,9 @@ impl App {
                     OutputFormat::Webp => OutputFormat::Mp4,
                     OutputFormat::Mp4 => OutputFormat::Png,
                 };
+                if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
+                    p.enable_audio = None;
+                }
             }
             ParamField::Expand => {
                 p.expand = !p.expand;
@@ -4378,6 +4427,7 @@ impl App {
             // Toggle boolean fields
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
+            ParamField::Audio => self.adjust_field(ParamField::Audio, 1),
             // Cycle format
             ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
@@ -4449,6 +4499,7 @@ impl App {
         self.generate.params.upscale_model = None;
         self.generate.params.frames = 25;
         self.generate.params.fps = 24;
+        self.generate.params.enable_audio = None;
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
         self.generate.params.mask_image_path = None;
@@ -5697,7 +5748,7 @@ impl App {
                                 .map(|_| self.generate.params.control_scale),
                             upscale_model: None,
                             gif_preview: response.video.as_ref().map(|_| true),
-                            enable_audio: None,
+                            enable_audio: self.generate.params.enable_audio,
                             audio_file_path: None,
                             source_video_path: None,
                             extend_video_path: None,
@@ -6210,6 +6261,7 @@ impl App {
                     {
                         self.models.selected = self.models.catalog.len() - 1;
                     }
+                    self.sync_generate_capabilities();
                 }
                 BackgroundEvent::ChainProgress(event) => {
                     use mold_core::ChainProgressEvent;
@@ -9559,6 +9611,74 @@ mod tests {
         // Enter opens the SeedInput popup (the absorbed SeedValue row).
         app.dispatch_action(Action::Confirm);
         assert!(matches!(app.popup, Some(Popup::SeedInput { .. })));
+    }
+
+    #[tokio::test]
+    async fn audio_row_cycles_default_on_off() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.generate.capabilities = crate::model_info::capabilities_for_family("ltx2");
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Video);
+        app.refresh_create_rows();
+        let audio_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::SectionField(AdvSection::Video, ParamField::Audio))
+            .expect("LTX-2 Video section must expose Audio");
+        app.generate.param_index = audio_idx;
+
+        assert_eq!(app.generate.params.enable_audio, None);
+        app.increment_param(1);
+        assert_eq!(app.generate.params.enable_audio, Some(true));
+        assert_eq!(
+            app.generate.params.format,
+            OutputFormat::Mp4,
+            "audio output must select the only compatible container"
+        );
+        app.increment_param(1);
+        assert_eq!(app.generate.params.enable_audio, Some(false));
+        app.increment_param(1);
+        assert_eq!(app.generate.params.enable_audio, None);
+
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(app.generate.params.enable_audio, Some(true));
+    }
+
+    #[tokio::test]
+    async fn changing_away_from_mp4_clears_audio_override() {
+        let mut app = make_settings_test_app();
+        app.generate.params.format = OutputFormat::Mp4;
+        app.generate.params.enable_audio = Some(true);
+
+        app.adjust_field(ParamField::Format, 1);
+
+        assert_ne!(app.generate.params.format, OutputFormat::Mp4);
+        assert_eq!(
+            app.generate.params.enable_audio, None,
+            "a non-MP4 container cannot retain explicit audio output authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_an_incompatible_model_clears_audio_authority() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "flux2-klein:q8".into();
+        app.generate.params.enable_audio = Some(true);
+
+        app.sync_generate_capabilities();
+
+        assert!(!app.generate.capabilities.supports_audio);
+        assert_eq!(app.generate.params.enable_audio, None);
+        assert!(!app
+            .generate
+            .rows
+            .iter()
+            .any(|row| { *row == CreateRow::SectionField(AdvSection::Video, ParamField::Audio) }));
     }
 
     #[tokio::test]

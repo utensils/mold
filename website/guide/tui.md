@@ -141,15 +141,21 @@ carries a count of advanced values that differ from their defaults. The
 open state and expanded section persist across sessions
 (`tui.advanced_open` / `tui.advanced_section`).
 
-| Section                | Rows                                                 |
-| ---------------------- | ---------------------------------------------------- |
-| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload       |
-| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)     |
-| Source image           | Source, Strength, Mask, ControlNet (per model)       |
-| LoRA                   | LoRA path + scale                                    |
-| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears) |
-| Output format          | png / jpeg / gif / apng / webp / mp4                 |
-| Video                  | Frames, FPS (video models only)                      |
+| Section                | Rows                                                                  |
+| ---------------------- | --------------------------------------------------------------------- |
+| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                        |
+| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)                      |
+| Source image           | Source, Strength, Mask, ControlNet (per model)                        |
+| LoRA                   | LoRA path + scale                                                     |
+| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                  |
+| Output format          | png / jpeg / gif / apng / webp / mp4                                  |
+| Video                  | Frames, FPS; Audio default/on/off for audio-capable LTX-2 checkpoints |
+
+The Audio row is capability-driven: a checkpoint that advertises missing
+audio assets does not show it. `default` leaves the field absent so the
+server's pipeline constant remains authoritative; `on` and `off` send an
+explicit choice. Switching Audio on also selects MP4, the only container that
+can carry LTX-2's synchronized audio.
 
 The `↺ Reset to model defaults` action row at the bottom restores every
 parameter (keeping the model and your prompt). `qwen-image-edit` shows a
