@@ -87,6 +87,9 @@ watch(
   ],
   async () => {
     const epoch = ++controlAdaptersEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    cameraUnsupportedReason.value = null;
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;

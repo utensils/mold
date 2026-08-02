@@ -4009,7 +4009,14 @@ async fn capabilities_ltx2_control_adapters(
     get,
     path = "/api/capabilities/ltx2-camera-controls",
     tag = "generation",
-    params(("model" = String, Query, description = "Installed LTX-2 model ID")),
+    params(
+        ("model" = String, Query, description = "Installed LTX-2 model ID"),
+        (
+            "detail" = Option<String>,
+            Query,
+            description = "`1`, `true`, or bare to return the availability envelope with the                            host's reason instead of a bare array"
+        ),
+    ),
     responses(
         (status = 200, description = "Compatible built-in camera controls; a bare array, or an availability envelope for `detail=1`", body = Ltx2CameraControlsResponse),
         (status = 422, description = "Model is not an LTX-2 model")
@@ -4020,9 +4027,11 @@ async fn capabilities_ltx2_camera_controls(
     Query(query): Query<Ltx2ControlAdaptersQuery>,
 ) -> Result<Json<Ltx2CameraControlsResponse>, ApiError> {
     let detail = query.wants_detail();
-    // An older client asked for the array and can only express "no presets",
-    // so every failure has to collapse to an empty list for it. A `detail=1`
-    // client gets the reason instead of having to guess the server's policy.
+    // The bare array cannot carry a reason, so for an older client the
+    // 19B-only case stays an empty list — exactly what it returns today. Every
+    // other failure keeps its existing status for that client (unknown
+    // architecture still 422s) rather than being silently flattened here. A
+    // `detail=1` client gets the reason instead of guessing at server policy.
     let unsupported = |reason: String| -> Result<Json<Ltx2CameraControlsResponse>, ApiError> {
         if detail {
             Ok(Json(Ltx2CameraControlsResponse::Detailed(

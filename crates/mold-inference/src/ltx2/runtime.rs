@@ -829,13 +829,17 @@ impl Ltx2RuntimeSession {
             bail!(
                 "the LTX-2 {:?} pipeline cannot render this combination of inputs \
                  (spatial upscale: {:?}, temporal upscale: {:?}, source video: {}, \
-                 conditioning audio: {}). Choose a pipeline that supports them, or drop \
+                 conditioning audio: {}, reference-video conditioning: {}, retake \
+                 masking: {}, LoRAs: {}). Choose a pipeline that supports them, or drop \
                  the unsupported input.",
                 plan.pipeline,
                 plan.spatial_upscale,
                 plan.temporal_upscale,
                 plan.conditioning.video_path.is_some(),
                 plan.conditioning.audio_path.is_some(),
+                plan.execution_graph.uses_reference_video_conditioning,
+                plan.execution_graph.uses_retake_masking,
+                plan.loras.len(),
             );
         }
         let render = match plan.pipeline {

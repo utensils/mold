@@ -122,6 +122,9 @@ watch(
   [sequenceMode, () => props.family, () => props.modelValue.model],
   async () => {
     const epoch = ++cameraControlsEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    sequenceCameraUnsupportedReason.value = null;
     sequenceCameraControls.value = [];
     sequenceCameraControlsLoaded.value = false;
     if (
