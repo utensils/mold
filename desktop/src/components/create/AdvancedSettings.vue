@@ -568,9 +568,9 @@ function reset() {
             class="ms-hint"
           >
             {{
-          cameraUnsupportedReason ??
-          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
-        }}
+              cameraUnsupportedReason ??
+              "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+            }}
           </p>
           <p v-if="cameraError" data-test="camera-motion-error" class="ms-error" role="alert">
             {{ cameraError }}

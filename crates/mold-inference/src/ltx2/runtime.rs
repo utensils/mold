@@ -2,7 +2,7 @@
 
 use crate::audio::NativeAudioTrack;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::sampling::{

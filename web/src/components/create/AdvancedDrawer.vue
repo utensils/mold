@@ -135,7 +135,9 @@ watch(
         `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.modelValue.model)}&detail=1`,
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const availability = parseCameraControlAvailability(await response.json());
+      const availability = parseCameraControlAvailability(
+        await response.json(),
+      );
       const options = availability.controls;
       if (epoch !== cameraControlsEpoch) return;
       sequenceCameraControls.value = options;
@@ -567,9 +569,9 @@ function setSequenceCameraMode(mode: string) {
             data-test="sequence-camera-motion-19b-hint"
           >
             {{
-            sequenceCameraUnsupportedReason ??
-            "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
-          }}
+              sequenceCameraUnsupportedReason ??
+              "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+            }}
           </p>
         </AccordionSection>
 

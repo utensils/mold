@@ -954,6 +954,108 @@ mod tests {
         assert_eq!(json_body(response).await, serde_json::json!([]));
     }
 
+    /// `?detail=1` carries the server's own reason. Without it the response
+    /// must stay a bare array, byte for byte, because desktop and iPhone talk
+    /// to arbitrary-version remotes.
+    #[tokio::test]
+    async fn ltx2_camera_capabilities_detail_envelope_reports_why_presets_are_unavailable() {
+        let app = app_empty();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2.3-22b-distilled%3Afp8&detail=1",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert_eq!(body["controls"], serde_json::json!([]));
+        assert!(
+            body["unsupported_reason"]
+                .as_str()
+                .unwrap()
+                .contains("LTX-2 19B only"),
+            "response body: {body}"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2-19b-distilled%3Afp8&detail=1",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], true);
+        assert!(body["unsupported_reason"].is_null());
+        assert_eq!(body["controls"].as_array().unwrap().len(), 7);
+
+        // Older clients keep the exact array they parse today.
+        let response = app
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2.3-22b-distilled%3Afp8",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await, serde_json::json!([]));
+    }
+
+    /// An unknown architecture is "no presets here", not a client error. It
+    /// used to 422, which every surface caught into an unexplained empty
+    /// picker — the user saw nothing and was told nothing.
+    #[tokio::test]
+    async fn ltx2_camera_capabilities_detail_explains_an_unknown_architecture() {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "mystery:fp8".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("ltx2".to_string()),
+                transformer: Some("/models/mystery/weights.safetensors".to_string()),
+                ..Default::default()
+            },
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let app = app_with_state(AppState::empty(config, queue, gpu_pool, 200));
+
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/ltx2-camera-controls?model=mystery%3Afp8&detail=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert!(
+            body["unsupported_reason"]
+                .as_str()
+                .unwrap()
+                .contains("unknown"),
+            "response body: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
         let app = app_empty();

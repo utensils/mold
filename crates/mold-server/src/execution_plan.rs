@@ -1541,10 +1541,14 @@ fn concrete_artifacts_for_family(
 /// and then agrees with itself everywhere, so the render proceeds with the
 /// preset silently absent. Admission calls this first and refuses instead.
 fn unresolvable_camera_control_alias(config: &Config, request: &GenerateRequest) -> Option<String> {
-    effective_lora_requests(config, request).into_iter().find_map(|lora| {
-        let id = lora.path.strip_prefix("camera-control:")?;
-        resolved_camera_control_path(config, id).is_none().then(|| lora.path.clone())
-    })
+    effective_lora_requests(config, request)
+        .into_iter()
+        .find_map(|lora| {
+            let id = lora.path.strip_prefix("camera-control:")?;
+            resolved_camera_control_path(config, id)
+                .is_none()
+                .then(|| lora.path.clone())
+        })
 }
 
 /// Resolve a `camera-control:<id>` alias to the adapter's on-disk path.
@@ -1562,7 +1566,10 @@ fn resolved_camera_control_path(config: &Config, id: &str) -> Option<PathBuf> {
 /// The LoRA stack a request actually asks for, before alias resolution:
 /// explicit `loras`, else the legacy single `lora`, else the model config's
 /// own default.
-fn effective_lora_requests(config: &Config, request: &GenerateRequest) -> Vec<mold_core::LoraWeight> {
+fn effective_lora_requests(
+    config: &Config,
+    request: &GenerateRequest,
+) -> Vec<mold_core::LoraWeight> {
     request
         .loras
         .as_ref()

@@ -1579,7 +1579,11 @@ mod tests {
     /// simply not a file argument and arg validation must not opine on it.
     #[test]
     fn camera_control_preset_name_is_not_a_file_argument() {
-        for model in ["ltx-2.3-22b-distilled:fp8", "ltx-2-19b-distilled:fp8", "cv:2752735"] {
+        for model in [
+            "ltx-2.3-22b-distilled:fp8",
+            "ltx-2-19b-distilled:fp8",
+            "cv:2752735",
+        ] {
             assert!(
                 validate_file_args_full(FileArgRefs {
                     camera_control: Some("dolly-in"),

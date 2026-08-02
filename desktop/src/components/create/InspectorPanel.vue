@@ -17,10 +17,7 @@ import type {
   Ltx2ControlAdapterInfo,
   ModelEntry,
 } from "../../lib/api/types";
-import {
-  isCameraMotionPreset,
-  parseCameraControlAvailability,
-} from "@studio/lib/cameraMotion";
+import { isCameraMotionPreset, parseCameraControlAvailability } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import {
   filterModelsForTarget,

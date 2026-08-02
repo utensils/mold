@@ -69,10 +69,7 @@ import type {
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
-import {
-  isCameraMotionPreset,
-  parseCameraControlAvailability,
-} from "@studio/lib/cameraMotion";
+import { isCameraMotionPreset, parseCameraControlAvailability } from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import {
   buildAutoChainRequest,
@@ -3810,7 +3807,7 @@ onBeforeUnmount(() => {
                 :control-adapters="controlAdapters"
                 :camera-controls="cameraControls"
                 :camera-controls-loaded="cameraControlsLoaded"
-              :camera-unsupported-reason="cameraUnsupportedReason"
+                :camera-unsupported-reason="cameraUnsupportedReason"
                 @validity-change="parameterValid = $event"
               />
               <label v-if="form.model && caps.supportsNegativePrompt" class="field">

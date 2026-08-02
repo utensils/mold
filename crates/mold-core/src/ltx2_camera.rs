@@ -145,7 +145,10 @@ pub fn camera_profile_for_artifact_paths<'a>(
     architecture_paths: impl IntoIterator<Item = Option<&'a str>>,
 ) -> Result<Ltx2CameraProfile, String> {
     let architecture_paths: Vec<&str> = architecture_paths.into_iter().flatten().collect();
-    if architecture_paths.iter().any(|path| path.contains("ltx-2.3")) {
+    if architecture_paths
+        .iter()
+        .any(|path| path.contains("ltx-2.3"))
+    {
         return Err(
             "camera-control presets are currently published for LTX-2 19B only".to_string(),
         );
@@ -224,8 +227,8 @@ mod tests {
             .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
             .unwrap_or(env!("CARGO_MANIFEST_DIR"));
         let path = format!("{workspace}/studio/lib/cameraMotion.ts");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
         let list = source
             .split_once("export const CAMERA_MOTION_PRESETS = [")
             .expect("cameraMotion.ts must declare CAMERA_MOTION_PRESETS")

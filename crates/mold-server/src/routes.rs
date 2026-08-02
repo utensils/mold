@@ -3935,8 +3935,18 @@ struct Ltx2ControlAdaptersQuery {
     model: String,
     /// Opt into the `Ltx2CameraControlAvailability` envelope. Absent keeps the
     /// bare-array response older clients parse, byte for byte.
+    ///
+    /// Deliberately a string: `serde_urlencoded` only accepts `true`/`false`
+    /// for a `bool`, so a plain `?detail=1` would 400 the whole request.
     #[serde(default)]
-    detail: bool,
+    detail: Option<String>,
+}
+
+impl Ltx2ControlAdaptersQuery {
+    /// `?detail=1`, `?detail=true`, and a bare `?detail` all opt in.
+    fn wants_detail(&self) -> bool {
+        matches!(self.detail.as_deref(), Some("1" | "true" | "yes" | ""))
+    }
 }
 
 /// Either shape of `/api/capabilities/ltx2-camera-controls`, chosen by
@@ -4009,7 +4019,7 @@ async fn capabilities_ltx2_camera_controls(
     State(state): State<AppState>,
     Query(query): Query<Ltx2ControlAdaptersQuery>,
 ) -> Result<Json<Ltx2CameraControlsResponse>, ApiError> {
-    let detail = query.detail;
+    let detail = query.wants_detail();
     // An older client asked for the array and can only express "no presets",
     // so every failure has to collapse to an empty list for it. A `detail=1`
     // client gets the reason instead of having to guess the server's policy.

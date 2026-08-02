@@ -939,7 +939,7 @@ async fn materialize_local_builtin_control(
 /// Download any built-in `camera-control:<id>` adapter the request names.
 ///
 /// The server does this in `materialize_builtin_ltx2_camera_controls` before
-/// planning. Forced-local had no counterpart, and
+/// planning. Forced-local has no counterpart, and
 /// `execution_plan::materialize_request` rewrites the alias to its manifest
 /// path during planning — so by the time the engine's `resolve_loras` runs,
 /// the `camera-control:` prefix is gone and its download never fires. The
