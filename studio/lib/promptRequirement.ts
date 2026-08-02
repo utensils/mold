@@ -99,7 +99,7 @@ export function promptRequired(
  * expectation-setting; this only says the field can be skipped.
  */
 export const OPTIONAL_PROMPT_PLACEHOLDER =
-  "Describe the motion — optional with a source image…";
+  "Describe the motion — optional with a source…";
 
 /**
  * The one shared explanation of what a blank prompt does. Web, desktop, and
@@ -107,7 +107,7 @@ export const OPTIONAL_PROMPT_PLACEHOLDER =
  * expectations.
  */
 export const OPTIONAL_PROMPT_GUIDANCE =
-  "With a source image the prompt is optional — leave it blank and the model animates what it sees, which usually means near-static motion. It does not reduce memory use.";
+  "With a source the prompt is optional — leave it blank and the model animates what it sees, which usually means near-static motion. It does not reduce memory use.";
 
 /**
  * The prompt bed's placeholder: the surface's own wording while the prompt is

@@ -124,12 +124,10 @@ pub(crate) fn oom_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         request.height,
         request.frames.unwrap_or(1),
         request.batch_size,
-        u8::from(
-            request.source_image.is_some()
-                || request.source_video.is_some()
-                || request.extend_video.is_some()
-                || request.extend_video_path.is_some()
-        ),
+        // Same definition of "conditioned" the optional-prompt rule uses.
+        // Conditioning changes the VRAM profile, so two requests that differ
+        // here must never share a cooldown or a reduced memory grant.
+        u8::from(mold_core::validation::has_visual_conditioning(request)),
     )
 }
 
@@ -2758,6 +2756,48 @@ mod tests {
             "cooling down one shape must not block every shape of the model"
         );
         clear_model_cuda_ooms_for_tests();
+    }
+
+    /// The bucket's conditioning flag must cover every variant the shared
+    /// predicate treats as visual conditioning. Missing one lets two requests
+    /// with different VRAM profiles share a cooldown and a reduced grant —
+    /// a keyframe or `source_video_path` render would inherit a plain
+    /// text-to-video bucket.
+    #[test]
+    fn shape_bucket_distinguishes_every_conditioning_variant() {
+        let base = mold_core::GenerateRequest {
+            source_image: None,
+            ..incident_request()
+        };
+        let unconditioned = oom_shape_bucket(&base);
+
+        let with_keyframes = mold_core::GenerateRequest {
+            keyframes: Some(vec![mold_core::types::KeyframeCondition {
+                frame: 0,
+                image: vec![0x89, 0x50, 0x4e, 0x47],
+            }]),
+            ..base.clone()
+        };
+        let with_source_video_path = mold_core::GenerateRequest {
+            source_video_path: Some("/tmp/clip.mp4".to_string()),
+            ..base.clone()
+        };
+        let with_source_image = mold_core::GenerateRequest {
+            source_image: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            ..base.clone()
+        };
+
+        for (label, conditioned) in [
+            ("keyframes", &with_keyframes),
+            ("source_video_path", &with_source_video_path),
+            ("source_image", &with_source_image),
+        ] {
+            assert_ne!(
+                oom_shape_bucket(conditioned),
+                unconditioned,
+                "{label} must not share a bucket with an unconditioned render"
+            );
+        }
     }
 
     #[test]

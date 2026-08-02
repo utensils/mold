@@ -21,7 +21,8 @@ mold run z-image-turbo:q4 "a city at dusk" --width 768 --height 768
 
 For LTX-2 you usually do not have to guess. A video shape that cannot fit is
 rejected before the model loads, and both that rejection and any later CUDA OOM
-name resolution/frame combinations that _do_ fit on the card — use one of those.
+will name resolution/frame combinations that _do_ fit on the card — use one of
+those.
 Lower the resolution before the frame count: attention cost grows with the
 square of the token count, and tokens scale with area × latent frames. See
 [Memory on 24 GB cards](/models/ltx2#memory-on-24-gb-cards).

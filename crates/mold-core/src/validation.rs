@@ -297,15 +297,25 @@ fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Opt
 /// catalog-resolved family for `cv:` / `hf:` model IDs, whose family the
 /// manifest cannot see.
 pub fn prompt_required_for(req: &GenerateRequest, family_hint: Option<&str>) -> bool {
-    let has_visual_conditioning = req.source_image.is_some()
+    prompt_required_with_conditioning(
+        resolved_family(&req.model, family_hint),
+        has_visual_conditioning(req),
+    )
+}
+
+/// Whether a request carries visual conditioning — a source image, keyframes,
+/// a source video (inline or server-local path), or an extend.
+///
+/// This is the single definition of "conditioned" for the whole request path.
+/// Beyond the optional-prompt rule it also separates OOM cooldown buckets, and
+/// those must agree: two requests with different conditioning have different
+/// VRAM profiles and must never share a cooldown or a reduced memory grant.
+pub fn has_visual_conditioning(req: &GenerateRequest) -> bool {
+    req.source_image.is_some()
         || req.keyframes.as_ref().is_some_and(|k| !k.is_empty())
         || req.source_video.is_some()
         || req.source_video_path.is_some()
-        || req.is_extend();
-    prompt_required_with_conditioning(
-        resolved_family(&req.model, family_hint),
-        has_visual_conditioning,
-    )
+        || req.is_extend()
 }
 
 /// Lower-level form of [`prompt_required_for`] for callers that have not yet

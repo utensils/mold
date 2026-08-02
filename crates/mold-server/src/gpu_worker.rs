@@ -2412,8 +2412,12 @@ fn cuda_oom_user_message_with_plan(
             worker.gpu.ordinal,
             high_water,
         ) {
+            // This job is over — the caller turns this string into its
+            // failure. The reduced grant is stored for the next submission of
+            // this exact (model, shape, GPU), so say that rather than
+            // promising an automatic retry that never comes.
             base.push_str(&format!(
-                " Retrying with a smaller memory grant (~{:.1} GB).",
+                " The next attempt at this shape will plan against a smaller memory grant (~{:.1} GB).",
                 grant as f64 / 1_000_000_000.0
             ));
         }
