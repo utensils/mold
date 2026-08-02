@@ -45,12 +45,6 @@ const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
 /** Only LTX-2 carries latent context between clips. */
 const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
 
-/** Live-catalog checkpoints use opaque IDs and default to a chain-capable
- * one-stage pipeline because they do not bundle a spatial upscaler. */
-function isCatalogModel(model: string): boolean {
-  return model.startsWith("cv:") || model.startsWith("hf:");
-}
-
 function canonicalizeFamily(family: string | null | undefined): string {
   const normalized = (family ?? "").trim().toLowerCase();
   return normalized === "ltx-2" ? "ltx2" : normalized;
@@ -93,13 +87,11 @@ export function decideChainRouting(
   if (!frames || frames <= 0) return { kind: "single" };
 
   const normalizedFamily = canonicalizeFamily(family);
-  const isChainCapable =
-    CHAIN_CAPABLE_FAMILIES.has(normalizedFamily) &&
-    // LTX-2 chain rendering supports one-stage and distilled pipelines.
-    // Built-in IDs encode distilled explicitly; live-catalog IDs are opaque.
-    (normalizedFamily !== "ltx2" ||
-      model.includes("distilled") ||
-      isCatalogModel(model));
+  // Every LTX-2 pipeline renders sequence clips, so capability is a property
+  // of the family. The old `model.includes("distilled")` test refused a dev
+  // checkpoint the server chains, and only tolerated opaque catalog IDs by
+  // special-casing them.
+  const isChainCapable = CHAIN_CAPABLE_FAMILIES.has(normalizedFamily);
 
   if (!isChainCapable) {
     // Non-chainable models still get their family's own single-request

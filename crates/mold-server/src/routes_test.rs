@@ -9180,7 +9180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_chain_limits_rejects_ltx2_two_stage_pipeline_up_front() {
+    async fn capabilities_chain_limits_accepts_ltx2_two_stage_pipeline() {
         let app = app_empty();
         let response = app
             .oneshot(
@@ -9195,10 +9195,8 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["supports_sequence"], false);
-        assert!(limits["sequence_unsupported_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("two-stage")));
+        assert_eq!(limits["supports_sequence"], true);
+        assert!(limits["sequence_unsupported_reason"].is_null());
     }
 
     #[tokio::test]

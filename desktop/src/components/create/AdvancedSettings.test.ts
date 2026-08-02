@@ -314,17 +314,16 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.get("[data-test='chain-cue']").text()).toContain("chained clips of 97 frames");
   });
 
-  it("shows the reject message for a non-chainable model over budget", async () => {
+  it("shows the reject message when a chain would exceed the stage ceiling", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
-    // 489 frames is past even the single-clip 20s budget at 24 fps, so a
-    // non-chainable model has nowhere to route it. (241 frames is now a valid
-    // single clip — the ceiling is a duration, not a flat 97.)
-    form.frames = 489;
+    // Every ltx2 checkpoint chains now, so the remaining reject case is the
+    // server's sixteen-stage ceiling: 1305 frames needs a seventeenth clip.
+    form.frames = 1305;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
-      "does not support chained video generation",
+      "at most 1297 frames",
     );
   });
 

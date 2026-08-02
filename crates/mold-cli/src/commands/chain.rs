@@ -80,7 +80,16 @@ pub fn decide_chain_routing(
         return ChainRoutingDecision::SingleClip;
     };
 
-    let is_ltx2_distilled = family == Some("ltx2") && model.contains("distilled");
+    // Every LTX-2 pipeline renders sequence clips, so chain capability is a
+    // property of the family, not of whether the model name says "distilled".
+    // The old name test also rejected opaque `cv:` / `hf:` catalog IDs that
+    // the server and the Studio surfaces both accept.
+    // Auto-chaining is an LTX-2 routing behaviour. Every LTX-2 pipeline now
+    // renders sequence clips, so the old `model.contains("distilled")` test is
+    // gone — it also rejected opaque `cv:` / `hf:` catalog IDs the server and
+    // the Studio surfaces both accept. ltx-video stays deliberately excluded:
+    // it has a chain capability but is not auto-chained here.
+    let is_chain_capable = family == Some("ltx2");
 
     // The model's real single-request ceiling. LTX-2's is a runtime duration,
     // so it depends on fps; other families report a flat frame count.
@@ -88,7 +97,7 @@ pub fn decide_chain_routing(
         .and_then(|family| mold_core::validation::max_frames_for_family_at_fps(family, fps))
         .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
 
-    if !is_ltx2_distilled {
+    if !is_chain_capable {
         // Non-chainable families: if the requested frame count is within the
         // family's own single-clip budget, stay on the single-clip path and
         // let the engine decide if it's acceptable. Otherwise, reject with
@@ -98,9 +107,8 @@ pub fn decide_chain_routing(
         }
         return ChainRoutingDecision::Rejected {
             reason: format!(
-                "model '{model}' does not support chained video generation \
-                 (only LTX-2 distilled families do); specify --frames <= {single_clip_cap} \
-                 per clip for this model",
+                "model '{model}' does not support chained video generation; \
+                 specify --frames <= {single_clip_cap} per clip for this model",
             ),
         };
     }
@@ -1032,6 +1040,25 @@ mod tests {
                 );
             }
             other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    /// Chain capability is a property of the family. The old
+    /// `model.contains("distilled")` test refused a dev checkpoint the server
+    /// happily chains, and refused every opaque catalog ID outright.
+    #[test]
+    fn routing_chains_every_ltx2_checkpoint_over_cap() {
+        for model in [
+            "ltx-2-19b-dev:fp8",
+            "ltx-2.3-22b-dev:fp8",
+            "ltx-2-19b-distilled:fp8",
+            "cv:3143864",
+        ] {
+            let decision = decide_chain_routing(Some(400), Some("ltx2"), model, None, 17, 24);
+            assert!(
+                matches!(decision, ChainRoutingDecision::Chain { .. }),
+                "{model} must auto-chain, got {decision:?}"
+            );
         }
     }
 

@@ -173,12 +173,12 @@ describe("MobileGenerateParameters", () => {
     expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
     chain.wrapper.unmount();
 
-    // 489 frames is past the single-clip 20s budget at 24 fps; a non-chainable
-    // model has nowhere to route it. (177 is now a valid single clip.)
+    // Every ltx2 checkpoint chains now, dev included, so the remaining reject
+    // case is the server's sixteen-stage ceiling.
     const unsupported = mountParameters(formFor("ltx2", "ltx-2-19b-dev:fp8"));
-    await unsupported.wrapper.get("[data-test='mobile-frames']").setValue("489");
+    await unsupported.wrapper.get("[data-test='mobile-frames']").setValue("1305");
     expect(unsupported.wrapper.get("[data-test='mobile-chain-reject']").text()).toContain(
-      "does not support chained video generation",
+      "at most 1297 frames",
     );
     expect(
       unsupported.wrapper.getComponent(MobileGenerateParameters).emitted("validity-change")?.at(-1),

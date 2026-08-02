@@ -39,8 +39,10 @@ pub struct ChainLimits {
     /// when this is false. Single source of truth: `mold_inference::chain::capability_for_family`.
     pub supports_audio: bool,
     /// Whether the model's effective runtime pipeline can render sequence
-    /// stages. This is model-specific: an LTX-2 dev checkpoint with its
-    /// spatial upscaler selects TwoStage, which render-chain v1 cannot run.
+    /// stages. Every LTX-2 pipeline `select_pipeline` chooses now can, so in
+    /// practice this tracks whether the family chains at all — it stays
+    /// per-model because that is where a future incompatible pipeline would
+    /// have to be caught.
     pub supports_sequence: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_unsupported_reason: Option<String>,
@@ -73,9 +75,7 @@ pub fn family_supports_audio(family: &str) -> bool {
     mold_inference::chain::capability_for_family(family).is_some_and(|c| c.supports_audio)
 }
 
-/// Resolve the sequence renderer's model-specific pipeline gate. LTX-2
-/// distilled checkpoints use Distilled, while non-distilled checkpoints use
-/// TwoStage when a spatial upscaler is present and OneStage otherwise.
+/// Resolve the sequence renderer's model-specific pipeline gate.
 pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -> SequenceSupport {
     if family_cap(family).is_none() {
         return SequenceSupport {
@@ -83,19 +83,16 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
             reason: Some(format!("{family} models do not render video sequences")),
         };
     }
-    if family != "ltx2" || model.contains("distilled") || !has_spatial_upscaler {
-        return SequenceSupport {
-            supported: true,
-            reason: None,
-        };
-    }
+    // Every pipeline `select_pipeline` can choose for an LTX-2 checkpoint now
+    // renders sequence clips, two-stage included, so the only thing that
+    // decides support is whether the family chains at all. `model` and
+    // `has_spatial_upscaler` stay in the signature: they are how a checkpoint
+    // is classified, and the seam is worth keeping if a future pipeline is
+    // again chain-incapable.
+    let _ = (model, has_spatial_upscaler);
     SequenceSupport {
-        supported: false,
-        reason: Some(
-            "This checkpoint selects the two-stage LTX-2 pipeline, which is for single videos. \
-             Sequences currently require a distilled LTX-2 checkpoint or a one-stage catalog checkpoint."
-                .into(),
-        ),
+        supported: true,
+        reason: None,
     }
 }
 
@@ -308,26 +305,35 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_dev_with_spatial_upscaler_is_not_sequence_compatible() {
+    fn ltx2_dev_with_spatial_upscaler_is_sequence_compatible() {
+        // A dev checkpoint plus a spatial upscaler selects the two-stage
+        // pipeline, which now renders sequence clips.
         let support = sequence_support("ltx-2.3-22b-dev:fp8", "ltx2", true);
+        assert!(support.supported);
+        assert!(support.reason.is_none());
+    }
+
+    #[test]
+    fn non_chain_families_still_report_an_actionable_reason() {
+        // The seam has to stay alive: it is the only thing that tells the UI
+        // why a Sequence picker is empty for a still-image family.
+        let support = sequence_support("flux-dev:q4", "flux", false);
         assert!(!support.supported);
         assert!(
             support
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("two-stage")),
-            "the UI needs an actionable pipeline-specific reason",
+                .is_some_and(|reason| reason.contains("flux")),
+            "the reason must name the family, got: {:?}",
+            support.reason,
         );
     }
 
     #[test]
-    fn ltx2_dev_legacy_alias_keeps_two_stage_sequence_gate() {
+    fn ltx2_dev_legacy_alias_is_sequence_compatible() {
         let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None, None);
-        assert!(!limits.supports_sequence);
-        assert!(limits
-            .sequence_unsupported_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("two-stage")));
+        assert!(limits.supports_sequence);
+        assert!(limits.sequence_unsupported_reason.is_none());
     }
 
     #[test]

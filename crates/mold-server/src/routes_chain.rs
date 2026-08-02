@@ -1403,17 +1403,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_preflight_rejects_ltx2_two_stage_before_creating_a_job() {
+    async fn chain_preflight_admits_an_ltx2_two_stage_checkpoint() {
+        // A dev checkpoint selects the two-stage pipeline, which now renders
+        // sequence clips: the stage-2 pass already re-encodes conditioning at
+        // its own pixel shape, and the carry is decoded RGB.
         let state = AppState::for_tests();
         let mut request = req(OutputFormat::Mp4);
         request.model = "ltx-2.3-22b-dev:fp8".into();
 
         let config = state.config.read().await;
-        let error = validate_and_normalize_chain_family(&config, &mut request)
-            .expect_err("two-stage LTX-2 must be rejected at the API boundary");
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("a two-stage LTX-2 checkpoint must pass chain preflight");
+    }
 
-        assert!(error.error.contains("two-stage"));
-        assert!(error.error.contains("distilled"));
+    #[tokio::test]
+    async fn chain_preflight_still_rejects_a_family_that_does_not_chain() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "flux-dev:q4".into();
+
+        let config = state.config.read().await;
+        let error = validate_and_normalize_chain_family(&config, &mut request)
+            .expect_err("a still-image family must be rejected at the API boundary");
+        assert!(
+            error.error.contains("flux"),
+            "the rejection must name the family, got: {}",
+            error.error
+        );
     }
 
     fn ltx2_chain_config(model: &str) -> mold_core::Config {
