@@ -50,13 +50,27 @@ pub(crate) fn ltx2_activation_budget_bytes(
     height: u32,
     frames: u32,
     conditioned: bool,
+    adaln_dim: Option<u64>,
 ) -> u64 {
-    mold_inference::device::ltx2_activation_budget_bytes(width, height, frames, conditioned)
+    mold_inference::device::ltx2_activation_budget_bytes(
+        width,
+        height,
+        frames,
+        conditioned,
+        adaln_dim,
+    )
 }
 
-/// Activation budget for a request shape.
-pub(crate) fn ltx2_activation_bytes(shape: Ltx2ShapeHint) -> u64 {
-    ltx2_activation_budget_bytes(shape.width, shape.height, shape.frames, shape.conditioned)
+/// Activation budget for a request shape, priced against the checkpoint's own
+/// AdaLN width when its header has been read.
+pub(crate) fn ltx2_activation_bytes(shape: Ltx2ShapeHint, adaln_dim: Option<u64>) -> u64 {
+    ltx2_activation_budget_bytes(
+        shape.width,
+        shape.height,
+        shape.frames,
+        shape.conditioned,
+        adaln_dim,
+    )
 }
 
 /// Request shape that drives the LTX-2 activation budget. `ActivationHint`
@@ -103,6 +117,10 @@ pub(crate) struct Ltx2CheckpointFacts {
     /// Bundled video VAE weights, resident for encode and decode while the
     /// transformer's resident blocks are still held.
     pub(crate) vae_bytes: u64,
+    /// The checkpoint's `adaln_single.linear` output width, which sets the
+    /// per-token AdaLN cost of a conditioned render. The 19B ships six
+    /// components (24,576); LTX-2.3's 22B ships nine (36,864).
+    pub(crate) adaln_dim: Option<u64>,
 }
 
 impl Ltx2CheckpointFacts {
@@ -184,6 +202,8 @@ pub(crate) fn warm_checkpoint_facts(path: &Path) -> Option<Arc<Ltx2CheckpointFac
 #[derive(serde::Deserialize)]
 struct HeaderTensor {
     data_offsets: (u64, u64),
+    #[serde(default)]
+    shape: Vec<u64>,
 }
 
 /// Read the safetensors metadata header and classify every tensor into
@@ -205,6 +225,7 @@ pub(crate) fn parse_checkpoint_facts(path: &Path) -> anyhow::Result<Ltx2Checkpoi
     let mut blocks: BTreeMap<usize, u64> = BTreeMap::new();
     let mut fixed_resident_bytes = 0u64;
     let mut vae_bytes = 0u64;
+    let mut adaln_dim = None;
     for (name, value) in tensors {
         if name == "__metadata__" {
             continue;
@@ -213,6 +234,14 @@ pub(crate) fn parse_checkpoint_facts(path: &Path) -> anyhow::Result<Ltx2Checkpoi
             continue;
         };
         let bytes = tensor.data_offsets.1.saturating_sub(tensor.data_offsets.0);
+        // The video branch's own modulation table — `audio_adaln_single` and
+        // the `av_ca_*` gates share the suffix.
+        if name.ends_with("adaln_single.linear.weight")
+            && !name.contains("audio")
+            && !name.contains("av_ca_")
+        {
+            adaln_dim = tensor.shape.first().copied();
+        }
         match classify_tensor(&name) {
             TensorRole::Block(index) => {
                 let entry = blocks.entry(index).or_default();
@@ -231,6 +260,7 @@ pub(crate) fn parse_checkpoint_facts(path: &Path) -> anyhow::Result<Ltx2Checkpoi
         block_sizes,
         fixed_resident_bytes,
         vae_bytes,
+        adaln_dim,
     })
 }
 
@@ -382,7 +412,11 @@ pub(crate) fn ltx2_shape_fits(
     shape: Ltx2ShapeHint,
     available_bytes: u64,
 ) -> bool {
-    let estimate = ltx2_peak_estimate(facts, ltx2_activation_bytes(shape), available_bytes);
+    let estimate = ltx2_peak_estimate(
+        facts,
+        ltx2_activation_bytes(shape, facts.adaln_dim),
+        available_bytes,
+    );
     estimate.viable && estimate.peak_bytes <= available_bytes / 100 * LTX2_ADMISSION_BUDGET_PERCENT
 }
 
@@ -495,7 +529,11 @@ pub(crate) fn supported_shape_advice(
     requested: Ltx2ShapeHint,
     available_bytes: u64,
 ) -> Option<String> {
-    let estimate = ltx2_peak_estimate(facts, ltx2_activation_bytes(requested), available_bytes);
+    let estimate = ltx2_peak_estimate(
+        facts,
+        ltx2_activation_bytes(requested, facts.adaln_dim),
+        available_bytes,
+    );
     let shapes = supported_shapes(facts, requested, available_bytes);
     if shapes.is_empty() {
         return None;
@@ -528,6 +566,7 @@ pub(crate) mod test_support {
             block_sizes,
             fixed_resident_bytes: 2_107_091_456,
             vae_bytes: 2_444_960_482,
+            adaln_dim: Some(24_576),
         }
     }
 
@@ -559,10 +598,14 @@ pub(crate) mod test_support {
                 &mut offset,
             );
         }
+        // The AdaLN table is itself a fixed-resident tensor, so the stub
+        // carries the remainder — parsing this file must reproduce exactly the
+        // `fixed_resident_bytes` the fixture declares.
+        let adaln_bytes = facts.adaln_dim.map_or(0, |dim| dim * 4096 * 2);
         push(
             &mut tensors,
             "model.patchify_proj.weight".to_string(),
-            facts.fixed_resident_bytes,
+            facts.fixed_resident_bytes.saturating_sub(adaln_bytes),
             &mut offset,
         );
         push(
@@ -571,6 +614,20 @@ pub(crate) mod test_support {
             facts.vae_bytes,
             &mut offset,
         );
+        if let Some(adaln_dim) = facts.adaln_dim {
+            // Shape carries the real `[out, in]`, unlike the byte-sized stubs
+            // above — the parser reads this width, not the tensor's size.
+            let start = offset;
+            offset += adaln_bytes;
+            tensors.insert(
+                "model.adaln_single.linear.weight".to_string(),
+                serde_json::json!({
+                    "dtype": "BF16",
+                    "shape": [adaln_dim, 4096],
+                    "data_offsets": [start, offset],
+                }),
+            );
+        }
 
         let header = serde_json::to_vec(&serde_json::Value::Object(tensors)).unwrap();
         let mut file = File::create(path).unwrap();
@@ -595,6 +652,34 @@ mod tests {
             frames: 97,
             conditioned: true,
         }
+    }
+
+    /// LTX-2.3's 22B ships nine AdaLN components (`[36864, 4096]`) where the
+    /// 19B ships six (`[24576, 4096]`) — measured from both checkpoints'
+    /// headers. Admission must price a conditioned render against the
+    /// checkpoint it is actually going to run, not the 19B's width.
+    #[test]
+    fn checkpoint_facts_read_the_adaln_width_and_price_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wide = ltx2_19b_fp8_facts();
+        wide.adaln_dim = Some(36_864);
+        let path = dir.path().join("ltx-2.3-22b-distilled-fp8.safetensors");
+        write_header_only_checkpoint(&path, &wide);
+
+        let parsed = parse_checkpoint_facts(&path).unwrap();
+        assert_eq!(
+            parsed.adaln_dim,
+            Some(36_864),
+            "the parser must read the checkpoint's own AdaLN width"
+        );
+
+        let six = ltx2_activation_bytes(incident_shape(), Some(24_576));
+        let nine = ltx2_activation_bytes(incident_shape(), parsed.adaln_dim);
+        assert_eq!(
+            nine - six,
+            327_155_712,
+            "the three extra components must be reserved, not assumed away"
+        );
     }
 
     /// The two-stage Distilled pipeline renders stage 1 at 512² (3,328 tokens)
@@ -642,7 +727,7 @@ mod tests {
         let facts = ltx2_19b_fp8_facts();
         let estimate = ltx2_peak_estimate(
             &facts,
-            ltx2_activation_bytes(incident_shape()),
+            ltx2_activation_bytes(incident_shape(), facts.adaln_dim),
             RTX_4090_AVAILABLE,
         );
 
@@ -668,7 +753,7 @@ mod tests {
         let facts = ltx2_19b_fp8_facts();
         let estimate = ltx2_peak_estimate(
             &facts,
-            ltx2_activation_bytes(incident_shape()),
+            ltx2_activation_bytes(incident_shape(), facts.adaln_dim),
             RTX_4090_AVAILABLE,
         );
 
@@ -729,7 +814,7 @@ mod tests {
         let facts = ltx2_19b_fp8_facts();
         let estimate = ltx2_peak_estimate(
             &facts,
-            ltx2_activation_bytes(incident_shape()),
+            ltx2_activation_bytes(incident_shape(), facts.adaln_dim),
             80_000_000_000,
         );
         assert!(estimate.viable);

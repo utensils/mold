@@ -827,9 +827,15 @@ const LTX2_PIXELS_PER_TOKEN_AXIS: u64 = 32;
 const LTX2_INNER_DIM: u64 = 4096;
 /// Feed-forward hidden width (`ff.net.0.proj` output) — 4× the inner dim.
 const LTX2_FF_HIDDEN_DIM: u64 = 16_384;
-/// Per-token AdaLN width (`adaln_single.linear` output) — 6 × inner dim, only
+/// Per-token AdaLN width (`adaln_single.linear` output) when the checkpoint's
+/// own width is not known — 6 × inner dim, the LTX-2 19B layout. Only
 /// materialized per token when the run is conditioned.
-const LTX2_ADALN_DIM: u64 = 24_576;
+///
+/// This is a fallback, not the truth: LTX-2.3's 22B checkpoint ships nine
+/// components (`[36864, 4096]`), so callers that have read the checkpoint
+/// header pass its real width to
+/// [`ltx2_activation_budget_bytes`].
+pub const LTX2_ADALN_DEFAULT_DIM: u64 = 24_576;
 const BF16_BYTES: u64 = 2;
 const F32_BYTES: u64 = 4;
 
@@ -872,19 +878,26 @@ pub fn ltx2_token_count(width: u32, height: u32, frames: u32) -> u64 {
 /// * feed-forward — the BF16 `[1, T, 16384]` projection. The F32 GELU work is
 ///   chunked (two `[chunk, 16384]` buffers) and therefore priced in
 ///   [`LTX2_FIXED_WORKSPACE_BYTES`], not per token
-/// * AdaLN — the per-token `[1, T, 24576]` BF16 modulation, materialized only
-///   when `conditioned` (source image, keyframes, or extend carryover) makes
-///   the modulation token-varying rather than a single broadcast row
+/// * AdaLN — the per-token `[1, T, adaln_dim]` BF16 modulation, materialized
+///   only when `conditioned` (source image, keyframes, or extend carryover)
+///   makes the modulation token-varying rather than a single broadcast row
 ///
-/// That is 112 KiB/token unconditioned and 160 KiB/token conditioned, plus the
-/// flat workspace. Anchors: 1024² × 97 frames (13,312 tokens) → 2.60 GB
-/// unconditioned / 3.25 GB conditioned; the 512² stage-1 render of the same
-/// job (3,328 tokens) → 1.46 GB.
+/// `adaln_dim` is the checkpoint's own `adaln_single.linear` output width. It
+/// is **not** a constant across LTX-2: the 19B ships six components
+/// (`[24576, 4096]`) and LTX-2.3's 22B ships nine (`[36864, 4096]`), a 327 MB
+/// difference at the stage-2 shape. Pass `None` only when the header has not
+/// been read; it falls back to [`LTX2_ADALN_DEFAULT_DIM`].
+///
+/// That is 112 KiB/token unconditioned and 160 KiB/token conditioned at the
+/// six-component width, plus the flat workspace. Anchors: 1024² × 97 frames
+/// (13,312 tokens) → 2.60 GB unconditioned / 3.25 GB conditioned; the 512²
+/// stage-1 render of the same job (3,328 tokens) → 1.46 GB.
 pub fn ltx2_activation_budget_bytes(
     width: u32,
     height: u32,
     frames: u32,
     conditioned: bool,
+    adaln_dim: Option<u64>,
 ) -> u64 {
     let residual = LTX2_RESIDUAL_LIVE_BUFFERS * LTX2_INNER_DIM * BF16_BYTES;
     // `chunked_attention` narrows q/k/v and upcasts per tile, so the only
@@ -894,7 +907,7 @@ pub fn ltx2_activation_budget_bytes(
     let attention = 3 * LTX2_INNER_DIM * BF16_BYTES + LTX2_INNER_DIM * F32_BYTES;
     let feed_forward = LTX2_FF_HIDDEN_DIM * BF16_BYTES;
     let adaln = if conditioned {
-        LTX2_ADALN_DIM * BF16_BYTES
+        adaln_dim.unwrap_or(LTX2_ADALN_DEFAULT_DIM) * BF16_BYTES
     } else {
         0
     };
@@ -3172,13 +3185,44 @@ mod tests {
     /// flat 1 GiB workspace.
     #[test]
     fn ltx2_activation_budget_models_ff_and_adaln() {
-        let uncond = ltx2_activation_budget_bytes(1024, 1024, 97, false);
-        let cond = ltx2_activation_budget_bytes(1024, 1024, 97, true);
+        let uncond = ltx2_activation_budget_bytes(1024, 1024, 97, false, None);
+        let cond = ltx2_activation_budget_bytes(1024, 1024, 97, true, None);
         assert_eq!(uncond, 13_312 * 114_688 + 1_073_741_824);
         assert_eq!(cond, 13_312 * 163_840 + 1_073_741_824);
         assert_eq!(uncond, 2_600_468_480);
         assert_eq!(cond, 3_254_779_904);
-        assert_eq!(cond - uncond, 13_312 * LTX2_ADALN_DIM * BF16_BYTES);
+        assert_eq!(cond - uncond, 13_312 * LTX2_ADALN_DEFAULT_DIM * BF16_BYTES);
+    }
+
+    /// LTX-2.3's 22B checkpoint ships `adaln_single.linear.weight` at
+    /// `[36864, 4096]` — **nine** AdaLN components, not the 19B's six. Measured
+    /// from the two checkpoints' safetensors headers. Assuming the 19B width
+    /// under-reserved a conditioned 22B render by 327 MB at the stage-2 shape,
+    /// in the exact budget this estimator exists to keep honest.
+    #[test]
+    fn ltx2_activation_budget_follows_the_checkpoints_adaln_width() {
+        const NINE_COMPONENT_ADALN: u64 = 36_864;
+        let six = ltx2_activation_budget_bytes(1024, 1024, 97, true, Some(LTX2_ADALN_DEFAULT_DIM));
+        let nine = ltx2_activation_budget_bytes(1024, 1024, 97, true, Some(NINE_COMPONENT_ADALN));
+
+        assert_eq!(
+            six,
+            ltx2_activation_budget_bytes(1024, 1024, 97, true, None),
+            "an unknown width must fall back to the 19B/6-component default"
+        );
+        assert_eq!(
+            nine - six,
+            13_312 * (NINE_COMPONENT_ADALN - LTX2_ADALN_DEFAULT_DIM) * BF16_BYTES,
+            "the extra three components must be priced per token"
+        );
+        assert_eq!(nine - six, 327_155_712);
+
+        // An unconditioned render never materializes the per-token modulation,
+        // so the width cannot matter there.
+        assert_eq!(
+            ltx2_activation_budget_bytes(1024, 1024, 97, false, Some(NINE_COMPONENT_ADALN)),
+            ltx2_activation_budget_bytes(1024, 1024, 97, false, None),
+        );
     }
 
     /// A half-resolution stage-1 render costs a quarter of the tokens, so it
@@ -3186,8 +3230,8 @@ mod tests {
     /// charged it the full-resolution budget.
     #[test]
     fn ltx2_activation_budget_scales_with_tokens_not_pixels() {
-        let stage1 = ltx2_activation_budget_bytes(512, 512, 97, false);
-        let stage2 = ltx2_activation_budget_bytes(1024, 1024, 97, false);
+        let stage1 = ltx2_activation_budget_bytes(512, 512, 97, false, None);
+        let stage2 = ltx2_activation_budget_bytes(1024, 1024, 97, false, None);
         assert_eq!(stage1, 3_328 * 114_688 + 1_073_741_824);
         let stage1_tokens = stage1 - 1_073_741_824;
         let stage2_tokens = stage2 - 1_073_741_824;
@@ -3197,7 +3241,7 @@ mod tests {
     /// Even a degenerate shape reserves the flat workspace.
     #[test]
     fn ltx2_activation_budget_floors_at_fixed_workspace() {
-        let tiny = ltx2_activation_budget_bytes(0, 0, 0, false);
+        let tiny = ltx2_activation_budget_bytes(0, 0, 0, false, None);
         assert!(tiny >= 1_073_741_824, "got {tiny}");
     }
 
