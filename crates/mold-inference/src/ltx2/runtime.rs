@@ -1331,8 +1331,7 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.conditioning.video_path.is_none()
         && !plan.execution_graph.uses_audio_conditioning
         && !plan.execution_graph.uses_reference_video_conditioning
-        && !plan.execution_graph.uses_retake_masking
-        && plan.loras.is_empty();
+        && !plan.execution_graph.uses_retake_masking;
     let native_audio_conditioning = plan.conditioning.audio_path.is_some()
         && plan.conditioning.video_path.is_none()
         && plan.execution_graph.uses_audio_conditioning
@@ -2205,8 +2204,15 @@ fn render_real_distilled_av(
     }
     let stage1_transformer_load_start = Instant::now();
     let stage1_stage_shape = Ltx2StageShape::from_pixel_shape(plan, prepared.video_pixel_shape);
-    let stage1_transformer =
-        load_ltx2_av_transformer_with_loras(plan, stage1_stage_shape, device, &[], None, progress)?;
+    let stage1_loras = stage_lora_stack(plan, 0)?;
+    let stage1_transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage1_stage_shape,
+        device,
+        &stage1_loras,
+        None,
+        progress,
+    )?;
     log_timing(
         "distilled.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2225,7 +2231,7 @@ fn render_real_distilled_av(
                     plan,
                     stage1_stage_shape,
                     device,
-                    &[],
+                    &stage1_loras,
                     Some(budget),
                     progress,
                 )
@@ -2381,8 +2387,15 @@ fn render_real_distilled_av(
     }
     let stage2_transformer_load_start = Instant::now();
     let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(plan, stage2_pixel_shape);
-    let stage2_transformer =
-        load_ltx2_av_transformer_with_loras(plan, stage2_stage_shape, device, &[], None, progress)?;
+    let stage2_loras = stage_lora_stack(plan, 1)?;
+    let stage2_transformer = load_ltx2_av_transformer_with_loras(
+        plan,
+        stage2_stage_shape,
+        device,
+        &stage2_loras,
+        None,
+        progress,
+    )?;
     log_timing(
         "distilled.stage2.transformer_load",
         stage2_transformer_load_start,
@@ -2400,7 +2413,7 @@ fn render_real_distilled_av(
                 plan,
                 stage2_stage_shape,
                 device,
-                &[],
+                &stage2_loras,
                 Some(budget),
                 progress,
             )
@@ -7843,6 +7856,29 @@ mod tests {
     }
 
     #[test]
+    fn supports_real_video_path_accepts_source_image_distilled_lora_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/camera-control.safetensors".to_string(),
+            scale: 0.63,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        assert!(source_image_only_conditioning(&plan));
+        let stage1_loras = super::stage_lora_stack(&plan, 0).unwrap();
+        let stage2_loras = super::stage_lora_stack(&plan, 1).unwrap();
+        assert_eq!(stage1_loras, plan.loras);
+        assert_eq!(stage2_loras, plan.loras);
+        assert_eq!(stage1_loras[0].scale, 0.63);
+        assert_eq!(stage2_loras[0].scale, 0.63);
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_keyframe_two_stage_runs() {
         let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
         req.keyframes = Some(vec![
@@ -8807,6 +8843,24 @@ mod tests {
             .find(&terminator)
             .unwrap_or_else(|| panic!("`{signature}` should end at its own closing brace"));
         &rest[..end]
+    }
+
+    #[test]
+    fn distilled_runtime_wires_stage_loras_into_initial_and_recovery_loads() {
+        let render = runtime_function_source("fn render_real_distilled_av(");
+        for required in [
+            "let stage1_loras = stage_lora_stack(plan, 0)?;",
+            "&stage1_loras,",
+            "let stage2_loras = stage_lora_stack(plan, 1)?;",
+            "&stage2_loras,",
+        ] {
+            assert!(
+                render.contains(required),
+                "distilled inference must retain `{required}` so neither an initial load nor an OOM recovery silently drops user LoRAs"
+            );
+        }
+        assert_eq!(render.matches("&stage1_loras,").count(), 2);
+        assert_eq!(render.matches("&stage2_loras,").count(), 2);
     }
 
     #[test]
