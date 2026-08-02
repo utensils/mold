@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import type { ApiTarget } from "../api/client";
 import {
   createPairingSession,
+  mobilePairingUrl,
   type MobilePairingPayload,
   type PairingSession,
 } from "../api/pairing";
@@ -39,7 +40,7 @@ const expired = computed(() => secondsLeft.value === 0);
 const buttonLabel = computed(() => {
   if (busy.value) return "Creating secure code…";
   if (session.value) return "New pairing code";
-  return "Pair an iPhone";
+  return "Create pairing code";
 });
 
 function reachableBaseUrl(input: string, hostname: string | null): string {
@@ -49,7 +50,7 @@ function reachableBaseUrl(input: string, hostname: string | null): string {
     url = new URL(candidate);
   } catch {
     throw new Error(
-      "Enter the http:// or https:// address your iPhone uses for this host.",
+      "Enter the http:// or https:// address your mobile device uses for this host.",
     );
   }
   if (!["http:", "https:"].includes(url.protocol))
@@ -92,7 +93,7 @@ async function startPairing(): Promise<void> {
       instance_id: next.instance_id,
       name: props.hostLabel || next.hostname || new URL(baseUrl).hostname,
     };
-    qrDataUrl.value = await QRCode.toDataURL(JSON.stringify(payload), {
+    qrDataUrl.value = await QRCode.toDataURL(mobilePairingUrl(payload), {
       width: 320,
       margin: 2,
       errorCorrectionLevel: "M",
@@ -124,7 +125,7 @@ onBeforeUnmount(() => {
       <div class="pairing-heading">
         <span class="pairing-icon" aria-hidden="true">▦</span>
         <div>
-          <h3>Pair Mold for iPhone</h3>
+          <h3>Mobile pairing</h3>
           <p>
             Scan once to add this host. The code expires quickly and never
             contains your API key.
@@ -132,7 +133,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <label class="pairing-address">
-        <span>Address your iPhone can reach</span>
+        <span>Address your mobile device can reach</span>
         <input
           v-model="address"
           data-selectable
@@ -160,7 +161,7 @@ onBeforeUnmount(() => {
       class="pairing-code"
       :class="{ 'pairing-code--expired': expired }"
     >
-      <img :src="qrDataUrl" alt="Mold iPhone pairing QR code" />
+      <img :src="qrDataUrl" alt="Mold mobile pairing QR code" />
       <div class="pairing-status">
         <span v-if="session?.auth_required === false">No key required</span>
         <span v-else-if="expired">Expired</span>

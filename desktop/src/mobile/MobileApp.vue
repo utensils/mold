@@ -11,6 +11,7 @@ import {
 } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Format, scan } from "@tauri-apps/plugin-barcode-scanner";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -285,6 +286,7 @@ const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const discovering = ref(false);
 const pairing = ref(false);
+let stopPairingDeepLinks: (() => void) | null = null;
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
@@ -1161,13 +1163,12 @@ async function discoverHosts(): Promise<void> {
   }
 }
 
-async function scanPairingCode(): Promise<void> {
+async function pairFromCode(code: () => Promise<string>): Promise<void> {
   if (pairing.value) return;
   pairing.value = true;
   hostError.value = "";
   try {
-    const result = await scan({ cameraDirection: "back", formats: [Format.QRCode] });
-    const payload = parseMobilePairingPayload(result.content);
+    const payload = parseMobilePairingPayload(await code());
     if (payload.expires_at !== null && payload.expires_at <= Math.floor(Date.now() / 1000)) {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
@@ -1185,6 +1186,24 @@ async function scanPairingCode(): Promise<void> {
   } finally {
     pairing.value = false;
   }
+}
+
+function scanPairingCode(): Promise<void> {
+  return pairFromCode(async () => {
+    const result = await scan({ cameraDirection: "back", formats: [Format.QRCode] });
+    return result.content;
+  });
+}
+
+async function openPairingUrls(urls: string[]): Promise<void> {
+  const pairingUrl = urls.find((url) => url.startsWith("mold://pair?"));
+  if (pairingUrl) await pairFromCode(() => Promise.resolve(pairingUrl));
+}
+
+async function listenForPairingDeepLinks(): Promise<void> {
+  stopPairingDeepLinks = await onOpenUrl((urls) => void openPairingUrls(urls));
+  const current = await getCurrent();
+  if (current) await openPairingUrls(current);
 }
 
 async function selectHost(id: string): Promise<void> {
@@ -3311,6 +3330,14 @@ onMounted(async () => {
   }
   await hydrateApiKeys();
   if (unmounted) return;
+  if ("__TAURI_INTERNALS__" in window) {
+    try {
+      await listenForPairingDeepLinks();
+    } catch (error) {
+      hostError.value = describeTransportError(error, "Mobile pairing");
+    }
+  }
+  if (unmounted) return;
   recoverMobileSequence();
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
@@ -3339,6 +3366,8 @@ onBeforeUnmount(() => {
   clearExpansionRecovery();
   document.removeEventListener("visibilitychange", handleForegroundResume);
   window.removeEventListener("pageshow", handleForegroundResume);
+  stopPairingDeepLinks?.();
+  stopPairingDeepLinks = null;
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
   stopSequenceTransport();

@@ -255,7 +255,10 @@ one-time-token `POST /api/pairing/claim`. The claim route is intentionally the
 only unauthenticated credential handoff: tokens are 256-bit random values,
 stored server-side only as an HMAC, capped, single-use, and expire after two
 minutes. Both responses are `no-store`; the QR must never contain the durable
-API key.
+API key. Pairing QR codes use the registered `mold://pair` scheme so the iOS
+Camera app offers to open them directly in Mold; cold-launch and already-open
+links share the same claim, instance-verification, and Keychain path as Mold's
+in-app scanner.
 
 Authenticated gallery media uses `POST /api/gallery/media-token` to exchange
 the normal `X-Api-Key` request for a short-lived, read-only URL scoped to one

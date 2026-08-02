@@ -56,5 +56,16 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>mold</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>mold</string>
+		</dict>
+	</array>
 </dict>
 </plist>

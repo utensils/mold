@@ -19,6 +19,9 @@ const {
   previewGenerationPlacement,
   scanPairingQr,
   claimPairingSession,
+  getCurrentDeepLinks,
+  onOpenDeepLinks,
+  unlistenDeepLinks,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -33,12 +36,19 @@ const {
   previewGenerationPlacement: vi.fn(),
   scanPairingQr: vi.fn(),
   claimPairingSession: vi.fn(),
+  getCurrentDeepLinks: vi.fn(),
+  onOpenDeepLinks: vi.fn(),
+  unlistenDeepLinks: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-barcode-scanner", () => ({
   Format: { QRCode: "QRCode" },
   scan: scanPairingQr,
+}));
+vi.mock("@tauri-apps/plugin-deep-link", () => ({
+  getCurrent: getCurrentDeepLinks,
+  onOpenUrl: onOpenDeepLinks,
 }));
 vi.mock("@studio/api/pairing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/pairing")>()),
@@ -265,6 +275,9 @@ beforeEach(() => {
   previewGenerationPlacement.mockReset().mockResolvedValue(plannedPlacement());
   scanPairingQr.mockReset();
   claimPairingSession.mockReset();
+  getCurrentDeepLinks.mockReset().mockResolvedValue(null);
+  unlistenDeepLinks.mockReset();
+  onOpenDeepLinks.mockReset().mockResolvedValue(unlistenDeepLinks);
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -276,6 +289,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.themeFamily;
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
 describe("MobileApp sequence generation", () => {
@@ -4407,6 +4421,15 @@ describe("MobileApp host and catalog coordination", () => {
     });
   }
 
+  function pairingUrl(overrides: Record<string, unknown> = {}): string {
+    const payload = JSON.parse(pairingPayload(overrides)) as Record<string, string>;
+    const url = new URL("mold://pair");
+    for (const [key, value] of Object.entries(payload)) {
+      if (key !== "type" && value !== null) url.searchParams.set(key, String(value));
+    }
+    return url.toString();
+  }
+
   async function scanFromMachines(): Promise<void> {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -4640,6 +4663,54 @@ describe("MobileApp host and catalog coordination", () => {
       .findAll("option")
       .map((option) => option.text());
     expect(options).toContain(pulledModel.name);
+  });
+
+  it("claims a cold-launch iOS Camera pairing link through the existing Keychain path", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    getCurrentDeepLinks.mockResolvedValue([pairingUrl()]);
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "pair-id",
+      hostname: "pair-host",
+    });
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      if (path === "/api/status" && baseUrl === "http://pair.local:7680") {
+        return Promise.resolve({ ...status, instance_id: "pair-id", hostname: "pair-host" });
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
+        hostId: "pair-local-7680",
+        apiKey: "paired-key",
+      }),
+    );
+
+    expect(onOpenDeepLinks).toHaveBeenCalledOnce();
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
+  });
+
+  it("stops listening for iOS pairing links when the mobile shell unmounts", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    wrapper = mountMobileApp();
+    await vi.waitFor(() => expect(onOpenDeepLinks).toHaveBeenCalledOnce());
+
+    wrapper.unmount();
+    wrapper = null;
+
+    expect(unlistenDeepLinks).toHaveBeenCalledOnce();
   });
 });
 
