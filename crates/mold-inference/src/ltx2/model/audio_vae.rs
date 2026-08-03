@@ -32,6 +32,13 @@ fn silu(x: &Tensor) -> Result<Tensor> {
     ops::silu(x).map_err(Into::into)
 }
 
+/// Tensor key that identifies an audio VAE in a combined LTX-2 checkpoint.
+/// Shared with `ltx2::single_file`'s capability probe so the two cannot drift.
+pub(crate) const AUDIO_VAE_SENTINEL: &str = "audio_vae.per_channel_statistics.mean-of-means";
+
+/// Prefix every audio-VAE tensor shares. See [`AUDIO_VAE_SENTINEL`].
+pub(crate) const AUDIO_VAE_KEY_PREFIX: &str = "audio_vae.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioNormType {

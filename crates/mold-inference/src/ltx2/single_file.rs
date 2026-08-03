@@ -97,15 +97,41 @@ pub enum LoadError {
 pub(crate) struct AudioOutputAssetFlags {
     pub(crate) audio_vae: bool,
     pub(crate) vocoder: bool,
+    /// Some `audio_vae.*` tensor exists even though the sentinel did not
+    /// match. Distinguishes "no audio VAE here" from "an audio VAE this build
+    /// does not recognise", which need different advice.
+    pub(crate) audio_vae_prefix_seen: bool,
+    /// Some `vocoder.*` tensor exists even though no generator sentinel
+    /// matched — an unrecognised vocoder layout rather than a missing one.
+    pub(crate) vocoder_prefix_seen: bool,
 }
 
 /// Inspect only the safetensors header for the two asset families required to
 /// decode LTX-2 audio. Video-only VAE companions intentionally report false.
+///
+/// Both sentinel sets come from the modules that own the corresponding
+/// loaders — `model::vocoder::VOCODER_GENERATOR_SENTINELS` covers every layout
+/// `CheckpointVocoderLayout` accepts, and `model::audio_vae::AUDIO_VAE_SENTINEL`
+/// the audio VAE — so this probe cannot recognise a different set of
+/// checkpoints than the code that reads them.
 pub(crate) fn audio_output_asset_flags(path: &Path) -> Result<AudioOutputAssetFlags, LoadError> {
+    use crate::ltx2::model::audio_vae::{AUDIO_VAE_KEY_PREFIX, AUDIO_VAE_SENTINEL};
+    use crate::ltx2::model::vocoder::{VOCODER_GENERATOR_SENTINELS, VOCODER_KEY_PREFIX};
+
     let header = read_header(path)?;
+    let audio_vae = header.contains_key(AUDIO_VAE_SENTINEL);
+    let vocoder = VOCODER_GENERATOR_SENTINELS
+        .iter()
+        .any(|sentinel| header.contains_key(*sentinel));
     Ok(AudioOutputAssetFlags {
-        audio_vae: header.contains_key("audio_vae.per_channel_statistics.mean-of-means"),
-        vocoder: header.contains_key("vocoder.vocoder.conv_pre.weight"),
+        audio_vae,
+        vocoder,
+        audio_vae_prefix_seen: !audio_vae
+            && header
+                .keys()
+                .any(|key| key.starts_with(AUDIO_VAE_KEY_PREFIX)),
+        vocoder_prefix_seen: !vocoder
+            && header.keys().any(|key| key.starts_with(VOCODER_KEY_PREFIX)),
     })
 }
 
@@ -281,6 +307,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(p);
+    }
+
+    /// LTX-2 ships two vocoder layouts and the capability probe has to accept
+    /// both, because [`crate::ltx2::model::vocoder::Ltx2VocoderConfig::load`]
+    /// already does: v2.0 (19B) stores the generator flat under `vocoder.*`,
+    /// while v2.3 (22B) nests it beside the bandwidth-extension stage as
+    /// `vocoder.vocoder.*`. Probing only the nested key reported "no vocoder"
+    /// for every 19B checkpoint, which made *all* LTX-2 19B audio — joint
+    /// audio-video as well as text-to-audio — refuse to run against a
+    /// checkpoint that plainly contains the weights.
+    #[test]
+    fn audio_output_accepts_both_the_flat_and_nested_vocoder_layouts() {
+        let nested = temp_path("vocoder-nested");
+        write_fixture(
+            &nested,
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.vocoder.conv_pre.weight",
+            ],
+        );
+        assert!(
+            supports_audio_output(&nested).unwrap(),
+            "LTX-2.3 nests the generator under vocoder.vocoder.*"
+        );
+
+        let flat = temp_path("vocoder-flat");
+        write_fixture(
+            &flat,
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.conv_pre.weight",
+            ],
+        );
+        assert!(
+            supports_audio_output(&flat).unwrap(),
+            "LTX-2.0 stores the generator flat under vocoder.*"
+        );
+
+        // The audio VAE is still required on its own merits.
+        let vocoder_only = temp_path("vocoder-only");
+        write_fixture(&vocoder_only, &["vocoder.conv_pre.weight"]);
+        assert!(!supports_audio_output(&vocoder_only).unwrap());
+
+        for path in [nested, flat, vocoder_only] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

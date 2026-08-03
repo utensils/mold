@@ -57,14 +57,16 @@ pub struct Ltx2Engine {
     gemma_variant: Option<String>,
 }
 
-fn validate_audio_output_request(req: &GenerateRequest, supported: bool) -> Result<()> {
-    if execution::wants_audio_output(req) && !supported {
-        anyhow::bail!(
-            "LTX-2 audio output is unavailable for model '{}': the resolved checkpoint assets do \
-             not include both the audio VAE and vocoder tensors. Set enable_audio=false and retry; \
-             this request was rejected before generation starts.",
-            req.model
-        );
+fn validate_audio_output_request(req: &GenerateRequest, gap: Option<&str>) -> Result<()> {
+    if let Some(gap) = gap {
+        if execution::wants_audio_output(req) {
+            anyhow::bail!(
+                "LTX-2 audio output is unavailable for model '{}': the resolved checkpoint set is \
+                 missing {gap}. Set enable_audio=false and retry; this request was rejected \
+                 before generation starts.",
+                req.model
+            );
+        }
     }
     Ok(())
 }
@@ -383,7 +385,7 @@ impl Ltx2Engine {
         work_dir: &Path,
         output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
-        validate_audio_output_request(req, super::audio_output_supported(&self.paths))?;
+        validate_audio_output_request(req, super::audio_output_gap(&self.paths).as_deref())?;
         let pipeline = self.select_pipeline(req)?;
         let gemma_root = self.gemma_root()?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
@@ -1788,7 +1790,8 @@ mod tests {
         req.source_image = Some(vec![0x89, b'P', b'N', b'G']);
         req.enable_audio = Some(true);
 
-        let err = validate_audio_output_request(&req, false).unwrap_err();
+        let err =
+            validate_audio_output_request(&req, Some("the audio VAE and the vocoder")).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("cv:3143864"), "got: {message}");
         assert!(message.contains("enable_audio=false"), "got: {message}");
@@ -1796,6 +1799,104 @@ mod tests {
             message.contains("before generation starts"),
             "got: {message}"
         );
+        // The reason is carried through verbatim rather than flattened back
+        // into "both the audio VAE and vocoder tensors".
+        assert!(
+            message.contains("the audio VAE and the vocoder"),
+            "got: {message}"
+        );
+
+        // A complete checkpoint set passes.
+        validate_audio_output_request(&req, None).expect("no gap means no rejection");
+    }
+
+    /// The message has to say *which* asset is missing, and separate "absent"
+    /// from "present under an unrecognised layout" — the latter reads as a bad
+    /// download otherwise, which is how the 19B vocoder-layout bug survived.
+    #[test]
+    fn audio_output_gap_names_the_specific_missing_asset() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn fixture(tag: &str, keys: &[&str]) -> std::path::PathBuf {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "mold-ltx2-gap-{tag}-{}-{}.safetensors",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let zero = 0.0f32.to_le_bytes().to_vec();
+            let bufs: Vec<Vec<u8>> = keys.iter().map(|_| zero.clone()).collect();
+            let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+            for (key, buf) in keys.iter().zip(bufs.iter()) {
+                tensors.insert(
+                    (*key).to_string(),
+                    TensorView::new(SafeDtype::F32, vec![1], buf).unwrap(),
+                );
+            }
+            serialize_to_file(&tensors, &None, &path).unwrap();
+            path
+        }
+
+        fn paths_for(transformer: &std::path::Path) -> ModelPaths {
+            ModelPaths {
+                transformer: transformer.to_path_buf(),
+                transformer_shards: vec![],
+                vae: PathBuf::new(),
+                spatial_upscaler: None,
+                temporal_upscaler: None,
+                distilled_lora: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![],
+                text_tokenizer: None,
+                decoder: None,
+            }
+        }
+
+        // Flat 19B layout: complete, and must report no gap at all.
+        let flat = fixture(
+            "flat",
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.conv_pre.weight",
+            ],
+        );
+        assert_eq!(super::super::audio_output_gap(&paths_for(&flat)), None);
+
+        // Audio VAE present, no vocoder tensors whatsoever.
+        let no_vocoder = fixture(
+            "no-vocoder",
+            &["audio_vae.per_channel_statistics.mean-of-means"],
+        );
+        let gap = super::super::audio_output_gap(&paths_for(&no_vocoder)).unwrap();
+        assert_eq!(gap, "the vocoder", "got: {gap}");
+
+        // Vocoder tensors present but under a spelling this build cannot read.
+        let odd_vocoder = fixture(
+            "odd-vocoder",
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.some_future_layout.weight",
+            ],
+        );
+        let gap = super::super::audio_output_gap(&paths_for(&odd_vocoder)).unwrap();
+        assert!(
+            gap.contains("not in a layout this build recognises"),
+            "got: {gap}"
+        );
+        assert!(gap.contains("vocoder"), "got: {gap}");
+
+        for path in [flat, no_vocoder, odd_vocoder] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {

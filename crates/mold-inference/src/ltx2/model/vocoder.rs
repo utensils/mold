@@ -69,6 +69,29 @@ struct CheckpointConfig {
     vocoder: CheckpointVocoderLayout,
 }
 
+/// Tensor keys that identify a vocoder generator, one per layout
+/// [`CheckpointVocoderLayout`] accepts.
+///
+/// This is the single source of truth for "does this checkpoint carry a
+/// vocoder". It lives beside the layout enum on purpose: the capability probe
+/// in `ltx2::single_file` reads these rather than spelling them out again, so
+/// adding a third layout cannot leave the probe and the loader disagreeing —
+/// which is exactly how every LTX-2 19B checkpoint came to be reported as
+/// having no vocoder while the loader read one out of it happily.
+pub(crate) const VOCODER_GENERATOR_SENTINELS: [&str; 2] = [
+    // v2.3 / 22B: the generator is nested beside the bandwidth-extension
+    // stage, matching `CheckpointVocoderLayout::Nested`.
+    "vocoder.vocoder.conv_pre.weight",
+    // v2.0 / 19B: the generator sits flat at the top level, matching
+    // `CheckpointVocoderLayout::Legacy`.
+    "vocoder.conv_pre.weight",
+];
+
+/// Prefix every vocoder tensor shares, in both layouts. Used to tell "this
+/// checkpoint has no vocoder at all" apart from "it has one under a spelling
+/// this build does not recognise" — two very different things to report.
+pub(crate) const VOCODER_KEY_PREFIX: &str = "vocoder.";
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum CheckpointVocoderLayout {
