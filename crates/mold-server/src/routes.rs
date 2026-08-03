@@ -966,25 +966,53 @@ async fn materialize_builtin_ltx2_control(
     Ok(())
 }
 
-/// Whether every file this adapter needs has landed and verified.
+/// Which of this adapter's files have not landed and verified.
 ///
-/// `path` is the weights file; companion files live beside it, so each is
-/// checked at its own recorded size. Checking only the weights would let a
-/// half-finished multi-file pull look complete and fail at load.
+/// `path` is the **weights** file; companion files live beside it, so each is
+/// checked in that directory at its own recorded size. Checking only the
+/// weights would let a half-finished multi-file pull look complete and then
+/// fail at load. A path with no parent cannot be probed at all, so every file
+/// counts as outstanding.
+fn control_missing_files(
+    adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
+    path: &std::path::Path,
+) -> Vec<mold_core::ltx2_control::Ltx2ControlAdapterFile> {
+    let Some(dir) = path.parent() else {
+        return adapter.files().collect();
+    };
+    adapter
+        .files()
+        .filter(|file| {
+            let candidate = dir.join(file.hf_filename);
+            !(mold_core::download::has_sha256_marker(&candidate)
+                || candidate
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.len() == file.size_bytes))
+        })
+        .collect()
+}
+
+/// Whether every file this adapter needs has landed and verified.
 fn control_artifact_is_complete(
     adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
     path: &std::path::Path,
 ) -> bool {
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    adapter.files().all(|file| {
-        let candidate = dir.join(file.hf_filename);
-        mold_core::download::has_sha256_marker(&candidate)
-            || candidate
-                .metadata()
-                .is_ok_and(|metadata| metadata.len() == file.size_bytes)
-    })
+    control_missing_files(adapter, path).is_empty()
+}
+
+/// Bytes an admission would actually fetch — the outstanding files only.
+///
+/// The adapter total would over-report a pull that already has its weights,
+/// which is the common case when a companion file is added to an adapter a
+/// user already installed.
+fn control_pending_download_bytes(
+    adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
+    path: &std::path::Path,
+) -> u64 {
+    control_missing_files(adapter, path)
+        .iter()
+        .map(|file| file.size_bytes)
+        .sum()
 }
 
 async fn normalize_generation_placement(
@@ -2363,9 +2391,13 @@ pub(crate) async fn placement_preview_for_request(
                         .pending_downloads
                         .push(mold_core::PendingModelDownload {
                             kind: "ic-lora-control".to_string(),
-                            name: adapter.hf_filename.to_string(),
+                            // The adapter, not one of its files: a multi-file
+                            // adapter with only its companion outstanding
+                            // would otherwise name the weights already on
+                            // disk and quote their size.
+                            name: adapter.download_model.to_string(),
                             repo: adapter.hf_repo.to_string(),
-                            bytes: adapter.size_bytes,
+                            bytes: control_pending_download_bytes(adapter, &path),
                         });
                 }
                 let artifact_fingerprint = format!(":ic-lora:{}", adapter.sha256);
@@ -4006,10 +4038,20 @@ async fn capabilities_ltx2_control_adapters(
         .map(|adapter| {
             let manifest = mold_core::manifest::find_manifest(adapter.download_model)
                 .expect("control registry and hidden manifests must stay in sync");
-            let installed = manifest.files.iter().all(|file| {
-                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
-                control_artifact_is_complete(adapter, &path)
-            });
+            // `control_artifact_is_complete` already checks every companion
+            // relative to the weights' directory, so resolve the weights once
+            // and ask once. Asking per manifest file would re-run the whole
+            // check N times, and would look for the weights in a companion's
+            // directory if the two ever stopped sharing one.
+            let weights = manifest
+                .files
+                .iter()
+                .find(|file| file.hf_filename == adapter.hf_filename)
+                .expect("control registry and hidden manifests must stay in sync");
+            let installed = control_artifact_is_complete(
+                adapter,
+                &models_dir.join(mold_core::manifest::storage_path(manifest, weights)),
+            );
             mold_core::Ltx2ControlAdapterInfo {
                 id: adapter.id.to_string(),
                 label: adapter.label.to_string(),
@@ -6514,6 +6556,72 @@ mod tests {
         let listing = state.downloads.listing().await;
         assert!(listing.active_jobs.is_empty());
         assert!(listing.queued.is_empty());
+    }
+
+    /// The HDR adapter is the multi-file case: weights plus a companion file
+    /// of pre-computed prompt embeddings.
+    fn multi_file_adapter() -> &'static mold_core::ltx2_control::Ltx2ControlAdapter {
+        mold_core::ltx2_control::LTX2_CONTROL_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.extra_files.len() == 1)
+            .expect("the registry must keep at least one multi-file adapter")
+    }
+
+    #[test]
+    fn a_present_companion_is_not_reported_as_a_pending_download() {
+        let adapter = multi_file_adapter();
+        let temp = tempfile::tempdir().unwrap();
+        let weights = temp.path().join(adapter.hf_filename);
+        for file in adapter.files() {
+            let path = temp.path().join(file.hf_filename);
+            std::fs::write(&path, b"x").unwrap();
+            mold_core::download::write_sha256_marker(&path, file.sha256).unwrap();
+        }
+
+        assert!(control_missing_files(adapter, &weights).is_empty());
+        assert!(control_artifact_is_complete(adapter, &weights));
+    }
+
+    #[test]
+    fn a_pending_control_download_reports_only_the_bytes_still_missing() {
+        let adapter = multi_file_adapter();
+        let companion = adapter.extra_files[0];
+        let temp = tempfile::tempdir().unwrap();
+
+        // Weights landed; the companion never did. Reporting the adapter's
+        // total, or the weights' filename, would both describe a download
+        // that is not the one about to run.
+        let weights = temp.path().join(adapter.hf_filename);
+        std::fs::write(&weights, b"x").unwrap();
+        mold_core::download::write_sha256_marker(&weights, adapter.sha256).unwrap();
+
+        let missing = control_missing_files(adapter, &weights);
+        assert_eq!(missing.len(), 1, "only the companion is outstanding");
+        assert_eq!(missing[0].hf_filename, companion.hf_filename);
+        assert_eq!(
+            control_pending_download_bytes(adapter, &weights),
+            companion.size_bytes,
+            "a half-finished pull must not re-report the bytes already on disk"
+        );
+        assert!(!control_artifact_is_complete(adapter, &weights));
+    }
+
+    #[test]
+    fn control_completeness_is_read_from_the_weights_directory_once() {
+        let adapter = multi_file_adapter();
+        let temp = tempfile::tempdir().unwrap();
+        let weights = temp.path().join(adapter.hf_filename);
+
+        // Nothing on disk: every file is outstanding and the reported size is
+        // the adapter total.
+        assert_eq!(
+            control_missing_files(adapter, &weights).len(),
+            adapter.files().count()
+        );
+        assert_eq!(
+            control_pending_download_bytes(adapter, &weights),
+            adapter.total_size_bytes()
+        );
     }
 
     #[tokio::test]
