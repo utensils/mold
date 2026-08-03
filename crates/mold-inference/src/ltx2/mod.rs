@@ -16,6 +16,7 @@ mod runtime;
 mod sampler;
 pub(crate) mod single_file;
 mod text;
+mod tiling;
 
 pub use chain::{extract_tail_latents, tail_latent_frame_count};
 pub use pipeline::Ltx2Engine;
