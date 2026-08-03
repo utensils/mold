@@ -28,6 +28,40 @@ pub struct Ltx2ControlAdapter {
     pub size_bytes: u64,
     pub sha256: &'static str,
     pub download_model: &'static str,
+    /// Whether Hugging Face requires an accepted licence before serving this
+    /// repository. Surfaced to clients so they can say "accept the licence and
+    /// set `HF_TOKEN`" *before* a download fails with a 403.
+    pub gated: bool,
+    /// Extra files the adapter cannot run without, beyond `hf_filename`.
+    ///
+    /// The HDR adapter ships pre-computed prompt embeddings alongside its
+    /// weights, so an adapter is not always exactly one file.
+    pub extra_files: &'static [Ltx2ControlAdapterFile],
+}
+
+/// A companion file an adapter needs on disk alongside its weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ltx2ControlAdapterFile {
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+    pub sha256: &'static str,
+}
+
+impl Ltx2ControlAdapter {
+    /// Every file this adapter needs, weights first.
+    pub fn files(&self) -> impl Iterator<Item = Ltx2ControlAdapterFile> + '_ {
+        std::iter::once(Ltx2ControlAdapterFile {
+            hf_filename: self.hf_filename,
+            size_bytes: self.size_bytes,
+            sha256: self.sha256,
+        })
+        .chain(self.extra_files.iter().copied())
+    }
+
+    /// Total bytes to download, across every file.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.files().map(|file| file.size_bytes).sum()
+    }
 }
 
 pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
@@ -41,6 +75,8 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
         size_bytes: 654_465_296,
         sha256: "cd342e0dcf7754d8b36135b5e768b0f0e820703acd372adc49e53de0b00a931b",
         download_model: "ltx2-control-union-19b",
+        gated: false,
+        extra_files: &[],
     },
     Ltx2ControlAdapter {
         id: "pose",
@@ -52,6 +88,8 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
         size_bytes: 654_465_256,
         sha256: "61816bf0985d4470c456160deec65df69188ae45d553e5aa8f1252fc543bc8aa",
         download_model: "ltx2-control-pose-19b",
+        gated: false,
+        extra_files: &[],
     },
     Ltx2ControlAdapter {
         id: "detailer",
@@ -63,6 +101,8 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
         size_bytes: 2_617_401_920,
         sha256: "05efdae9e472e06d168e122f5ebb890e7ef348cc047cf9876da6504c36d7d0e2",
         download_model: "ltx2-control-detailer-19b",
+        gated: false,
+        extra_files: &[],
     },
     Ltx2ControlAdapter {
         id: "union",
@@ -74,6 +114,8 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
         size_bytes: 654_465_352,
         sha256: "a1b888a87f661d27f08b394ae559e8e1050be33900bcc36a5cdf659e48f88d18",
         download_model: "ltx2-control-union-23",
+        gated: false,
+        extra_files: &[],
     },
     Ltx2ControlAdapter {
         id: "motion-track",
@@ -85,6 +127,43 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
         size_bytes: 327_309_314,
         sha256: "e279807ee3aa3db1ce60188d665ff83342860367dcd6bac19f8bd5a99a9e1dca",
         download_model: "ltx2-control-motion-track-23",
+        gated: false,
+        extra_files: &[],
+    },
+    Ltx2ControlAdapter {
+        id: "lipdub",
+        label: "Lip dub",
+        guide: "A reference video with speech; the mouth is re-timed to new audio.",
+        profile: Ltx2ControlProfile::Ltx2_23_22bDistilled,
+        // Upstream's README still names the repository LTX-2.3-22b-IC-LoRA-LipDub,
+        // which now 307-redirects to DubIt. Pin the destination so the download
+        // does not depend on a redirect being honoured.
+        hf_repo: "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+        hf_filename: "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+        size_bytes: 2_466_665_072,
+        sha256: "fc415b12cb639e78511bc264f85080c2f7b188e334c1d9fade76b310e2bc419c",
+        download_model: "ltx2-control-lipdub-23",
+        gated: true,
+        extra_files: &[],
+    },
+    Ltx2ControlAdapter {
+        id: "hdr",
+        label: "HDR",
+        guide: "An SDR reference video; the render is re-graded to linear HDR.",
+        profile: Ltx2ControlProfile::Ltx2_23_22bDistilled,
+        hf_repo: "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+        hf_filename: "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+        size_bytes: 327_309_312,
+        sha256: "c56bfa0f2e4461a8b2f318f494c61c5bf97f462f2220e31ece93ea7851ca871e",
+        download_model: "ltx2-control-hdr-23",
+        gated: true,
+        // The HDR pipeline runs from pre-computed prompt embeddings rather
+        // than encoding a prompt, so this file is not optional.
+        extra_files: &[Ltx2ControlAdapterFile {
+            hf_filename: "ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors",
+            size_bytes: 12_583_096,
+            sha256: "78bffa6049bae2649a4365ec8769db88052c21348d643e8fc1ce6d483d994c5b",
+        }],
     },
 ];
 
@@ -186,12 +265,18 @@ pub struct Ltx2ControlAdapterInfo {
     pub id: String,
     pub label: String,
     pub guide: String,
+    /// Total bytes across every file the adapter needs, not just its weights.
     pub size_bytes: u64,
     pub installed: bool,
     pub download_model: String,
     pub download_repo: String,
     pub download_filename: String,
     pub download_sha256: String,
+    /// Whether Hugging Face requires an accepted licence first. Additive:
+    /// absent on servers that predate gated adapters, which clients read as
+    /// "not gated" — the same answer those servers would have given.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gated: bool,
 }
 
 #[cfg(test)]
@@ -208,7 +293,7 @@ mod tests {
             assert_eq!(adapter.sha256.len(), 64);
             assert!(adapter.hf_filename.ends_with(".safetensors"));
         }
-        assert_eq!(seen.len(), 5);
+        assert_eq!(seen.len(), 7);
     }
 
     #[test]
@@ -257,8 +342,82 @@ mod tests {
                     327_309_314,
                     "e279807ee3aa3db1ce60188d665ff83342860367dcd6bac19f8bd5a99a9e1dca",
                 ),
+                (
+                    "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+                    "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+                    2_466_665_072,
+                    "fc415b12cb639e78511bc264f85080c2f7b188e334c1d9fade76b310e2bc419c",
+                ),
+                (
+                    "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+                    "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+                    327_309_312,
+                    "c56bfa0f2e4461a8b2f318f494c61c5bf97f462f2220e31ece93ea7851ca871e",
+                ),
             ]
         );
+    }
+
+    /// A multi-file adapter must report every file it needs, and its
+    /// advertised size must be the whole download — quoting only the weights
+    /// would understate the HDR adapter by its 12 MB embeddings file.
+    #[test]
+    fn adapters_enumerate_every_file_they_need() {
+        let hdr = LTX2_CONTROL_ADAPTERS
+            .iter()
+            .find(|a| a.id == "hdr")
+            .expect("hdr adapter is registered");
+        let files: Vec<_> = hdr.files().collect();
+        assert_eq!(files.len(), 2, "HDR ships weights plus scene embeddings");
+        assert_eq!(files[0].hf_filename, hdr.hf_filename, "weights come first");
+        assert!(files[1].hf_filename.contains("scene-emb"));
+        assert_eq!(
+            hdr.total_size_bytes(),
+            files.iter().map(|f| f.size_bytes).sum::<u64>()
+        );
+        assert!(hdr.total_size_bytes() > hdr.size_bytes);
+
+        // Single-file adapters are unchanged.
+        for adapter in LTX2_CONTROL_ADAPTERS.iter().filter(|a| a.id != "hdr") {
+            assert_eq!(adapter.files().count(), 1, "{}", adapter.id);
+            assert_eq!(adapter.total_size_bytes(), adapter.size_bytes);
+        }
+    }
+
+    /// Gating is per-adapter, and the generated manifests must carry it — a
+    /// gated file that claims otherwise fails late with an opaque 403 instead
+    /// of the "accept the licence, set HF_TOKEN" guidance the downloader has.
+    #[test]
+    fn gated_adapters_propagate_to_their_manifests() {
+        for adapter in LTX2_CONTROL_ADAPTERS {
+            let manifest = crate::manifest::find_manifest(adapter.download_model)
+                .unwrap_or_else(|| panic!("{} has no manifest", adapter.id));
+            assert_eq!(
+                manifest.files.len(),
+                adapter.files().count(),
+                "{} manifest file count",
+                adapter.id
+            );
+            for file in &manifest.files {
+                assert_eq!(file.gated, adapter.gated, "{} gating", adapter.id);
+            }
+        }
+        let gated: Vec<_> = LTX2_CONTROL_ADAPTERS
+            .iter()
+            .filter(|a| a.gated)
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(gated, ["lipdub", "hdr"]);
+    }
+
+    /// The 2.3 adapters are for the 22B distilled profile; offering one on a
+    /// 19B checkpoint would download gigabytes that cannot load.
+    #[test]
+    fn new_adapters_resolve_only_for_the_22b_profile() {
+        for id in ["lipdub", "hdr"] {
+            assert!(resolve_control_adapter(Ltx2ControlProfile::Ltx2_23_22bDistilled, id).is_ok());
+            assert!(resolve_control_adapter(Ltx2ControlProfile::Ltx2_19bDistilled, id).is_err());
+        }
     }
 
     #[test]
@@ -271,7 +430,7 @@ mod tests {
         let controls_23 = adapters_for_profile(Ltx2ControlProfile::Ltx2_23_22bDistilled)
             .map(|adapter| adapter.id)
             .collect::<Vec<_>>();
-        assert_eq!(controls_23, ["union", "motion-track"]);
+        assert_eq!(controls_23, ["union", "motion-track", "lipdub", "hdr"]);
 
         for id in ["union", "motion-track", "pose", "detailer"] {
             assert_eq!(

@@ -4565,14 +4565,17 @@ fn ltx2_control_manifests() -> Vec<ModelManifest> {
             name: adapter.download_model.to_string(),
             family: "ltx2-control".to_string(),
             description: format!("{} — {}", adapter.label, adapter.profile.label()),
-            files: vec![ModelFile {
-                hf_repo: adapter.hf_repo.to_string(),
-                hf_filename: adapter.hf_filename.to_string(),
-                component: ModelComponent::Transformer,
-                size_bytes: adapter.size_bytes,
-                gated: false,
-                sha256: Some(adapter.sha256),
-            }],
+            files: adapter
+                .files()
+                .map(|file| ModelFile {
+                    hf_repo: adapter.hf_repo.to_string(),
+                    hf_filename: file.hf_filename.to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: file.size_bytes,
+                    gated: adapter.gated,
+                    sha256: Some(file.sha256),
+                })
+                .collect(),
             defaults: ManifestDefaults {
                 steps: 1,
                 guidance: 0.0,
@@ -5953,13 +5956,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 5 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 129
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 131
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 129);
+        assert_eq!(known_manifests().len(), 131);
     }
 
     #[test]
