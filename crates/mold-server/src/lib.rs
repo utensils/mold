@@ -883,7 +883,8 @@ pub async fn run_server(
     }
 
     // Load optional auth and rate-limit configuration from env vars.
-    let auth_state = auth::load_api_keys()?;
+    let auth_state =
+        auth::load_api_keys_with_db(state.metadata_db.clone(), state.instance_id.clone())?;
     // Capture whether auth is required before `auth_state` is moved into the
     // router below — surfaced in the mDNS TXT `auth` flag.
     #[cfg(feature = "mdns")]

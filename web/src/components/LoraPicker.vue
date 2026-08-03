@@ -5,6 +5,7 @@ import Icon from "@ui/components/Icon.vue";
 import { fetchCatalogInstalled } from "../api";
 import type { CatalogEntryWire, LoraSelection } from "../types";
 import { MAX_LORA_STACK } from "../types";
+import { cameraMotionLoraLabel } from "@studio/lib/cameraMotion";
 
 defineOptions({ name: "LoraPicker" });
 
@@ -185,6 +186,9 @@ function addAnother() {
           @change="selectAt(index, $event)"
         >
           <option value="">— remove —</option>
+          <option v-if="!entryForPath(row.path)" :value="row.path">
+            {{ cameraMotionLoraLabel(row.path) }}
+          </option>
           <option
             v-for="e in filteredLoras"
             :key="e.id"

@@ -384,7 +384,7 @@ Important fields:
 | `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                                            |
 | `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                        |
 | `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                                   |
-| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`)                        |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`)                       |
 | `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`.       |
 | `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                                    |
 | `guidance_overrides`                                | Additive LTX-2 multimodal-guider overrides: `stg_scale`, `stg_blocks[]`, `rescale_scale`, `modality_scale`, `skip_step`. Each omitted field keeps the pipeline default. |
@@ -401,7 +401,7 @@ the object for non-LTX-2 families and bounds each value (`rescale_scale` is
 `0..=1`; `stg_scale` and `modality_scale` are `0..=10`; `skip_step` is `0..=8`;
 `stg_blocks` holds up to 8 distinct in-range indices) with HTTP 422 before any
 queue work. Only pipelines that run the multimodal guider (`two-stage`,
-`two-stage-hq`, `keyframe`, `a2vid`) read the overrides, and a guider the
+`two-stage-hq`, `keyframe`, `a2-vid`) read the overrides, and a guider the
 pipeline disables entirely stays disabled. Accepted values are recorded in
 gallery metadata under the same key.
 

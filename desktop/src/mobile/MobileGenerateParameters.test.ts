@@ -173,12 +173,12 @@ describe("MobileGenerateParameters", () => {
     expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
     chain.wrapper.unmount();
 
-    // 489 frames is past the single-clip 20s budget at 24 fps; a non-chainable
-    // model has nowhere to route it. (177 is now a valid single clip.)
+    // Every ltx2 checkpoint chains now, dev included, so the remaining reject
+    // case is the server's sixteen-stage ceiling.
     const unsupported = mountParameters(formFor("ltx2", "ltx-2-19b-dev:fp8"));
-    await unsupported.wrapper.get("[data-test='mobile-frames']").setValue("489");
+    await unsupported.wrapper.get("[data-test='mobile-frames']").setValue("1305");
     expect(unsupported.wrapper.get("[data-test='mobile-chain-reject']").text()).toContain(
-      "does not support chained video generation",
+      "at most 1297 frames",
     );
     expect(
       unsupported.wrapper.getComponent(MobileGenerateParameters).emitted("validity-change")?.at(-1),
@@ -233,7 +233,7 @@ describe("MobileGenerateParameters", () => {
     const child = wrapper.getComponent(MobileGenerateParameters);
     await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     expect(wrapper.get("[data-test='mobile-ltx2-validation-error']").text()).toContain(
       "conditioning audio file",
     );
@@ -338,7 +338,7 @@ describe("MobileGenerateParameters", () => {
     expect(wrapper.get("[data-test='mobile-ltx2-media-error']").text()).toContain("64 MiB");
     expect(fileToBase64).not.toHaveBeenCalled();
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     const oversizedAudio = new File(["a"], "large.wav", { type: "audio/wav" });
     Object.defineProperty(oversizedAudio, "size", { value: 64 * 1024 * 1024 + 1 });
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", oversizedAudio);
@@ -359,11 +359,28 @@ describe("MobileGenerateParameters", () => {
     await wrapper.get("[data-test='mobile-camera-motion']").setValue("dolly-in");
     expect(form.enableAudio).toBe(true);
     expect(form.cameraControl).toBe("dolly-in");
+    expect(form.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
+    form.loras[0]!.scale = 0.45;
     await wrapper.get("[data-test='mobile-camera-motion']").setValue("custom");
     await wrapper
       .get("[data-test='mobile-camera-motion-custom']")
       .setValue("/models/camera/custom.safetensors");
     expect(form.cameraControl).toBe("/models/camera/custom.safetensors");
+    expect(form.loras).toEqual([
+      {
+        path: "/models/camera/custom.safetensors",
+        name: "/models/camera/custom.safetensors",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
 
     const disclosure = wrapper.get("[data-test='mobile-ltx2-disclosure']");
     expect(disclosure.attributes("aria-expanded")).toBe("false");
@@ -397,10 +414,24 @@ describe("MobileGenerateParameters", () => {
     await wrapper.get("[data-test='mobile-ltx2-keyframe-frame-0']").setValue("24");
     expect(form.keyframes[0]?.frame).toBe(24);
 
-    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("a2-vid");
     expect(form.retakeRange).toBeNull();
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", new File(["a"], "voice.wav"));
     expect(form.audioFile).toEqual({ filename: "voice.wav", base64: "b64:voice.wav" });
+  });
+
+  it("disables new camera choices when all four LoRA slots are occupied", () => {
+    const initial = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    initial.loras = ["one", "two", "three", "four"].map((path) => ({
+      path,
+      name: path,
+      scale: 1,
+      trainedWords: [],
+    }));
+    const { wrapper } = mountParameters(initial);
+    const options = wrapper.get("[data-test='mobile-camera-motion']").findAll("option");
+    expect(options[1]?.attributes()).toHaveProperty("disabled");
+    expect(options[2]?.attributes()).toHaveProperty("disabled");
   });
 
   it("edits guidance overrides and blocks invalid values before submission", async () => {

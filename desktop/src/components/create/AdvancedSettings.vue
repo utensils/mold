@@ -20,7 +20,11 @@ import type {
   Ltx2ControlAdapterInfo,
   OutputFormat,
 } from "../../lib/api/types";
-import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
+import {
+  generationCapabilitiesForFamily,
+  MAX_LORA_STACK,
+  outputFormatsForFamily,
+} from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import {
   decideGenerateRequestRouting,
@@ -35,7 +39,13 @@ import {
   fpsValidationError,
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  cameraMotionLoraPath,
+  cameraMotionLoraSlotAvailable,
+  cameraMotionLoraLabel,
+  cameraMotionMode,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import {
   canOfferExtend,
   extendNewFrames,
@@ -65,6 +75,7 @@ const props = withDefaults(
     controlAdapters?: Ltx2ControlAdapterInfo[];
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
+    cameraUnsupportedReason?: string | null;
   }>(),
   {
     selectedModel: null,
@@ -72,6 +83,7 @@ const props = withDefaults(
     controlAdapters: () => [],
     cameraControls: () => [],
     cameraControlsLoaded: false,
+    cameraUnsupportedReason: null,
   },
 );
 
@@ -139,7 +151,12 @@ const chainCompatibilityError = computed(() => {
 const fpsError = computed(() =>
   caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
 );
-const cameraError = computed(() => cameraControlValidationError(props.form));
+const cameraError = computed(() =>
+  cameraControlValidationError(
+    props.form,
+    props.cameraControlsLoaded ? props.cameraControls.map((c) => c.id) : undefined,
+  ),
+);
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
 const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
 
@@ -156,11 +173,37 @@ watch(
 function setCameraMode(mode: string) {
   uiCameraMode.value = mode;
   if (mode === "custom") {
-    if (cameraMotionMode(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+    if (cameraMotionMode(props.form.cameraControl) !== "custom") setCameraControl("");
   } else {
-    props.form.cameraControl = mode === "" ? null : mode;
+    setCameraControl(mode === "" ? null : mode);
   }
 }
+
+function setCameraControl(next: string | null) {
+  if (
+    cameraMotionLoraPath(next) &&
+    !cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK)
+  ) {
+    return;
+  }
+  props.form.loras = syncCameraMotionLora(
+    props.form.loras,
+    props.form.cameraControl,
+    next,
+    (path, scale) => ({
+      path,
+      name: cameraMotionLoraLabel(path),
+      scale,
+      trainedWords: [],
+    }),
+    MAX_LORA_STACK,
+  );
+  props.form.cameraControl = next;
+}
+
+const cameraSlotAvailable = computed(() =>
+  cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK),
+);
 
 const keyframePickerOpen = ref(false);
 const pipelineOptions: Ltx2PipelineMode[] = [
@@ -170,7 +213,7 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "distilled",
   "ic-lora",
   "keyframe",
-  "a2vid",
+  "a2-vid",
   "retake",
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
@@ -539,10 +582,15 @@ function reset() {
             @change="setCameraMode(($event.target as HTMLSelectElement).value)"
           >
             <option value="">None</option>
-            <option v-for="p in cameraControls" :key="p.id" :value="p.id">
+            <option
+              v-for="p in cameraControls"
+              :key="p.id"
+              :value="p.id"
+              :disabled="!cameraSlotAvailable"
+            >
               {{ p.label }}{{ p.installed ? "" : " · downloads on first use" }}
             </option>
-            <option value="custom">Custom LoRA path…</option>
+            <option value="custom" :disabled="!cameraSlotAvailable">Custom LoRA path…</option>
           </select>
           <input
             v-if="uiCameraMode === 'custom'"
@@ -553,15 +601,17 @@ function reset() {
             aria-label="Camera motion LoRA path"
             class="ms-input data-mono ms-input--mt"
             :value="form.cameraControl ?? ''"
-            @input="form.cameraControl = ($event.target as HTMLInputElement).value"
+            @input="setCameraControl(($event.target as HTMLInputElement).value)"
           />
           <p
             v-if="cameraControlsLoaded && cameraControls.length === 0"
             data-test="camera-motion-19b-hint"
             class="ms-hint"
           >
-            Built-in camera motions are available for LTX-2 19B only. Use a custom LoRA path for
-            this model.
+            {{
+              cameraUnsupportedReason ??
+              "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+            }}
           </p>
           <p v-if="cameraError" data-test="camera-motion-error" class="ms-error" role="alert">
             {{ cameraError }}
@@ -818,7 +868,7 @@ function reset() {
               </div>
             </template>
 
-            <template v-if="form.pipeline === 'a2vid'">
+            <template v-if="form.pipeline === 'a2-vid'">
               <label class="ms-label ms-label--mt">Conditioning audio</label>
               <div v-if="form.audioFile" class="ms-file-row">
                 <span class="data-mono ms-file-row__name" :title="form.audioFile.filename">{{
@@ -837,7 +887,7 @@ function reset() {
                 data-test="ltx2-audio-file"
                 @change="setAudioFile"
               />
-              <p class="ms-hint">a2vid needs an audio track to drive the video.</p>
+              <p class="ms-hint">a2-vid needs an audio track to drive the video.</p>
             </template>
 
             <label class="ms-label ms-label--mt">Source video</label>

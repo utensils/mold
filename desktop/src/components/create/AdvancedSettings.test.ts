@@ -286,7 +286,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(false);
-    await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2vid");
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2-vid");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(true);
   });
 
@@ -314,18 +314,15 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.get("[data-test='chain-cue']").text()).toContain("chained clips of 97 frames");
   });
 
-  it("shows the reject message for a non-chainable model over budget", async () => {
+  it("shows the reject message when a chain would exceed the stage ceiling", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
-    // 489 frames is past even the single-clip 20s budget at 24 fps, so a
-    // non-chainable model has nowhere to route it. (241 frames is now a valid
-    // single clip — the ceiling is a duration, not a flat 97.)
-    form.frames = 489;
+    // Every ltx2 checkpoint chains now, so the remaining reject case is the
+    // server's sixteen-stage ceiling: 1305 frames needs a seventeenth clip.
+    form.frames = 1305;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
-      "does not support chained video generation",
-    );
+    expect(wrapper.get("[data-test='chain-reject']").text()).toContain("at most 1297 frames");
   });
 
   it("renders compatible host camera controls enabled with first-use download copy", async () => {
@@ -341,6 +338,14 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(options[1]?.attributes("disabled")).toBeUndefined();
     await wrapper.get("[data-test='camera-motion']").setValue("dolly-in");
     expect(form.cameraControl).toBe("dolly-in");
+    expect(form.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
   });
 
   it("keeps custom camera motion available when the host reports no built-ins", async () => {
@@ -362,11 +367,46 @@ describe("AdvancedSettings — video (LTX-2)", () => {
 
   it("reveals a custom camera-motion path input", async () => {
     const form = formFor("ltx2");
+    form.cameraControl = "dolly-in";
+    form.loras = [
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ];
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     await wrapper.get("[data-test='camera-motion']").setValue("custom");
     await wrapper.get("[data-test='camera-motion-custom']").setValue("/loras/pan.safetensors");
     expect(form.cameraControl).toBe("/loras/pan.safetensors");
+    expect(form.loras).toEqual([
+      {
+        path: "/loras/pan.safetensors",
+        name: "/loras/pan.safetensors",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
+  });
+
+  it("disables new camera choices when all four LoRA slots are occupied", async () => {
+    const form = formFor("ltx2");
+    form.loras = ["one", "two", "three", "four"].map((path) => ({
+      path,
+      name: path,
+      scale: 1,
+      trainedWords: [],
+    }));
+    const wrapper = mountSettings(form, {
+      cameraControls: [cameraControl("dolly-in", false)],
+      cameraControlsLoaded: true,
+    });
+    await openSection(wrapper, "Video");
+    const options = wrapper.get("[data-test='camera-motion']").findAll("option");
+    expect(options[1]?.attributes()).toHaveProperty("disabled");
+    expect(options[2]?.attributes()).toHaveProperty("disabled");
   });
 });
 

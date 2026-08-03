@@ -211,6 +211,30 @@ describe("merged grid", () => {
       availableOn: [{ key: "hal9000-7680", label: "hal9000" }],
     });
   });
+
+  it("dedupes matching copies across remote hosts without a local copy", async () => {
+    connectLocalPlusHal();
+    addExtra();
+    localSnapshot([]);
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([img("shared.png", 202)]) as never;
+      if (url.includes("okra")) return Promise.resolve([img("shared.png", 201)]) as never;
+      return Promise.resolve([]) as never;
+    });
+    const gallery = useGalleryStore();
+
+    await gallery.fetchAll();
+
+    expect(gallery.merged).toHaveLength(1);
+    expect(gallery.merged[0]).toMatchObject({
+      sourceKey: "hal9000-7680",
+      availableOn: [
+        { key: "hal9000-7680", label: "hal9000" },
+        { key: "okra-7680", label: "okra" },
+      ],
+    });
+  });
 });
 
 describe("identity dedupe", () => {

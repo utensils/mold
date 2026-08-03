@@ -105,6 +105,14 @@ The **non-streaming `/api/generate`** returns raw bytes with headers, not SSE. C
 
 `auth.rs`: `load_api_keys()` reads `MOLD_API_KEY` — single value, comma-separated list, or `@/path/to/file` (one key/line, `#` comments). Unset/empty ⇒ auth disabled. Enforced by `require_api_key` middleware checking the **`X-Api-Key`** header with constant-time compare (`subtle`). Exempt paths: `/health`, `/api/docs`, `/api/openapi.json` (and `/metrics` is mounted outside the auth layer entirely). When auth is **disabled**, `POST /api/shutdown` is restricted to loopback IPs. Rate limiting (`rate_limit.rs`) is opt-in via `MOLD_RATE_LIMIT=N/period` (sec|min|hour) + `MOLD_RATE_LIMIT_BURST`.
 
+Pairing never copies an operator key. `POST /api/pairing/sessions` creates a
+two-minute, one-use handoff; `POST /api/pairing/claim` exchanges it for a
+random per-client credential whose SHA-256 digest is persisted in
+`paired_clients`. Operator credentials list grants with
+`GET /api/pairing/clients` and revoke one immediately with
+`DELETE /api/pairing/clients/:id`. Paired credentials are accepted by normal
+API routes but cannot mint or manage pairing grants.
+
 Browser and native media elements cannot attach `X-Api-Key` to their own Range
 requests. An authenticated client can POST `{ "path":
 "/api/gallery/image/:filename" }` to `/api/gallery/media-token` and receive a

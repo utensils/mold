@@ -3349,7 +3349,9 @@ pub(crate) fn effective_request(manifest: &ChainJobManifest) -> anyhow::Result<C
     Ok(request)
 }
 
-fn build_stage_generate_request(
+/// Exposed to `routes_chain` so the advisory VRAM estimate prices exactly
+/// the request dispatch will render, rather than an approximation of it.
+pub(crate) fn build_stage_generate_request(
     stage: &ChainStage,
     chain: &ChainRequest,
     stage_seed: u64,
@@ -4056,8 +4058,11 @@ mod tests {
                 .map(|(idx, transition)| stage(&format!("stage {idx}"), transition))
                 .collect(),
             motion_tail_frames: 1,
+            // 32-aligned: the LTX-2 VAE compresses spatially by 32, and the
+            // fixture names an ltx2 model. 64x48 only ever passed because
+            // `normalise` checked with no family and used the /16 grid.
             width: 64,
-            height: 48,
+            height: 64,
             fps: 8,
             seed: Some(42),
             steps: 2,

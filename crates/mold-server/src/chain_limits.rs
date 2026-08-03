@@ -39,8 +39,10 @@ pub struct ChainLimits {
     /// when this is false. Single source of truth: `mold_inference::chain::capability_for_family`.
     pub supports_audio: bool,
     /// Whether the model's effective runtime pipeline can render sequence
-    /// stages. This is model-specific: an LTX-2 dev checkpoint with its
-    /// spatial upscaler selects TwoStage, which render-chain v1 cannot run.
+    /// stages. Every LTX-2 pipeline `select_pipeline` chooses now can, so in
+    /// practice this tracks whether the family chains at all — it stays
+    /// per-model because that is where a future incompatible pipeline would
+    /// have to be caught.
     pub supports_sequence: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_unsupported_reason: Option<String>,
@@ -73,9 +75,7 @@ pub fn family_supports_audio(family: &str) -> bool {
     mold_inference::chain::capability_for_family(family).is_some_and(|c| c.supports_audio)
 }
 
-/// Resolve the sequence renderer's model-specific pipeline gate. LTX-2
-/// distilled checkpoints use Distilled, while non-distilled checkpoints use
-/// TwoStage when a spatial upscaler is present and OneStage otherwise.
+/// Resolve the sequence renderer's model-specific pipeline gate.
 pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -> SequenceSupport {
     if family_cap(family).is_none() {
         return SequenceSupport {
@@ -83,19 +83,16 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
             reason: Some(format!("{family} models do not render video sequences")),
         };
     }
-    if family != "ltx2" || model.contains("distilled") || !has_spatial_upscaler {
-        return SequenceSupport {
-            supported: true,
-            reason: None,
-        };
-    }
+    // Every pipeline `select_pipeline` can choose for an LTX-2 checkpoint now
+    // renders sequence clips, two-stage included, so the only thing that
+    // decides support is whether the family chains at all. `model` and
+    // `has_spatial_upscaler` stay in the signature: they are how a checkpoint
+    // is classified, and the seam is worth keeping if a future pipeline is
+    // again chain-incapable.
+    let _ = (model, has_spatial_upscaler);
     SequenceSupport {
-        supported: false,
-        reason: Some(
-            "This checkpoint selects the two-stage LTX-2 pipeline, which is for single videos. \
-             Sequences currently require a distilled LTX-2 checkpoint or a one-stage catalog checkpoint."
-                .into(),
-        ),
+        supported: true,
+        reason: None,
     }
 }
 
@@ -103,7 +100,6 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
 ///
 /// `family` is the canonical family string (e.g. "ltx2").
 /// `quant` is the quantization slug ("fp8", "fp16", "q8", ...).
-/// `free_vram_bytes` is the current free VRAM on the primary GPU.
 /// `default_frames` is the model's own default frame count (manifest or
 /// catalog sidecar) and drives the recommended per-clip frames.
 /// `fps` is the frame rate the clips will render at; LTX-2's per-clip cap is
@@ -112,14 +108,11 @@ pub fn compute_limits(
     model: &str,
     family: &str,
     quant: &str,
-    free_vram_bytes: u64,
     default_frames: Option<u32>,
     fps: Option<u32>,
 ) -> ChainLimits {
     let fps = fps.filter(|value| *value > 0).unwrap_or(DEFAULT_CHAIN_FPS);
     let cap = family_cap_at_fps(family, fps).unwrap_or(97);
-    // Suppress unused for now; sub-project D wires free VRAM up.
-    let _ = free_vram_bytes;
     // Recommend the model's own default frame count (LTX-Video ships 25,
     // LTX-2 ships 97) so new clips start at what the model actually runs;
     // clamp to the family cap and snap down onto the 8n+1 grid. Without a
@@ -179,8 +172,8 @@ mod tests {
             family_cap("ltx2"),
             mold_core::validation::max_frames_for_family_at_fps("ltx2", DEFAULT_CHAIN_FPS),
         );
-        assert_eq!(family_cap_at_fps("ltx2", 12), Some(244));
-        assert_eq!(family_cap_at_fps("ltx2", 24), Some(484));
+        assert_eq!(family_cap_at_fps("ltx2", 12), Some(241));
+        assert_eq!(family_cap_at_fps("ltx2", 24), Some(481));
     }
 
     #[test]
@@ -213,36 +206,29 @@ mod tests {
     /// family cap, so new clips default to what the model actually runs.
     #[test]
     fn recommended_uses_model_default_frames() {
-        let ltx_video = compute_limits(
-            "ltx-video-0.9.6:bf16",
-            "ltx-video",
-            "bf16",
-            0,
-            Some(25),
-            None,
-        );
+        let ltx_video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", Some(25), None);
         assert_eq!(ltx_video.frames_per_clip_cap, 97);
         assert_eq!(ltx_video.frames_per_clip_recommended, 25);
 
-        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, Some(97), None);
+        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", Some(97), None);
         assert_eq!(ltx2.frames_per_clip_recommended, 97);
 
         // No model default → fall back to the family cap (old behavior).
-        let unknown = compute_limits("cv:123", "ltx2", "", 0, None, None);
+        let unknown = compute_limits("cv:123", "ltx2", "", None, None);
         assert_eq!(
             unknown.frames_per_clip_recommended,
             family_cap("ltx2").unwrap()
         );
 
         // Off-grid defaults snap DOWN onto the 8n+1 grid.
-        let off_grid = compute_limits("cv:456", "ltx-video", "", 0, Some(30), None);
+        let off_grid = compute_limits("cv:456", "ltx-video", "", Some(30), None);
         assert_eq!(off_grid.frames_per_clip_recommended, 25);
 
         // Defaults above the cap clamp to the cap — 500 is over budget at the
         // chain default 24 fps only once the absolute guard is applied, so use
         // a low fps where the duration budget clearly binds.
-        let oversized = compute_limits("cv:789", "ltx2", "", 0, Some(500), Some(12));
-        assert_eq!(oversized.frames_per_clip_cap, 244);
+        let oversized = compute_limits("cv:789", "ltx2", "", Some(500), Some(12));
+        assert_eq!(oversized.frames_per_clip_cap, 241);
         assert_eq!(oversized.frames_per_clip_recommended, 241);
     }
 
@@ -250,43 +236,29 @@ mod tests {
     /// carry the duration budget so clients can recompute it themselves.
     #[test]
     fn compute_limits_advertises_the_fps_it_used() {
-        let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(24));
+        let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(24));
         assert_eq!(at_24.fps, Some(24));
-        assert_eq!(at_24.frames_per_clip_cap, 484);
+        assert_eq!(at_24.frames_per_clip_cap, 481);
         assert_eq!(at_24.frames_per_clip_runtime_seconds, Some(20));
 
-        let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(12));
-        assert_eq!(at_12.frames_per_clip_cap, 244);
+        let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(12));
+        assert_eq!(at_12.frames_per_clip_cap, 241);
 
         // A zero/absent fps falls back to the chain default rather than
         // collapsing the cap to a single frame.
-        let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(0));
+        let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(0));
         assert_eq!(fallback.fps, Some(DEFAULT_CHAIN_FPS));
-        assert_eq!(fallback.frames_per_clip_cap, 484);
+        assert_eq!(fallback.frames_per_clip_cap, 481);
 
         // ltx-video has no duration budget to advertise.
-        let video = compute_limits(
-            "ltx-video-0.9.6:bf16",
-            "ltx-video",
-            "bf16",
-            0,
-            None,
-            Some(30),
-        );
+        let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", None, Some(30));
         assert_eq!(video.frames_per_clip_runtime_seconds, None);
         assert_eq!(video.frames_per_clip_cap, 97);
     }
 
     #[test]
     fn compute_limits_for_distilled() {
-        let lim = compute_limits(
-            "ltx-2-19b-distilled:fp8",
-            "ltx2",
-            "fp8",
-            8_000_000_000,
-            None,
-            None,
-        );
+        let lim = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, None);
         let cap = family_cap("ltx2").unwrap();
         assert_eq!(lim.frames_per_clip_cap, cap);
         assert_eq!(lim.frames_per_clip_recommended, cap);
@@ -308,26 +280,35 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_dev_with_spatial_upscaler_is_not_sequence_compatible() {
+    fn ltx2_dev_with_spatial_upscaler_is_sequence_compatible() {
+        // A dev checkpoint plus a spatial upscaler selects the two-stage
+        // pipeline, which now renders sequence clips.
         let support = sequence_support("ltx-2.3-22b-dev:fp8", "ltx2", true);
+        assert!(support.supported);
+        assert!(support.reason.is_none());
+    }
+
+    #[test]
+    fn non_chain_families_still_report_an_actionable_reason() {
+        // The seam has to stay alive: it is the only thing that tells the UI
+        // why a Sequence picker is empty for a still-image family.
+        let support = sequence_support("flux-dev:q4", "flux", false);
         assert!(!support.supported);
         assert!(
             support
                 .reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("two-stage")),
-            "the UI needs an actionable pipeline-specific reason",
+                .is_some_and(|reason| reason.contains("flux")),
+            "the reason must name the family, got: {:?}",
+            support.reason,
         );
     }
 
     #[test]
-    fn ltx2_dev_legacy_alias_keeps_two_stage_sequence_gate() {
-        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None, None);
-        assert!(!limits.supports_sequence);
-        assert!(limits
-            .sequence_unsupported_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("two-stage")));
+    fn ltx2_dev_legacy_alias_is_sequence_compatible() {
+        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", None, None);
+        assert!(limits.supports_sequence);
+        assert!(limits.sequence_unsupported_reason.is_none());
     }
 
     #[test]
@@ -345,7 +326,6 @@ mod tests {
             "ltx-video-0.9.7-distilled:fp8",
             "ltx-video",
             "fp8",
-            0,
             None,
             None,
         );

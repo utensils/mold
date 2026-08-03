@@ -1,9 +1,14 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import {
+  dimensionAlignmentForFamily,
+  maxAxisPixelsForFamily,
+  maxPixelsForFamily,
+  type ModelResolutionContract,
+} from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 
-export const MAX_GENERATION_PIXELS = 1_800_000;
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
 // MiB. Keep the whole iPhone conditioning payload below 45 MiB so the request
@@ -75,26 +80,61 @@ export function fpsValidationError(value: number): string | null {
     : "FPS must be a whole number from 1 to 60.";
 }
 
-export function resolutionValidationError(width: number, height: number): string | null {
+/**
+ * `contract` is the selected model's advertised resolution limits. Supply it
+ * wherever the model row is in scope: the ceiling and the pixel grid are
+ * family-specific, and hard-coding 1.8 MP / 16 px rejected LTX-2 shapes the
+ * server accepts while admitting off-grid ones it does not.
+ */
+export function resolutionValidationError(
+  width: number,
+  height: number,
+  contract?: ModelResolutionContract | null,
+): string | null {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
     return "Width and height must each be at least 64 pixels.";
   }
-  if (width % 16 !== 0 || height % 16 !== 0) {
-    return "Width and height must be multiples of 16.";
+  const alignment = contract?.dimension_alignment ?? dimensionAlignmentForFamily(contract?.family);
+  if (width % alignment !== 0 || height % alignment !== 0) {
+    return `Width and height must be multiples of ${alignment}.`;
   }
+  const axisLimit = maxAxisPixelsForFamily(contract?.family);
+  if (axisLimit && Math.max(width, height) > axisLimit) {
+    return `${width} × ${height} exceeds the ${axisLimit}px span this model was trained on. Keep the long edge at or below ${axisLimit}px.`;
+  }
+  const maxPixels = contract?.max_pixels ?? maxPixelsForFamily(contract?.family);
   const megapixels = (width * height) / 1_000_000;
-  return width * height <= MAX_GENERATION_PIXELS
+  return width * height <= maxPixels
     ? null
-    : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below 1.8 MP.`;
+    : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below ${(maxPixels / 1_000_000).toFixed(1)} MP.`;
 }
 
-export function cameraControlValidationError(form: GenerateForm): string | null {
+/**
+ * `availablePresetIds` is what the selected host advertises for this
+ * checkpoint. Supply it wherever the fetched list is in scope; the submit gate
+ * has no list and omits it, letting the host's own 422 be the authority.
+ *
+ * This used to gate on `!form.model.includes("ltx-2.3")`, which is unsound in
+ * both directions — an opaque `cv:` / `hf:` ID for an LTX-2.3 checkpoint
+ * contains no architecture, so the check passed a preset that cannot resolve
+ * and rejected one on a 19B install reached the same way.
+ */
+export function cameraControlValidationError(
+  form: GenerateForm,
+  availablePresetIds?: readonly string[],
+): string | null {
   if (!generationCapabilitiesForFamily(form.family).supportsAdvancedVideo) return null;
   if (form.cameraControl === null) return null;
   const value = form.cameraControl.trim();
   if (!value) return "Choose a camera motion or enter a custom .safetensors path.";
   if (value.endsWith(".safetensors")) return null;
-  if (!form.model.includes("ltx-2.3") && isCameraMotionPreset(value)) return null;
+  if (availablePresetIds) {
+    if (availablePresetIds.includes(value)) return null;
+    return isCameraMotionPreset(value)
+      ? "This host has no camera-motion preset by that name for the selected model. Use a custom .safetensors path."
+      : "Custom camera motion must be a .safetensors path on the selected host.";
+  }
+  if (isCameraMotionPreset(value)) return null;
   return "Custom camera motion must be a .safetensors path on the selected host.";
 }
 
@@ -138,7 +178,7 @@ export function advancedVideoValidationError(form: GenerateForm): string | null 
   }
 
   switch (form.pipeline) {
-    case "a2vid":
+    case "a2-vid":
       if (!form.audioFile) return "Audio-to-video requires a conditioning audio file.";
       return form.audioFile.base64 ? null : "Conditioning audio cannot be empty.";
     case "retake":

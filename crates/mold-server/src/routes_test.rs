@@ -954,6 +954,108 @@ mod tests {
         assert_eq!(json_body(response).await, serde_json::json!([]));
     }
 
+    /// `?detail=1` carries the server's own reason. Without it the response
+    /// must stay a bare array, byte for byte, because desktop and iPhone talk
+    /// to arbitrary-version remotes.
+    #[tokio::test]
+    async fn ltx2_camera_capabilities_detail_envelope_reports_why_presets_are_unavailable() {
+        let app = app_empty();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2.3-22b-distilled%3Afp8&detail=1",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert_eq!(body["controls"], serde_json::json!([]));
+        assert!(
+            body["unsupported_reason"]
+                .as_str()
+                .unwrap()
+                .contains("LTX-2 19B only"),
+            "response body: {body}"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2-19b-distilled%3Afp8&detail=1",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], true);
+        assert!(body["unsupported_reason"].is_null());
+        assert_eq!(body["controls"].as_array().unwrap().len(), 7);
+
+        // Older clients keep the exact array they parse today.
+        let response = app
+            .oneshot(
+                Request::get(
+                    "/api/capabilities/ltx2-camera-controls?model=ltx-2.3-22b-distilled%3Afp8",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await, serde_json::json!([]));
+    }
+
+    /// An unknown architecture is "no presets here", not a client error. It
+    /// used to 422, which every surface caught into an unexplained empty
+    /// picker — the user saw nothing and was told nothing.
+    #[tokio::test]
+    async fn ltx2_camera_capabilities_detail_explains_an_unknown_architecture() {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "mystery:fp8".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("ltx2".to_string()),
+                transformer: Some("/models/mystery/weights.safetensors".to_string()),
+                ..Default::default()
+            },
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let app = app_with_state(AppState::empty(config, queue, gpu_pool, 200));
+
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/ltx2-camera-controls?model=mystery%3Afp8&detail=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["supported"], false);
+        assert!(
+            body["unsupported_reason"]
+                .as_str()
+                .unwrap()
+                .contains("unknown"),
+            "response body: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
         let app = app_empty();
@@ -4747,6 +4849,48 @@ mod tests {
             assert_eq!(schnell["default_height"], 1024);
             assert_eq!(schnell["default_steps"], 4);
         }
+    }
+
+    /// Sequence capability is advertised per model, so a picker never has to
+    /// infer it from the checkpoint name. Every LTX-2 checkpoint qualifies,
+    /// dev included — the old name heuristic hid dev checkpoints from the
+    /// Sequence picker even though the server chains them.
+    #[tokio::test]
+    async fn list_models_advertise_per_model_sequence_support() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        for name in [
+            "ltx-2-19b-distilled:fp8",
+            "ltx-2-19b-dev:fp8",
+            "ltx-2.3-22b-dev:fp8",
+        ] {
+            let model = models
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be listed"));
+            assert_eq!(
+                model["supports_sequence"], true,
+                "{name} must advertise sequence support"
+            );
+        }
+
+        let still = models
+            .iter()
+            .find(|m| m["name"] == "sd15:fp16")
+            .expect("sd15 must be listed");
+        assert_eq!(
+            still["supports_sequence"], false,
+            "a still-image family must not advertise sequence support"
+        );
     }
 
     #[tokio::test]
@@ -8975,7 +9119,7 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["frames_per_clip_cap"], 484);
+        assert_eq!(limits["frames_per_clip_cap"], 481);
         assert_eq!(limits["fps"], 24);
         assert_eq!(limits["frames_per_clip_runtime_seconds"], 20);
         assert_eq!(limits["max_stages"], 16);
@@ -9062,7 +9206,7 @@ mod tests {
         assert_eq!(ltx2["default_frames"], 97);
         assert_eq!(ltx2["default_fps"], 24);
         assert_eq!(
-            ltx2["max_frames"], 484,
+            ltx2["max_frames"], 481,
             "the 20s temporal RoPE budget at the model's own 24 fps default",
         );
         assert_eq!(ltx2["max_runtime_seconds"], 20);
@@ -9078,7 +9222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_chain_limits_rejects_ltx2_two_stage_pipeline_up_front() {
+    async fn capabilities_chain_limits_accepts_ltx2_two_stage_pipeline() {
         let app = app_empty();
         let response = app
             .oneshot(
@@ -9093,10 +9237,8 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["supports_sequence"], false);
-        assert!(limits["sequence_unsupported_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("two-stage")));
+        assert_eq!(limits["supports_sequence"], true);
+        assert!(limits["sequence_unsupported_reason"].is_null());
     }
 
     #[tokio::test]
@@ -9161,7 +9303,7 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
-        assert_eq!(limits["frames_per_clip_cap"], 484);
+        assert_eq!(limits["frames_per_clip_cap"], 481);
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",

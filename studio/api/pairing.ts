@@ -1,5 +1,5 @@
 import type { ApiTarget } from "./client";
-import { apiJsonTo } from "./client";
+import { apiFetchTo, apiJsonTo } from "./client";
 
 export interface PairingSession {
   token: string | null;
@@ -13,6 +13,25 @@ export interface PairingClaim {
   api_key: string | null;
   instance_id: string;
   hostname: string | null;
+}
+
+export interface PairingClientIdentity {
+  name: string;
+  kind: "iphone" | "ipad" | "mobile";
+}
+
+export interface PairedClient {
+  id: string;
+  name: string;
+  client_kind: string;
+  created_at_ms: number;
+  last_used_at_ms: number | null;
+}
+
+export interface PairedClientsResponse {
+  auth_required: boolean;
+  pairing_available: boolean;
+  clients: PairedClient[];
 }
 
 export interface MobilePairingPayload {
@@ -48,6 +67,7 @@ export function createPairingSession(
 export function claimPairingSession(
   baseUrl: string,
   token: string | null,
+  client: PairingClientIdentity = { name: "Mold mobile", kind: "mobile" },
 ): Promise<PairingClaim> {
   return apiJsonTo<PairingClaim>(
     { baseUrl, apiKey: null },
@@ -55,9 +75,41 @@ export function claimPairingSession(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({
+        token,
+        client_name: client.name,
+        client_kind: client.kind,
+      }),
     },
   );
+}
+
+export function listPairedClients(
+  target: ApiTarget,
+): Promise<PairedClientsResponse> {
+  return apiJsonTo<unknown>(target, "/api/pairing/clients").then((value) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof (value as PairedClientsResponse).auth_required !== "boolean" ||
+      typeof (value as PairedClientsResponse).pairing_available !== "boolean" ||
+      !Array.isArray((value as PairedClientsResponse).clients)
+    ) {
+      throw new Error(
+        "This Mold host does not support paired access management yet.",
+      );
+    }
+    return value as PairedClientsResponse;
+  });
+}
+
+export async function revokePairedClient(
+  target: ApiTarget,
+  id: string,
+): Promise<void> {
+  await apiFetchTo(target, `/api/pairing/clients/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function parseMobilePairingPayload(raw: string): MobilePairingPayload {

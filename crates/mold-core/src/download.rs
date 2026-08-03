@@ -1541,6 +1541,19 @@ pub fn cached_file_path_existing_only(
 
 // ── Pull and configure (shared between CLI and server) ───────────────────────
 
+/// Hidden LTX-2 adapters are complete, runnable assets by themselves. They
+/// must use the files-only pull path: treating their single LoRA tensor as a
+/// standalone diffusion checkpoint makes `paths_from_downloads` require a
+/// VAE after the verified file has already landed. Upstream publishes the
+/// camera controls as individual `.safetensors` LoRAs (LTX-2 README:72-83).
+fn manifest_uses_files_only_pull(manifest: &ModelManifest) -> bool {
+    manifest.is_utility()
+        || matches!(
+            manifest.family.as_str(),
+            "ltx2-control" | "ltx2-camera-control"
+        )
+}
+
 /// Download a model and save its paths to config. Returns the updated config
 /// and resolved model paths. Used by both the CLI `pull` command and the
 /// server's auto-pull logic.
@@ -1560,7 +1573,7 @@ pub async fn pull_and_configure(
     // Utility models and hidden LTX-2 control adapters have no standalone
     // runtime config entry. The selected control is frozen onto the request
     // as a concrete LoRA path after this download completes.
-    if manifest.is_utility() || manifest.family == "ltx2-control" {
+    if manifest_uses_files_only_pull(manifest) {
         pull_model_files_only(manifest, opts).await?;
         let config = Config::load_or_default();
         return Ok((config, None));
@@ -1643,7 +1656,7 @@ pub async fn pull_and_configure_with_callback_and_hf_token(
     // Utility models and hidden LTX-2 control adapters have no standalone
     // runtime config entry. The selected control is frozen onto the request
     // as a concrete LoRA path after this download completes.
-    if manifest.is_utility() || manifest.family == "ltx2-control" {
+    if manifest_uses_files_only_pull(manifest) {
         pull_model_files_only_with_callback_and_hf_token(manifest, callback, opts, hf_token)
             .await?;
         let config = Config::load_or_default();
@@ -2222,6 +2235,34 @@ async fn fetch_recipe_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_ltx2_adapters_use_files_only_pulls() {
+        let adapters = crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| {
+                matches!(
+                    manifest.family.as_str(),
+                    "ltx2-control" | "ltx2-camera-control"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!adapters.is_empty());
+        assert!(adapters
+            .iter()
+            .any(|manifest| manifest.name == "ltx2-camera-control-dolly-right-19b"));
+        for manifest in adapters {
+            assert!(manifest.is_auxiliary());
+            assert!(manifest_uses_files_only_pull(manifest), "{}", manifest.name);
+        }
+
+        assert!(!manifest_uses_files_only_pull(
+            crate::manifest::find_manifest("ltx-2-19b-distilled:fp8").unwrap()
+        ));
+        assert!(!manifest_uses_files_only_pull(
+            crate::manifest::find_manifest("controlnet-canny-sd15:fp16").unwrap()
+        ));
+    }
 
     #[test]
     fn truncate_short_name_unchanged() {

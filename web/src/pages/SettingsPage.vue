@@ -8,7 +8,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
-import MobilePairingCard from "@studio/components/MobilePairingCard.vue";
+import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import type { DeviceInfo } from "@studio/api/devices";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
@@ -264,7 +264,7 @@ onBeforeUnmount(() => {
     </CardSurface>
 
     <p class="kicker">Mobile pairing</p>
-    <MobilePairingCard
+    <PairingAccessPanel
       :target="pairingTarget"
       :suggested-base-url="pairingHost.url"
       host-label="This server"

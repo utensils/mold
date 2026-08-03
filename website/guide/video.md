@@ -4,10 +4,12 @@ title: Video Generation
 
 # Video Generation
 
-mold supports generating video clips using LTX Video and LTX-2 models. LTX-2
-distilled and one-stage checkpoints support chaining multiple clips together
-for longer videos with scene-by-scene direction. Two-stage dev checkpoints are
-single-clip pipelines and are rejected before a sequence job is created.
+mold supports generating video clips using LTX Video and LTX-2 models. Every
+LTX-2 checkpoint can chain multiple clips together for longer videos with
+scene-by-scene direction. A dev checkpoint renders its clips through the
+two-stage pipeline, so expect roughly twice the wall time per clip as a
+distilled one — stage 1 runs classifier-free guidance as two sequential
+forward passes.
 
 ## Single-clip generation
 
@@ -148,7 +150,8 @@ Returns per-model caps used by every sequence UI:
 
 `frames_per_clip_recommended` follows the model's own default frame count — 97
 for LTX-2, 25 for LTX-Video — so clients do not have to hardcode one.
-`supports_sequence` is model-specific: a two-stage LTX-2 dev checkpoint reports
-`false` with a `sequence_unsupported_reason`. `GET /api/models` carries the
-matching per-model `default_frames`, `default_fps`, `max_frames`, and
-`frame_step` fields.
+`supports_sequence` is model-specific and is also advertised per model on
+`GET /api/models`, so a picker never has to infer it from the checkpoint name.
+A family with no chain path reports `false` with a
+`sequence_unsupported_reason`. `GET /api/models` carries the matching per-model
+`default_frames`, `default_fps`, `max_frames`, and `frame_step` fields.

@@ -4042,7 +4042,7 @@ describe("MobileApp gallery", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
 
     await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
     await wrapper.findAll("[data-test='gallery-item']")[0]!.trigger("click");
@@ -4063,6 +4063,73 @@ describe("MobileApp gallery", () => {
       "/api/gallery/image/storm%20clip.mp4",
     ]);
     expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(0);
+  });
+
+  it("does not hide or delete a chained legacy copy outside the representative window", async () => {
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    const archiveTarget = { baseUrl: "http://archive.tailnet.ts.net:7680", apiKey: "secret" };
+    const routes = [
+      { id: "studio-id", name: "Studio", baseUrl: target.baseUrl },
+      { id: "render-id", name: "Render", baseUrl: renderTarget.baseUrl },
+      { id: "archive-id", name: "Archive", baseUrl: archiveTarget.baseUrl },
+    ];
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify(routes.map((host) => ({ ...host, online: false }))),
+    );
+    const copies = new Map([
+      [target.baseUrl, { filename: "newest.mp4", timestamp: 6_000 }],
+      [renderTarget.baseUrl, { filename: "middle.mp4", timestamp: 3_000 }],
+      [archiveTarget.baseUrl, { filename: "oldest.mp4", timestamp: 0 }],
+    ]);
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const host = routes.find((candidate) => candidate.baseUrl === route.baseUrl)!;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: host.name.toLowerCase(),
+          instance_id: host.id,
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            ...print,
+            ...copies.get(route.baseUrl),
+            size_bytes: 4_096,
+            metadata: { ...print.metadata, seed: 42, model: "flux-dev:q8" },
+          },
+        ]);
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation((_route, _path, init?: RequestInit) =>
+      Promise.resolve(
+        init?.method === "DELETE"
+          ? new Response(null, { status: 204 })
+          : ({ blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response),
+      ),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.findAll("[data-test='gallery-item']")[1]!.trigger("click");
+    const deleteButton = () =>
+      wrapper!.get("[data-test='mobile-gallery-actions']").find("button.danger");
+    await deleteButton().trigger("click");
+    await deleteButton().trigger("click");
+    await flushPromises();
+
+    const deletePaths = apiFetchTo.mock.calls
+      .filter(([, , init]) => init?.method === "DELETE")
+      .map(([, path]) => path);
+    expect(deletePaths).toEqual(["/api/gallery/image/oldest.mp4"]);
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(1);
   });
 
   it("defers completion refreshes until an open viewer closes", async () => {
@@ -4555,7 +4622,10 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on iPhone",
+      kind: "iphone",
+    });
     expect(wrapper?.get(".error-text").text()).toContain("different Mold host");
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
@@ -4791,7 +4861,10 @@ describe("MobileApp host and catalog coordination", () => {
     );
 
     expect(onOpenDeepLinks).toHaveBeenCalledOnce();
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on iPhone",
+      kind: "iphone",
+    });
   });
 
   it("stops listening for iOS pairing links when the mobile shell unmounts", async () => {

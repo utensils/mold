@@ -28,6 +28,11 @@ import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/so
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { findInstalledModel } from "./generateModels";
 import {
+  cameraMotionFromLoraPath,
+  cameraMotionLoraLabel,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
+import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
   guidanceOverridesToWire,
@@ -126,7 +131,7 @@ export interface GenerateForm {
   temporalUpscale: Ltx2TemporalUpscale | null;
   /** Optional LTX-2 guider overrides. Empty values preserve pipeline defaults. */
   guidanceOverrides: Ltx2GuidanceOverridesState;
-  /** Conditioning audio for the a2vid pipeline; base64 on the wire. */
+  /** Conditioning audio for the a2-vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
   /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
    * explicit `.safetensors` path; null = off. Ships as a `loras[]` entry
@@ -223,6 +228,9 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
  * target the new variant's tensor layout.
  */
 export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
+  const cameraRows = form.loras.filter(
+    (lora) => lora.path.startsWith("camera-control:") || lora.path === form.cameraControl?.trim(),
+  );
   form.width = m.default_width;
   form.height = m.default_height;
   form.steps = m.default_steps;
@@ -233,6 +241,19 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.loras = [];
   form.icLoraControl = null;
   reconcileModelCapabilities(form, m);
+  if (form.cameraControl) {
+    form.loras = syncCameraMotionLora(
+      cameraRows,
+      form.cameraControl,
+      form.cameraControl,
+      (path, scale) => ({
+        path,
+        name: cameraMotionLoraLabel(path),
+        scale,
+        trainedWords: [],
+      }),
+    );
+  }
 }
 
 /**
@@ -301,6 +322,12 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.temporalUpscale = null;
     form.guidanceOverrides = emptyGuidanceOverrides();
     form.audioFile = null;
+    form.loras = syncCameraMotionLora(form.loras, form.cameraControl, null, (path, scale) => ({
+      path,
+      name: path,
+      scale,
+      trainedWords: [],
+    }));
     form.cameraControl = null;
   }
 }
@@ -342,7 +369,7 @@ export function resetFormToModelDefaults(
 export function buildRequest(form: GenerateForm): GenerateRequest {
   const caps = generationCapabilitiesForFamily(form.family, form.model);
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
-  const loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
+  let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
 
   // Camera motion rides the ordinary loras[] stack (mirrors the CLI's
   // --camera-control, run.rs): presets ship as the `camera-control:<preset>`
@@ -351,11 +378,16 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // authority; the serializer never guesses from a public model id.
   const cameraControl = form.cameraControl?.trim();
   if (caps.supportsAdvancedVideo && cameraControl) {
-    if (cameraControl.endsWith(".safetensors")) {
-      loras.push({ path: cameraControl, scale: 1.0 });
-    } else {
-      loras.push({ path: `camera-control:${cameraControl}`, scale: 1.0 });
-    }
+    loras = syncCameraMotionLora(
+      loras,
+      cameraControl,
+      cameraControl,
+      (path, scale) => ({
+        path,
+        scale,
+      }),
+      MAX_LORA_STACK,
+    );
   }
 
   const req: GenerateRequest = {
@@ -448,8 +480,8 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
     const guidanceOverrides = guidanceOverridesToWire(form.guidanceOverrides);
     if (guidanceOverrides) req.guidance_overrides = guidanceOverrides;
-    // a2vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
-    if (form.pipeline === "a2vid" && form.audioFile) req.audio_file = form.audioFile.base64;
+    // a2-vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
+    if (form.pipeline === "a2-vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
   return pruneRequestForFamily(req, form.family, form.model);
@@ -475,6 +507,7 @@ function normalizeMetadataScheduler(s: OutputMetadata["scheduler"]): Scheduler {
 
 /** Display name for a LoRA restored from metadata — the path's basename. */
 function loraNameFromPath(path: string): string {
+  if (cameraMotionFromLoraPath(path)) return cameraMotionLoraLabel(path);
   const base = path.split("/").pop() ?? path;
   return base.replace(/\.safetensors$/i, "");
 }
@@ -493,9 +526,6 @@ export function applyMetadataToForm(
   metadata: OutputMetadata,
   models: ModelEntry[] = [],
 ): void {
-  // Camera motion serializes as an ordinary LoRA. The metadata mapper below
-  // restores that stack directly, so a separate live camera selection would
-  // duplicate or contaminate the reused print.
   form.cameraControl = null;
   const model = findInstalledModel(models, metadata.model);
   if (model) {
@@ -527,6 +557,10 @@ export function applyMetadataToForm(
     scale: l.scale,
     trainedWords: [],
   }));
+  form.cameraControl =
+    form.loras
+      .map((lora) => cameraMotionFromLoraPath(lora.path))
+      .find((value): value is string => value !== null) ?? null;
 
   form.controlModel = metadata.control_model ?? "";
   if (metadata.control_scale != null) form.controlScale = metadata.control_scale;
@@ -624,6 +658,10 @@ export function applyRequestToForm(
     scale: lora.scale,
     trainedWords: [],
   }));
+  form.cameraControl =
+    form.loras
+      .map((lora) => cameraMotionFromLoraPath(lora.path))
+      .find((value): value is string => value !== null) ?? null;
   form.frames = request.frames ?? form.frames;
   form.fps = request.fps ?? form.fps;
   form.enableAudio = request.enable_audio ?? false;

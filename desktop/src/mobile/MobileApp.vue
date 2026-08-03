@@ -26,7 +26,7 @@ import {
   resolveSourceResolution,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
+import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
   modelsForOutput,
@@ -69,7 +69,11 @@ import type {
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
-import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import {
+  isCameraMotionPreset,
+  parseCameraControlAvailability,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import {
   buildAutoChainRequest,
@@ -417,6 +421,8 @@ const resultMediaLoadKey = ref(0);
 const objectUrls = new Set<string>();
 const handledGenerationClientIds = new Set<number>();
 let pendingGallery: PendingGalleryPrint[] = [];
+/** Every concrete device copy behind the deduplicated Library tiles. */
+let galleryCopies: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
 let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
@@ -512,11 +518,15 @@ const selectedTarget = computed<ApiTarget | null>(() => {
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
+const cameraUnsupportedReason = ref<string | null>(null);
 let controlAdaptersEpoch = 0;
 watch(
   [selectedHostId, () => form.model, () => selectedHost.value?.online],
   async () => {
     const epoch = ++controlAdaptersEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    cameraUnsupportedReason.value = null;
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;
@@ -541,17 +551,28 @@ watch(
         controlAdapters.value = [];
         form.icLoraControl = null;
       });
-    const cameraRequest = apiJsonTo<Ltx2CameraControlInfo[]>(
+    const cameraRequest = apiJsonTo<unknown>(
       target,
-      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(form.model)}`,
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(form.model)}&detail=1`,
     )
-      .then((cameras) => {
+      .then((body) => {
         if (epoch !== controlAdaptersEpoch) return;
+        const availability = parseCameraControlAvailability(body);
+        const cameras = availability.controls;
         cameraControls.value = cameras;
+        cameraUnsupportedReason.value = availability.unsupportedReason;
         cameraControlsLoaded.value = true;
         const compatible = (value: string | null) =>
           !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
-        if (!compatible(form.cameraControl)) form.cameraControl = null;
+        if (!compatible(form.cameraControl)) {
+          form.loras = syncCameraMotionLora(
+            form.loras,
+            form.cameraControl,
+            null,
+            (path, scale) => ({ path, name: path, scale, trainedWords: [] }),
+          );
+          form.cameraControl = null;
+        }
         for (const clip of draft.clips) {
           if (!compatible(clip.cameraControl)) clip.cameraControl = null;
         }
@@ -559,6 +580,7 @@ watch(
       .catch(() => {
         if (epoch !== controlAdaptersEpoch) return;
         cameraControls.value = [];
+        cameraUnsupportedReason.value = null;
         cameraControlsLoaded.value = false;
       });
     await Promise.allSettled([controlsRequest, cameraRequest]);
@@ -1181,7 +1203,13 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
     const baseUrl = normalizeRemoteAddress(payload.base_url);
-    const claim = await claimPairingSession(baseUrl, payload.token);
+    const iPad =
+      /iPad/i.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const claim = await claimPairingSession(baseUrl, payload.token, {
+      name: iPad ? "Mold on iPad" : "Mold on iPhone",
+      kind: iPad ? "ipad" : "iphone",
+    });
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }
@@ -2922,9 +2950,10 @@ async function performGalleryRefresh(): Promise<void> {
       }));
     }),
   );
-  pendingGallery = results
+  galleryCopies = results
     .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
     .sort((a, b) => b.timestamp - a.timestamp);
+  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
   const failed = results.filter((result) => result.status === "rejected").length;
   if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
   await loadMoreGalleryPage();
@@ -2964,7 +2993,7 @@ async function loadMoreGalleryPage(): Promise<void> {
       ...batch.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
     );
   }
-  markMobileLibrarySeen(gallery.value);
+  markMobileLibrarySeen(galleryCopies);
   galleryRemaining.value = pendingGallery.length;
   galleryLoadingMore.value = false;
 }
@@ -3132,10 +3161,14 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   const selected = allGalleryPrints().filter((print) =>
     gallerySelection.value.has(galleryPrintKey(print)),
   );
-  const all = allGalleryPrints();
-  const groups = selected.map((print) =>
-    all.filter((candidate) => sameLogicalGalleryPrint(print, candidate)),
-  );
+  const logicalGroups = groupLogicalGalleryPrints(galleryCopies);
+  const groups = selected.map((print) => {
+    const key = galleryPrintKey(print);
+    return (
+      logicalGroups.find((group) => group.copies.some((copy) => galleryPrintKey(copy) === key))
+        ?.copies ?? [print]
+    );
+  });
   const targets = new Map<string, GalleryPrint | PendingGalleryPrint>();
   for (const group of groups) {
     for (const print of group) targets.set(galleryPrintKey(print), print);
@@ -3155,12 +3188,11 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     if (result.status === "fulfilled") deletedKeys.add(key);
     else failedKeys.add(key);
   });
-  for (const print of gallery.value) {
-    if (deletedKeys.has(galleryPrintKey(print))) revokeObjectUrl(print.thumbnailUrl);
-  }
-  gallery.value = gallery.value.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
-  pendingGallery = pendingGallery.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
-  galleryRemaining.value = pendingGallery.length;
+  for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
+  galleryCopies = galleryCopies.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
+  gallery.value = [];
+  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+  await loadMoreGalleryPage();
 
   const failedPrints = groups.filter((group) =>
     group.some((print) => failedKeys.has(galleryPrintKey(print))),
@@ -3183,7 +3215,7 @@ function isFreshMobilePrint(print: GalleryPrint): boolean {
   return libraryPreviouslyVisited && seenAt != null && print.timestamp > seenAt;
 }
 
-function markMobileLibrarySeen(prints: GalleryPrint[]): void {
+function markMobileLibrarySeen(prints: Array<GalleryPrint | PendingGalleryPrint>): void {
   const seenAt = { ...librarySeenAtBaseline };
   for (const print of prints) {
     seenAt[print.hostId] = Math.max(seenAt[print.hostId] ?? 0, print.timestamp);
@@ -3632,6 +3664,7 @@ onBeforeUnmount(() => {
               :settings-summary="sequenceSettingsSummary"
               :camera-controls="cameraControls"
               :camera-controls-loaded="cameraControlsLoaded"
+              :camera-unsupported-reason="cameraUnsupportedReason"
               @submit="submitMobileSequence"
             >
               <template #settings>
@@ -3851,6 +3884,7 @@ onBeforeUnmount(() => {
                 :control-adapters="controlAdapters"
                 :camera-controls="cameraControls"
                 :camera-controls-loaded="cameraControlsLoaded"
+                :camera-unsupported-reason="cameraUnsupportedReason"
                 @validity-change="parameterValid = $event"
               />
               <label v-if="form.model && caps.supportsNegativePrompt" class="field">

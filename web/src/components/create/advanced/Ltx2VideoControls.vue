@@ -23,10 +23,15 @@ import type {
   SourceImageState,
   SourceMediaState,
 } from "../../../types";
+import { MAX_LORA_STACK } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
 import {
+  cameraMotionLoraPath,
+  cameraMotionLoraSlotAvailable,
   cameraMotionMode,
   isCameraMotionPreset,
+  parseCameraControlAvailability,
+  syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import {
   DEFAULT_EXTEND_OVERLAP_FRAMES,
@@ -60,13 +65,18 @@ const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
+const cameraUnsupportedReason = ref<string | null>(null);
 let controlEpoch = 0;
 watch(
   () => props.modelValue.model,
   async (model) => {
     const epoch = ++controlEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    cameraUnsupportedReason.value = null;
     controlAdapters.value = [];
     cameraControls.value = [];
+    cameraUnsupportedReason.value = null;
     cameraControlsLoaded.value = false;
     if (!model) return;
     const read = async <T,>(path: string): Promise<T> => {
@@ -94,12 +104,15 @@ watch(
         controlAdapters.value = [];
         patch({ icLoraControl: null });
       });
-    const camerasRequest = read<Ltx2CameraControlInfo[]>(
-      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(model)}`,
+    const camerasRequest = read<unknown>(
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(model)}&detail=1`,
     )
-      .then((cameras) => {
+      .then((body) => {
         if (epoch !== controlEpoch) return;
+        const availability = parseCameraControlAvailability(body);
+        const cameras = availability.controls;
         cameraControls.value = cameras;
+        cameraUnsupportedReason.value = availability.unsupportedReason;
         cameraControlsLoaded.value = true;
         if (
           props.modelValue.cameraControl &&
@@ -108,12 +121,13 @@ watch(
             (camera) => camera.id === props.modelValue.cameraControl,
           )
         ) {
-          patch({ cameraControl: null });
+          setCameraControl(null);
         }
       })
       .catch(() => {
         if (epoch !== controlEpoch) return;
         cameraControls.value = [];
+        cameraUnsupportedReason.value = null;
         cameraControlsLoaded.value = false;
       });
     await Promise.allSettled([controlsRequest, camerasRequest]);
@@ -124,6 +138,37 @@ watch(
 function patch(next: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...next });
 }
+
+function setCameraControl(next: string | null) {
+  if (
+    cameraMotionLoraPath(next) &&
+    !cameraMotionLoraSlotAvailable(
+      props.modelValue.loras,
+      props.modelValue.cameraControl,
+      MAX_LORA_STACK,
+    )
+  ) {
+    return;
+  }
+  patch({
+    cameraControl: next,
+    loras: syncCameraMotionLora(
+      props.modelValue.loras,
+      props.modelValue.cameraControl,
+      next,
+      (path, scale) => ({ path, scale, trainedWords: [] }),
+      MAX_LORA_STACK,
+    ),
+  });
+}
+
+const cameraSlotAvailable = computed(() =>
+  cameraMotionLoraSlotAvailable(
+    props.modelValue.loras,
+    props.modelValue.cameraControl,
+    MAX_LORA_STACK,
+  ),
+);
 
 // ── Audio decode toggle ───────────────────────────────────────────────
 // enableAudio is boolean | null; null lets the server default (on for MP4).
@@ -143,7 +188,7 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
   "distilled",
   "ic-lora",
   "keyframe",
-  "a2vid",
+  "a2-vid",
   "retake",
 ];
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
@@ -175,10 +220,10 @@ function setCameraMode(raw: string) {
   cameraMode.value = raw;
   if (raw === "custom") {
     if (cameraMotionMode(props.modelValue.cameraControl) !== "custom")
-      patch({ cameraControl: "" });
+      setCameraControl("");
     return;
   }
-  patch({ cameraControl: raw || null });
+  setCameraControl(raw || null);
 }
 
 // ── Spatial / temporal upscale (segmented; "" = native) ───────────────
@@ -431,11 +476,14 @@ function removeKeyframe(index: number) {
           v-for="preset in cameraControls"
           :key="preset.id"
           :value="preset.id"
+          :disabled="!cameraSlotAvailable"
         >
           {{ preset.label
           }}{{ preset.installed ? "" : " · downloads on first use" }}
         </option>
-        <option value="custom">Custom LoRA path…</option>
+        <option value="custom" :disabled="!cameraSlotAvailable">
+          Custom LoRA path…
+        </option>
       </select>
       <input
         v-if="cameraMode === 'custom'"
@@ -443,17 +491,17 @@ function removeKeyframe(index: number) {
         data-test="ltx2-camera-motion-custom"
         placeholder="/path/to/lora.safetensors"
         :value="modelValue.cameraControl ?? ''"
-        @input="
-          patch({ cameraControl: ($event.target as HTMLInputElement).value })
-        "
+        @input="setCameraControl(($event.target as HTMLInputElement).value)"
       />
       <p
         v-if="cameraControlsLoaded && cameraControls.length === 0"
         class="ltx2__hint"
         data-test="ltx2-camera-motion-19b-hint"
       >
-        Built-in camera motions are available for LTX-2 19B only. This model
-        accepts a custom LoRA path.
+        {{
+          cameraUnsupportedReason ??
+          "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+        }}
       </p>
     </div>
 
@@ -668,7 +716,7 @@ function removeKeyframe(index: number) {
       </div>
       <p class="ltx2__hint">
         Empty keeps this checkpoint's pipeline defaults. Only two-stage,
-        two-stage HQ, keyframe, and a2vid renders use these.
+        two-stage HQ, keyframe, and a2-vid renders use these.
       </p>
       <div class="ltx2__pair">
         <label class="ltx2__sublabel">

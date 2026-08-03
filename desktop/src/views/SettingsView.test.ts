@@ -20,6 +20,7 @@ vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansio
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
 vi.mock("../components/settings/AdvancedSection.vue", () => stub("stub-advanced"));
+vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-paired-access"));
 
 import SettingsView from "./SettingsView.vue";
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   galleryIdentitySeed,
   galleryPrintIdentity,
+  groupLogicalGalleryPrints,
   sameLogicalGalleryPrint,
 } from "./galleryPrintIdentity";
 
@@ -52,5 +53,62 @@ describe("gallery print identity", () => {
         metadata: { seed: 0 },
       }),
     ).toBeNull();
+  });
+
+  it("groups the same logical print across multiple remote hosts", () => {
+    const items = [
+      {
+        hostId: "render-a",
+        filename: "origin.png",
+        timestamp: 1_002,
+        size_bytes: 4_096,
+        metadata: { seed: 42, model: "flux-dev:q8" },
+      },
+      {
+        hostId: "render-b",
+        filename: "legacy-copy.png",
+        timestamp: 1_001,
+        size_bytes: 4_096,
+        metadata: { seed: 42, model: "flux-dev:q8" },
+      },
+      {
+        hostId: "render-c",
+        filename: "origin.png",
+        timestamp: 1_000,
+      },
+    ];
+
+    const [group] = groupLogicalGalleryPrints(items);
+
+    expect(group?.representative.hostId).toBe("render-a");
+    expect(group?.copies.map((copy) => copy.hostId)).toEqual([
+      "render-a",
+      "render-b",
+      "render-c",
+    ]);
+  });
+
+  it("does not transitively chain copies outside the representative's time window", () => {
+    const identified = (
+      hostId: string,
+      filename: string,
+      timestamp: number,
+    ) => ({
+      hostId,
+      filename,
+      timestamp,
+      size_bytes: 4_096,
+      metadata: { seed: 42, model: "flux-dev:q8" },
+    });
+
+    const groups = groupLogicalGalleryPrints([
+      identified("render-a", "newest.png", 6_000),
+      identified("render-b", "middle.png", 3_000),
+      identified("render-c", "oldest.png", 0),
+    ]);
+
+    expect(
+      groups.map((group) => group.copies.map((copy) => copy.hostId)),
+    ).toEqual([["render-a", "render-b"], ["render-c"]]);
   });
 });

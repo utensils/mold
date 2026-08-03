@@ -173,19 +173,19 @@ describe("buildRequest — LTX-2 advanced video", () => {
     form.pipeline = "keyframe";
     expect(buildRequest(form).audio_file).toBeUndefined();
     // a2vid → the conditioning audio ships as base64.
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     expect(buildRequest(form).audio_file).toBe("AUDIOB64");
   });
 
   it("omits audio_file for a2vid when no audio was picked", () => {
     const form = ltx2Form();
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     expect("audio_file" in buildRequest(form)).toBe(false);
   });
 
   it("does not ship audio_file for a non-ltx2 family", () => {
     const form = ltx2Form();
-    form.pipeline = "a2vid";
+    form.pipeline = "a2-vid";
     form.audioFile = { filename: "voice.wav", base64: "AUDIOB64" };
     form.family = "flux";
     expect(buildRequest(form).audio_file).toBeUndefined();
@@ -249,6 +249,20 @@ describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
     form.prompt = "a cave";
     form.cameraControl = "dolly-in";
     expect(buildRequest(form).loras).toEqual([{ path: "camera-control:dolly-in", scale: 1.0 }]);
+  });
+
+  it("uses the camera adapter strength edited in the visible LoRA stack", () => {
+    const form = ltx2Form();
+    form.cameraControl = "dolly-in";
+    form.loras = [
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 0.5,
+        trainedWords: [],
+      },
+    ];
+    expect(buildRequest(form).loras).toEqual([{ path: "camera-control:dolly-in", scale: 0.5 }]);
   });
 
   it("appends the camera-control entry after user loras, preserving order", () => {
@@ -713,6 +727,34 @@ describe("applyMetadataToForm", () => {
       skipStep: 1,
     });
     expect(form.outputFormat).toBe("mp4");
+  });
+
+  it("restores a camera preset and its strength from the saved LoRA stack", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a tracking shot",
+        model: "ltx2:q8",
+        seed: 7,
+        width: 768,
+        height: 512,
+        steps: 20,
+        guidance: 3,
+        loras: [{ path: "camera-control:dolly-in", scale: 0.45 }],
+      },
+      [ltx2Model()],
+    );
+
+    expect(form.cameraControl).toBe("dolly-in");
+    expect(form.loras).toEqual([
+      expect.objectContaining({
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 0.45,
+      }),
+    ]);
+    expect(buildRequest(form).loras).toEqual([{ path: "camera-control:dolly-in", scale: 0.45 }]);
   });
 
   it("promotes a legacy single lora/lora_scale pair into the stack", () => {

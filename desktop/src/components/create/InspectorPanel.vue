@@ -17,7 +17,11 @@ import type {
   Ltx2ControlAdapterInfo,
   ModelEntry,
 } from "../../lib/api/types";
-import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import {
+  isCameraMotionPreset,
+  parseCameraControlAvailability,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import {
   filterModelsForTarget,
@@ -77,6 +81,7 @@ const appPrefs = useAppPrefsStore();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
+const cameraUnsupportedReason = ref<string | null>(null);
 let controlAdaptersEpoch = 0;
 watch(
   [
@@ -86,6 +91,9 @@ watch(
   ],
   async () => {
     const epoch = ++controlAdaptersEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    cameraUnsupportedReason.value = null;
     controlAdapters.value = [];
     cameraControls.value = [];
     cameraControlsLoaded.value = false;
@@ -114,17 +122,26 @@ watch(
         controlAdapters.value = [];
         props.form.icLoraControl = null;
       });
-    const cameraRequest = apiJsonTo<Ltx2CameraControlInfo[]>(
+    const cameraRequest = apiJsonTo<unknown>(
       route.target,
-      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.form.model)}`,
+      `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.form.model)}&detail=1`,
     )
-      .then((cameras) => {
+      .then((body) => {
         if (epoch !== controlAdaptersEpoch) return;
+        const availability = parseCameraControlAvailability(body);
+        const cameras = availability.controls;
         cameraControls.value = cameras;
+        cameraUnsupportedReason.value = availability.unsupportedReason;
         cameraControlsLoaded.value = true;
         const compatible = (value: string | null) =>
           !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
         if (!compatible(props.form.cameraControl)) {
+          props.form.loras = syncCameraMotionLora(
+            props.form.loras,
+            props.form.cameraControl,
+            null,
+            (path, scale) => ({ path, name: path, scale, trainedWords: [] }),
+          );
           props.form.cameraControl = null;
         }
         for (const clip of draft.clips) {
@@ -134,6 +151,7 @@ watch(
       .catch(() => {
         if (epoch !== controlAdaptersEpoch) return;
         cameraControls.value = [];
+        cameraUnsupportedReason.value = null;
         cameraControlsLoaded.value = false;
       });
     await Promise.allSettled([controlsRequest, cameraRequest]);
@@ -368,7 +386,7 @@ const resolutionMp = computed(() => {
   );
 });
 const resolutionError = computed(() =>
-  resolutionValidationError(props.form.width, props.form.height),
+  resolutionValidationError(props.form.width, props.form.height, selectedModel.value),
 );
 const stepsError = computed(() => stepsValidationError(props.form.steps));
 
@@ -701,6 +719,7 @@ function resetSettings() {
         :camera-controls-enabled="form.family === 'ltx2'"
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"
+        :camera-unsupported-reason="cameraUnsupportedReason"
       />
       <AdvancedSettings
         v-else-if="advancedExpanded"
@@ -711,6 +730,7 @@ function resetSettings() {
         :control-adapters="controlAdapters"
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"
+        :camera-unsupported-reason="cameraUnsupportedReason"
         @append-word="emit('append-word', $event)"
       />
     </div>

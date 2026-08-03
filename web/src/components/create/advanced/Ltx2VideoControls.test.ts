@@ -194,6 +194,61 @@ describe("Ltx2VideoControls", () => {
     ]);
     await select.setValue("jib-up");
     expect(lastPatch(wrapper).cameraControl).toBe("jib-up");
+    expect(lastPatch(wrapper).loras).toEqual([
+      { path: "camera-control:jib-up", scale: 1, trainedWords: [] },
+    ]);
+
+    await wrapper.setProps({
+      modelValue: {
+        ...lastPatch(wrapper),
+        loras: [
+          { path: "camera-control:jib-up", scale: 0.45, trainedWords: [] },
+        ],
+      },
+    });
+    await select.setValue("custom");
+    await wrapper.setProps({ modelValue: lastPatch(wrapper) });
+    await wrapper
+      .get("[data-test='ltx2-camera-motion-custom']")
+      .setValue("/models/camera/custom.safetensors");
+    expect(lastPatch(wrapper).loras).toEqual([
+      {
+        path: "/models/camera/custom.safetensors",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
+  });
+
+  it("disables camera choices when all four LoRA slots are occupied", async () => {
+    vi.mocked(fetch).mockImplementation(
+      async (input) =>
+        ({
+          ok: true,
+          json: async () =>
+            String(input).includes("ltx2-camera-controls")
+              ? [{ id: "dolly-in", label: "Dolly in", installed: false }]
+              : [],
+        }) as Response,
+    );
+    const wrapper = factory({
+      model: "ltx-2-19b-distilled:fp8",
+      loras: ["one", "two", "three", "four"].map((path) => ({
+        path,
+        scale: 1,
+        trainedWords: [],
+      })),
+    });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='ltx2-camera-motion']").findAll("option"),
+      ).toHaveLength(3),
+    );
+    const options = wrapper
+      .get("[data-test='ltx2-camera-motion']")
+      .findAll("option");
+    expect(options[1]?.attributes()).toHaveProperty("disabled");
+    expect(options[2]?.attributes()).toHaveProperty("disabled");
   });
 
   it("shows 19B guidance without disabled rows and accepts a custom camera LoRA", async () => {
@@ -219,6 +274,13 @@ describe("Ltx2VideoControls", () => {
     expect(lastPatch(wrapper).cameraControl).toBe(
       "/models/camera/pan.safetensors",
     );
+    expect(lastPatch(wrapper).loras).toEqual([
+      {
+        path: "/models/camera/pan.safetensors",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
   });
 
   it("maps the spatial segmented control to the upscale field", async () => {

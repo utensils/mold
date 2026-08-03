@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
-import MobilePairingCard from "@studio/components/MobilePairingCard.vue";
+import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
 import AppearanceCard from "../components/settings/AppearanceCard.vue";
 import UpdatesSection from "../components/settings/UpdatesSection.vue";
 import AboutSection from "../components/settings/AboutSection.vue";
@@ -119,7 +119,7 @@ function toggle(id: SectionId): void {
 
           <section data-test="mobile-pairing-region">
             <div class="edge-code mb-2.5 uppercase">Mobile pairing</div>
-            <MobilePairingCard
+            <PairingAccessPanel
               :target="pairingTarget"
               :suggested-base-url="pairingBaseUrl"
               host-label="This device"

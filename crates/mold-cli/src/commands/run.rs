@@ -143,7 +143,6 @@ struct FileArgRefs<'a> {
     video: Option<&'a str>,
     camera_control: Option<&'a str>,
     output: Option<&'a str>,
-    model: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -269,16 +268,12 @@ fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
             if !p.exists() {
                 anyhow::bail!("--camera-control file not found: {camera_control_value}");
             }
-        } else if let Some(model) = args.model {
-            if model.contains("ltx-2.3") {
-                anyhow::bail!(
-                    "--camera-control preset '{camera_control_value}' is published only for LTX-2 19B; \
-                     Lightricks has not released camera-control LoRAs for LTX-2.3 yet. \
-                     Pass an explicit .safetensors path with --camera-control /path/to/lora.safetensors, \
-                     or switch to an LTX-2 19B model."
-                );
-            }
         }
+        // Compatibility is decided from the *resolved* checkpoint artifacts,
+        // by the server on the request path and by the engine locally. A
+        // model-name substring test cannot see the architecture behind an
+        // opaque `cv:` / `hf:` catalog ID, so it used to reject a perfectly
+        // good LTX-2 19B install and wave an LTX-2.3 one straight through.
     }
 
     // -- --output validation --
@@ -690,7 +685,6 @@ pub async fn run(
         video: video.as_deref(),
         camera_control: camera_control.as_deref(),
         output: output.as_deref(),
-        model: Some(model.as_str()),
     })?;
     for lora_path in &lora {
         validate_file_args_full(FileArgRefs {
@@ -1574,26 +1568,37 @@ mod tests {
         assert!(validate_file_args(Some("camera-control:static"), None, None, None, None).is_ok());
     }
 
+    /// Arg validation is about *files*, not about model compatibility.
+    ///
+    /// This used to reject a preset whenever the model name contained
+    /// "ltx-2.3", which is unsound in both directions: an opaque `cv:` / `hf:`
+    /// catalog ID for an LTX-2.3 checkpoint sails through, while a 19B install
+    /// reached by such an ID is refused. Compatibility now comes from the
+    /// resolved checkpoint artifacts — the server's 422 on the request path,
+    /// `resolve_camera_control_preset_path` locally — so a preset name is
+    /// simply not a file argument and arg validation must not opine on it.
     #[test]
-    fn camera_control_preset_rejected_on_ltx_2_3() {
-        let err = validate_file_args_full(FileArgRefs {
-            camera_control: Some("dolly-in"),
-            model: Some("ltx-2.3-22b-distilled:fp8"),
-            ..FileArgRefs::default()
-        })
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("LTX-2 19B") && msg.contains("LTX-2.3"),
-            "expected LTX-2.3 publishing gap message, got: {msg}"
-        );
+    fn camera_control_preset_name_is_not_a_file_argument() {
+        for model in [
+            "ltx-2.3-22b-distilled:fp8",
+            "ltx-2-19b-distilled:fp8",
+            "cv:2752735",
+        ] {
+            assert!(
+                validate_file_args_full(FileArgRefs {
+                    camera_control: Some("dolly-in"),
+                    ..FileArgRefs::default()
+                })
+                .is_ok(),
+                "preset names must pass file-arg validation regardless of model ({model})"
+            );
+        }
     }
 
     #[test]
     fn camera_control_preset_accepted_on_ltx_2_19b() {
         assert!(validate_file_args_full(FileArgRefs {
             camera_control: Some("dolly-in"),
-            model: Some("ltx-2-19b-distilled:fp8"),
             ..FileArgRefs::default()
         })
         .is_ok());
@@ -1605,7 +1610,6 @@ mod tests {
         std::fs::write(&path, b"dummy").unwrap();
         let result = validate_file_args_full(FileArgRefs {
             camera_control: Some(path.to_str().unwrap()),
-            model: Some("ltx-2.3-22b-distilled:fp8"),
             ..FileArgRefs::default()
         });
         std::fs::remove_file(&path).ok();

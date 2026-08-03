@@ -274,7 +274,7 @@ mold run ltx-2-19b-distilled:fp8 "a canyon flyover" \
 # Camera-control preset
 mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
 
-# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2vid)
+# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid)
 mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
   --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
 ```
@@ -287,8 +287,8 @@ The five guidance flags (wire: an additive optional `guidance_overrides`
 object) each replace one per-(pipeline, stage) guider constant. Omitting a flag
 keeps its constant, so an unflagged request reproduces earlier outputs exactly.
 They are read only by pipelines that run the multimodal guider — `two-stage`,
-`two-stage-hq`, `keyframe`, `a2vid` — never enable a guider a pipeline
-deliberately disables (`a2vid` audio), and are ignored by chained/sequence
+`two-stage-hq`, `keyframe`, `a2-vid` — never enable a guider a pipeline
+deliberately disables (`a2-vid` audio), and are ignored by chained/sequence
 renders, which say so instead of pretending the flag landed. Non-LTX-2
 families and out-of-range values are rejected with HTTP 422.
 Web, desktop, and iPhone expose the same optional fields in their LTX-2
@@ -612,7 +612,7 @@ checkpoint is transformer-only; LTX-2.3 entries also pull the standalone Gemma
 hidden-state projection used by diffusion-only/quantized exports. Combined
 checkpoints keep using their bundled assets. ConvRot W4A4 exports full-stream
 automatically because the compatibility backend reconstructs BF16 block weights.
-Native multi-prompt chains accept one-stage and distilled LTX-2 checkpoints.
+Native multi-prompt chains accept every LTX-2 checkpoint; a dev checkpoint renders its clips through the two-stage pipeline, which costs roughly twice the wall time per clip because stage 1 runs CFG as two sequential forwards.
 Installed catalog checkpoints with opaque `cv:` / `hf:` IDs and no bundled
 spatial upscaler use the one-stage path and remain sequence-capable.
 Two-stage LTX-2 dev checkpoints are rejected before a durable sequence job is
@@ -966,7 +966,7 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 - Quantized models (q4/q6/q8) use less VRAM than fp16/bf16
 - FP8 safetensors models auto-convert to Q8 GGUF on first use (fits 24GB cards)
 - `--eager` trades VRAM for speed (keeps encoders loaded between generations)
-- Dimensions must be multiples of 16; total pixels capped at ~1.1 megapixels
+- Dimensions must be multiples of 16 (32 for LTX video families); total pixels capped at 1.8 MP, or 2.09 MP for LTX-2 (1920x1088) with both axes at or below 2048px
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
 - LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects

@@ -52,7 +52,9 @@ import {
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
 import {
+  cameraMotionLoraPath,
   cameraMotionMode,
+  parseCameraControlAvailability,
   isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
 
@@ -115,11 +117,15 @@ const activeSequenceIndex = computed(() =>
 );
 const sequenceCameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const sequenceCameraControlsLoaded = ref(false);
+const sequenceCameraUnsupportedReason = ref<string | null>(null);
 let cameraControlsEpoch = 0;
 watch(
   [sequenceMode, () => props.family, () => props.modelValue.model],
   async () => {
     const epoch = ++cameraControlsEpoch;
+    // Drop the previous model's reason immediately; keeping it while the
+    // new request is in flight shows a stale explanation for the wrong model.
+    sequenceCameraUnsupportedReason.value = null;
     sequenceCameraControls.value = [];
     sequenceCameraControlsLoaded.value = false;
     if (
@@ -130,12 +136,16 @@ watch(
       return;
     try {
       const response = await fetch(
-        `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.modelValue.model)}`,
+        `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.modelValue.model)}&detail=1`,
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const options = (await response.json()) as Ltx2CameraControlInfo[];
+      const availability = parseCameraControlAvailability(
+        await response.json(),
+      );
+      const options = availability.controls;
       if (epoch !== cameraControlsEpoch) return;
       sequenceCameraControls.value = options;
+      sequenceCameraUnsupportedReason.value = availability.unsupportedReason;
       sequenceCameraControlsLoaded.value = true;
       for (const clip of draft.clips) {
         const camera = clip.cameraControl;
@@ -150,6 +160,7 @@ watch(
     } catch {
       // The custom-path escape hatch remains usable while the host recovers.
       if (epoch === cameraControlsEpoch) {
+        sequenceCameraUnsupportedReason.value = null;
         sequenceCameraControlsLoaded.value = false;
       }
     }
@@ -326,7 +337,14 @@ const seedModes = [
 
 // ── LoRA / placement passthrough ──────────────────────────────────────
 function setLoras(loras: LoraSelection[]) {
-  patch({ loras });
+  const cameraPath = cameraMotionLoraPath(props.modelValue.cameraControl);
+  patch({
+    loras,
+    cameraControl:
+      cameraPath && !loras.some((lora) => lora.path === cameraPath)
+        ? null
+        : props.modelValue.cameraControl,
+  });
 }
 function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
@@ -561,8 +579,10 @@ function setSequenceCameraMode(mode: string) {
             class="adv__hint"
             data-test="sequence-camera-motion-19b-hint"
           >
-            Built-in camera motions are available for LTX-2 19B only. This model
-            accepts a custom LoRA path.
+            {{
+              sequenceCameraUnsupportedReason ??
+              "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
+            }}
           </p>
         </AccordionSection>
 

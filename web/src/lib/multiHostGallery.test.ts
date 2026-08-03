@@ -78,6 +78,60 @@ describe("fetchMergedGallery", () => {
     const multi = await fetchMergedGallery([origin, a, b], fetcher);
     expect(multi.remoteHostCount).toBe(2);
   });
+
+  it("deduplicates the same logical print across remote hosts without a local copy", async () => {
+    const a = host("render-a", "render a");
+    const b = host("render-b", "render b");
+    const shared = {
+      ...img("shared.png", 200),
+      size_bytes: 4_096,
+      metadata: { prompt: "shared", model: "flux", seed: 42 } as never,
+    };
+    const fetcher = vi.fn(async (h: HostEntry) => [
+      h.id === "render-a"
+        ? shared
+        : { ...shared, filename: "legacy-shared.png", timestamp: 199 },
+    ]);
+
+    const res = await fetchMergedGallery([a, b], fetcher);
+
+    expect(res.entries).toHaveLength(1);
+    expect(res.entries[0]).toMatchObject({
+      hostId: "render-a",
+      filename: "shared.png",
+    });
+    expect(res.rawEntries.map((entry) => entry.hostId)).toEqual([
+      "render-a",
+      "render-b",
+    ]);
+  });
+
+  it("keeps a chained legacy identity outside the representative window visible", async () => {
+    const hosts = [
+      host("render-a", "render a"),
+      host("render-b", "render b"),
+      host("render-c", "render c"),
+    ];
+    const timestamps = new Map([
+      ["render-a", 6_000],
+      ["render-b", 3_000],
+      ["render-c", 0],
+    ]);
+    const fetcher = vi.fn(async (h: HostEntry) => [
+      {
+        ...img(`${h.id}.png`, timestamps.get(h.id)!),
+        size_bytes: 4_096,
+        metadata: { prompt: "shared", model: "flux", seed: 42 } as never,
+      },
+    ]);
+
+    const res = await fetchMergedGallery(hosts, fetcher);
+
+    expect(res.entries.map((entry) => entry.hostId)).toEqual([
+      "render-a",
+      "render-c",
+    ]);
+  });
 });
 
 describe("printKey", () => {

@@ -267,6 +267,13 @@ Camera app offers to open them directly in Mold; cold-launch and already-open
 links share the same claim, instance-verification, and Keychain path as Mold's
 in-app scanner.
 
+An authenticated claim receives a distinct `mold_pair_...` credential, not the
+host's operator key. The host stores only its digest in `mold.db`; web and
+desktop Settings list grants with `GET /api/pairing/clients` and revoke one
+with `DELETE /api/pairing/clients/:id`. Paired credentials can use normal APIs
+but cannot create or manage other grants. When host authentication is disabled,
+pairing remains credential-free and there is no grant to revoke.
+
 Authenticated gallery media uses `POST /api/gallery/media-token` to exchange
 the normal `X-Api-Key` request for a short-lived, read-only URL scoped to one
 `/api/gallery/image/:filename` path. This allows native video Range requests and

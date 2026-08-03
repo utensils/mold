@@ -1872,6 +1872,56 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.imageAttachments).toEqual([]);
   });
 
+  it("restores a queued camera LoRA into both the picker and visible stack", async () => {
+    const job = {
+      id: "camera-print",
+      request: {
+        prompt: "a tracking shot",
+        model: "ltx-2-19b-distilled:fp8",
+        width: 768,
+        height: 512,
+        steps: 8,
+        guidance: 3,
+        loras: [{ path: "camera-control:dolly-in", scale: 0.45 }],
+      },
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      serverId: null,
+    } as Job;
+    streamJobsRef.value = [job];
+    const form = useGenerateForm();
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ActivityStrip" }).vm.$emit("open", job);
+    await nextTick();
+
+    expect(form.state.value.cameraControl).toBe("dolly-in");
+    expect(form.state.value.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
+  });
+
   it("deletes settled durable jobs through the strip's Delete action", async () => {
     listChainJobsMock.mockResolvedValue({
       jobs: [

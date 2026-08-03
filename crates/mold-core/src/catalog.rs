@@ -2,22 +2,33 @@ use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, vi
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended, RecommendedDimensions};
 
 fn resolution_defaults(family: &str) -> (Option<u64>, Vec<RecommendedDimensions>, Option<u32>) {
+    // Route through the validator's own helpers rather than restating the
+    // rules: `/api/models` is the single source clients read, so an
+    // advertisement that disagrees with admission is a rejected request the
+    // user was told would work.
     (
-        Some(crate::validation::MAX_PIXELS),
+        Some(crate::validation::max_pixels_for_family(Some(family))),
         crate::validation::recommended_dimensions(family)
             .iter()
             .map(|&(width, height)| RecommendedDimensions { width, height })
             .collect(),
-        Some(if matches!(family, "ltx-video" | "ltx2") {
-            32
-        } else {
-            16
-        }),
+        Some(crate::validation::dimension_alignment_for_family(Some(
+            family,
+        ))),
     )
 }
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
 /// Hidden manifests are excluded from the catalog (CLI list, TUI model selector).
+/// Whether a family's runtime can render sequence clips at all.
+///
+/// This is the same answer `mold-server`'s `sequence_support` gives; it lives
+/// here too because `/api/models` must advertise it per model, and the picker
+/// on every surface reads it instead of guessing from the checkpoint name.
+fn chain_capable_family(family: &str) -> bool {
+    matches!(family, "ltx2" | "ltx-video")
+}
+
 pub fn build_model_catalog(
     config: &Config,
     loaded_model: Option<&str>,
@@ -96,6 +107,7 @@ pub fn build_model_catalog(
             nsfw: None,
             supports_audio: None,
             supports_extend: Some(manifest.family == "ltx2"),
+            supports_sequence: Some(chain_capable_family(&manifest.family)),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
@@ -110,13 +122,14 @@ pub fn build_model_catalog(
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
         let size_gb = size_gb_f64 as f32;
-        let family = model_cfg
+        let family: String = model_cfg
             .family
             .clone()
             .unwrap_or_else(|| "flux".to_string());
         let (max_pixels, recommended_dimensions, dimension_alignment) =
             resolution_defaults(&family);
         let is_ltx2 = family == "ltx2";
+        let sequence_capable = chain_capable_family(&family);
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -160,6 +173,7 @@ pub fn build_model_catalog(
             nsfw: None,
             supports_audio: None,
             supports_extend: Some(is_ltx2),
+            supports_sequence: Some(sequence_capable),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
@@ -252,11 +266,12 @@ mod tests {
             .expect("an ltx2 manifest model should exist");
         assert_eq!(ltx2.defaults.default_frames, Some(97));
         assert_eq!(ltx2.defaults.default_fps, Some(24));
-        // The LTX-2 ceiling is a 20s duration, so the advertised scalar is the
-        // frame count that budget buys at this model's own default fps.
+        // The LTX-2 ceiling is a 20s duration, so the advertised scalar is
+        // the frame count that budget buys at this model's own default fps —
+        // snapped onto the 8n+1 grid so a client can submit it.
         assert_eq!(
             ltx2.defaults.max_frames,
-            Some(crate::validation::ltx2_max_frames_at_fps(24)),
+            Some(crate::validation::ltx2_max_frames_on_grid_at_fps(24)),
             "temporal RoPE ceiling at the model's default fps",
         );
         assert_eq!(ltx2.defaults.max_runtime_seconds, Some(20));
@@ -267,7 +282,8 @@ mod tests {
         assert_eq!(ltx2.defaults.frame_step, Some(8));
         assert_eq!(
             ltx2.defaults.max_pixels,
-            Some(crate::validation::MAX_PIXELS)
+            Some(crate::validation::LTX2_MAX_PIXELS),
+            "LTX-2 advertises its own raised ceiling, not the shared default"
         );
         assert_eq!(ltx2.defaults.dimension_alignment, Some(32));
         assert!(
@@ -417,6 +433,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             }
         }
