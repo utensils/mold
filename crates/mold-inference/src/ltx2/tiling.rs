@@ -14,7 +14,7 @@
 //! the blend weights and the token order produces plausible-looking output
 //! rather than an error.
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 /// Half-open `[start, end)` slice of one latent axis, plus the ramp widths
 /// that fade it into its neighbours.
@@ -175,7 +175,11 @@ pub(crate) fn trapezoidal_mask(length: usize, left_ramp: usize, right_ramp: usiz
 
 /// Split an axis into `size`-long intervals overlapping by `overlap`
 /// (`tiling.py:133-170`).
-fn split_by_size(dimension_size: usize, size: usize, overlap: usize) -> Result<Vec<DimensionInterval>> {
+fn split_by_size(
+    dimension_size: usize,
+    size: usize,
+    overlap: usize,
+) -> Result<Vec<DimensionInterval>> {
     if size == 0 {
         bail!("tile size must be > 0");
     }
@@ -260,7 +264,10 @@ pub(crate) fn split_by_count(
 /// Shrink a requested layout to something this latent can actually be split
 /// into (`hdr_ic_lora.py:100-142`), and additionally refuse a layout whose
 /// windows would not sum to one.
-pub(crate) fn clamp_dimension_tiling(cfg: DimensionTiling, dimension_size: usize) -> DimensionTiling {
+pub(crate) fn clamp_dimension_tiling(
+    cfg: DimensionTiling,
+    dimension_size: usize,
+) -> DimensionTiling {
     if cfg.num_tiles <= 1 {
         return DimensionTiling::none();
     }
@@ -325,6 +332,47 @@ pub(crate) fn create_tiles(
         }
     }
     Ok(tiles)
+}
+
+/// Per-axis span, in latent cells, that the checkpoints' RoPE was trained on.
+///
+/// `positional_embedding_max_pos = [20, 2048, 2048]` in pixels, and the video
+/// VAE compresses space by 32, so the spatial axes are trained over 64 latent
+/// cells. Past that, positions land outside the trained range.
+pub(crate) const TRAINED_SPATIAL_LATENT_SPAN: usize = 2_048 / LATENT_SPATIAL_STRIDE;
+
+/// Choose a tile layout for a stage-2 latent.
+///
+/// Returns [`TileCountConfig::untiled`] when the shape is already inside the
+/// span the model was trained on — tiling costs a full denoise pass per tile,
+/// so it must not be paid unless it buys something. Otherwise split each
+/// oversized axis into just enough tiles to bring every tile back inside the
+/// span, using upstream's shipped overlaps.
+pub(crate) fn plan_stage2_tiling(
+    latent_frames: usize,
+    latent_height: usize,
+    latent_width: usize,
+) -> TileCountConfig {
+    let axis = |size: usize, overlap: usize| -> DimensionTiling {
+        if size <= TRAINED_SPATIAL_LATENT_SPAN {
+            return DimensionTiling::none();
+        }
+        // Ceiling division: the smallest tile count whose tiles fit the span.
+        let tiles = size.div_ceil(TRAINED_SPATIAL_LATENT_SPAN).max(2);
+        clamp_dimension_tiling(DimensionTiling::new(tiles, overlap), size)
+    };
+
+    let upstream = TileCountConfig::upstream_stage2();
+    let planned = TileCountConfig {
+        // Time is not the axis that blows past the trained span at high
+        // resolution — the duration budget already caps it — so frames stay
+        // whole and only space is tiled.
+        frames: DimensionTiling::none(),
+        height: axis(latent_height, upstream.height.overlap),
+        width: axis(latent_width, upstream.width.overlap),
+    };
+    let _ = latent_frames;
+    planned
 }
 
 #[cfg(test)]
@@ -506,6 +554,52 @@ mod tests {
         let (w, h, f) = tiles[0].pixel_shape();
         // 6 latent frames -> (6 - 1) * 8 + 1 = 41 pixel frames, not 48.
         assert_eq!((w, h, f), (6 * 32, 5 * 32, 41));
+    }
+
+    /// Tiling costs a full denoise pass per tile, so a shape the model was
+    /// trained on must not pay for it.
+    #[test]
+    fn shapes_inside_the_trained_span_are_not_tiled() {
+        // 1216x704 -> 38x22 latent cells: the LTX-2 default, comfortably inside.
+        assert!(plan_stage2_tiling(13, 22, 38).is_untiled());
+        // 1920x1088 -> 60x34: still inside, which is why #668 could ship it
+        // without tiling.
+        assert!(plan_stage2_tiling(13, 34, 60).is_untiled());
+        // Exactly at the span.
+        assert!(plan_stage2_tiling(13, 64, 64).is_untiled());
+    }
+
+    /// Every tile of a 4K plan must land back inside the trained span, or
+    /// tiling has not bought anything.
+    #[test]
+    fn oversized_axes_are_split_until_every_tile_fits_the_trained_span() {
+        // 3840x2160 -> 120x68 latent cells.
+        let cfg = plan_stage2_tiling(13, 68, 120);
+        assert!(!cfg.is_untiled());
+        assert_eq!(cfg.frames, DimensionTiling::none(), "time stays whole");
+
+        let tiles = create_tiles(13, 68, 120, cfg).unwrap();
+        for tile in &tiles {
+            assert!(
+                tile.height.len() <= TRAINED_SPATIAL_LATENT_SPAN,
+                "tile is {} cells tall, past the trained span",
+                tile.height.len()
+            );
+            assert!(
+                tile.width.len() <= TRAINED_SPATIAL_LATENT_SPAN,
+                "tile is {} cells wide, past the trained span",
+                tile.width.len()
+            );
+        }
+
+        // And the windows still reconstruct the field exactly.
+        let mut acc = vec![0.0f32; 13 * 68 * 120];
+        for tile in &tiles {
+            for (token, weight) in tile.token_indices(68, 120).iter().zip(tile.blend_window()) {
+                acc[*token] += weight;
+            }
+        }
+        assert!(acc.iter().all(|total| (total - 1.0).abs() < 1e-5));
     }
 
     #[test]
