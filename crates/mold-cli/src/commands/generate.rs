@@ -368,6 +368,21 @@ pub async fn run(
                 clip_frames: cf,
                 motion_tail: mt,
             } => {
+                // A chain renders one clip per stage and stitches the decoded
+                // RGB, and the per-stage requests deliberately carry no EXR
+                // directory — so the sidecar would silently come out empty
+                // while the run still reported success. Refuse instead: an
+                // empty directory beside a saved video is the kind of result
+                // a user only discovers in a compositor.
+                if hdr_exr_dir.is_some() {
+                    anyhow::bail!(
+                        "--hdr-exr-dir cannot be combined with auto-chaining: {} frames exceeds \
+                         the {cf}-frame clip this model auto-chains at, and EXR export writes \
+                         one sequence per render rather than per clip. Render at most {cf} \
+                         frames, or drop --hdr-exr-dir and keep the tonemapped video.",
+                        effective_frames.unwrap_or_default()
+                    );
+                }
                 warn_if_clamped(
                     clip_frames,
                     family
@@ -3032,5 +3047,62 @@ mod tests {
             .write_with_encoder(image::codecs::jpeg::JpegEncoder::new(&mut buf))
             .unwrap();
         buf.into_inner()[2..].to_vec()
+    }
+}
+
+#[cfg(test)]
+mod hdr_chain_guard_tests {
+    /// A chain stitches decoded RGB from one clip per stage, and both stage
+    /// builders hard-code `hdr_exr_dir: None`. Without this guard the sidecar
+    /// directory comes out **empty** while the run still prints `✓ Saved` —
+    /// found on a 121-frame render that silently auto-chained to 177.
+    ///
+    /// Asserted against the source because the guard sits inside the routing
+    /// match in a long function, the way the other CLI routing contracts are.
+    #[test]
+    fn auto_chaining_refuses_an_exr_sidecar_rather_than_writing_nothing() {
+        let source = include_str!("generate.rs");
+        let chain_arm = source
+            .split("ChainRoutingDecision::Chain {")
+            .nth(1)
+            .expect("the Chain routing arm must exist");
+        let guard = chain_arm
+            .split("warn_if_clamped")
+            .next()
+            .expect("the guard must precede any other chain work");
+
+        assert!(
+            guard.contains("hdr_exr_dir.is_some()"),
+            "the Chain arm must reject an EXR sidecar before building the chain; \
+             without it the directory is silently left empty"
+        );
+        assert!(
+            guard.contains("anyhow::bail!"),
+            "the EXR/auto-chain combination must be an error, not a warning: a \
+             warning beside a successful save is what made this invisible"
+        );
+    }
+
+    /// The stage builders are the reason the guard is needed; if either ever
+    /// starts carrying the directory, the guard should be revisited rather
+    /// than left rejecting something that would now work.
+    #[test]
+    fn chain_stage_requests_still_drop_the_exr_directory() {
+        for (label, source) in [
+            (
+                "inference orchestrator",
+                include_str!("../../../mold-inference/src/chain/orchestrator.rs"),
+            ),
+            (
+                "server chain runner",
+                include_str!("../../../mold-server/src/chain_job_runner.rs"),
+            ),
+        ] {
+            assert!(
+                source.contains("hdr_exr_dir: None"),
+                "{label} no longer pins hdr_exr_dir to None — if chain stages can \
+                 now carry it, the CLI guard is obsolete"
+            );
+        }
     }
 }

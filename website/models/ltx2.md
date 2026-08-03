@@ -138,6 +138,12 @@ noticeably faster — about 120 s instead of 180 s for a 25-frame 704x448 clip o
 a 4090. Your prompt text is ignored for this control; that is upstream's design,
 not a limitation of the port.
 
+EXR export covers **one render**, so it cannot be combined with auto-chaining.
+A frame count above the model's per-clip cap is split into stitched clips, and
+each clip would overwrite the previous one's frame numbering — so mold refuses
+the combination rather than leaving you an empty directory beside a video that
+reported success. Render within the per-clip cap, or drop `--hdr-exr-dir`.
+
 The EXR sequence is a **sidecar**, not the gallery artifact: a sequence is many
 files and gigabytes, so the ordinary tonemapped video is still written and is
 what appears in the Library. Note that LogC3's toe decodes pure black slightly
