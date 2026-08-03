@@ -229,7 +229,7 @@ LTX-2 also adds:
 - `--audio-file`
 - `--video`
 - repeatable `--keyframe <frame:path>`
-- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2-vid|retake`
+- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2-vid|retake|lip-dub`
 - `--retake <start:end>`
 - repeatable `--lora`
 - `--camera-control <preset-or-path>`

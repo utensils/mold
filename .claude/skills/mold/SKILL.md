@@ -274,12 +274,26 @@ mold run ltx-2-19b-distilled:fp8 "a canyon flyover" \
 # Camera-control preset
 mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
 
+# Lip dub — re-voice a clip of someone speaking. Frames and fps come from the
+# reference video (rounded down to 8k+1); width/height must be multiples of 64.
+mold run ltx-2.3-22b-distilled:fp8 "she says: the harbour freezes every winter" \
+  --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448
+
 # Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid)
 mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
   --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
 ```
 
 **Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
+
+**Lip dub** (`--pipeline lip-dub`, or just `--ic-lora-control lipdub`, which
+selects it) re-voices an existing clip on the gated LTX-2.3 22B DubIt adapter.
+The reference video is the authority for length and frame rate — `--frames` /
+`--fps` are replaced and mold says so — and it must carry an audio track,
+because the reference speech is what the dub imitates. Both axes must be
+multiples of 64: the pipeline always renders in two stages, and unlike generic
+IC-LoRA it keeps the adapter and the reference on both of them, freezes the
+audio through stage 2, and exports the audio stage 1 generated.
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`, `--stg-scale`, `--stg-blocks`, `--rescale-scale`, `--modality-scale`, `--guidance-skip-step`
 

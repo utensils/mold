@@ -79,6 +79,53 @@ describe("Ltx2VideoControls", () => {
     expect(lastPatch(wrapper).pipeline).toBe(null);
   });
 
+  it("routes the lip-dub adapter to its own pipeline and explains the timing", async () => {
+    vi.mocked(fetch).mockImplementation(
+      async (input) =>
+        ({
+          ok: true,
+          json: async () =>
+            String(input).includes("ltx2-control-adapters")
+              ? [
+                  {
+                    id: "lipdub",
+                    label: "Lip dub",
+                    guide: "A reference video with speech.",
+                    size_bytes: 2_466_665_072,
+                    installed: false,
+                    gated: true,
+                    download_model: "ltx2-control-lipdub-23",
+                    download_repo: "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+                    download_filename:
+                      "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+                    download_sha256: "a".repeat(64),
+                  },
+                ]
+              : [],
+        }) as Response,
+    );
+    const wrapper = factory({ model: "ltx-2.3-22b-distilled:fp8" });
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get("[data-test='ltx2-reference-control']").findAll("option"),
+      ).toHaveLength(2),
+    );
+
+    await wrapper
+      .get("[data-test='ltx2-reference-control']")
+      .setValue("lipdub");
+
+    // Not `ic-lora`: that pipeline drops the adapter before stage 2 and never
+    // conditions on the reference voice, and the server rejects the pairing.
+    expect(lastPatch(wrapper).pipeline).toBe("lip-dub");
+    expect(lastPatch(wrapper).icLoraControl).toBe("lipdub");
+
+    await wrapper.setProps({ modelValue: lastPatch(wrapper) });
+    expect(wrapper.get("[data-test='ltx2-lip-dub-hint']").text()).toContain(
+      "reference video",
+    );
+  });
+
   it("renders host-provided controls and their guide copy", async () => {
     vi.mocked(fetch).mockImplementation(
       async (input) =>

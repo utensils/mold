@@ -131,6 +131,188 @@ impl StageVideoConditioning {
     }
 }
 
+/// Audio latents appended to the denoised sequence as a *reference* — tokens
+/// the transformer may attend to but never denoises.
+///
+/// The exact mirror of [`VideoTokenAppendCondition`] on the audio branch,
+/// which lip dub is the first pipeline to need: upstream builds an
+/// `AudioConditionByReferenceLatent` from the reference clip's own speech
+/// (`lipdub.py:228-239`).
+#[derive(Debug, Clone)]
+struct AudioTokenAppendCondition {
+    tokens: Tensor,
+    positions: Tensor,
+    strength: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StageAudioConditioning {
+    appended: Vec<AudioTokenAppendCondition>,
+}
+
+impl StageAudioConditioning {
+    fn is_empty(&self) -> bool {
+        self.appended.is_empty()
+    }
+
+    fn appended_token_count(&self) -> Result<usize> {
+        let mut total = 0;
+        for condition in &self.appended {
+            total += condition.tokens.dim(1)?;
+        }
+        Ok(total)
+    }
+}
+
+/// One audio latent frame, in seconds: `hop_length / sample_rate` per mel
+/// frame, times the VAE's temporal downsample factor. 0.04 s at 16 kHz.
+const LTX2_AUDIO_LATENT_FRAME_SECONDS: f32 = (LTX2_AUDIO_HOP_LENGTH
+    * LTX2_AUDIO_LATENT_DOWNSAMPLE_FACTOR) as f32
+    / LTX2_AUDIO_SAMPLE_RATE as f32;
+
+/// RoPE positions for reference audio, shifted so the whole reference sits
+/// strictly *before* the clip being generated.
+///
+/// This is the load-bearing detail of lip dub. The reference tokens carry the
+/// same seconds-valued positions the generated audio would, so without a shift
+/// the model sees two overlapping soundtracks on one timeline. Upstream
+/// subtracts the reference's own duration plus exactly one audio latent frame
+/// (`lipdub.py:297-316`): `positions -= positions[..., -1, 1].max() + 0.04`.
+/// Every position ends up negative and the last reference patch ends at
+/// exactly `-0.04`, one frame before the generated audio's `0.0`.
+///
+/// Getting this wrong produces output that looks plausible and is out of sync,
+/// so `lip_dub_audio_reference_positions_end_one_latent_frame_before_zero`
+/// asserts the boundary exactly rather than within a tolerance.
+fn shift_audio_reference_positions_before_zero(positions: &Tensor) -> Result<Tensor> {
+    // `positions` is `(batch, 1, tokens, 2)` holding `[start, end]` seconds.
+    let last_end = positions
+        .i((.., .., positions.dim(2)? - 1, 1))?
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .into_iter()
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !last_end.is_finite() {
+        anyhow::bail!("audio reference positions contained no finite end timestamp");
+    }
+    positions
+        .to_dtype(DType::F32)?
+        .affine(1.0, -((last_end + LTX2_AUDIO_LATENT_FRAME_SECONDS) as f64))
+        .map_err(Into::into)
+}
+
+/// Patchify an audio VAE latent into reference tokens with negatively shifted
+/// RoPE positions. The audio analogue of
+/// [`append_condition_from_video_latents`].
+fn append_condition_from_audio_latents(
+    latents: &Tensor,
+    strength: f64,
+) -> Result<AudioTokenAppendCondition> {
+    let patchifier = AudioPatchifier::new(
+        LTX2_AUDIO_SAMPLE_RATE,
+        LTX2_AUDIO_HOP_LENGTH,
+        LTX2_AUDIO_LATENT_DOWNSAMPLE_FACTOR,
+        true,
+        0,
+    );
+    let latents = latents.to_dtype(DType::F32)?;
+    let (batch, channels, frames, mel_bins) = latents.dims4()?;
+    let tokens = patchifier.patchify(&latents)?;
+    let shape = AudioLatentShape {
+        batch,
+        channels,
+        frames,
+        mel_bins,
+    };
+    let positions = shift_audio_reference_positions_before_zero(
+        &patchifier.get_patch_grid_bounds(shape, latents.device())?,
+    )?;
+    Ok(AudioTokenAppendCondition {
+        tokens,
+        positions,
+        strength,
+    })
+}
+
+fn apply_appended_audio_conditioning(
+    audio_latents: &Tensor,
+    audio_positions: &Tensor,
+    conditioning: &StageAudioConditioning,
+) -> Result<(Tensor, Tensor)> {
+    if conditioning.appended.is_empty() {
+        return Ok((audio_latents.clone(), audio_positions.clone()));
+    }
+    let mut token_parts = vec![audio_latents.clone()];
+    let mut position_parts = vec![audio_positions.clone()];
+    for condition in &conditioning.appended {
+        token_parts.push(
+            condition
+                .tokens
+                .to_device(audio_latents.device())?
+                .to_dtype(audio_latents.dtype())?,
+        );
+        position_parts.push(
+            condition
+                .positions
+                .to_device(audio_positions.device())?
+                .to_dtype(audio_positions.dtype())?,
+        );
+    }
+    let token_refs = token_parts.iter().collect::<Vec<_>>();
+    let position_refs = position_parts.iter().collect::<Vec<_>>();
+    Ok((
+        Tensor::cat(&token_refs, 1)?,
+        Tensor::cat(&position_refs, 2)?,
+    ))
+}
+
+/// Re-seat the reference tokens after a sampler step so they never drift.
+fn reapply_stage_audio_conditioning(
+    audio_latents: &Tensor,
+    base_token_count: usize,
+    conditioning: &StageAudioConditioning,
+) -> Result<Tensor> {
+    if conditioning.appended.is_empty() {
+        return Ok(audio_latents.clone());
+    }
+    let total_tokens = audio_latents.dim(1)?;
+    if total_tokens < base_token_count {
+        anyhow::bail!(
+            "audio token count ({total_tokens}) is smaller than base token count ({base_token_count})"
+        );
+    }
+    let mut parts = vec![audio_latents.narrow(1, 0, base_token_count)?];
+    for condition in &conditioning.appended {
+        parts.push(
+            condition
+                .tokens
+                .to_device(audio_latents.device())?
+                .to_dtype(audio_latents.dtype())?,
+        );
+    }
+    let refs = parts.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, 1).map_err(Into::into)
+}
+
+fn strip_appended_audio_conditioning(
+    audio_latents: &Tensor,
+    base_token_count: usize,
+) -> Result<Tensor> {
+    let total_tokens = audio_latents.dim(1)?;
+    if total_tokens < base_token_count {
+        anyhow::bail!(
+            "audio token count ({total_tokens}) is smaller than base token count ({base_token_count})"
+        );
+    }
+    if total_tokens == base_token_count {
+        return Ok(audio_latents.clone());
+    }
+    audio_latents
+        .narrow(1, 0, base_token_count)
+        .map_err(Into::into)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RenderPromptInputOptions {
     include_unconditional: bool,
@@ -893,7 +1075,8 @@ impl Ltx2RuntimeSession {
             | PipelineKind::TwoStageHq
             | PipelineKind::IcLora
             | PipelineKind::Keyframe
-            | PipelineKind::A2Vid => {
+            | PipelineKind::A2Vid
+            | PipelineKind::LipDub => {
                 render_real_two_stage_av(plan, prepared, device, progress, cancellation)
             }
             PipelineKind::Retake => {
@@ -1448,6 +1631,17 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_retake_masking
         && !plan.loras.is_empty()
         && plan.spatial_upscale.is_none();
+    // Lip dub is the one pipeline that conditions on audio it was never handed:
+    // the reference clip supplies both the pixels and the voice, so a separate
+    // `audio_path` is a contradiction rather than a requirement.
+    let native_lip_dub = plan.conditioning.audio_path.is_none()
+        && plan.conditioning.video_path.is_some()
+        && plan.execution_graph.uses_reference_video_conditioning
+        && plan.execution_graph.uses_audio_conditioning
+        && !plan.execution_graph.uses_retake_masking
+        && !plan.loras.is_empty()
+        && plan.spatial_upscale.is_none()
+        && plan.temporal_upscale.is_none();
     match plan.pipeline {
         PipelineKind::Distilled => native_plain_or_image_conditioning,
         PipelineKind::OneStage => {
@@ -1460,6 +1654,7 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         }
         PipelineKind::A2Vid => native_audio_conditioning,
         PipelineKind::IcLora => native_ic_lora,
+        PipelineKind::LipDub => native_lip_dub,
         PipelineKind::Retake => native_retake,
     }
 }
@@ -1479,7 +1674,42 @@ fn denoise_pass_plan(
         })
 }
 
+/// What the second denoise pass does with the audio the first one produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage2AudioPolicy {
+    /// Re-noise it to the stage-2 sigma and denoise it again alongside the
+    /// upscaled video. Every two-stage pipeline except lip dub.
+    Refine,
+    /// Carry it through untouched and export *it* rather than stage 2's copy.
+    ///
+    /// Lip dub's second pass exists to sharpen the picture. Upstream marks its
+    /// audio `frozen=True, noise_scale=0.0,
+    /// initial_latent=s1_audio_latent` (`lipdub.py:283-289`) and decodes the
+    /// stage-1 latent for the soundtrack (`lipdub.py:293`) — re-denoising a
+    /// finished dub can only move it away from the mouth already rendered
+    /// against it.
+    Frozen,
+}
+
+fn stage2_audio_policy(pipeline: PipelineKind) -> Stage2AudioPolicy {
+    match pipeline {
+        PipelineKind::LipDub => Stage2AudioPolicy::Frozen,
+        _ => Stage2AudioPolicy::Refine,
+    }
+}
+
+/// Whether this pipeline appends reference speech as negatively positioned
+/// audio tokens, the way lip dub conditions on the voice it is imitating.
+fn appends_audio_reference(pipeline: PipelineKind) -> bool {
+    matches!(pipeline, PipelineKind::LipDub)
+}
+
 fn stage_lora_stack(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Vec<LoraWeight>> {
+    // Generic IC-LoRA builds its second stage with `loras=()`
+    // (`ic_lora.py:99-103`) — the adapter has done its job by then. Lip dub
+    // deliberately does not: one `DiffusionStage` carrying the adapter runs
+    // both passes (`lipdub.py:96-106`), because stage 2 is still re-timing a
+    // mouth and would drift off the reference without it.
     if matches!(plan.pipeline, PipelineKind::IcLora) && stage_index > 0 {
         return Ok(Vec::new());
     }
@@ -2140,6 +2370,72 @@ fn append_conditioning_attention_mask(
     Tensor::cat(&[&top, &bottom], 1).map_err(Into::into)
 }
 
+/// Denoise mask over `base + appended` audio tokens.
+///
+/// `base_denoise` is the mask the stage wants for the audio it is generating —
+/// all ones on stage 1, all zeros on stage 2 where the audio is frozen. The
+/// appended reference tokens are always pinned at their conditioning strength,
+/// exactly like their video counterparts.
+fn build_audio_conditioning_denoise_mask(
+    audio_shape: AudioLatentShape,
+    base_denoise: Option<&Tensor>,
+    conditioning: &StageAudioConditioning,
+    device: &candle_core::Device,
+) -> Result<Option<Tensor>> {
+    if conditioning.is_empty() {
+        return base_denoise
+            .map(|mask| mask.to_device(device)?.to_dtype(DType::F32))
+            .transpose()
+            .map_err(Into::into);
+    }
+    let base = match base_denoise {
+        Some(mask) => mask.to_device(device)?.to_dtype(DType::F32)?,
+        None => Tensor::ones((audio_shape.batch, audio_shape.frames), DType::F32, device)?,
+    };
+    let mut values = Vec::with_capacity(conditioning.appended_token_count()?);
+    for condition in &conditioning.appended {
+        values.extend(std::iter::repeat_n(
+            (1.0 - condition.strength) as f32,
+            condition.tokens.dim(1)?,
+        ));
+    }
+    let appended_tokens = values.len();
+    let appended = Tensor::from_vec(values, (1, appended_tokens), device)?
+        .broadcast_as((audio_shape.batch, appended_tokens))?
+        .contiguous()?;
+    Ok(Some(Tensor::cat(&[&base, &appended], 1)?))
+}
+
+fn build_audio_conditioning_self_attention_mask(
+    base_token_count: usize,
+    conditioning: &StageAudioConditioning,
+    device: &candle_core::Device,
+) -> Result<Option<Tensor>> {
+    if conditioning.appended.is_empty() {
+        return Ok(None);
+    }
+    let batch_size = conditioning
+        .appended
+        .first()
+        .context("appended audio conditioning unexpectedly empty")?
+        .tokens
+        .dim(0)?;
+    let mut existing_mask = None;
+    let mut existing_tokens = base_token_count;
+    for condition in &conditioning.appended {
+        existing_mask = Some(append_conditioning_attention_mask(
+            existing_mask.as_ref(),
+            base_token_count,
+            existing_tokens,
+            condition.tokens.dim(1)?,
+            batch_size,
+            device,
+        )?);
+        existing_tokens += condition.tokens.dim(1)?;
+    }
+    Ok(existing_mask)
+}
+
 fn build_video_conditioning_self_attention_mask(
     base_token_count: usize,
     conditioning: &StageVideoConditioning,
@@ -2372,6 +2668,7 @@ fn render_real_distilled_av(
                     None,
                     stage1_audio_noise.as_ref(),
                     None,
+                    &StageAudioConditioning::default(),
                     &prompt_inputs.video_positions,
                     prompt_inputs.audio_positions.as_ref(),
                     &prompt_inputs.cond_context,
@@ -2555,6 +2852,7 @@ fn render_real_distilled_av(
                 None,
                 stage2_audio_start.as_ref(),
                 None,
+                &StageAudioConditioning::default(),
                 &stage2_video_positions,
                 prompt_inputs.audio_positions.as_ref(),
                 &prompt_inputs.cond_context,
@@ -2730,9 +3028,22 @@ fn render_real_two_stage_av(
         prepared.video_pixel_shape,
         device,
         dtype,
-        matches!(plan.pipeline, PipelineKind::IcLora),
+        matches!(plan.pipeline, PipelineKind::IcLora | PipelineKind::LipDub),
         progress,
     )?;
+    // Lip dub hands the model the reference clip's own speech as negatively
+    // positioned tokens sitting entirely before the generated audio, so the
+    // dub inherits the speaker's voice rather than inventing one
+    // (`lipdub.py:228-239`).
+    let lip_dub_reference_audio = matches!(plan.pipeline, PipelineKind::LipDub)
+        .then(|| load_lip_dub_reference_audio_latents(plan, device, dtype))
+        .transpose()?;
+    let stage1_audio_conditioning = match lip_dub_reference_audio.as_ref() {
+        Some(latents) => StageAudioConditioning {
+            appended: vec![append_condition_from_audio_latents(latents, 1.0)?],
+        },
+        None => StageAudioConditioning::default(),
+    };
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -2780,6 +3091,7 @@ fn render_real_two_stage_av(
                     None,
                     stage1_audio_start,
                     None,
+                    &stage1_audio_conditioning,
                     &prompt_inputs.video_positions,
                     prompt_inputs.audio_positions.as_ref(),
                     &prompt_inputs.cond_context,
@@ -2862,7 +3174,7 @@ fn render_real_two_stage_av(
         stage2_pixel_shape,
         device,
         dtype,
-        false,
+        plan.pipeline.keeps_reference_video_in_stage_two(),
         progress,
     )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
@@ -2914,7 +3226,12 @@ fn render_real_two_stage_av(
         &stage2_video_noise,
         stage2_sigma,
     )?;
+    let stage2_audio_policy = stage2_audio_policy(plan.pipeline);
+    let stage2_audio_is_frozen = stage2_audio_policy == Stage2AudioPolicy::Frozen;
     let stage2_audio_start = match (stage1_audio_latents.as_ref(), stage2_audio_noise.as_ref()) {
+        (Some(stage1_audio_latents), _) if stage2_audio_is_frozen => {
+            Some(stage1_audio_latents.to_dtype(DType::F32)?)
+        }
         (Some(stage1_audio_latents), Some(stage2_audio_noise)) => {
             Some(mix_clean_latents_with_noise(
                 &stage1_audio_latents.to_dtype(DType::F32)?,
@@ -2923,6 +3240,29 @@ fn render_real_two_stage_av(
             )?)
         }
         _ => None,
+    };
+    // The reference the refinement attends to is the audio stage 1 *produced*,
+    // not the original clip's (`lipdub.py:267`): stage 2 is re-timing a mouth
+    // against the dub, so pointing it at the source speech would fight the dub
+    // it is supposed to sharpen.
+    let stage2_audio_conditioning = match stage1_audio_latents.as_ref() {
+        Some(stage1_audio_latents) if appends_audio_reference(plan.pipeline) => {
+            StageAudioConditioning {
+                appended: vec![append_condition_from_audio_latents(
+                    stage1_audio_latents,
+                    1.0,
+                )?],
+            }
+        }
+        _ => StageAudioConditioning::default(),
+    };
+    let stage2_frozen_audio_denoise_mask = if stage2_audio_is_frozen {
+        Some(build_frozen_audio_denoise_mask(
+            audio_shape.context("a frozen stage-2 audio pass requires an audio latent shape")?,
+            device,
+        )?)
+    } else {
+        frozen_audio_denoise_mask.clone()
     };
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
@@ -2966,6 +3306,7 @@ fn render_real_two_stage_av(
                 None,
                 stage2_audio_start.as_ref(),
                 None,
+                &stage2_audio_conditioning,
                 &stage2_video_positions,
                 prompt_inputs.audio_positions.as_ref(),
                 &prompt_inputs.cond_context,
@@ -2994,7 +3335,7 @@ fn render_real_two_stage_av(
                 Some(&stage2_video_noise),
                 stage2_audio_noise.as_ref(),
                 None,
-                frozen_audio_denoise_mask.as_ref(),
+                stage2_frozen_audio_denoise_mask.as_ref(),
                 Some("two_stage.stage2"),
                 debug_enabled.then_some("stage2"),
                 progress,
@@ -3028,6 +3369,12 @@ fn render_real_two_stage_av(
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
         conditioned_audio.original_track.clone()
+    } else if stage2_audio_is_frozen {
+        // Stage 2 never denoised the audio, so its "output" is the frozen copy
+        // that went in. Upstream decodes `s1_audio_latent` (`lipdub.py:293`);
+        // decoding stage 2's would round-trip the same samples through an
+        // extra blend for nothing.
+        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?
     } else {
         maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?
     };
@@ -3043,7 +3390,9 @@ fn render_real_two_stage_av(
     drop(stage1_audio_latents);
     drop(stage1_video_latents);
     drop(stage1_audio_noise);
+    drop(stage2_frozen_audio_denoise_mask);
     drop(frozen_audio_denoise_mask);
+    drop(lip_dub_reference_audio);
     drop(conditioned_audio);
     drop(stage1_video_noise);
     let _ = cond_mask;
@@ -3178,6 +3527,7 @@ fn render_real_one_stage_av(
                 None,
                 stage1_audio_noise.as_ref(),
                 None,
+                &StageAudioConditioning::default(),
                 &prompt_inputs.video_positions,
                 prompt_inputs.audio_positions.as_ref(),
                 &prompt_inputs.cond_context,
@@ -3387,6 +3737,7 @@ fn render_real_retake_av(
                 Some(&source_video.latents),
                 stage1_audio_noise.as_ref(),
                 conditioned_audio.as_ref().map(|audio| &audio.latents),
+                &StageAudioConditioning::default(),
                 &prompt_inputs.video_positions,
                 prompt_inputs.audio_positions.as_ref(),
                 &prompt_inputs.cond_context,
@@ -3475,6 +3826,7 @@ fn run_real_distilled_stage(
     video_clean_latents: Option<&Tensor>,
     audio_start_latents: Option<&Tensor>,
     audio_clean_latents: Option<&Tensor>,
+    audio_conditioning: &StageAudioConditioning,
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
     cond_context: &Tensor,
@@ -3538,6 +3890,10 @@ fn run_real_distilled_stage(
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
         .transpose()?;
+    let base_audio_token_count = audio_shape.map(|shape| audio_patchifier.get_token_count(shape));
+    if !audio_conditioning.is_empty() && audio_shape.is_none() {
+        anyhow::bail!("appended audio conditioning requires an audio latent shape");
+    }
     let mut audio_latents = match (audio_shape, audio_start_latents) {
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
         _ => None,
@@ -3550,9 +3906,48 @@ fn run_real_distilled_stage(
         (Some(_), Some(noise)) => Some(audio_patchifier.patchify(noise)?),
         _ => None,
     };
-    let audio_denoise_mask = audio_denoise_mask
-        .map(|mask| mask.to_device(&device)?.to_dtype(DType::F32))
-        .transpose()?;
+    // Reference tokens ride along with the denoised sequence: appended to the
+    // latents, to the clean target the freeze blend restores every step, and
+    // to the RoPE positions, with a self-attention mask that lets the noisy
+    // tokens see them without letting them see each other.
+    let mut conditioned_audio_positions = audio_positions.cloned();
+    let mut audio_self_attention_mask = None;
+    if let (Some(audio_shape), Some(audio_positions)) = (audio_shape, audio_positions) {
+        if !audio_conditioning.is_empty() {
+            let latents = audio_latents
+                .as_ref()
+                .context("appended audio conditioning requires audio latents to append to")?;
+            let (appended_latents, appended_positions) =
+                apply_appended_audio_conditioning(latents, audio_positions, audio_conditioning)?;
+            audio_latents = Some(appended_latents);
+            conditioned_audio_positions = Some(appended_positions);
+            audio_self_attention_mask = build_audio_conditioning_self_attention_mask(
+                audio_shape.frames,
+                audio_conditioning,
+                &device,
+            )?;
+        }
+    }
+    let clean_audio_latents = match (clean_audio_latents, audio_positions) {
+        (Some(clean), Some(positions)) if !audio_conditioning.is_empty() => {
+            Some(apply_appended_audio_conditioning(&clean, positions, audio_conditioning)?.0)
+        }
+        (clean, _) => clean,
+    };
+    let audio_denoise_mask = match audio_shape {
+        Some(audio_shape) => build_audio_conditioning_denoise_mask(
+            audio_shape,
+            audio_denoise_mask,
+            audio_conditioning,
+            &device,
+        )?,
+        // No audio latent shape means no reference tokens to widen the mask
+        // for; pass whatever the caller supplied through untouched.
+        None => audio_denoise_mask
+            .map(|mask| mask.to_device(&device)?.to_dtype(DType::F32))
+            .transpose()?,
+    };
+    let audio_positions = conditioned_audio_positions.as_ref();
     if uses_video_freeze_mask {
         video_latents =
             blend_conditioned_denoised(&video_latents, &clean_video_latents, &video_denoise_mask)?;
@@ -3584,6 +3979,7 @@ fn run_real_distilled_stage(
             cond_mask,
             uncond_mask,
             video_self_attention_mask.as_ref(),
+            audio_self_attention_mask.as_ref(),
             video_positions,
             audio_positions,
             video_guider,
@@ -3598,7 +3994,7 @@ fn run_real_distilled_stage(
             cond_mask,
             cond_mask,
             video_self_attention_mask.as_ref(),
-            None,
+            audio_self_attention_mask.as_ref(),
             video_positions,
             audio_positions,
         )?)
@@ -3614,7 +4010,7 @@ fn run_real_distilled_stage(
                     uncond_mask,
                     uncond_mask,
                     video_self_attention_mask.as_ref(),
-                    None,
+                    audio_self_attention_mask.as_ref(),
                     video_positions,
                     audio_positions,
                 )?)
@@ -3632,7 +4028,7 @@ fn run_real_distilled_stage(
                 alt_mask,
                 alt_mask,
                 video_self_attention_mask.as_ref(),
-                None,
+                audio_self_attention_mask.as_ref(),
                 video_positions,
                 audio_positions,
             )?),
@@ -4010,6 +4406,13 @@ fn run_real_distilled_stage(
                 audio_sampler_noise.as_ref(),
                 "audio sampler noise missing for Res2S stage",
             )?;
+            if let Some(base_audio_token_count) = base_audio_token_count {
+                *audio_latents = reapply_stage_audio_conditioning(
+                    audio_latents,
+                    base_audio_token_count,
+                    audio_conditioning,
+                )?;
+            }
         }
         update_secs += update_start.elapsed().as_secs_f64();
         emit_denoise_progress(
@@ -4045,7 +4448,10 @@ fn run_real_distilled_stage(
     let video_latents = strip_appended_video_conditioning(&video_latents, base_video_token_count)?;
     let video_latents = video_patchifier.unpatchify(&video_latents, video_shape)?;
     let audio_latents = match (audio_latents, audio_shape) {
-        (Some(latents), Some(shape)) => Some(audio_patchifier.unpatchify(&latents, shape)?),
+        (Some(latents), Some(shape)) => Some(audio_patchifier.unpatchify(
+            &strip_appended_audio_conditioning(&latents, shape.frames)?,
+            shape,
+        )?),
         _ => None,
     };
     if debug_stage.is_some() {
@@ -4370,6 +4776,41 @@ fn maybe_load_native_conditioning_video(
         device.synchronize()?;
     }
     Ok(Some(NativeConditioningVideo { latents }))
+}
+
+/// Encode the lip-dub reference clip's own soundtrack into audio VAE latents.
+///
+/// Deliberately *not* [`maybe_load_native_conditioning_audio`]: that path
+/// conforms the latent to the render's audio shape and keeps the decoded track
+/// as the output soundtrack, both of which are wrong here. These latents are
+/// reference tokens at whatever natural length the clip has — upstream encodes
+/// the full stream with no duration cap and no conforming
+/// (`lipdub.py:166-171`) — and the exported audio is the *generated* dub.
+fn load_lip_dub_reference_audio_latents(
+    plan: &Ltx2GeneratePlan,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let video_path = plan
+        .conditioning
+        .video_path
+        .as_ref()
+        .context("the LTX-2 lip-dub pipeline requires a reference video")?;
+    let decoded_audio =
+        DecodedAudio::from_file(Path::new(video_path), None)?.with_context(|| {
+            format!(
+                "lip-dub reference video '{video_path}' has no audio stream; the pipeline \
+                 re-voices existing speech, so the reference must contain some"
+            )
+        })?;
+    let encoder =
+        Ltx2AudioEncoder::load_from_checkpoint(Path::new(&plan.checkpoint_path), dtype, device)?;
+    let latents = encoder.encode_audio(&decoded_audio)?;
+    drop(encoder);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    Ok(latents)
 }
 
 fn maybe_load_native_conditioning_audio(
@@ -4737,6 +5178,7 @@ fn prepare_static_multimodal_guidance_batch(
     cond_mask: Option<&Tensor>,
     uncond_mask: Option<&Tensor>,
     video_self_attention_mask: Option<&Tensor>,
+    audio_self_attention_mask: Option<&Tensor>,
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
     video_guider: &MultiModalGuider,
@@ -4753,6 +5195,9 @@ fn prepare_static_multimodal_guidance_batch(
     let batched_video_self_attention_mask = video_self_attention_mask
         .map(|mask| repeat_batch(mask, batch.repeat_count))
         .transpose()?;
+    let batched_audio_self_attention_mask = audio_self_attention_mask
+        .map(|mask| repeat_batch(mask, batch.repeat_count))
+        .transpose()?;
     let batched_video_positions = repeat_batch(video_positions, batch.repeat_count)?;
     let batched_audio_positions = audio_positions
         .map(|positions| repeat_batch(positions, batch.repeat_count))
@@ -4763,7 +5208,7 @@ fn prepare_static_multimodal_guidance_batch(
         batch.batched_video_mask.as_ref(),
         batch.batched_audio_mask.as_ref(),
         batched_video_self_attention_mask.as_ref(),
-        None,
+        batched_audio_self_attention_mask.as_ref(),
         &batched_video_positions,
         batched_audio_positions.as_ref(),
     )?;
@@ -6519,8 +6964,9 @@ mod tests {
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
         should_inspect_step_velocity, source_image_only_conditioning,
         strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
-        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
-        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning,
+        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
+        LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -9014,6 +9460,258 @@ mod tests {
         let loras = super::stage_lora_stack(&plan, 1).unwrap();
 
         assert!(loras.is_empty());
+    }
+
+    // ── lip dub ─────────────────────────────────────────────────────────────
+
+    fn lip_dub_plan() -> Ltx2GeneratePlan {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.pipeline = Some(mold_core::Ltx2PipelineMode::LipDub);
+        req.ic_lora_control = Some("lipdub".to_string());
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ltx-2.3-22b-ic-lora-dubit-0.9.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::LipDub;
+        plan.loras = req.loras.clone().unwrap();
+        plan.spatial_upsampler_path = Some("/tmp/spatial.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+        plan
+    }
+
+    /// The one number in this pipeline that is invisible when it is wrong.
+    ///
+    /// The reference speech is appended to the same token sequence as the
+    /// audio being generated, so without a shift the model sees two
+    /// soundtracks stacked on one timeline. Upstream subtracts the reference's
+    /// own duration plus exactly one audio latent frame
+    /// (`lipdub.py:314-315`), leaving the last reference patch ending at
+    /// `-0.04` — immediately before the generated audio's `0.0`.
+    #[test]
+    fn lip_dub_audio_reference_positions_end_one_latent_frame_before_zero() {
+        let device = Device::Cpu;
+        for frames in [1usize, 3, 126] {
+            let latents = Tensor::zeros(
+                (1, LTX2_AUDIO_LATENT_CHANNELS, frames, LTX2_AUDIO_MEL_BINS),
+                DType::F32,
+                &device,
+            )
+            .unwrap();
+            let condition = super::append_condition_from_audio_latents(&latents, 1.0).unwrap();
+
+            assert_eq!(
+                condition.tokens.dims3().unwrap(),
+                (1, frames, LTX2_AUDIO_LATENT_CHANNELS * LTX2_AUDIO_MEL_BINS)
+            );
+            let positions = condition
+                .positions
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(positions.len(), frames * 2, "frames={frames}");
+
+            // Every position is strictly in the past …
+            assert!(
+                positions.iter().all(|value| *value < 0.0),
+                "frames={frames}: {positions:?}"
+            );
+            // … the last patch ends exactly one audio latent frame before zero …
+            let last_end = positions[positions.len() - 1];
+            assert!(
+                (last_end + 0.04).abs() < 1e-6,
+                "frames={frames}: last patch ends at {last_end}, expected -0.04"
+            );
+            // … and the reference starts a whole clip earlier. Latent frame 0
+            // spans 0.01 s and every later one 0.04 s, so `T` frames shifted
+            // by `duration + 0.04` begin at `-(0.04 * T + 0.01)`.
+            let expected_start = -(0.04 * frames as f32 + 0.01);
+            assert!(
+                (positions[0] - expected_start).abs() < 1e-5,
+                "frames={frames}: reference starts at {}, expected {expected_start}",
+                positions[0]
+            );
+        }
+    }
+
+    /// Deviation 1 of 4 from the plain two-stage pipeline.
+    #[test]
+    fn lip_dub_keeps_the_ic_lora_on_both_denoise_stages() {
+        let plan = lip_dub_plan();
+
+        let stage1 = super::stage_lora_stack(&plan, 0).unwrap();
+        let stage2 = super::stage_lora_stack(&plan, 1).unwrap();
+
+        assert_eq!(stage1.len(), 1);
+        assert_eq!(
+            stage2.len(),
+            1,
+            "lip dub runs one adapter-carrying stage twice (`lipdub.py:96-106`);              dropping it for stage 2 is the generic IC-LoRA rule, not this one"
+        );
+        assert_eq!(stage1[0].path, stage2[0].path);
+    }
+
+    /// Deviation 2 of 4.
+    #[test]
+    fn lip_dub_stage_two_freezes_the_audio_instead_of_refining_it() {
+        assert_eq!(
+            super::stage2_audio_policy(PipelineKind::LipDub),
+            Stage2AudioPolicy::Frozen
+        );
+        for pipeline in [
+            PipelineKind::TwoStage,
+            PipelineKind::TwoStageHq,
+            PipelineKind::A2Vid,
+            PipelineKind::Keyframe,
+            PipelineKind::IcLora,
+        ] {
+            assert_eq!(
+                super::stage2_audio_policy(pipeline),
+                Stage2AudioPolicy::Refine,
+                "{pipeline:?} must keep re-denoising its audio in stage 2"
+            );
+        }
+
+        // The frozen policy has to reach three places in the renderer: the
+        // stage-2 initial latent, its denoise mask, and the exported track.
+        let render = runtime_function_source("fn render_real_two_stage_av(");
+        assert!(render.contains("(Some(stage1_audio_latents), _) if stage2_audio_is_frozen =>"));
+        assert!(render.contains("let stage2_frozen_audio_denoise_mask = if stage2_audio_is_frozen"));
+        assert!(render.contains("stage2_frozen_audio_denoise_mask.as_ref(),"));
+    }
+
+    /// Deviation 3 of 4.
+    #[test]
+    fn lip_dub_stage_two_rebuilds_its_audio_reference_from_the_generated_audio() {
+        assert!(super::appends_audio_reference(PipelineKind::LipDub));
+        assert!(!super::appends_audio_reference(PipelineKind::A2Vid));
+
+        let render = runtime_function_source("fn render_real_two_stage_av(");
+        assert!(
+            render.contains(
+                "Some(stage1_audio_latents) if appends_audio_reference(plan.pipeline) =>"
+            ),
+            "stage 2's audio reference must come from stage 1's output, not the source clip"
+        );
+    }
+
+    /// Deviation 4 of 4.
+    #[test]
+    fn lip_dub_exports_the_stage_one_audio_not_the_frozen_stage_two_copy() {
+        let render = runtime_function_source("fn render_real_two_stage_av(");
+        assert!(render.contains("} else if stage2_audio_is_frozen {"));
+        assert!(render.contains(
+            "maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?"
+        ));
+    }
+
+    /// The deviation that is easiest to miss because generic IC-LoRA does the
+    /// opposite: lip dub re-encodes the reference clip for stage 2 as well.
+    #[test]
+    fn lip_dub_keeps_the_reference_video_conditioning_in_stage_two() {
+        assert!(PipelineKind::LipDub.keeps_reference_video_in_stage_two());
+        assert!(!PipelineKind::IcLora.keeps_reference_video_in_stage_two());
+        assert!(!PipelineKind::TwoStage.keeps_reference_video_in_stage_two());
+
+        let render = runtime_function_source("fn render_real_two_stage_av(");
+        assert!(render.contains("plan.pipeline.keeps_reference_video_in_stage_two(),"));
+        assert!(render
+            .contains("matches!(plan.pipeline, PipelineKind::IcLora | PipelineKind::LipDub),"));
+    }
+
+    #[test]
+    fn lip_dub_conditions_on_audio_it_was_never_handed_and_renders_for_real() {
+        let plan = lip_dub_plan();
+
+        assert!(plan.conditioning.audio_path.is_none());
+        assert!(plan.execution_graph.uses_audio_conditioning);
+        assert!(plan.execution_graph.uses_reference_video_conditioning);
+        assert!(plan.execution_graph.wants_audio_output);
+        assert_eq!(plan.execution_graph.denoise_passes.len(), 2);
+        assert!(plan
+            .execution_graph
+            .denoise_passes
+            .iter()
+            .all(|pass| pass.uses_distilled_checkpoint && !pass.apply_distilled_lora));
+        assert!(
+            super::supports_real_video_path(&plan),
+            "a lip-dub plan must take the real path; the synthetic fallback would \
+             hand back a gradient that looks like a render"
+        );
+    }
+
+    #[test]
+    fn appended_audio_reference_tokens_are_frozen_and_stripped_before_unpatchify() {
+        let device = Device::Cpu;
+        let audio_shape = crate::ltx2::model::AudioLatentShape {
+            batch: 1,
+            channels: LTX2_AUDIO_LATENT_CHANNELS,
+            frames: 5,
+            mel_bins: LTX2_AUDIO_MEL_BINS,
+        };
+        let reference = Tensor::ones(
+            (1, LTX2_AUDIO_LATENT_CHANNELS, 3, LTX2_AUDIO_MEL_BINS),
+            DType::F32,
+            &device,
+        )
+        .unwrap();
+        let conditioning = StageAudioConditioning {
+            appended: vec![super::append_condition_from_audio_latents(&reference, 1.0).unwrap()],
+        };
+
+        let latents = Tensor::zeros(
+            (
+                1,
+                audio_shape.frames,
+                LTX2_AUDIO_LATENT_CHANNELS * LTX2_AUDIO_MEL_BINS,
+            ),
+            DType::F32,
+            &device,
+        )
+        .unwrap();
+        let positions = Tensor::zeros((1, 1, audio_shape.frames, 2), DType::F32, &device).unwrap();
+        let (appended, appended_positions) =
+            super::apply_appended_audio_conditioning(&latents, &positions, &conditioning).unwrap();
+        assert_eq!(appended.dims3().unwrap().1, 8);
+        assert_eq!(appended_positions.dims4().unwrap().2, 8);
+
+        // Generating audio: the render's own tokens denoise, the reference does not.
+        let mask =
+            super::build_audio_conditioning_denoise_mask(audio_shape, None, &conditioning, &device)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            mask.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+        );
+
+        // Stage 2: everything is frozen, reference included.
+        let frozen = super::build_frozen_audio_denoise_mask(audio_shape, &device).unwrap();
+        let mask = super::build_audio_conditioning_denoise_mask(
+            audio_shape,
+            Some(&frozen),
+            &conditioning,
+            &device,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(mask
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| *value == 0.0));
+
+        // The reference never reaches the audio decoder.
+        let stripped =
+            super::strip_appended_audio_conditioning(&appended, audio_shape.frames).unwrap();
+        assert_eq!(stripped.dims3().unwrap().1, audio_shape.frames);
     }
 
     #[test]

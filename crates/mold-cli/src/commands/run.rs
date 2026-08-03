@@ -344,6 +344,7 @@ fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
         Ltx2PipelineArg::Keyframe => Ltx2PipelineMode::Keyframe,
         Ltx2PipelineArg::A2Vid => Ltx2PipelineMode::A2Vid,
         Ltx2PipelineArg::Retake => Ltx2PipelineMode::Retake,
+        Ltx2PipelineArg::LipDub => Ltx2PipelineMode::LipDub,
     })
 }
 
@@ -352,16 +353,21 @@ fn resolve_ic_lora_pipeline(
     control: Option<&str>,
     has_video: bool,
 ) -> anyhow::Result<Option<Ltx2PipelineMode>> {
-    let Some(_) = control else {
+    let Some(control) = control else {
         return Ok(pipeline);
     };
     if !has_video {
         anyhow::bail!("--ic-lora-control requires --video");
     }
+    // Most adapters imply `--pipeline ic-lora`; the lip-dub adapter implies
+    // its own pipeline, which keeps the adapter loaded for both stages and
+    // conditions on the reference clip's speech.
+    let required = mold_core::ltx2_control::pipeline_for_control_id(control);
     match pipeline {
-        None | Some(Ltx2PipelineMode::IcLora) => Ok(Some(Ltx2PipelineMode::IcLora)),
+        None => Ok(Some(required)),
+        Some(pipeline) if pipeline == required => Ok(Some(required)),
         Some(other) => anyhow::bail!(
-            "--ic-lora-control conflicts with --pipeline {other}; use --pipeline ic-lora"
+            "--ic-lora-control {control} conflicts with --pipeline {other}; use --pipeline {required}"
         ),
     }
 }
@@ -1242,6 +1248,26 @@ mod tests {
                 Some(Ltx2PipelineMode::IcLora)
             );
         }
+    }
+
+    #[test]
+    fn lipdub_control_selects_the_lip_dub_pipeline_not_ic_lora() {
+        assert_eq!(
+            resolve_ic_lora_pipeline(None, Some("lipdub"), true).unwrap(),
+            Some(Ltx2PipelineMode::LipDub)
+        );
+        assert_eq!(
+            resolve_ic_lora_pipeline(Some(Ltx2PipelineMode::LipDub), Some("lipdub"), true).unwrap(),
+            Some(Ltx2PipelineMode::LipDub)
+        );
+        // Asking for the adapter on the generic pipeline is a mistake worth
+        // naming rather than honouring.
+        assert!(
+            resolve_ic_lora_pipeline(Some(Ltx2PipelineMode::IcLora), Some("lipdub"), true)
+                .unwrap_err()
+                .to_string()
+                .contains("use --pipeline lip-dub")
+        );
     }
 
     #[test]

@@ -183,7 +183,8 @@ export type Ltx2PipelineMode =
   | "ic-lora"
   | "keyframe"
   | "a2-vid"
-  | "retake";
+  | "retake"
+  | "lip-dub";
 
 /** Spatial latent upscale factor. Mirrors mold-core `Ltx2SpatialUpscale`
  * (`X1_5` → `"x1-5"`, `X2` → `"x2"`). */

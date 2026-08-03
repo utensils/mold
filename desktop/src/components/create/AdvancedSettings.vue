@@ -63,6 +63,11 @@ import {
   MAX_GUIDANCE_SKIP_STEP,
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import {
+  LIP_DUB_TIMING_HINT,
+  isControlAdapterPipeline,
+  pipelineForControlId,
+} from "@studio/lib/ltx2Control";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -216,17 +221,19 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "keyframe",
   "a2-vid",
   "retake",
+  "lip-dub",
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 function setPipeline(v: string) {
   props.form.pipeline = (v || null) as Ltx2PipelineMode | null;
-  if (props.form.pipeline !== "ic-lora") props.form.icLoraControl = null;
+  if (!isControlAdapterPipeline(props.form.pipeline)) props.form.icLoraControl = null;
   if (props.form.pipeline !== "retake") props.form.retakeRange = null;
 }
 function setControlAdapter(value: string) {
   props.form.icLoraControl = value || null;
-  if (value) props.form.pipeline = "ic-lora";
+  // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
+  if (value) props.form.pipeline = pipelineForControlId(value);
 }
 function setSpatial(v: string) {
   props.form.spatialUpscale = (v || null) as Ltx2SpatialUpscale | null;
@@ -661,6 +668,9 @@ function reset() {
               <option value="">Auto</option>
               <option v-for="opt in pipelineOptions" :key="opt" :value="opt">{{ opt }}</option>
             </select>
+            <p v-if="form.pipeline === 'lip-dub'" class="ms-hint" data-test="ltx2-lip-dub-hint">
+              {{ LIP_DUB_TIMING_HINT }}
+            </p>
 
             <label class="ms-label ms-label--mt">Reference control</label>
             <select

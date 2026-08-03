@@ -20,7 +20,8 @@ export type Ltx2PipelineMode =
   | "ic-lora"
   | "keyframe"
   | "a2-vid"
-  | "retake";
+  | "retake"
+  | "lip-dub";
 
 export type Ltx2SpatialUpscale = "x1-5" | "x2";
 export type Ltx2TemporalUpscale = "x2";

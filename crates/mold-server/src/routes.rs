@@ -619,10 +619,38 @@ fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
 /// Performs the identical pre-queue checks used by both `generate` and
 /// `generate_stream`: applies the default metadata setting, validates the
 /// request, checks model availability, and resolves the output directory.
+/// Pre-queue advisories about a request that was still accepted.
+///
+/// Dimension adjustments keep their own long-standing header and documented
+/// meaning; everything else rides a general one. Collapsing the two would make
+/// `x-mold-dimension-warning` mean "some warning", which a client that
+/// special-cases dimension handling could reasonably drop on the floor — and a
+/// lip-dub timing substitution is exactly the kind of thing that must not be
+/// silently discarded.
+#[derive(Debug, Default)]
+pub(crate) struct RequestWarnings {
+    dimension: Option<String>,
+    other: Vec<String>,
+}
+
+impl RequestWarnings {
+    fn is_empty(&self) -> bool {
+        self.dimension.is_none() && self.other.is_empty()
+    }
+
+    /// Every advisory, request-specific ones first.
+    fn all(&self) -> impl Iterator<Item = &str> {
+        self.other
+            .iter()
+            .map(String::as_str)
+            .chain(self.dimension.as_deref())
+    }
+}
+
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
+) -> Result<(Option<std::path::PathBuf>, RequestWarnings, Option<usize>), ApiError> {
     ensure_schedulable_device(state)?;
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
@@ -662,6 +690,14 @@ async fn prepare_generation(
     let planned_control = plan_builtin_ltx2_control(state, request).await?;
     let planned_camera_controls = plan_builtin_ltx2_camera_controls(state, request).await?;
 
+    // Lip dub's length and rate belong to the reference clip. Resolve them
+    // here, before validation and before the scheduler prices the job: a plan
+    // admitted for 97 frames that then renders 481 would blow its VRAM grant.
+    let mut warnings = RequestWarnings {
+        other: apply_lip_dub_reference_timing(state, request).await?,
+        ..RequestWarnings::default()
+    };
+
     let mut singleton_validation;
     let validation_request = if request.batch_size > 1 && state.scheduled_work.v2_authoritative() {
         singleton_validation = request.clone();
@@ -696,7 +732,8 @@ async fn prepare_generation(
         (output_dir, dim_warning)
     };
 
-    Ok((output_dir, dim_warning, preferred_gpu))
+    warnings.dimension = dim_warning;
+    Ok((output_dir, warnings, preferred_gpu))
 }
 
 pub(crate) async fn plan_builtin_ltx2_camera_controls(
@@ -869,13 +906,17 @@ async fn plan_builtin_ltx2_control(
     };
     let control = mold_core::ltx2_control::normalize_control_id(control);
     request.ic_lora_control = Some(control.clone());
+    // Lip dub is a pipeline, not just an adapter: routing it through `ic-lora`
+    // would load the right weights and then run a graph that drops them before
+    // stage 2 and never conditions on the reference voice at all.
+    let required = mold_core::ltx2_control::pipeline_for_control_id(&control);
     match request.pipeline {
-        None | Some(mold_core::Ltx2PipelineMode::IcLora) => {
-            request.pipeline = Some(mold_core::Ltx2PipelineMode::IcLora);
-        }
+        None => request.pipeline = Some(required),
+        Some(pipeline) if pipeline == required => {}
         Some(other) => {
             return Err(ApiError::validation(format!(
-                "ic_lora_control conflicts with pipeline={other}; use pipeline=ic-lora"
+                "ic_lora_control '{control}' conflicts with pipeline={other}; use \
+                 pipeline={required}"
             )));
         }
     }
@@ -903,6 +944,60 @@ async fn plan_builtin_ltx2_control(
         .resolved_models_dir()
         .join(mold_core::manifest::storage_path(manifest, file));
     Ok(Some((adapter, path)))
+}
+
+/// Replace a lip-dub request's `frames` / `fps` with the reference clip's own.
+///
+/// Lip dub re-voices an existing video, so its output has to sit on that
+/// video's timeline — upstream reads both numbers straight off the reference
+/// stream (`lipdub.py:190-192`). Doing it here, before validation and before
+/// the scheduler prices the job, is what keeps the VRAM grant honest: a plan
+/// admitted for 97 frames that then rendered a 20-second reference would be
+/// five times the size it was measured at.
+///
+/// Returns anything the caller asked for that the reference overrode, so the
+/// client is told rather than quietly retimed.
+async fn apply_lip_dub_reference_timing(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Result<Vec<String>, ApiError> {
+    if request.pipeline != Some(mold_core::Ltx2PipelineMode::LipDub) {
+        return Ok(Vec::new());
+    }
+    let probe = if let Some(bytes) = request.source_video.as_deref() {
+        mold_inference::ltx2::media::probe_video_bytes(bytes)
+    } else if let Some(path) = request.source_video_path.as_deref() {
+        let roots = state.config.read().await.resolved_media_roots();
+        let resolved = mold_core::resolve_server_media_path(path, &roots)
+            .map_err(|e| ApiError::validation(format!("source_video_path: {e}")))?;
+        mold_inference::ltx2::media::probe_video(&resolved)
+    } else {
+        // No reference at all: `validate_generate_request` says so far better
+        // than a probe failure would.
+        return Ok(Vec::new());
+    };
+    let probe = probe.map_err(|e| {
+        ApiError::validation(format!("could not read the lip-dub reference video: {e:#}"))
+    })?;
+    let frames = probe.frames.ok_or_else(|| {
+        ApiError::validation("the lip-dub reference video reports no frame count")
+    })?;
+    let timing = mold_core::validation::resolve_lip_dub_timing(
+        mold_core::validation::LipDubReference {
+            frames,
+            fps: probe.fps,
+            has_audio: probe.has_audio,
+        },
+        request.frames,
+        request.fps,
+    )
+    .map_err(ApiError::validation)?;
+    request.frames = Some(timing.frames);
+    request.fps = Some(timing.fps);
+    for warning in &timing.warnings {
+        tracing::info!("{warning}");
+    }
+    Ok(timing.warnings)
 }
 
 async fn materialize_builtin_ltx2_control(
@@ -1294,7 +1389,7 @@ async fn generate(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, warnings, preferred_gpu) = prepare_generation(&state, &mut req).await?;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     if req.batch_size > 1 {
@@ -1418,14 +1513,26 @@ async fn generate(
                     })?,
                 );
             }
-            if let Some(warning) = dim_warning {
-                match HeaderValue::from_str(&warning.replace('\n', " ")) {
+            if !warnings.is_empty() {
+                let mut set = |name: &'static str, text: String| match HeaderValue::from_str(
+                    &text.replace('\n', " "),
+                ) {
                     Ok(val) => {
-                        headers.insert("x-mold-dimension-warning", val);
+                        headers.insert(name, val);
                     }
                     Err(e) => {
-                        tracing::warn!("dimension warning could not be encoded as header: {e}");
+                        tracing::warn!("{name} could not be encoded as a header: {e}");
                     }
+                };
+                // Every advisory, for a client that wants them all …
+                set(
+                    "x-mold-request-warning",
+                    warnings.all().collect::<Vec<_>>().join("; "),
+                );
+                // … and the dimension header keeps carrying only dimension
+                // adjustments, which is what its documentation promises.
+                if let Some(dimension) = warnings.dimension.clone() {
+                    set("x-mold-dimension-warning", dimension);
                 }
             }
             // For video responses, return the actual video data (not the thumbnail)
@@ -2081,7 +2188,7 @@ async fn generate_stream(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, warnings, preferred_gpu) = prepare_generation(&state, &mut req).await?;
     if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
         return Err(ApiError::validation(
             "metadata-only SSE completions require server gallery output to be enabled",
@@ -2101,9 +2208,9 @@ async fn generate_stream(
             )
         })?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
-        if let Some(warning) = dim_warning {
+        for warning in warnings.all() {
             let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
-                message: warning,
+                message: warning.to_string(),
             }));
         }
         let authority = crate::batch_runtime::register_server_batch(&state);
@@ -2169,9 +2276,9 @@ async fn generate_stream(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
 
     // Send dimension warning before queuing so the client sees it early
-    if let Some(warning) = dim_warning {
+    for warning in warnings.all() {
         let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
-            message: warning,
+            message: warning.to_string(),
         }));
     }
 
@@ -6655,6 +6762,41 @@ mod tests {
             control_pending_download_bytes(adapter, &weights),
             adapter.total_size_bytes()
         );
+    }
+
+    /// A dimension header that carries non-dimension text is a header a client
+    /// can reasonably discard. Keep the two channels separate.
+    #[test]
+    fn request_warnings_keep_dimension_advisories_in_their_own_channel() {
+        let warnings = super::RequestWarnings {
+            dimension: Some("dimensions adjusted from 1000x1000 to 1024x1024".to_string()),
+            other: vec!["lip-dub takes its length from the reference video".to_string()],
+        };
+
+        // Everything, request-specific first, for the general header.
+        assert_eq!(
+            warnings.all().collect::<Vec<_>>(),
+            vec![
+                "lip-dub takes its length from the reference video",
+                "dimensions adjusted from 1000x1000 to 1024x1024",
+            ]
+        );
+        // The dimension header still means exactly what its docs say.
+        assert_eq!(
+            warnings.dimension.as_deref(),
+            Some("dimensions adjusted from 1000x1000 to 1024x1024")
+        );
+
+        let timing_only = super::RequestWarnings {
+            dimension: None,
+            other: vec!["lip-dub takes its frame rate from the reference video".to_string()],
+        };
+        assert!(!timing_only.is_empty());
+        assert!(
+            timing_only.dimension.is_none(),
+            "a timing substitution must not be published as a dimension adjustment"
+        );
+        assert!(super::RequestWarnings::default().is_empty());
     }
 
     #[tokio::test]

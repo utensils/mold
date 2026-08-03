@@ -370,6 +370,7 @@ impl Ltx2Engine {
                 Ltx2PipelineMode::Keyframe => PipelineKind::Keyframe,
                 Ltx2PipelineMode::A2Vid => PipelineKind::A2Vid,
                 Ltx2PipelineMode::Retake => PipelineKind::Retake,
+                Ltx2PipelineMode::LipDub => PipelineKind::LipDub,
             });
         }
 
@@ -445,6 +446,42 @@ impl Ltx2Engine {
         let temporal_upsampler_path =
             assets::resolve_temporal_upscaler_path(&self.paths, req.temporal_upscale)?
                 .map(|path| path.to_string_lossy().to_string());
+        // Lip dub re-voices an existing clip, so its length and rate belong to
+        // the reference video, not the request. The server pre-fills the same
+        // numbers so validation and VRAM admission see the truth; deriving
+        // them here from the same helper keeps a forced-local run — which
+        // never passes through the server — on the identical timeline.
+        let (num_frames, frame_rate) = match pipeline {
+            PipelineKind::LipDub => {
+                let reference = conditioning.video_path.as_deref().context(
+                    "the LTX-2 lip-dub pipeline requires a reference video (source_video)",
+                )?;
+                let probe = media::probe_video(Path::new(reference)).with_context(|| {
+                    format!("failed to read the lip-dub reference video '{reference}'")
+                })?;
+                let frames = probe.frames.with_context(|| {
+                    format!("lip-dub reference video '{reference}' reports no frame count")
+                })?;
+                let timing = mold_core::validation::resolve_lip_dub_timing(
+                    mold_core::validation::LipDubReference {
+                        frames,
+                        fps: probe.fps,
+                        has_audio: probe.has_audio,
+                    },
+                    req.frames,
+                    req.fps,
+                )
+                .map_err(anyhow::Error::msg)?;
+                // The server says this too, but a forced-local run never sees
+                // that path — and a silently retimed dub looks fine and is out
+                // of sync, so it is worth saying twice.
+                for warning in &timing.warnings {
+                    self.info(warning);
+                }
+                (timing.frames, timing.fps)
+            }
+            _ => (req.frames.unwrap_or(97), req.fps.unwrap_or(24)),
+        };
 
         Ok(Ltx2GeneratePlan {
             hdr_exr_dir: req.hdr_exr_dir.clone(),
@@ -486,8 +523,8 @@ impl Ltx2Engine {
             seed: req.seed.unwrap_or_else(rand_seed),
             width: req.width,
             height: req.height,
-            num_frames: req.frames.unwrap_or(97),
-            frame_rate: req.fps.unwrap_or(24),
+            num_frames,
+            frame_rate,
             num_inference_steps: req.steps,
             guidance: req.guidance,
             quantization: self.request_quantization(),

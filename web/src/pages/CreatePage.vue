@@ -2055,6 +2055,17 @@ function validateSubmit(): boolean {
       return false;
     }
   }
+  // Lip dub always renders in two stages, so stage 1 halves both axes and
+  // needs them on the VAE's /32 latent grid afterwards.
+  if (
+    form.state.value.pipeline === "lip-dub" &&
+    (form.state.value.width % 64 !== 0 || form.state.value.height % 64 !== 0)
+  ) {
+    composerError.value =
+      "Lip dub renders in two stages, so width and height must be multiples of 64.";
+    showAdvanced.value = true;
+    return false;
+  }
   // A value the wire cannot carry — an unparsable block list, a fractional
   // skip stride — would otherwise be dropped on the way out, quietly
   // rendering with the pipeline's own constants.
