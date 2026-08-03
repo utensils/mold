@@ -2151,9 +2151,29 @@ fn blend_conditioned_denoised(
 /// the user a correctly sized video with no picture while hiding the
 /// corruption.
 fn checkpoint_has_no_weights(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(metadata) => !metadata.is_file() || metadata.len() == 0,
-        Err(_) => true,
+    stat_reports_no_weights(
+        std::fs::metadata(path)
+            .map(|metadata| (metadata.is_file(), metadata.len()))
+            .map_err(|err| err.kind()),
+    )
+}
+
+/// Classify a checkpoint's stat result as "no weights to read".
+///
+/// Split from the filesystem call so the permission and I/O cases are testable:
+/// the suite runs under a mapped root user, where a `chmod`-based fixture would
+/// not actually deny anything.
+///
+/// Only [`std::io::ErrorKind::NotFound`] means absent. A permission or
+/// transient I/O error is a real failure and must fall through to the load,
+/// which reports it with the checkpoint named — treating it as "no weights"
+/// would hide it behind exactly the plausible-looking gradient this module
+/// exists to stop producing.
+fn stat_reports_no_weights(stat: std::result::Result<(bool, u64), std::io::ErrorKind>) -> bool {
+    match stat {
+        Ok((is_file, len)) => !is_file || len == 0,
+        Err(std::io::ErrorKind::NotFound) => true,
+        Err(_) => false,
     }
 }
 
@@ -7123,6 +7143,30 @@ mod tests {
         );
 
         assert!(super::checkpoint_has_no_weights(temp_dir.path()));
+    }
+
+    /// An unreadable checkpoint is not an absent one. A permission or transient
+    /// I/O error must reach the loader — which names the file — rather than
+    /// being classified as "nothing downloaded" and rendered as a gradient.
+    #[test]
+    fn stat_reports_no_weights_only_treats_not_found_as_absent() {
+        use std::io::ErrorKind;
+
+        assert!(super::stat_reports_no_weights(Err(ErrorKind::NotFound)));
+        assert!(super::stat_reports_no_weights(Ok((true, 0))));
+        assert!(super::stat_reports_no_weights(Ok((false, 4096))));
+        assert!(!super::stat_reports_no_weights(Ok((true, 4))));
+
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+            ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !super::stat_reports_no_weights(Err(kind)),
+                "{kind:?} is a real failure and must not select the placeholder path"
+            );
+        }
     }
 
     #[test]
