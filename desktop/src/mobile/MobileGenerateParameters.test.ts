@@ -72,6 +72,31 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
+  it("offers a duration slider while retaining exact video fields", async () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+      default_fps: 24,
+      max_runtime_seconds: 20,
+      max_frames_absolute: 604,
+      frame_step: 8,
+    } as ModelEntry;
+    const { wrapper, form } = mountParameters(
+      { ...formFor("ltx2", model.name), frames: 97, fps: 24 },
+      [],
+      true,
+      [],
+      [cameraControl],
+      model,
+    );
+    expect(wrapper.get("[data-test='mobile-advanced-duration']").text()).toContain("4.0s");
+    await wrapper.get("[data-test='mobile-advanced-duration'] input[type='range']").setValue("241");
+    expect(form.frames).toBe(241);
+    expect(wrapper.find("[data-test='mobile-frames']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-fps']").exists()).toBe(true);
+  });
+
   it("renders host-provided reference controls and guide copy", async () => {
     const adapters: Ltx2ControlAdapterInfo[] = [
       {

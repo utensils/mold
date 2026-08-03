@@ -4,6 +4,7 @@ import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -591,6 +592,16 @@ function resetSettings() {
           label="Prompt strength"
           :value-label="form.guidance.toFixed(1)"
           @update:model-value="form.guidance = $event"
+        />
+      </div>
+
+      <!-- Duration is the human-facing video control; exact frames/FPS stay in Advanced. -->
+      <div v-if="caps.supportsVideo && !isSequence" class="ms-field">
+        <VideoDurationSlider
+          :frames="form.frames"
+          :fps="form.fps"
+          :model="selectedModel"
+          @update:frames="form.frames = $event"
         />
       </div>
 

@@ -3316,7 +3316,11 @@ onBeforeUnmount(() => {
               >{{ galleryEntries.length }} prints</span
             >
           </div>
-          <RecentGrid :entries="galleryEntries" @open="openItem" />
+          <RecentGrid
+            :entries="galleryEntries"
+            :limit="isPhone ? 18 : 50"
+            @open="openItem"
+          />
         </section>
       </main>
 

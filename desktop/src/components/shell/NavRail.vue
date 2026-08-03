@@ -14,7 +14,13 @@ import {
   sequenceToVM,
   type ActivityJobVM,
 } from "@studio/lib/activity";
-import { useGenerationStore, jobStatusCode, railOrder, type Job } from "../../stores/generation";
+import {
+  GENERATION_HISTORY_LIMIT,
+  useGenerationStore,
+  jobStatusCode,
+  railOrder,
+  type Job,
+} from "../../stores/generation";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useComposerStore } from "../../stores/composer";
@@ -99,15 +105,16 @@ function isActive(path: string): boolean {
   return route.path === path;
 }
 
-/** Queue order: every live job first (submission order), then the freshest
- *  finished prints — the rail is a working queue, not a full history. */
+/** Queue order: every live job first (submission order), then enough recent
+ * finished prints to use the rail's available height. The flex child scrolls,
+ * so a tall window becomes useful history without displacing status/settings. */
 const railJobs = computed<Job[]>(() => {
   const live = railOrder(
     generation.jobs.filter((j) => j.status !== "complete" && j.status !== "error"),
   );
   const done = generation.jobs
     .filter((j) => j.status === "complete" || j.status === "error")
-    .slice(-3)
+    .slice(-GENERATION_HISTORY_LIMIT)
     .reverse();
   return [...live, ...done];
 });
@@ -197,6 +204,18 @@ function selectPrint(job: Job) {
   draft.output = "single";
   const request = job.request;
   if (request) composer.set({ request });
+  if (job.status === "complete" && !job.resultUrl) {
+    if (job.result?.filename) {
+      void generation.refreshRemoteResultUrl(job.clientId).catch(() => {
+        toasts.push("Open this older print in Library");
+        void router.push("/library");
+      });
+    } else {
+      toasts.push("Open this older print in Library");
+      void router.push("/library");
+      return;
+    }
+  }
   void router.push("/create");
 }
 
@@ -291,6 +310,7 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
           v-for="job in railJobs"
           :key="job.clientId"
           href="#"
+          data-test="developing-print"
           class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
           @click.prevent="selectPrint(job)"
           @contextmenu.prevent="contextMenu.open($event, jobMenu(job))"

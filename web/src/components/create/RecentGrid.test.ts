@@ -52,6 +52,12 @@ describe("RecentGrid", () => {
     expect(more.text()).toContain("30");
   });
 
+  it("fills large web workspaces when given the desktop history limit", () => {
+    const entries = Array.from({ length: 60 }, (_, i) => entry(`p${i}.png`));
+    const w = mountGrid(entries, 50);
+    expect(w.findAll("[data-test='recent-tile']")).toHaveLength(50);
+  });
+
   it("does not render a view-all link when everything fits", () => {
     const w = mountGrid([entry("a.png")], 12);
     expect(w.find("[data-test='recent-view-all']").exists()).toBe(false);

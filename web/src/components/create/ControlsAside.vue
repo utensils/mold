@@ -12,6 +12,7 @@ import { useRouter } from "vue-router";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -365,6 +366,18 @@ function lockLastSeed() {
         :max="60"
         :value-label="`${modelValue.steps} steps`"
         @update:model-value="patch({ steps: $event })"
+      />
+    </div>
+
+    <div
+      v-if="capabilities.supportsVideo && !sequenceMode"
+      class="controls__group"
+    >
+      <VideoDurationSlider
+        :frames="modelValue.frames ?? model?.default_frames ?? 25"
+        :fps="modelValue.fps ?? model?.default_fps ?? 24"
+        :model="model"
+        @update:frames="patch({ frames: $event })"
       />
     </div>
 

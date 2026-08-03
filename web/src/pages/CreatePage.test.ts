@@ -550,6 +550,7 @@ describe("CreatePage layout and behavior", () => {
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
     }
+    expect(wrapper.findComponent(RecentGridStub).props("limit")).toBe(18);
     wrapper.unmount();
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());
@@ -560,6 +561,7 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
     const feed = wrapper.findComponent(RecentGridStub);
     expect(feed.props("entries")).toEqual([entry]);
+    expect(feed.props("limit")).toBe(50);
   });
 
   it("dismisses the Templates popover with Escape and outside click", async () => {

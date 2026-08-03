@@ -6,8 +6,8 @@
  * narrow, and the format/type/time badges stacked on top of each other. The
  * prototype's Recent block is a plain fixed grid of square tiles, so this
  * component renders one `MediaTile` per print — square, aspect-fit (cover)
- * thumbnails, a single non-overlapping video badge — capped to a handful with
- * a "view all" link into the gallery for the rest.
+ * thumbnails, a single non-overlapping video badge — long enough to fill a
+ * large Create workspace, with a "view all" link into the gallery for the rest.
  */
 import { computed } from "vue";
 import { RouterLink } from "vue-router";

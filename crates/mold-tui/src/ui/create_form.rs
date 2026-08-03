@@ -215,10 +215,15 @@ pub fn visible_rows(caps: &ModelCapabilities, adv: &AdvancedState) -> Vec<Create
         CreateRow::Field(ParamField::Size),
         CreateRow::Field(ParamField::Steps),
         CreateRow::Field(ParamField::Guidance),
+    ];
+    if caps.supports_video {
+        rows.push(CreateRow::Field(ParamField::Duration));
+    }
+    rows.extend([
         CreateRow::Field(ParamField::Seed),
         CreateRow::Field(ParamField::Batch),
         CreateRow::AdvancedHeader,
-    ];
+    ]);
     if adv.open {
         for sec in advanced_sections(caps) {
             rows.push(CreateRow::Section(sec));
@@ -487,11 +492,13 @@ mod tests {
         assert!(video_caps.supports_video);
         let rows = visible_rows(&video_caps, &open_state(None));
         assert!(rows.contains(&CreateRow::Section(AdvSection::Video)));
+        assert!(rows.contains(&CreateRow::Field(ParamField::Duration)));
 
         let image_caps = capabilities_for_family("flux");
         assert!(!image_caps.supports_video);
         let rows = visible_rows(&image_caps, &open_state(None));
         assert!(!rows.contains(&CreateRow::Section(AdvSection::Video)));
+        assert!(!rows.contains(&CreateRow::Field(ParamField::Duration)));
     }
 
     #[test]

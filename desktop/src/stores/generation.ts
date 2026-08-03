@@ -48,6 +48,11 @@ export {
   type JobStatus,
 } from "../lib/generationJob";
 
+/** Settled prints retained for the activity rail's scrollable history. */
+export const GENERATION_HISTORY_LIMIT = 50;
+/** Only the freshest jobs retain decoded/encoded media in Create memory. */
+export const GENERATION_RICH_HISTORY_LIMIT = 12;
+
 /** Where a batch runs — mirrors `HostRoute` from the hosts store. */
 export interface JobRoute {
   hostId: string;
@@ -452,7 +457,7 @@ export const useGenerationStore = defineStore("generation", {
           );
           const pendingBatches = new Set(this.pendingConsumerBatchIds);
           this.prune(
-            12,
+            GENERATION_HISTORY_LIMIT,
             jobs.map((job) => job.clientId),
             this.jobs.filter((job) => !pendingBatches.has(job.batchId)).map((job) => job.clientId),
           );
@@ -536,6 +541,23 @@ export const useGenerationStore = defineStore("generation", {
           (job.status === "complete" || job.status === "error") &&
           (!eligible || eligible.has(job.clientId)),
       );
+      const rich = new Set(
+        finished.slice(-Math.min(keep, GENERATION_RICH_HISTORY_LIMIT)).map((job) => job.clientId),
+      );
+      for (const clientId of preserve) rich.add(clientId);
+      for (const job of finished) {
+        if (rich.has(job.clientId)) continue;
+        if (job.result) job.result = metadataOnlyResult(job.result);
+        if (job.resultUrlIsObjectUrl && job.resultUrl) {
+          URL.revokeObjectURL(job.resultUrl);
+          job.resultUrl = null;
+          job.resultUrlIsObjectUrl = false;
+        }
+        if (job.previewUrl) {
+          URL.revokeObjectURL(job.previewUrl);
+          job.previewUrl = null;
+        }
+      }
       const excess = finished.length - keep;
       if (excess <= 0) return;
       const drop = new Set(

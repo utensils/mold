@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
@@ -120,6 +120,42 @@ describe("NavRail developing jobs", () => {
       expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]),
     );
     expect(jobs.classes()).not.toContain("max-h-44");
+  });
+
+  it("uses the available rail space for a longer finished-print history", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    generation.jobs = Array.from({ length: 12 }, (_, index) => ({
+      clientId: index + 1,
+      model: "flux-dev:q8",
+      prompt: `finished print ${index + 1}`,
+      status: "complete",
+    })) as never;
+    await flushPromises();
+
+    expect(wrapper.findAll("[data-test='developing-print']")).toHaveLength(12);
+    expect(wrapper.get("[data-test='developing-jobs']").classes()).toContain("overflow-y-auto");
+  });
+
+  it("reacquires a compacted print when its history row is opened", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    const refresh = vi.spyOn(generation, "refreshRemoteResultUrl").mockResolvedValue();
+    generation.jobs = [
+      {
+        clientId: 13,
+        model: "flux-dev:q8",
+        prompt: "older compacted print",
+        status: "complete",
+        resultUrl: null,
+        result: { filename: "older.png", image: "" },
+        request: { prompt: "older compacted print", model: "flux-dev:q8" },
+      } as never,
+    ];
+    await flushPromises();
+
+    await wrapper.get("[data-test='developing-print']").trigger("click");
+    expect(refresh).toHaveBeenCalledWith(13);
   });
 
   // G14 hole: the rail only ever read `generation.jobs`, so a running sequence
