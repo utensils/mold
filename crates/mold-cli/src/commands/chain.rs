@@ -80,10 +80,6 @@ pub fn decide_chain_routing(
         return ChainRoutingDecision::SingleClip;
     };
 
-    // Every LTX-2 pipeline renders sequence clips, so chain capability is a
-    // property of the family, not of whether the model name says "distilled".
-    // The old name test also rejected opaque `cv:` / `hf:` catalog IDs that
-    // the server and the Studio surfaces both accept.
     // Auto-chaining is an LTX-2 routing behaviour. Every LTX-2 pipeline now
     // renders sequence clips, so the old `model.contains("distilled")` test is
     // gone — it also rejected opaque `cv:` / `hf:` catalog IDs the server and

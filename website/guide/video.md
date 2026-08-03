@@ -7,7 +7,7 @@ title: Video Generation
 mold supports generating video clips using LTX Video and LTX-2 models. Every
 LTX-2 checkpoint can chain multiple clips together for longer videos with
 scene-by-scene direction. A dev checkpoint renders its clips through the
-two-stage pipeline, so expect roughly twice the wall time per clip than a
+two-stage pipeline, so expect roughly twice the wall time per clip as a
 distilled one — stage 1 runs classifier-free guidance as two sequential
 forward passes.
 
