@@ -4544,7 +4544,10 @@ describe("MobileApp host and catalog coordination", () => {
 
     await scanFromMachines();
 
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on iPhone",
+      kind: "iphone",
+    });
     expect(wrapper?.get(".error-text").text()).toContain("different Mold host");
     expect(invoke).not.toHaveBeenCalledWith("keychain_set_api_key", expect.anything());
   });
@@ -4780,7 +4783,10 @@ describe("MobileApp host and catalog coordination", () => {
     );
 
     expect(onOpenDeepLinks).toHaveBeenCalledOnce();
-    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token");
+    expect(claimPairingSession).toHaveBeenCalledWith("http://pair.local:7680", "one-time-token", {
+      name: "Mold on iPhone",
+      kind: "iphone",
+    });
   });
 
   it("stops listening for iOS pairing links when the mobile shell unmounts", async () => {

@@ -378,6 +378,25 @@ const V15_SCHEDULER_ESTIMATE_RUNTIME: &str = r#"
 ALTER TABLE scheduler_estimates ADD COLUMN ewma_runtime_ms REAL;
 "#;
 
+/// v16 → individually revocable credentials created by mobile pairing.
+///
+/// Only SHA-256 digests of the high-entropy bearer credentials are retained.
+/// Revocation deletes the row, so a copied client credential stops working
+/// immediately and stays revoked across server restarts.
+const V16_PAIRED_CLIENTS: &str = r#"
+CREATE TABLE paired_clients (
+    id                   TEXT PRIMARY KEY,
+    server_instance_id   TEXT NOT NULL,
+    name                 TEXT NOT NULL,
+    client_kind          TEXT NOT NULL,
+    credential_hash      BLOB NOT NULL UNIQUE CHECK (length(credential_hash) = 32),
+    created_at_ms        INTEGER NOT NULL,
+    last_used_at_ms      INTEGER
+);
+CREATE INDEX idx_paired_clients_instance_created_at
+ON paired_clients(server_instance_id, created_at_ms DESC);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -441,11 +460,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 15,
         kind: MigrationKind::Sql(V15_SCHEDULER_ESTIMATE_RUNTIME),
     },
+    Migration {
+        version: 16,
+        kind: MigrationKind::Sql(V16_PAIRED_CLIENTS),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -821,7 +844,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 15);
+        assert_eq!(SCHEMA_VERSION, 16);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1152,8 +1175,8 @@ mod v9_tests {
     use rusqlite::Connection;
 
     #[test]
-    fn schema_version_is_thirteen() {
-        assert_eq!(SCHEMA_VERSION, 15);
+    fn schema_version_is_current() {
+        assert_eq!(SCHEMA_VERSION, 16);
     }
 
     #[test]
@@ -1234,7 +1257,7 @@ mod v15_tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 15);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         let runtime: Option<f64> = conn
             .query_row(
                 "SELECT ewma_runtime_ms FROM scheduler_estimates WHERE estimate_key = 'legacy'",

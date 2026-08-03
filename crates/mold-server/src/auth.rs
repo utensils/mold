@@ -8,7 +8,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -30,28 +30,54 @@ pub type AuthState = Option<Arc<ApiKeySet>>;
 
 /// Set of valid API keys loaded from `MOLD_API_KEY`.
 pub struct ApiKeySet {
-    keys: HashSet<String>,
+    operator_keys: HashSet<String>,
     gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
     pairing_sessions: Mutex<HashMap<[u8; 32], PairingSession>>,
+    paired_clients: Mutex<HashMap<[u8; 32], PairedClientAccess>>,
+    metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    server_instance_id: Arc<String>,
 }
 
 struct PairingSession {
-    api_key: String,
     expires_at: u64,
+}
+
+#[derive(Clone)]
+struct PairedClientAccess {
+    id: String,
+    name: String,
+    client_kind: String,
+    created_at_ms: i64,
+    last_used_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthenticationKind {
+    Operator,
+    PairedClient,
 }
 
 impl ApiKeySet {
     pub fn new(keys: HashSet<String>) -> Self {
-        Self::try_new(keys).expect("OS randomness is required for gallery media authentication")
+        Self::try_new(keys, Arc::new(None), Arc::new(String::new()))
+            .expect("OS randomness is required for gallery media authentication")
     }
 
-    fn try_new(keys: HashSet<String>) -> Result<Self, getrandom::Error> {
+    fn try_new(
+        keys: HashSet<String>,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+        server_instance_id: Arc<String>,
+    ) -> Result<Self, getrandom::Error> {
         let mut gallery_signing_secret = [0_u8; GALLERY_SIGNING_SECRET_BYTES];
         getrandom::fill(&mut gallery_signing_secret)?;
+        let paired_clients = load_paired_clients(&metadata_db, &server_instance_id);
         Ok(Self {
-            keys,
+            operator_keys: keys,
             gallery_signing_secret,
             pairing_sessions: Mutex::new(HashMap::new()),
+            paired_clients: Mutex::new(paired_clients),
+            metadata_db,
+            server_instance_id,
         })
     }
 
@@ -61,21 +87,69 @@ impl ApiKeySet {
         gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
     ) -> Self {
         Self {
-            keys,
+            operator_keys: keys,
             gallery_signing_secret,
             pairing_sessions: Mutex::new(HashMap::new()),
+            paired_clients: Mutex::new(HashMap::new()),
+            metadata_db: Arc::new(None),
+            server_instance_id: Arc::new(String::new()),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_metadata_db(
+        keys: HashSet<String>,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+        server_instance_id: impl Into<String>,
+    ) -> Self {
+        Self::try_new(keys, metadata_db, Arc::new(server_instance_id.into())).unwrap()
+    }
+
     pub fn contains(&self, candidate: &str) -> bool {
+        self.authenticate(candidate).is_some()
+    }
+
+    fn authenticate(&self, candidate: &str) -> Option<AuthenticationKind> {
         // Check ALL keys unconditionally to avoid leaking which key matched
         // via timing side-channel (`.any()` would short-circuit on first match).
         let candidate_bytes = candidate.as_bytes();
         let mut found = subtle::Choice::from(0u8);
-        for k in &self.keys {
+        for k in &self.operator_keys {
             found |= k.as_bytes().ct_eq(candidate_bytes);
         }
-        found.into()
+        if bool::from(found) {
+            return Some(AuthenticationKind::Operator);
+        }
+
+        let candidate_hash: [u8; 32] = Sha256::digest(candidate_bytes).into();
+        let now_ms = unix_timestamp_ms();
+        let mut matched = None;
+        let mut clients = self
+            .paired_clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (hash, client) in clients.iter_mut() {
+            if bool::from(hash.ct_eq(&candidate_hash)) {
+                matched = Some(client);
+            }
+        }
+        let client = matched?;
+        if client
+            .last_used_at_ms
+            .is_none_or(|last_used| now_ms.saturating_sub(last_used) >= 60_000)
+        {
+            client.last_used_at_ms = Some(now_ms);
+            if let Some(db) = self.metadata_db.as_ref() {
+                if let Err(error) = mold_db::paired_clients::PairedClients::new(db).touch(
+                    &self.server_instance_id,
+                    &client.id,
+                    now_ms,
+                ) {
+                    warn!(error = %format!("{error:#}"), client_id = %client.id, "failed to persist paired client activity");
+                }
+            }
+        }
+        Some(AuthenticationKind::PairedClient)
     }
 
     fn audit_identity(&self, candidate: &str) -> String {
@@ -122,13 +196,10 @@ impl ApiKeySet {
         )
     }
 
-    /// Create a one-time, short-lived handoff for the API key that authorized
-    /// the Settings request. Only the HMAC of the random token is retained;
-    /// the bearer value exists solely in the no-store response and QR code.
-    pub(crate) fn issue_pairing_token(
-        &self,
-        api_key: String,
-    ) -> Result<(String, u64), getrandom::Error> {
+    /// Create a one-time, short-lived handoff authorizing a new paired grant.
+    /// Only the HMAC of the random token is retained; the bearer value exists
+    /// solely in the no-store response and QR code.
+    pub(crate) fn issue_pairing_token(&self) -> Result<(String, u64), getrandom::Error> {
         let mut token_bytes = [0_u8; PAIRING_TOKEN_BYTES];
         getrandom::fill(&mut token_bytes)?;
         let token = URL_SAFE_NO_PAD.encode(token_bytes);
@@ -149,19 +220,19 @@ impl ApiKeySet {
                 sessions.remove(&oldest);
             }
         }
-        sessions.insert(
-            token_hash,
-            PairingSession {
-                api_key,
-                expires_at,
-            },
-        );
+        sessions.insert(token_hash, PairingSession { expires_at });
         Ok((token, expires_at))
     }
 
-    /// Consume a pairing token exactly once. Removal happens before the API
-    /// key is returned so concurrent redemption attempts cannot both win.
-    pub(crate) fn claim_pairing_token(&self, token: &str) -> Option<String> {
+    /// Consume a pairing token exactly once and mint a distinct durable grant.
+    /// The operator credential that opened Settings is never copied to the
+    /// paired client, so this grant can be revoked independently.
+    pub(crate) fn claim_pairing_token(
+        &self,
+        token: &str,
+        client_name: &str,
+        client_kind: &str,
+    ) -> anyhow::Result<Option<String>> {
         let token_hash = self.pairing_token_hash(token);
         let now = unix_timestamp();
         let mut sessions = self
@@ -169,10 +240,84 @@ impl ApiKeySet {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sessions.retain(|_, session| session.expires_at > now);
-        sessions
+        let session = sessions
             .remove(&token_hash)
-            .filter(|session| session.expires_at > now)
-            .map(|session| session.api_key)
+            .filter(|session| session.expires_at > now);
+        drop(sessions);
+        if session.is_none() {
+            return Ok(None);
+        }
+        let Some(db) = self.metadata_db.as_ref() else {
+            anyhow::bail!("paired access requires the Mold metadata database");
+        };
+
+        let mut key_bytes = [0_u8; 32];
+        getrandom::fill(&mut key_bytes)?;
+        let credential = format!("mold_pair_{}", URL_SAFE_NO_PAD.encode(key_bytes));
+        let credential_hash: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
+        let id = format!("pair_{}", URL_SAFE_NO_PAD.encode(&credential_hash[..12]));
+        let created_at_ms = unix_timestamp_ms();
+        let access = PairedClientAccess {
+            id: id.clone(),
+            name: normalized_client_name(client_name),
+            client_kind: normalized_client_kind(client_kind),
+            created_at_ms,
+            last_used_at_ms: None,
+        };
+        mold_db::paired_clients::PairedClients::new(db).insert(
+            &mold_db::paired_clients::PairedClient {
+                id,
+                server_instance_id: self.server_instance_id.as_ref().clone(),
+                name: access.name.clone(),
+                client_kind: access.client_kind.clone(),
+                credential_hash,
+                created_at_ms,
+                last_used_at_ms: None,
+            },
+        )?;
+        self.paired_clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(credential_hash, access);
+        Ok(Some(credential))
+    }
+
+    pub(crate) fn pairing_available(&self) -> bool {
+        self.metadata_db.is_some()
+    }
+
+    pub(crate) fn paired_clients(&self) -> Vec<PairedClientSummary> {
+        let mut clients = self
+            .paired_clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .map(|client| PairedClientSummary {
+                id: client.id,
+                name: client.name,
+                client_kind: client.client_kind,
+                created_at_ms: client.created_at_ms,
+                last_used_at_ms: client.last_used_at_ms,
+            })
+            .collect::<Vec<_>>();
+        clients.sort_by_key(|client| std::cmp::Reverse(client.created_at_ms));
+        clients
+    }
+
+    pub(crate) fn revoke_paired_client(&self, id: &str) -> anyhow::Result<bool> {
+        let Some(db) = self.metadata_db.as_ref() else {
+            anyhow::bail!("paired access requires the Mold metadata database");
+        };
+        let revoked =
+            mold_db::paired_clients::PairedClients::new(db).revoke(&self.server_instance_id, id)?;
+        if revoked {
+            self.paired_clients
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|_, client| client.id != id);
+        }
+        Ok(revoked)
     }
 
     fn pairing_token_hash(&self, token: &str) -> [u8; 32] {
@@ -195,6 +340,63 @@ impl ApiKeySet {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PairedClientSummary {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) client_kind: String,
+    pub(crate) created_at_ms: i64,
+    pub(crate) last_used_at_ms: Option<i64>,
+}
+
+fn load_paired_clients(
+    metadata_db: &Arc<Option<mold_db::MetadataDb>>,
+    server_instance_id: &str,
+) -> HashMap<[u8; 32], PairedClientAccess> {
+    let Some(db) = metadata_db.as_ref() else {
+        return HashMap::new();
+    };
+    match mold_db::paired_clients::PairedClients::new(db).list(server_instance_id) {
+        Ok(clients) => clients
+            .into_iter()
+            .map(|client| {
+                (
+                    client.credential_hash,
+                    PairedClientAccess {
+                        id: client.id,
+                        name: client.name,
+                        client_kind: client.client_kind,
+                        created_at_ms: client.created_at_ms,
+                        last_used_at_ms: client.last_used_at_ms,
+                    },
+                )
+            })
+            .collect(),
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "failed to load paired clients");
+            HashMap::new()
+        }
+    }
+}
+
+fn normalized_client_name(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "Mold mobile".to_string()
+    } else {
+        value.chars().take(80).collect()
+    }
+}
+
+fn normalized_client_kind(value: &str) -> String {
+    match value.trim() {
+        "iphone" => "iphone",
+        "ipad" => "ipad",
+        _ => "mobile",
+    }
+    .to_string()
+}
+
 /// Marker proving normal API-key authentication succeeded for this request.
 /// The matched API key itself deliberately never leaves the middleware.
 #[derive(Clone)]
@@ -205,13 +407,10 @@ pub(crate) struct ApiKeyAuthenticated {
     pub(crate) identity: String,
 }
 
-/// Present only on an authenticated pairing-session creation request. It is
-/// deliberately scoped to that exact route so ordinary handlers never gain
-/// access to a caller's durable credential.
+/// Present only when the request used an operator-configured credential.
+/// Paired credentials deliberately cannot mint or manage other grants.
 #[derive(Clone)]
-pub(crate) struct PairingAuthority {
-    pub(crate) api_key: String,
-}
+pub(crate) struct PairingAuthority;
 
 #[derive(Debug, Serialize)]
 struct AuthError {
@@ -228,6 +427,13 @@ struct AuthError {
 ///
 /// Returns `None` when the variable is unset or empty (auth disabled).
 pub fn load_api_keys() -> anyhow::Result<AuthState> {
+    load_api_keys_with_db(Arc::new(None), Arc::new(String::new()))
+}
+
+pub(crate) fn load_api_keys_with_db(
+    metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    server_instance_id: Arc<String>,
+) -> anyhow::Result<AuthState> {
     let raw = match std::env::var("MOLD_API_KEY") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(None),
@@ -255,7 +461,7 @@ pub fn load_api_keys() -> anyhow::Result<AuthState> {
     }
 
     tracing::info!(num_keys = keys.len(), "API key authentication enabled");
-    let key_set = ApiKeySet::try_new(keys)
+    let key_set = ApiKeySet::try_new(keys, metadata_db, server_instance_id)
         .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
     Ok(Some(Arc::new(key_set)))
 }
@@ -307,17 +513,13 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
     match request.headers().get("x-api-key") {
         Some(value) => {
             let candidate = value.to_str().unwrap_or("").to_string();
-            if key_set.contains(&candidate) {
+            if let Some(kind) = key_set.authenticate(&candidate) {
                 let identity = key_set.audit_identity(&candidate);
                 request
                     .extensions_mut()
                     .insert(ApiKeyAuthenticated { identity });
-                if request.method() == Method::POST
-                    && request.uri().path() == "/api/pairing/sessions"
-                {
-                    request
-                        .extensions_mut()
-                        .insert(PairingAuthority { api_key: candidate });
+                if kind == AuthenticationKind::Operator {
+                    request.extensions_mut().insert(PairingAuthority);
                 }
                 next.run(request).await
             } else {
@@ -417,6 +619,15 @@ fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn unix_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn unauthorized(msg: &str) -> Response {
@@ -625,29 +836,78 @@ mod tests {
 
     #[test]
     fn pairing_token_is_random_url_safe_and_single_use() {
-        let ks = ApiKeySet::new_with_gallery_signing_secret(
+        let ks = ApiKeySet::new_with_metadata_db(
             HashSet::from(["phone-key".to_string()]),
-            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            "server-a",
         );
-        let (token, expires_at) = ks.issue_pairing_token("phone-key".to_string()).unwrap();
+        let (token, expires_at) = ks.issue_pairing_token().unwrap();
 
         assert_eq!(token.len(), 43);
         assert!(token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
         assert!(expires_at > unix_timestamp());
-        assert_eq!(ks.claim_pairing_token(&token).as_deref(), Some("phone-key"));
-        assert_eq!(ks.claim_pairing_token(&token), None);
-        assert_eq!(ks.claim_pairing_token("not-the-token"), None);
+        let paired = ks
+            .claim_pairing_token(&token, "James's iPhone", "iphone")
+            .unwrap()
+            .unwrap();
+        assert!(paired.starts_with("mold_pair_"));
+        assert_ne!(paired, "phone-key");
+        assert!(ks.contains(&paired));
+        assert_eq!(ks.paired_clients()[0].name, "James's iPhone");
+        assert_eq!(
+            ks.claim_pairing_token(&token, "Replay", "iphone").unwrap(),
+            None
+        );
+        assert_eq!(
+            ks.claim_pairing_token("not-the-token", "Unknown", "mobile")
+                .unwrap(),
+            None
+        );
+        let id = ks.paired_clients()[0].id.clone();
+        assert!(ks.revoke_paired_client(&id).unwrap());
+        assert!(!ks.contains(&paired));
+        assert!(ks.contains("phone-key"));
+    }
+
+    #[test]
+    fn paired_credentials_are_scoped_to_one_server_instance() {
+        let metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let operators = HashSet::from(["operator-key".to_string()]);
+        let server_a =
+            ApiKeySet::new_with_metadata_db(operators.clone(), metadata_db.clone(), "server-a");
+        let (token, _) = server_a.issue_pairing_token().unwrap();
+        let paired = server_a
+            .claim_pairing_token(&token, "James's iPhone", "iphone")
+            .unwrap()
+            .unwrap();
+
+        let server_b =
+            ApiKeySet::new_with_metadata_db(operators.clone(), metadata_db.clone(), "server-b");
+        let restarted_a =
+            ApiKeySet::new_with_metadata_db(operators, metadata_db.clone(), "server-a");
+        assert!(!server_b.contains(&paired));
+        assert!(restarted_a.contains(&paired));
+
+        let client_id = restarted_a.paired_clients()[0].id.clone();
+        assert!(restarted_a.revoke_paired_client(&client_id).unwrap());
+        let restarted_after_revoke = ApiKeySet::new_with_metadata_db(
+            HashSet::from(["operator-key".to_string()]),
+            metadata_db,
+            "server-a",
+        );
+        assert!(!restarted_after_revoke.contains(&paired));
     }
 
     #[test]
     fn expired_pairing_token_is_rejected_and_removed() {
-        let ks = ApiKeySet::new_with_gallery_signing_secret(
+        let ks = ApiKeySet::new_with_metadata_db(
             HashSet::from(["phone-key".to_string()]),
-            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            "server-a",
         );
-        let (token, _) = ks.issue_pairing_token("phone-key".to_string()).unwrap();
+        let (token, _) = ks.issue_pairing_token().unwrap();
         let token_hash = ks.pairing_token_hash(&token);
         ks.pairing_sessions
             .lock()
@@ -656,7 +916,10 @@ mod tests {
             .unwrap()
             .expires_at = unix_timestamp();
 
-        assert_eq!(ks.claim_pairing_token(&token), None);
+        assert_eq!(
+            ks.claim_pairing_token(&token, "Expired", "mobile").unwrap(),
+            None
+        );
         assert!(!ks
             .pairing_sessions
             .lock()
@@ -686,7 +949,7 @@ mod tests {
                         if authority.is_some() {
                             StatusCode::OK
                         } else {
-                            StatusCode::INTERNAL_SERVER_ERROR
+                            StatusCode::FORBIDDEN
                         }
                     },
                 ),
@@ -737,6 +1000,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn paired_credentials_cannot_mint_more_credentials() {
+        let key_set = Arc::new(ApiKeySet::new_with_metadata_db(
+            HashSet::from(["operator-key".to_string()]),
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            "server-a",
+        ));
+        let (token, _) = key_set.issue_pairing_token().unwrap();
+        let paired = key_set
+            .claim_pairing_token(&token, "Mold on iPhone", "iphone")
+            .unwrap()
+            .unwrap();
+        let auth = Some(key_set);
+
+        let denied = pairing_test_app(auth)
+            .oneshot(
+                Request::post("/api/pairing/sessions")
+                    .header("x-api-key", paired)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
