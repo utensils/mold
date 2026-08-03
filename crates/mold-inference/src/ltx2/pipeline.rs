@@ -1707,6 +1707,8 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -1949,6 +1951,8 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -2009,6 +2013,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -2242,6 +2248,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,

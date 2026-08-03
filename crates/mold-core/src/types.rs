@@ -408,6 +408,18 @@ pub struct GenerateRequest {
     /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyframes: Option<Vec<KeyframeCondition>>,
+    /// Write the render as an OpenEXR sequence into this directory, in
+    /// scene-referred linear HDR, alongside the ordinary tonemapped video.
+    ///
+    /// A sidecar rather than the primary artifact: a frame sequence is many
+    /// files and gigabytes, which the one-file-per-generation gallery cannot
+    /// represent. Requires the `hdr` IC-LoRA control, whose adapter is what
+    /// makes the render HDR in the first place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_exr_dir: Option<String>,
+    /// Write EXR samples at full 32-bit float instead of 16-bit half.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hdr_exr_full_float: bool,
     /// Explicit LTX-2 pipeline mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
@@ -2667,6 +2679,8 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a cat on Mars".to_string(),
             negative_prompt: None,
@@ -2859,6 +2873,8 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, low quality".to_string()),
@@ -2918,6 +2934,8 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -2974,6 +2992,8 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3045,6 +3065,8 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3166,6 +3188,8 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, ugly".to_string()),
@@ -3222,6 +3246,8 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3281,6 +3307,8 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "video".to_string(),
             negative_prompt: Some("blur".to_string()),
@@ -3791,6 +3819,8 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3853,6 +3883,8 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3928,6 +3960,8 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -3988,6 +4022,8 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -4107,6 +4143,8 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,

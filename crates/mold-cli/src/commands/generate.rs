@@ -500,6 +500,8 @@ pub async fn run(
     );
 
     let mut req = GenerateRequest {
+        hdr_exr_dir: None,
+        hdr_exr_full_float: false,
         guidance_overrides,
         prompt: prompt.to_string(),
         negative_prompt: effective_negative_prompt.clone(),

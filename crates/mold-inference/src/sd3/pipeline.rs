@@ -1824,6 +1824,8 @@ mod tests {
         let key = cfg_prompt_cache_key("a cat", "", 1.0);
         store_cached_tensor_pair(&engine.prompt_cache, key, &context, &y).unwrap();
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,

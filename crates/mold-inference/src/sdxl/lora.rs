@@ -1234,6 +1234,8 @@ mod tests {
         loras: Option<Vec<mold_core::LoraWeight>>,
     ) -> mold_core::GenerateRequest {
         mold_core::GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,

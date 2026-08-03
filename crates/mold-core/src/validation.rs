@@ -982,6 +982,25 @@ pub fn validate_generate_request_with_family(
         require_ltx2_family(family, "guidance_overrides")?;
         validate_guidance_overrides(overrides)?;
     }
+    if let Some(dir) = req.hdr_exr_dir.as_deref() {
+        require_ltx2_family(family, "hdr_exr_dir")?;
+        if dir.trim().is_empty() {
+            return Err("hdr_exr_dir must not be empty".to_string());
+        }
+        // The adapter is what makes the render HDR. Without it the decode
+        // would apply a LogC3 inverse to an ordinary SDR signal and write a
+        // wrongly-graded EXR that looks deliberate.
+        if req.ic_lora_control.as_deref().map(str::trim) != Some("hdr") {
+            return Err(
+                "hdr_exr_dir requires ic_lora_control=hdr — EXR output is only meaningful for \
+                 the HDR adapter's LogC3 signal"
+                    .to_string(),
+            );
+        }
+    } else if req.hdr_exr_full_float {
+        return Err("hdr_exr_full_float requires hdr_exr_dir".to_string());
+    }
+
     if let Some(control) = req.ic_lora_control.as_deref() {
         require_ltx2_family(family, "ic_lora_control")?;
         if control.trim().is_empty() {
@@ -1363,8 +1382,54 @@ mod tests {
         assert_eq!(ltx2_max_frames_on_grid_at_fps(48), 601);
     }
 
+    /// EXR output is only meaningful for the HDR adapter's LogC3 signal.
+    /// Applying the inverse to an ordinary SDR render would write a
+    /// wrongly-graded file that looks deliberate — worse than a rejection.
+    #[test]
+    fn exr_output_requires_the_hdr_adapter() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("EXR without the HDR adapter must be rejected");
+        assert!(err.contains("ic_lora_control=hdr"), "got: {err}");
+
+        // With the adapter (and the pipeline it forces) it validates.
+        req.ic_lora_control = Some("hdr".to_string());
+        req.pipeline = Some(Ltx2PipelineMode::IcLora);
+        req.source_video_path = Some("/tmp/reference.mp4".to_string());
+        req.loras = Some(vec![LoraWeight {
+            path: "/models/hdr.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect("the HDR adapter makes EXR output valid");
+    }
+
+    #[test]
+    fn exr_options_are_rejected_for_non_ltx2_families() {
+        let mut req = valid_req();
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+        assert!(validate_generate_request_with_family(&req, Some("flux")).is_err());
+    }
+
+    #[test]
+    fn exr_precision_without_an_output_directory_is_rejected() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.hdr_exr_full_float = true;
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("a precision knob with nothing to write is a mistake");
+        assert!(err.contains("hdr_exr_dir"), "got: {err}");
+    }
+
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a red apple".to_string(),
             negative_prompt: None,

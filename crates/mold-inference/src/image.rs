@@ -444,6 +444,8 @@ mod tests {
     #[test]
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
