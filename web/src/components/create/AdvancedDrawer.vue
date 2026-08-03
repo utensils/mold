@@ -45,6 +45,7 @@ import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
@@ -104,6 +105,10 @@ const emit = defineEmits<{
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
 const draft = useSequenceDraftStore();
 const sequenceMode = computed(() => props.output === "sequence");
+const selectedModel = computed(
+  () =>
+    props.models.find((model) => model.name === props.modelValue.model) ?? null,
+);
 const activeSequenceClip = computed(
   () =>
     draft.clips.find((clip) => clip.id === draft.activeClipId) ??
@@ -973,6 +978,15 @@ function setSequenceCameraMode(mode: string) {
           :header-interactive="false"
           data-test="section-video"
         >
+          <div class="adv__field">
+            <VideoDurationSlider
+              :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
+              :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
+              :model="selectedModel"
+              label="Duration"
+              @update:frames="patch({ frames: $event })"
+            />
+          </div>
           <div class="adv__field">
             <label class="adv__label">Frames (8n+1)</label>
             <input

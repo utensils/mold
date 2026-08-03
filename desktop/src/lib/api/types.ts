@@ -154,6 +154,14 @@ export interface ModelEntry {
   /** Server-advertised frame rate (LTX-Video ships 30, LTX-2 24); absent on
    * older servers and image models. Applied like steps/guidance. */
   default_fps?: number | null;
+  /** Requestable single-shot frame ceiling at `default_fps`. */
+  max_frames?: number | null;
+  /** Duration-based ceiling; clients recompute max frames when FPS changes. */
+  max_runtime_seconds?: number | null;
+  /** FPS-independent resource guard paired with `max_runtime_seconds`. */
+  max_frames_absolute?: number | null;
+  /** Valid frame counts are `k * frame_step + 1`. */
+  frame_step?: number | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────

@@ -442,6 +442,32 @@ describe("generation queueing", () => {
     expect(store.jobs).not.toContain(jobs[1]);
   });
 
+  it("keeps long rail history lightweight beyond the freshest media window", () => {
+    const store = useGenerationStore();
+    for (let index = 0; index < 13; index += 1) {
+      const job = store.startJob({ ...req, prompt: `history ${index}` });
+      job.status = "complete";
+      job.result = {
+        image: "large-encoded-output",
+        format: "png",
+        width: 1024,
+        height: 1024,
+        seed_used: index,
+        generation_time_ms: 1,
+        model: req.model,
+      } as never;
+      job.resultUrl = `blob:history-${index}`;
+      job.resultUrlIsObjectUrl = true;
+    }
+
+    store.prune(50);
+
+    expect(store.jobs).toHaveLength(13);
+    expect(store.jobs[0]?.result?.image).toBe("");
+    expect(store.jobs[0]?.resultUrl).toBeNull();
+    expect(store.jobs[1]?.result?.image).toBe("large-encoded-output");
+  });
+
   it("prunes only terminal jobs whose consumer callbacks have run", () => {
     const store = useGenerationStore();
     const jobs = Array.from({ length: 3 }, (_, index) =>
@@ -460,7 +486,7 @@ describe("generation queueing", () => {
     const store = useGenerationStore();
     const { jobs, settled } = store.submitBatch({ ...req, prompt: "slow oldest" }, 1);
     await flushPromises();
-    for (let index = 0; index < 12; index += 1) {
+    for (let index = 0; index < 50; index += 1) {
       const newer = store.startJob({ ...req, prompt: `newer ${index}` });
       newer.status = "complete";
     }
@@ -483,7 +509,7 @@ describe("generation queueing", () => {
     expect(store.jobs).toContain(jobs[0]);
     await new Promise((resolve) => setTimeout(resolve, 1));
     expect(store.jobs).toContain(jobs[0]);
-    expect(store.jobs).toHaveLength(12);
+    expect(store.jobs).toHaveLength(50);
   });
 
   it("does not auto-prune a terminal job from another batch whose consumer is pending", async () => {
@@ -529,7 +555,7 @@ describe("generation queueing", () => {
     // Force the finishing batch's automatic housekeeping over the retention
     // threshold. The older terminal job is first in store order, so it would
     // be the first casualty without the cross-batch consumer guard.
-    for (let index = 0; index < 12; index += 1) {
+    for (let index = 0; index < 50; index += 1) {
       const filler = store.startJob({ ...req, prompt: `finished filler ${index}` });
       filler.status = "complete";
     }
@@ -540,7 +566,7 @@ describe("generation queueing", () => {
     expect(pendingConsumerObserved).toBe(false);
     expect(store.pendingConsumerBatchIds).toEqual([pendingBatch.jobs[0]!.batchId]);
     expect(store.jobs).toContain(pendingBatch.jobs[0]);
-    expect(store.jobs).toHaveLength(13);
+    expect(store.jobs).toHaveLength(51);
 
     openStreams[0]!.resolve();
     await pendingBatch.settled;

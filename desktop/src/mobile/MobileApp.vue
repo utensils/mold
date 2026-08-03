@@ -3833,6 +3833,7 @@ onBeforeUnmount(() => {
 
             <MobileSharedParams
               :form="form"
+              :duration-model="selectedGenerationModel"
               :last-seed="generation.lastSeedUsed"
               :disabled="loadingModels"
               :steps-error="stepsError"

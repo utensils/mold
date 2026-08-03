@@ -394,6 +394,7 @@ pub enum ParamField {
     Guidance,
     Seed,
     Batch,
+    Duration,
     // Advanced — Sampling
     Scheduler,
     Expand,
@@ -424,6 +425,7 @@ impl ParamField {
             Self::Guidance => "Prompt strength",
             Self::Seed => "Seed",
             Self::Batch => "Batch",
+            Self::Duration => "Duration",
             Self::Format => "Format",
             Self::Scheduler => "Scheduler",
             Self::Lora => "LoRA",
@@ -667,6 +669,13 @@ impl GenerateParams {
                 ),
             },
             ParamField::Batch => self.batch.to_string(),
+            ParamField::Duration => {
+                format!(
+                    "{:.1}s · {}f",
+                    self.frames as f64 / self.fps.max(1) as f64,
+                    self.frames
+                )
+            }
             ParamField::Format => format!("{:?}", self.format).to_lowercase(),
             ParamField::Upscale => self.upscale_model.clone().unwrap_or_else(|| "off".into()),
             ParamField::Scheduler => self
@@ -732,6 +741,20 @@ impl GenerateParams {
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
         }
     }
+}
+
+/// Mirror `/api/models`' requestable video grid for the TUI's keyboard sliders.
+/// Tuple fields are `(step, runtime_seconds, absolute_frames, fixed_frames)`.
+fn tui_max_video_frames(grid: (u32, Option<u32>, Option<u32>, u32), fps: u32) -> u32 {
+    let (step, runtime_seconds, absolute_frames, fixed_frames) = grid;
+    let cap = if let Some(seconds) = runtime_seconds {
+        let duration_cap = seconds.saturating_mul(fps.max(1)).saturating_add(4);
+        absolute_frames.map_or(duration_cap, |absolute| duration_cap.min(absolute))
+    } else {
+        fixed_frames
+    };
+    cap.saturating_sub(cap.saturating_sub(1) % step)
+        .max(step + 1)
 }
 
 /// State for the Generate view.
@@ -1797,7 +1820,7 @@ impl App {
 
     /// Apply model defaults from the server's catalog to the current model.
     /// When connected remotely, the server's config is authoritative for steps,
-    /// guidance, width, and height.
+    /// guidance, size, and video timing.
     fn apply_remote_model_defaults(&mut self, catalog: &[ModelInfoExtended]) {
         let model_name = &self.generate.params.model;
         if let Some(entry) = catalog.iter().find(|m| &m.name == model_name) {
@@ -1805,6 +1828,12 @@ impl App {
             self.generate.params.guidance = entry.defaults.default_guidance;
             self.generate.params.width = entry.defaults.default_width;
             self.generate.params.height = entry.defaults.default_height;
+            if let Some(frames) = entry.defaults.default_frames {
+                self.generate.params.frames = frames;
+            }
+            if let Some(fps) = entry.defaults.default_fps {
+                self.generate.params.fps = fps;
+            }
             if !entry.defaults.description.is_empty() {
                 self.generate.model_description = entry.defaults.description.clone();
             }
@@ -2150,6 +2179,12 @@ impl App {
                 self.generate.params.guidance = entry.defaults.default_guidance;
                 self.generate.params.width = entry.defaults.default_width;
                 self.generate.params.height = entry.defaults.default_height;
+                if let Some(frames) = entry.defaults.default_frames {
+                    self.generate.params.frames = frames;
+                }
+                if let Some(fps) = entry.defaults.default_fps {
+                    self.generate.params.fps = fps;
+                }
                 if !entry.defaults.description.is_empty() {
                     self.generate.model_description = entry.defaults.description.clone();
                 }
@@ -2167,6 +2202,12 @@ impl App {
             self.generate.params.guidance = model_cfg.effective_guidance();
             self.generate.params.width = model_cfg.effective_width(&self.config);
             self.generate.params.height = model_cfg.effective_height(&self.config);
+            if let Some(frames) = model_cfg.effective_frames() {
+                self.generate.params.frames = frames;
+            }
+            if let Some(fps) = model_cfg.effective_fps() {
+                self.generate.params.fps = fps;
+            }
 
             self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
                 .and_then(|m| {
@@ -3807,6 +3848,38 @@ impl App {
         } else {
             None
         };
+        let video_grid = if matches!(
+            field,
+            ParamField::Duration | ParamField::Frames | ParamField::Fps
+        ) {
+            let entry = self
+                .models
+                .catalog
+                .iter()
+                .find(|entry| entry.name == self.generate.params.model);
+            let family =
+                crate::model_info::family_for_model(&self.generate.params.model, &self.config);
+            let step = entry
+                .and_then(|entry| entry.defaults.frame_step)
+                .or_else(|| mold_core::validation::frame_step_for_family(&family))
+                .unwrap_or(8)
+                .max(1);
+            Some((
+                step,
+                entry
+                    .and_then(|entry| entry.defaults.max_runtime_seconds)
+                    .or_else(|| mold_core::validation::max_runtime_seconds_for_family(&family)),
+                entry
+                    .and_then(|entry| entry.defaults.max_frames_absolute)
+                    .or_else(|| mold_core::validation::max_frames_absolute_for_family(&family)),
+                entry
+                    .and_then(|entry| entry.defaults.max_frames)
+                    .or_else(|| mold_core::validation::max_frames_for_family(&family))
+                    .unwrap_or(257),
+            ))
+        } else {
+            None
+        };
         let p = &mut self.generate.params;
         match field {
             ParamField::Size => {
@@ -3844,14 +3917,30 @@ impl App {
             ParamField::Batch => {
                 p.batch = (p.batch as i32 + delta).max(1) as u32;
             }
+            ParamField::Duration => {
+                let grid = video_grid.expect("duration has video grid");
+                let step = grid.0;
+                let fps = p.fps.max(1);
+                let seconds = (p.frames as f64 / fps as f64 + delta as f64).max(0.1);
+                let target = (seconds * fps as f64).round() as u32;
+                let snapped =
+                    (((target.saturating_sub(1) + step / 2) / step) * step + 1).max(step + 1);
+                p.frames = snapped.min(tui_max_video_frames(grid, fps));
+            }
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
             }
             ParamField::Frames => {
-                p.frames = (p.frames as i32 + delta * 8).clamp(9, 257) as u32;
+                let grid = video_grid.expect("frames has video grid");
+                let step = grid.0;
+                p.frames = (p.frames as i64 + delta as i64 * step as i64)
+                    .clamp((step + 1) as i64, tui_max_video_frames(grid, p.fps) as i64)
+                    as u32;
             }
             ParamField::Fps => {
                 p.fps = (p.fps as i32 + delta).clamp(1, 60) as u32;
+                let grid = video_grid.expect("fps has video grid");
+                p.frames = p.frames.min(tui_max_video_frames(grid, p.fps));
             }
             ParamField::Audio => {
                 p.enable_audio = match (p.enable_audio, delta >= 0) {
@@ -4483,6 +4572,8 @@ impl App {
     /// Restore the selected model's defaults (keeps model and prompt).
     fn reset_params_to_model_defaults(&mut self) {
         let model = self.generate.params.model.clone();
+        let mut default_frames = 25;
+        let mut default_fps = 24;
 
         // Use server catalog defaults when connected (and not in local mode),
         // local config otherwise
@@ -4493,12 +4584,24 @@ impl App {
         } {
             self.generate.params.width = entry.defaults.default_width;
             self.generate.params.height = entry.defaults.default_height;
+            if let Some(frames) = entry.defaults.default_frames {
+                default_frames = frames;
+            }
+            if let Some(fps) = entry.defaults.default_fps {
+                default_fps = fps;
+            }
             self.generate.params.steps = entry.defaults.default_steps;
             self.generate.params.guidance = entry.defaults.default_guidance;
         } else {
             let mc = self.config.resolved_model_config(&model);
             self.generate.params.width = mc.effective_width(&self.config);
             self.generate.params.height = mc.effective_height(&self.config);
+            if let Some(frames) = mc.effective_frames() {
+                default_frames = frames;
+            }
+            if let Some(fps) = mc.effective_fps() {
+                default_fps = fps;
+            }
             self.generate.params.steps = mc.effective_steps(&self.config);
             self.generate.params.guidance = mc.effective_guidance();
         }
@@ -4512,8 +4615,8 @@ impl App {
         self.generate.params.expand = false;
         self.generate.params.offload = false;
         self.generate.params.upscale_model = None;
-        self.generate.params.frames = 25;
-        self.generate.params.fps = 24;
+        self.generate.params.frames = default_frames;
+        self.generate.params.fps = default_fps;
         self.generate.params.enable_audio = None;
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
@@ -9606,6 +9709,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn video_duration_ceiling_tracks_fps_and_the_absolute_guard() {
+        let ltx2_grid = (8, Some(20), Some(604), 481);
+        assert_eq!(tui_max_video_frames(ltx2_grid, 12), 241);
+        assert_eq!(tui_max_video_frames(ltx2_grid, 24), 481);
+        assert_eq!(tui_max_video_frames(ltx2_grid, 48), 601);
+    }
+
     #[tokio::test]
     async fn seed_row_cycles_mode_with_arrows_and_enter_edits_value() {
         use crate::ui::create_form::CreateRow;
@@ -10579,14 +10690,11 @@ mod tests {
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
             app.server_url = Some("http://hal9000:7680".to_string());
-            app.models.catalog = vec![make_test_catalog_entry(
-                "flux-dev:q4",
-                28,
-                4.0,
-                768,
-                768,
-                "Server FLUX Dev Q4",
-            )];
+            let mut entry =
+                make_test_catalog_entry("flux-dev:q4", 28, 4.0, 768, 768, "Server FLUX Dev Q4");
+            entry.defaults.default_frames = Some(97);
+            entry.defaults.default_fps = Some(24);
+            app.models.catalog = vec![entry];
 
             app.update_model("flux-dev:q4");
 
@@ -10594,6 +10702,8 @@ mod tests {
             assert!((app.generate.params.guidance - 4.0).abs() < f64::EPSILON);
             assert_eq!(app.generate.params.width, 768);
             assert_eq!(app.generate.params.height, 768);
+            assert_eq!(app.generate.params.frames, 97);
+            assert_eq!(app.generate.params.fps, 24);
             assert_eq!(app.generate.model_description, "Server FLUX Dev Q4");
         });
     }
@@ -11522,11 +11632,21 @@ mod tests {
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
             app.server_url = None;
-            let model = app.config.resolved_default_model();
+            let model = "local-video:test".to_string();
+            app.config.models.insert(
+                model.clone(),
+                mold_core::config::ModelConfig {
+                    default_frames: Some(97),
+                    default_fps: Some(30),
+                    ..Default::default()
+                },
+            );
             app.update_model(&model);
             // Should succeed without panic and use local config defaults
             assert!(app.generate.params.steps > 0);
             assert!(app.generate.params.width > 0);
+            assert_eq!(app.generate.params.frames, 97);
+            assert_eq!(app.generate.params.fps, 30);
         });
     }
 
@@ -11652,6 +11772,14 @@ mod tests {
     async fn reset_defaults_uses_local_config_when_no_server() {
         let mut app = make_settings_test_app();
         app.server_url = None;
+        app.config.models.insert(
+            app.generate.params.model.clone(),
+            mold_core::config::ModelConfig {
+                default_frames: Some(97),
+                default_fps: Some(30),
+                ..Default::default()
+            },
+        );
 
         // Mutate params
         app.generate.params.steps = 999;
@@ -11671,6 +11799,8 @@ mod tests {
         // Should use local config defaults (steps won't be 999)
         assert_ne!(app.generate.params.steps, 999);
         assert_eq!(app.generate.params.batch, 1);
+        assert_eq!(app.generate.params.frames, 97);
+        assert_eq!(app.generate.params.fps, 30);
     }
 
     // ── sync_resource_info_mode() ─────────────────────────────

@@ -6,6 +6,7 @@ import InspectorPanel from "./InspectorPanel.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
@@ -43,6 +44,29 @@ describe("InspectorPanel — layout", () => {
     expect(wrapper.findComponent(Stepper).exists()).toBe(true);
     expect(wrapper.find('[data-test="seed-mode-random"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="open-advanced"]').exists()).toBe(true);
+  });
+
+  it("shows duration in seconds for the selected one-shot video model", async () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+      default_fps: 24,
+      max_runtime_seconds: 20,
+      max_frames_absolute: 604,
+      frame_step: 8,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("ltx2");
+    form.model = model.name;
+    form.frames = 97;
+    form.fps = 24;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const duration = wrapper.getComponent(VideoDurationSlider);
+    expect(duration.text()).toContain("4.0s");
+    duration.vm.$emit("update:frames", 241);
+    await flushPromises();
+    expect(form.frames).toBe(241);
   });
 
   it("defaults wide enough for one ratio row and persists left-edge resizing", async () => {

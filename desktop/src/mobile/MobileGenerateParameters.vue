@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, useId, watch } from "vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import type {
   Ltx2PipelineMode,
   Ltx2CameraControlInfo,
@@ -568,6 +569,15 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       class="mobile-generate-section mobile-generate-video-options"
     >
       <legend class="mobile-generate-legend">Video</legend>
+
+      <VideoDurationSlider
+        :frames="form.frames"
+        :fps="form.fps"
+        :model="selectedModel"
+        touch-friendly
+        data-test="mobile-advanced-duration"
+        @update:frames="form.frames = $event"
+      />
 
       <div class="mobile-generate-field-grid">
         <label class="field mobile-generate-field">

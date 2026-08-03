@@ -167,6 +167,36 @@ describe("AdvancedDrawer sequence contract", () => {
   });
 });
 
+describe("AdvancedDrawer video duration", () => {
+  it("keeps the seconds slider beside exact frames and FPS", async () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+      default_fps: 24,
+      max_runtime_seconds: 20,
+      max_frames_absolute: 604,
+      frame_step: 8,
+    } as ModelInfoExtended;
+    const wrapper = factory(
+      "ltx2",
+      { model: model.name, frames: 97, fps: 24 },
+      { models: [model] },
+    );
+    expect(wrapper.get("[data-test='video-duration']").text()).toContain(
+      "4.0s",
+    );
+    await wrapper
+      .get("[data-test='video-duration'] input[type='range']")
+      .setValue("241");
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      frames: 241,
+    });
+    expect(wrapper.find("[data-test='video-frames']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='video-fps']").exists()).toBe(true);
+  });
+});
+
 function sections(family: string, extra: Record<string, unknown> = {}) {
   const wrapper = factory(family, {}, extra);
   const has = (key: string) =>

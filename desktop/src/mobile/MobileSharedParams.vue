@@ -12,12 +12,16 @@ import type { GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     model?: ModelEntry | null;
+    /** Timing metadata without changing legacy resolution projection behavior. */
+    durationModel?: ModelEntry | null;
     lastSeed: number | null;
     disabled?: boolean;
     /** Sequence output surfaces frame rate outside the Advanced sheet. */
@@ -25,7 +29,14 @@ const props = withDefaults(
     stepsError?: string | null;
     guidanceError?: string | null;
   }>(),
-  { disabled: false, showFps: false, stepsError: null, guidanceError: null, model: null },
+  {
+    disabled: false,
+    showFps: false,
+    stepsError: null,
+    guidanceError: null,
+    model: null,
+    durationModel: null,
+  },
 );
 
 const emit = defineEmits<{
@@ -34,6 +45,9 @@ const emit = defineEmits<{
 }>();
 
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
+const supportsVideo = computed(
+  () => generationCapabilitiesForFamily(props.form.family, props.form.model).supportsVideo,
+);
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
   if (props.showFps) {
@@ -58,6 +72,15 @@ const sourceDimensions = computed(() => {
     :source-dimensions="sourceDimensions"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
+  />
+  <VideoDurationSlider
+    v-if="supportsVideo && !showFps"
+    :frames="form.frames"
+    :fps="form.fps"
+    :model="durationModel ?? model"
+    touch-friendly
+    data-test="mobile-duration"
+    @update:frames="form.frames = $event"
   />
   <label v-if="showFps" class="field" data-test="mobile-sequence-fps">
     <span>FPS</span>

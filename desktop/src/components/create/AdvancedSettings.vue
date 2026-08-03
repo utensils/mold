@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
@@ -521,6 +522,13 @@ function reset() {
         :header-interactive="false"
         data-test="section-video"
       >
+        <VideoDurationSlider
+          :frames="form.frames"
+          :fps="form.fps"
+          :model="selectedModel"
+          @update:frames="form.frames = $event"
+        />
+
         <label class="ms-label">Frames</label>
         <input
           v-model.number="form.frames"
