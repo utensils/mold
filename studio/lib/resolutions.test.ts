@@ -107,6 +107,16 @@ describe("shared resolution contract", () => {
     expect(presets.map((p) => [p.width, p.height])).toEqual([[1216, 704]]);
   });
 
+  it("accepts the ltx-2 family alias, not just the canonical spelling", () => {
+    // `chainRouting` canonicalizes `ltx-2` -> `ltx2`, so an exact-string test
+    // here would silently hand an LTX-2 caller the shared 1.8 MP limit.
+    for (const alias of ["ltx-2", "LTX2", " ltx2 ", "Ltx-2"]) {
+      expect(maxPixelsForFamily(alias), alias).toBe(LTX2_MAX_GENERATION_PIXELS);
+      expect(maxAxisPixelsForFamily(alias), alias).toBe(2048);
+      expect(dimensionAlignmentForFamily(alias), alias).toBe(32);
+    }
+  });
+
   it("exposes family-aware ceilings and grids", () => {
     expect(maxPixelsForFamily("ltx2")).toBe(LTX2_MAX_GENERATION_PIXELS);
     expect(maxPixelsForFamily("flux")).toBe(MAX_GENERATION_PIXELS);

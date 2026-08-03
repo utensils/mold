@@ -1,4 +1,5 @@
 import {
+  dimensionAlignmentForFamily,
   maxPixelsForFamily,
   type ModelResolutionContract,
 } from "./resolutions";
@@ -45,9 +46,12 @@ function minimumAligned(alignment: number): number {
   return Math.ceil(64 / alignment) * alignment;
 }
 
+function familyOf(model: ModelResolutionContract | string): string | undefined {
+  return typeof model === "string" ? model : model.family;
+}
+
 function familyAlignment(model: ModelResolutionContract | string): number {
-  const family = typeof model === "string" ? model : model.family;
-  return family === "ltx-video" || family === "ltx2" ? 32 : 16;
+  return dimensionAlignmentForFamily(familyOf(model));
 }
 
 /**
@@ -77,8 +81,10 @@ export function resolveSourceResolution(
   const advertisedMaxPixels = positiveInteger(
     contract?.max_pixels,
     // Family-aware fallback: clamping an LTX-2 source to the shared 1.8 MP
-    // limit would shrink a canvas the server would have accepted.
-    maxPixelsForFamily(contract?.family),
+    // limit would shrink a canvas the server would have accepted. Read the
+    // family from whichever form the caller passed — when `model` is a bare
+    // string it *is* the family, so keying off `contract` alone would miss it.
+    maxPixelsForFamily(familyOf(model)),
   );
   const maxPixels = advertisedMaxPixels;
   const sourcePixels = sourceWidth * sourceHeight;

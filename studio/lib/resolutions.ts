@@ -36,20 +36,33 @@ export const LTX2_MAX_GENERATION_PIXELS = 1_920 * 1_088;
  */
 export const LTX2_MAX_AXIS_PIXELS = 2_048;
 
+/**
+ * Normalize a family string before matching. `ltx-2` is a live alias — the
+ * chain-routing policy already canonicalizes it — so an exact-string test
+ * would silently hand an LTX-2 caller the shared 1.8 MP limit.
+ */
+function canonicalFamily(family: string | null | undefined): string {
+  const normalized = (family ?? "").trim().toLowerCase();
+  return normalized === "ltx-2" ? "ltx2" : normalized;
+}
+
 export function maxPixelsForFamily(family: string | null | undefined): number {
-  return family === "ltx2" ? LTX2_MAX_GENERATION_PIXELS : MAX_GENERATION_PIXELS;
+  return canonicalFamily(family) === "ltx2"
+    ? LTX2_MAX_GENERATION_PIXELS
+    : MAX_GENERATION_PIXELS;
 }
 
 export function maxAxisPixelsForFamily(
   family: string | null | undefined,
 ): number | null {
-  return family === "ltx2" ? LTX2_MAX_AXIS_PIXELS : null;
+  return canonicalFamily(family) === "ltx2" ? LTX2_MAX_AXIS_PIXELS : null;
 }
 
 export function dimensionAlignmentForFamily(
   family: string | null | undefined,
 ): number {
-  return family === "ltx-video" || family === "ltx2" ? 32 : 16;
+  const normalized = canonicalFamily(family);
+  return normalized === "ltx-video" || normalized === "ltx2" ? 32 : 16;
 }
 
 function gcd(a: number, b: number): number {
