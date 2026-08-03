@@ -5,7 +5,8 @@
  * frame: absolute overlay, never Teleport or position:fixed. Backdrop
  * click and Esc close; clicks inside the panel do not.
  */
-import { nextTick, onMounted, ref, watch } from "vue";
+import { ref } from "vue";
+import { useRootFocusOnOpen } from "../lib/useRootFocusOnOpen";
 import Icon from "./Icon.vue";
 
 const props = withDefaults(
@@ -21,22 +22,7 @@ const props = withDefaults(
 const emit = defineEmits<{ close: [] }>();
 
 const root = ref<HTMLElement | null>(null);
-
-async function focusRoot() {
-  await nextTick();
-  root.value?.focus();
-}
-
-onMounted(() => {
-  if (props.open) focusRoot();
-});
-
-watch(
-  () => props.open,
-  (open) => {
-    if (open) focusRoot();
-  },
-);
+useRootFocusOnOpen(root, () => props.open);
 </script>
 
 <template>
