@@ -130,7 +130,7 @@ with a D65 white point. Add `--hdr-exr-full-float` for 32-bit samples instead
 of the 16-bit default.
 
 The HDR adapter ships pre-computed text embeddings beside its weights, and
-mold uses them the way upstream does: they *replace* prompt encoding rather
+mold uses them the way upstream does: they _replace_ prompt encoding rather
 than supplementing it. The adapter was trained against that one fixed scene
 context, so a prompt of your own would be out of distribution. Mold loads the
 companion and skips the Gemma encode entirely, which also makes an HDR render
