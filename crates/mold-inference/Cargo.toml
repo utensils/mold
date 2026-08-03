@@ -69,6 +69,10 @@ candle-flash-attn = { version = "0.9.2", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
+# Already vendored transitively via image's default features, so a direct
+# dependency adds no new crates to the Nix vendor set. Pure Rust: no system
+# OpenEXR, no cmake, nothing to cross-compile for the sm86/89/100/120 matrix.
+exr = "1.74"
 base64 = "0.22"
 mp4-rs = { package = "mp4", version = "0.14" }
 openh264 = { version = "0.9", features = ["source"] }

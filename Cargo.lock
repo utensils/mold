@@ -3257,6 +3257,7 @@ dependencies = [
  "candle-flash-attn",
  "candle-nn-mold",
  "candle-transformers-mold",
+ "exr",
  "fdk-aac",
  "gif 0.13.3",
  "image",
