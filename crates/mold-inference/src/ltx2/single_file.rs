@@ -309,6 +309,35 @@ mod tests {
         let _ = std::fs::remove_file(p);
     }
 
+    /// Pin the sentinel constants to the literal key spellings the shipped
+    /// checkpoints actually use.
+    ///
+    /// The fixtures in the tests below deliberately write literal strings
+    /// rather than referencing the constants. That matters: the original bug
+    /// survived a passing test suite precisely because the fixture was built
+    /// from the same key the probe searched for, so the two agreed with each
+    /// other and both disagreed with every real 19B checkpoint on disk. A test
+    /// that cannot fail when the constant is wrong is not testing the
+    /// constant. These literals were read out of the real safetensors headers.
+    #[test]
+    fn sentinels_match_the_key_spellings_shipped_checkpoints_use() {
+        use crate::ltx2::model::audio_vae::AUDIO_VAE_SENTINEL;
+        use crate::ltx2::model::vocoder::VOCODER_GENERATOR_SENTINELS;
+
+        assert_eq!(
+            AUDIO_VAE_SENTINEL,
+            "audio_vae.per_channel_statistics.mean-of-means"
+        );
+        assert!(
+            VOCODER_GENERATOR_SENTINELS.contains(&"vocoder.vocoder.conv_pre.weight"),
+            "LTX-2.3 / 22B nests the generator; observed in ltx-2.3-22b-{{dev,distilled}}-fp8"
+        );
+        assert!(
+            VOCODER_GENERATOR_SENTINELS.contains(&"vocoder.conv_pre.weight"),
+            "LTX-2.0 / 19B stores it flat; observed in ltx-2-19b-{{dev,distilled}}-fp8"
+        );
+    }
+
     /// LTX-2 ships two vocoder layouts and the capability probe has to accept
     /// both, because [`crate::ltx2::model::vocoder::Ltx2VocoderConfig::load`]
     /// already does: v2.0 (19B) stores the generator flat under `vocoder.*`,
