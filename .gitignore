@@ -70,5 +70,8 @@ uat-*
 *.apng
 *.webp
 *.mp4
+# HDR renders write one EXR per frame, so a single short clip is tens of
+# megabytes across dozens of files.
+*.exr
 *.zip
 .superpowers/
