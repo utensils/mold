@@ -1,3 +1,13 @@
+// `plan_stage2_tiling` is live — stage-2 telemetry reports when a shape
+// exceeds the span the checkpoints were trained on. The tile *execution*
+// arithmetic (interval splitting, blend windows, tile enumeration) is verified
+// against upstream but has no production caller until the per-tile denoise
+// lands in https://github.com/utensils/mold/issues/673. It is staged here
+// rather than written later because it is the part that fails silently when
+// it is wrong: a desynced blend window produces a plausible-looking seam, not
+// an error.
+#![allow(dead_code)]
+
 //! Latent-space tiling for LTX-2 stage-2 refinement.
 //!
 //! Upstream reaches resolutions the transformer never saw in training by
@@ -384,7 +394,12 @@ mod tests {
     /// reference rather than to my reading of it.
     #[test]
     fn split_by_count_matches_upstream() {
-        let cases: &[(usize, usize, usize, &[(usize, usize, usize, usize)])] = &[
+        /// `(start, end, left_ramp, right_ramp)` as upstream reports it.
+        type ExpectedInterval = (usize, usize, usize, usize);
+        /// `(dimension, tiles, overlap, expected intervals)`.
+        type SplitCase = (usize, usize, usize, &'static [ExpectedInterval]);
+
+        let cases: &[SplitCase] = &[
             (21, 2, 8, &[(0, 15, 0, 8), (7, 21, 8, 0)]),
             (34, 2, 6, &[(0, 20, 0, 6), (14, 34, 6, 0)]),
             (60, 2, 6, &[(0, 33, 0, 6), (27, 60, 6, 0)]),
