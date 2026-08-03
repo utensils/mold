@@ -10730,7 +10730,12 @@ mod tests {
         });
 
         plan_built.notified().await;
-        std::fs::write(&transformer, b"new-transformer").unwrap();
+        // `b"new-transformer"` is the same length as `b"old-transformer"`, so an
+        // in-place rewrite is only visible through `ctime`, which advances on a
+        // coarse (~98 ms) clock. The awaits above usually separate the two
+        // writes far enough, but nothing guarantees it. Replace the file so the
+        // inode differs and the replan is observed deterministically.
+        crate::execution_plan::replace_artifact_bytes(&transformer, b"new-transformer");
         resume.notify_one();
         let coordinator = dispatch.await.unwrap();
 

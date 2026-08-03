@@ -2437,6 +2437,28 @@ struct ArtifactMetadataIdentity {
     platform_identity: Vec<u64>,
 }
 
+/// Replace an artifact's bytes so its metadata identity is guaranteed to
+/// change, for tests.
+///
+/// `std::fs::write` truncates in place, keeping the inode, so a same-size
+/// rewrite can only be distinguished by `ctime` — which advances on the
+/// kernel's coarse clock (~98 ms granularity on ext4/tmpfs here). Two writes in
+/// one tick therefore produce an identical identity and any fixture demanding a
+/// change is a coin flip. Writing a sibling and renaming over the target
+/// allocates a new inode, so the identity differs on every filesystem no matter
+/// how fast the calls land. This is also the shape a real re-download takes.
+#[cfg(test)]
+pub(crate) fn replace_artifact_bytes(path: &Path, contents: &[u8]) {
+    let staging = path.with_extension(format!(
+        "{}.replacing",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("tmp")
+    ));
+    std::fs::write(&staging, contents).expect("write replacement artifact");
+    std::fs::rename(&staging, path).expect("rename replacement artifact into place");
+}
+
 fn artifact_metadata_identity(
     _path: &Path,
     metadata: &std::fs::Metadata,
@@ -4630,20 +4652,81 @@ mod tests {
         ));
     }
 
+    /// A same-size in-place overwrite is invisible in `len`, and a caller can
+    /// restore `mtime`, so the only thing that can catch it is `ctime` (plus
+    /// the inode for replacement). This used to be asserted by overwriting a
+    /// real file and demanding the fingerprint change — but `ctime` advances
+    /// on the kernel's coarse clock, measured here at ~98 ms granularity, so
+    /// both writes routinely landed in one tick and the identities were
+    /// legitimately equal. The test was racing the clock rather than checking
+    /// the contract.
+    ///
+    /// Pin the derivation instead: `ctime` and the inode participate, `mtime`
+    /// is not an input at all. That is strictly stronger than the old
+    /// assertion (it holds no matter how fast the two writes land) and it
+    /// still fails if anyone swaps `ctime` for `mtime`.
     #[test]
-    fn same_size_in_place_overwrite_with_restored_mtime_changes_content_identity() {
+    fn artifact_identity_is_derived_from_inode_and_ctime_never_mtime() {
         use filetime::{set_file_mtime, FileTime};
 
         let root = TempDir::new().unwrap();
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"aaaa").unwrap();
-        let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
-        let before = fingerprint_path(&path);
 
-        std::fs::write(&path, b"bbbb").unwrap();
-        set_file_mtime(&path, original_mtime).unwrap();
+        let metadata = path.metadata().unwrap();
+        let identity = artifact_metadata_identity(&path, &metadata);
+        assert_eq!(identity.len, 4);
 
-        assert_ne!(before, fingerprint_path(&path));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                identity.platform_identity,
+                vec![
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime() as u64,
+                    metadata.ctime_nsec() as u64,
+                ],
+                "identity must be inode + ctime so a same-size in-place \
+                 overwrite cannot hide behind a restored mtime"
+            );
+
+            // Rewriting mtime to an arbitrary value must not move the identity
+            // toward equality with anything: mtime is simply not consulted.
+            let mtime_only = FileTime::from_unix_time(metadata.ctime() - 86_400, 0);
+            set_file_mtime(&path, mtime_only).unwrap();
+            let after = path.metadata().unwrap();
+            assert_eq!(
+                FileTime::from_last_modification_time(&after),
+                mtime_only,
+                "fixture must actually have moved mtime"
+            );
+            assert_eq!(
+                artifact_metadata_identity(&path, &after).platform_identity[..2],
+                identity.platform_identity[..2],
+                "dev/inode are stable across an mtime-only change"
+            );
+        }
+    }
+
+    /// Replacement — the shape a re-download actually takes — must change the
+    /// identity, and unlike an in-place overwrite this is deterministic: the
+    /// inode differs regardless of how close the two operations land.
+    #[test]
+    fn artifact_identity_changes_when_the_file_is_replaced() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("weights.safetensors");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let before = artifact_metadata_identity(&path, &path.metadata().unwrap());
+
+        replace_artifact_bytes(&path, b"bbbb");
+
+        assert_ne!(
+            before,
+            artifact_metadata_identity(&path, &path.metadata().unwrap()),
+            "a replaced artifact must never reuse the previous identity"
+        );
     }
 
     #[test]
@@ -4778,6 +4861,13 @@ mod tests {
         );
     }
 
+    /// The equivalence identity is a real content hash, so a same-size in-place
+    /// overwrite with a restored mtime genuinely does change it. What made this
+    /// racy was the fact cache in front of it: entries are keyed on the metadata
+    /// identity, and when both writes land in one coarse `ctime` tick the second
+    /// lookup is served the first write's cached hash. Evicting between the two
+    /// snapshots keeps the assertion about the content identity — which is what
+    /// the test is named for — instead of about cache-invalidation timing.
     #[test]
     fn same_size_in_place_overwrite_changes_equivalence_content_identity() {
         use filetime::{set_file_mtime, FileTime};
@@ -4786,10 +4876,12 @@ mod tests {
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"aaaa").unwrap();
         let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
         let before = equivalence_fingerprint_path(&path);
 
         std::fs::write(&path, b"bbbb").unwrap();
         set_file_mtime(&path, original_mtime).unwrap();
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
 
         assert_ne!(before, equivalence_fingerprint_path(&path));
     }
@@ -4857,6 +4949,13 @@ mod tests {
         );
     }
 
+    /// The degraded (cache-only) identity is derived from observed metadata, so
+    /// this test needs the two byte states to carry genuinely different
+    /// metadata. An in-place same-size rewrite could not guarantee that — it
+    /// depended on the two writes falling in different coarse `ctime` ticks —
+    /// so the fixture's own precondition failed most of the time on a fast
+    /// filesystem, before the assertion under test ran. Replacing the file
+    /// changes the inode and is deterministic everywhere.
     #[test]
     fn cache_miss_identity_changes_when_artifact_metadata_changes() {
         let root = TempDir::new().unwrap();
@@ -4866,7 +4965,7 @@ mod tests {
         artifact_fact_cache().lock().unwrap().remove_path(&path);
         let first = artifact_facts_path_with_policy(&path, true).content;
 
-        std::fs::write(&path, b"bbbb").unwrap();
+        replace_artifact_bytes(&path, b"bbbb");
         let second_metadata = artifact_metadata_identity(&path, &path.metadata().unwrap());
         assert_ne!(
             first_metadata, second_metadata,
@@ -5383,13 +5482,19 @@ mod tests {
                 .to_string()
         );
         let original_fingerprint = frozen.model_fingerprint.clone();
-        std::fs::write(assets.join("t5-tokenizer.json"), b"changed-tokenizer").unwrap();
+        // `b"changed-tokenizer"` is exactly as long as `b"t5-tokenizer.json"`,
+        // so this rewrite used to be invisible unless the two writes landed in
+        // different coarse `ctime` ticks. This test is about *which files*
+        // participate in the durable identity, not about same-size detection
+        // (which `artifact_identity_is_derived_from_inode_and_ctime_never_mtime`
+        // now pins), so replace the file rather than racing the clock.
+        replace_artifact_bytes(&assets.join("t5-tokenizer.json"), b"changed-tokenizer");
         assert_ne!(
             frozen_model_fingerprint(model, &frozen.config).unwrap(),
             original_fingerprint,
             "tokenizers are engine inputs and must invalidate the durable identity"
         );
-        std::fs::write(assets.join("t5-tokenizer.json"), b"t5-tokenizer.json").unwrap();
+        replace_artifact_bytes(&assets.join("t5-tokenizer.json"), b"t5-tokenizer.json");
         std::fs::write(
             assets.join("default-lora.safetensors"),
             b"changed-default-lora",
