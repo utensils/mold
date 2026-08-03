@@ -2445,8 +2445,14 @@ struct ArtifactMetadataIdentity {
 /// kernel's coarse clock (~98 ms granularity on ext4/tmpfs here). Two writes in
 /// one tick therefore produce an identical identity and any fixture demanding a
 /// change is a coin flip. Writing a sibling and renaming over the target
-/// allocates a new inode, so the identity differs on every filesystem no matter
-/// how fast the calls land. This is also the shape a real re-download takes.
+/// allocates a new inode, so the identity differs on the *inode* rather than on
+/// a timestamp — deterministic no matter how fast the calls land. This is also
+/// the shape a real re-download takes.
+///
+/// `std::fs::rename` replaces an existing destination on both Unix and Windows
+/// (`MoveFileExW` / `SetFileInformationByHandle` with replace-if-exists), so no
+/// remove-then-rename fallback is needed — and adding one would open a window
+/// where the artifact is absent.
 #[cfg(test)]
 pub(crate) fn replace_artifact_bytes(path: &Path, contents: &[u8]) {
     let staging = path.with_extension(format!(
