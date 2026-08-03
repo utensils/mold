@@ -86,7 +86,8 @@ pub struct NativeRenderedVideo {
     /// Scene-referred linear HDR frames, present only when the plan asked for
     /// an EXR sidecar. Kept alongside the 8-bit frames rather than replacing
     /// them: the gallery artifact is still the tonemapped video.
-    pub hdr_frames: Option<Vec<crate::ltx2::exr::HdrFrame>>,
+    /// Number of EXR frames written as a sidecar during decode, if any.
+    pub hdr_frames_written: Option<usize>,
     pub audio_track: Option<NativeAudioTrack>,
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
@@ -821,7 +822,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativeRenderedVideo {
             frames,
-            hdr_frames: None,
+            hdr_frames_written: None,
             audio_track: None,
             has_audio: plan.execution_graph.wants_audio_output,
             audio_sample_rate: plan.execution_graph.wants_audio_output.then_some(48_000),
@@ -2616,11 +2617,13 @@ fn render_real_distilled_av(
         dtype,
         device,
         debug_enabled,
-        plan.hdr_exr_dir.is_some(),
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
     let frames = decoded.frames;
-    let hdr_frames = decoded.hdr;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
@@ -2651,7 +2654,7 @@ fn render_real_distilled_av(
 
     Ok(NativeRenderedVideo {
         frames,
-        hdr_frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3014,11 +3017,13 @@ fn render_real_two_stage_av(
         dtype,
         device,
         false,
-        plan.hdr_exr_dir.is_some(),
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
     let frames = decoded.frames;
-    let hdr_frames = decoded.hdr;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
@@ -3056,7 +3061,7 @@ fn render_real_two_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
-        hdr_frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3227,11 +3232,13 @@ fn render_real_one_stage_av(
         dtype,
         device,
         debug_enabled,
-        plan.hdr_exr_dir.is_some(),
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
     let frames = decoded.frames;
-    let hdr_frames = decoded.hdr;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_track =
         maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
@@ -3253,7 +3260,7 @@ fn render_real_one_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
-        hdr_frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3421,11 +3428,13 @@ fn render_real_retake_av(
         dtype,
         device,
         debug_enabled,
-        plan.hdr_exr_dir.is_some(),
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
     let frames = decoded.frames;
-    let hdr_frames = decoded.hdr;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
@@ -3448,7 +3457,7 @@ fn render_real_retake_av(
 
     Ok(NativeRenderedVideo {
         frames,
-        hdr_frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -4097,10 +4106,40 @@ fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
 /// LTX-2 path, so this is the one place HDR can diverge — everything past it
 /// is `RgbImage`. Keeps full float precision and does not resize: an EXR is
 /// for compositing, and resampling linear light after the grade defeats it.
-fn decoded_video_to_hdr_frames(video: &Tensor) -> Result<Vec<crate::ltx2::exr::HdrFrame>> {
+/// The EXR sidecar target for this plan, if one was requested.
+///
+/// Resolved once per decode so the four render paths cannot disagree about
+/// where the sequence goes or at what precision.
+fn plan_hdr_exr_target(
+    plan: &Ltx2GeneratePlan,
+) -> Option<(std::path::PathBuf, crate::ltx2::exr::ExrPrecision)> {
+    let dir = plan.hdr_exr_dir.as_deref()?;
+    let precision = if plan.hdr_exr_full_float {
+        crate::ltx2::exr::ExrPrecision::Full
+    } else {
+        crate::ltx2::exr::ExrPrecision::Half
+    };
+    Some((std::path::PathBuf::from(dir), precision))
+}
+
+/// Convert the decoded tensor to scene-referred linear HDR and write it out
+/// one frame at a time, returning how many frames landed.
+///
+/// Deliberately streaming rather than returning a `Vec<HdrFrame>`. Each frame
+/// holds `width * height * 3` `f32` samples, so buffering the clip scales with
+/// its length: 25 MB per frame at 1920x1088, which is 3 GB for a 5-second
+/// render and 12 GB at LTX-2's 20-second ceiling — on a card that is already
+/// holding the model. Only one frame is live at a time here.
+fn write_hdr_frames_streaming(
+    video: &Tensor,
+    dir: &Path,
+    precision: crate::ltx2::exr::ExrPrecision,
+) -> Result<usize> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create HDR EXR directory '{}'", dir.display()))?;
     let video = video.to_dtype(DType::F32)?.i(0)?;
-    let mut frames = Vec::with_capacity(video.dim(1)?);
-    for index in 0..video.dim(1)? {
+    let count = video.dim(1)?;
+    for index in 0..count {
         let frame = video
             .i((.., index, .., ..))?
             .permute((1, 2, 0))?
@@ -4114,9 +4153,14 @@ fn decoded_video_to_hdr_frames(video: &Tensor) -> Result<Vec<crate::ltx2::exr::H
             .into_iter()
             .map(crate::ltx2::hdr::vae_output_to_linear_hdr)
             .collect();
-        frames.push(crate::ltx2::exr::HdrFrame { width, height, rgb });
+        let hdr_frame = crate::ltx2::exr::HdrFrame { width, height, rgb };
+        crate::ltx2::exr::write_exr_frame(
+            &crate::ltx2::exr::exr_frame_path(dir, index),
+            &hdr_frame,
+            precision,
+        )?;
     }
-    Ok(frames)
+    Ok(count)
 }
 
 fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
@@ -5503,7 +5547,9 @@ fn load_ltx2_video_vae_inner(
 /// A decoded pass: 8-bit frames always, linear HDR frames when asked for.
 struct DecodedVideo {
     frames: Vec<RgbImage>,
-    hdr: Option<Vec<crate::ltx2::exr::HdrFrame>>,
+    /// How many EXR frames the decode wrote, when a sidecar was requested.
+    /// A count rather than the pixels: the frames are already on disk.
+    hdr_frames_written: Option<usize>,
 }
 
 fn decode_video_frames_with_telemetry(
@@ -5514,7 +5560,7 @@ fn decode_video_frames_with_telemetry(
     dtype: DType,
     device: &candle_core::Device,
     debug_enabled: bool,
-    want_hdr: bool,
+    hdr_exr: Option<(&Path, crate::ltx2::exr::ExrPrecision)>,
     progress: Option<&ProgressCallback>,
 ) -> Result<DecodedVideo> {
     let decode_start = Instant::now();
@@ -5527,17 +5573,22 @@ fn decode_video_frames_with_telemetry(
         if debug_enabled {
             log_tensor_stats("decoded_video", &video)?;
         }
-        // Both come from the same tensor: the 8-bit conversion is lossy, so
-        // HDR cannot be recovered from the frames afterwards.
-        let hdr = want_hdr
-            .then(|| decoded_video_to_hdr_frames(&video))
+        // The EXR sidecar is written here, from the same tensor, because the
+        // 8-bit conversion below is lossy and HDR cannot be recovered from the
+        // frames afterwards. Streaming it frame-by-frame keeps peak memory at
+        // one frame instead of the whole clip.
+        let hdr_frames_written = hdr_exr
+            .map(|(dir, precision)| write_hdr_frames_streaming(&video, dir, precision))
             .transpose()?;
         let frames = decoded_video_to_frames(&video, pixel_shape)?;
         if device.is_cuda() {
             device.synchronize()?;
         }
         drop(video);
-        Ok(DecodedVideo { frames, hdr })
+        Ok(DecodedVideo {
+            frames,
+            hdr_frames_written,
+        })
     })();
     log_ltx2_phase_vram_result(probe.finish(), &decoded, None, "");
     if decoded.is_ok() {

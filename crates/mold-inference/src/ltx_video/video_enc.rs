@@ -57,6 +57,8 @@ impl VideoMetadata {
             extend_overlap_frames: None,
             pipeline: None,
             ic_lora_control: None,
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,

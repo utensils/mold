@@ -869,6 +869,12 @@ pub struct OutputMetadata {
     pub pipeline: Option<Ltx2PipelineMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
+    /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
+    /// video, so without this the sequence is unfindable from the Library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_exr_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hdr_exr_full_float: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retake_range: Option<TimeRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -975,6 +981,8 @@ impl OutputMetadata {
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
             ic_lora_control: req.ic_lora_control.clone(),
+            hdr_exr_dir: req.hdr_exr_dir.clone(),
+            hdr_exr_full_float: req.hdr_exr_full_float,
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,

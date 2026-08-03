@@ -852,7 +852,7 @@ impl Ltx2Engine {
         plan.num_frames = frames.len() as u32;
         let rendered = NativeRenderedVideo {
             frames,
-            hdr_frames: None,
+            hdr_frames_written: None,
             audio_track: outcome.audio,
             has_audio: false,
             audio_sample_rate: None,
@@ -961,25 +961,15 @@ impl Ltx2Engine {
         // The EXR sequence is a sidecar: the gallery artifact stays the
         // tonemapped video, because a frame sequence is many files and
         // gigabytes that the one-file-per-generation model cannot hold.
-        if let (Some(dir), Some(hdr_frames)) =
-            (plan.hdr_exr_dir.as_deref(), rendered.hdr_frames.as_ref())
+        // The frames were written during decode rather than buffered and
+        // written here: each one is width*height*3 f32, so holding the clip
+        // would cost 12 GB at LTX-2's 20-second 1080p ceiling.
+        if let (Some(dir), Some(written)) =
+            (plan.hdr_exr_dir.as_deref(), rendered.hdr_frames_written)
         {
-            let exr_start = Instant::now();
-            let precision = if plan.hdr_exr_full_float {
-                crate::ltx2::exr::ExrPrecision::Full
-            } else {
-                crate::ltx2::exr::ExrPrecision::Half
-            };
-            let written = crate::ltx2::exr::write_exr_sequence(
-                std::path::Path::new(dir),
-                hdr_frames,
-                precision,
-            )?;
-            Self::log_timing("pipeline.write_exr_sequence", exr_start);
             tracing::info!(
                 target: "mold::ltx2",
-                "wrote {} EXR frame(s) to {dir}",
-                written.len()
+                "wrote {written} EXR frame(s) to {dir}"
             );
         }
 

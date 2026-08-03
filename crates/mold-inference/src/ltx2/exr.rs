@@ -115,6 +115,13 @@ pub(crate) fn exr_frame_path(dir: &Path, index: usize) -> PathBuf {
 }
 
 /// Write a whole sequence, returning the paths written in order.
+/// Write a whole sequence at once.
+///
+/// Test-only: production streams frames out during decode via
+/// `write_exr_frame`, because buffering a clip's worth of `f32` samples costs
+/// gigabytes at LTX-2's larger shapes. This keeps the round-trip tests
+/// readable without reintroducing that buffer on a real render.
+#[cfg(test)]
 pub(crate) fn write_exr_sequence(
     dir: &Path,
     frames: &[HdrFrame],
