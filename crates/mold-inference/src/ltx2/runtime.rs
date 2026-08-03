@@ -498,6 +498,19 @@ impl Ltx2RuntimeSession {
             stage1_shape.height = implicit_x2_shape.height;
         }
         let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
+        if plan.scene_embeddings_path.is_some()
+            && prompt_requires_unconditional_context_for_plan(plan)?
+        {
+            // The saved embeddings are one conditional context; upstream's HDR
+            // pipeline is distilled and never runs classifier-free guidance.
+            // Reusing them as the negative would cancel guidance to nothing
+            // and quietly change what the user asked for, so refuse instead.
+            anyhow::bail!(
+                "pre-computed control embeddings carry no negative context, but this plan \
+                 needs one (guidance > 1.0). Run the control on its distilled checkpoint, \
+                 or drop the guidance override."
+            );
+        }
         let alt_prompt_env = ltx_debug_alt_prompt();
         // Chain path fast-path: if a previous `prepare()` already encoded
         // the exact same prompt+unconditional combo, reuse those embeddings
@@ -509,7 +522,22 @@ impl Ltx2RuntimeSession {
                 cached.encode_unconditional == encode_unconditional_prompt
                     && cached.token_pair == plan.prompt_tokens
             });
-        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if cache_hit {
+        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if let Some(path) =
+            plan.scene_embeddings_path.as_deref()
+        {
+            // Pre-computed context: no Gemma load, no encode. The encoder is
+            // left untaken so a later stage that does need it still finds it.
+            let scene_start = Instant::now();
+            let prompt = load_scene_embeddings(path)?;
+            log_timing("prepare.scene_embeddings", scene_start);
+            emit_phase_done(
+                progress,
+                ProgressPhase::PromptEncode,
+                "Loading control embeddings",
+                scene_start.elapsed(),
+            );
+            (false, candle_core::Device::Cpu, prompt, None)
+        } else if cache_hit {
             let cached = self
                 .cached_prompt_encoding
                 .as_ref()
@@ -1303,6 +1331,45 @@ fn stage_multimodal_guider_params(
         apply_guidance_overrides(plan, &mut audio_params, overrides)?;
     }
     Ok(Some((video_params, audio_params)))
+}
+
+/// Build a prompt encoding from a control adapter's saved text embeddings.
+///
+/// Upstream saves `video_context` and `audio_context` with
+/// `safetensors.torch.save_file` and reads them back verbatim
+/// (`hdr_ic_lora.py:250-256`); there is no attention mask in the file because
+/// the pipeline attends to the whole fixed 1,024-token context. The
+/// connector's binary mask is therefore all ones — and the saved encodings are
+/// already post-connector output, so nothing further is applied to them.
+///
+/// The same tensors fill the unconditional slot. That slot is unread on the
+/// distilled pipelines these embeddings ship for; `prepare` refuses the plans
+/// where it would be read, rather than letting a duplicated context silently
+/// neutralize guidance.
+fn load_scene_embeddings(path: &str) -> Result<NativePromptEncoding> {
+    let device = candle_core::Device::Cpu;
+    let tensors = candle_core::safetensors::load(path, &device)
+        .with_context(|| format!("failed to read control text embeddings from '{path}'"))?;
+    let video_encoding = tensors
+        .get("video_context")
+        .with_context(|| format!("'{path}' has no `video_context` tensor"))?
+        .clone();
+    let audio_encoding = tensors.get("audio_context").cloned();
+
+    let (batch, sequence, _) = video_encoding.dims3().with_context(|| {
+        format!("`video_context` in '{path}' must be [batch, sequence, features]")
+    })?;
+    let attention_mask = Tensor::ones((batch, sequence), DType::U8, &device)?;
+
+    let conditional = crate::ltx2::text::connectors::EmbeddingsProcessorOutput {
+        video_encoding,
+        audio_encoding,
+        attention_mask,
+    };
+    Ok(NativePromptEncoding {
+        unconditional: conditional.clone(),
+        conditional,
+    })
 }
 
 fn prompt_requires_unconditional_context(plan: &Ltx2GeneratePlan) -> Result<bool> {
@@ -6691,6 +6758,7 @@ mod tests {
         Ltx2GeneratePlan {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
+            scene_embeddings_path: None,
             guidance_overrides: None,
             vram_grant_bytes: None,
             pipeline: PipelineKind::Distilled,
@@ -9407,5 +9475,79 @@ mod tests {
             body.contains("thread_gpu_ordinal()") && !body.contains("free_vram_bytes(0)"),
             "debug VRAM lines must sample the GPU this thread is bound to"
         );
+    }
+}
+
+#[cfg(test)]
+mod scene_embeddings_tests {
+    use super::*;
+
+    /// Writes a stand-in for the adapter's shipped embeddings file.
+    fn write_scene_embeddings(dir: &std::path::Path, with_audio: bool) -> String {
+        let path = dir.join("scene-emb.safetensors");
+        let device = candle_core::Device::Cpu;
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "video_context".to_string(),
+            Tensor::ones((1, 1024, 4096), DType::F32, &device).unwrap(),
+        );
+        if with_audio {
+            tensors.insert(
+                "audio_context".to_string(),
+                Tensor::ones((1, 1024, 2048), DType::F32, &device).unwrap(),
+            );
+        }
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn saved_embeddings_become_the_conditioning_without_encoding_a_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_scene_embeddings(temp.path(), true);
+
+        let prompt = load_scene_embeddings(&path).expect("embeddings must load");
+
+        assert_eq!(prompt.conditional.video_encoding.dims3().unwrap().2, 4096);
+        assert_eq!(
+            prompt
+                .conditional
+                .audio_encoding
+                .as_ref()
+                .expect("audio context is present")
+                .dims3()
+                .unwrap()
+                .2,
+            2048
+        );
+        // Upstream ships no mask; the whole fixed context is attended.
+        let mask: Vec<u8> = prompt
+            .conditional
+            .attention_mask
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(mask.len(), 1024);
+        assert!(mask.iter().all(|&value| value == 1));
+    }
+
+    #[test]
+    fn a_video_only_embeddings_file_still_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_scene_embeddings(temp.path(), false);
+        let prompt = load_scene_embeddings(&path).expect("embeddings must load");
+        assert!(prompt.conditional.audio_encoding.is_none());
+    }
+
+    #[test]
+    fn a_file_without_video_context_names_the_missing_tensor() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty.safetensors");
+        let tensors: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+
+        let err = load_scene_embeddings(&path.to_string_lossy()).unwrap_err();
+        assert!(format!("{err:#}").contains("video_context"), "got: {err:#}");
     }
 }

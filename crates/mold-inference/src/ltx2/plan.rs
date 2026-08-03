@@ -32,6 +32,11 @@ pub(crate) struct Ltx2GeneratePlan {
     /// HDR cannot be recovered from the frames afterwards.
     pub(crate) hdr_exr_dir: Option<String>,
     pub(crate) hdr_exr_full_float: bool,
+    /// Pre-computed text embeddings shipped beside an IC-LoRA control's
+    /// weights. Upstream's HDR pipeline requires these and never encodes a
+    /// prompt, so when this is set the Gemma encode is skipped entirely and
+    /// the saved `video_context` becomes the conditioning.
+    pub(crate) scene_embeddings_path: Option<String>,
     pub(crate) pipeline: PipelineKind,
     pub(crate) preset: Ltx2ModelPreset,
     pub(crate) checkpoint_is_distilled: bool,

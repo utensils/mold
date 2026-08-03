@@ -129,6 +129,15 @@ One `frame_00000.exr` per frame, scene-referred linear, sRGB/Rec.709 primaries
 with a D65 white point. Add `--hdr-exr-full-float` for 32-bit samples instead
 of the 16-bit default.
 
+The HDR adapter ships pre-computed text embeddings beside its weights, and
+mold uses them the way upstream does: they *replace* prompt encoding rather
+than supplementing it. The adapter was trained against that one fixed scene
+context, so a prompt of your own would be out of distribution. Mold loads the
+companion and skips the Gemma encode entirely, which also makes an HDR render
+noticeably faster — about 120 s instead of 180 s for a 25-frame 704x448 clip on
+a 4090. Your prompt text is ignored for this control; that is upstream's design,
+not a limitation of the port.
+
 The EXR sequence is a **sidecar**, not the gallery artifact: a sequence is many
 files and gigabytes, so the ordinary tonemapped video is still written and is
 what appears in the Library. Note that LogC3's toe decodes pure black slightly

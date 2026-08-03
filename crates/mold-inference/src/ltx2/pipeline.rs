@@ -20,6 +20,33 @@ use super::preset;
 use super::runtime::{Ltx2RuntimeSession, NativeRenderedVideo};
 use super::text::gemma::GemmaAssets;
 use super::text::prompt_encoder::NativePromptEncoder;
+
+/// Locate the pre-computed text embeddings that ship beside an IC-LoRA
+/// control's weights.
+///
+/// Upstream's HDR pipeline takes `--text-embeddings` as a required argument
+/// and never encodes a prompt (`hdr_ic_lora.py:250-256`, `:383`), so when the
+/// companion is present it is the authority. The server reserves the control
+/// adapter as the first LoRA slot, and the companion is downloaded into that
+/// same directory, so the weights path locates it.
+///
+/// Returns `None` — and the ordinary Gemma encode runs — when the control is
+/// not one that ships embeddings, or when the file is not on disk.
+fn resolve_scene_embeddings_path(
+    req: &GenerateRequest,
+    loras: &[mold_core::LoraWeight],
+) -> Option<String> {
+    let control = req.ic_lora_control.as_deref()?;
+    let filename = mold_core::ltx2_control::LTX2_CONTROL_ADAPTERS
+        .iter()
+        .find(|adapter| adapter.id == control)?
+        .scene_embeddings_filename()?;
+    let weights = Path::new(&loras.first()?.path);
+    let candidate = weights.parent()?.join(filename);
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().into_owned())
+}
 use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
@@ -422,6 +449,7 @@ impl Ltx2Engine {
         Ok(Ltx2GeneratePlan {
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
+            scene_embeddings_path: resolve_scene_embeddings_path(req, &loras),
             pipeline,
             preset,
             checkpoint_is_distilled: self.model_name.contains("distilled"),
