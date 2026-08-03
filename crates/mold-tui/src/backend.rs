@@ -545,8 +545,8 @@ fn build_request(
         ic_lora_control: None,
         loras: None,
         retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
+        spatial_upscale: params.spatial_upscale,
+        temporal_upscale: params.temporal_upscale,
         placement: None,
     }
 }
@@ -812,5 +812,26 @@ mod tests {
 
         params.enable_audio = Some(false);
         assert_eq!(build_request(&params, "p", &None).enable_audio, Some(false));
+    }
+
+    #[test]
+    fn build_request_preserves_ltx2_upscale_choices() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        let default_request = build_request(&params, "p", &None);
+        assert_eq!(default_request.spatial_upscale, None);
+        assert_eq!(default_request.temporal_upscale, None);
+
+        params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
+        params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
+        let request = build_request(&params, "p", &None);
+        assert_eq!(
+            request.spatial_upscale,
+            Some(mold_core::Ltx2SpatialUpscale::X1_5)
+        );
+        assert_eq!(
+            request.temporal_upscale,
+            Some(mold_core::Ltx2TemporalUpscale::X2)
+        );
     }
 }
