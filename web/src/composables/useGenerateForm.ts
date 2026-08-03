@@ -26,7 +26,6 @@ import {
 import { composeStyle } from "../lib/stylePresets";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import {
-  cameraMotionFromLoraPath,
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
   syncCameraMotionLora,
@@ -321,9 +320,12 @@ export function applyMetadataToForm(
         ]
       : []);
   const outputFormat = metadata.output_format ?? options.format ?? null;
-  const cameraControl =
-    loras.map((lora) => cameraMotionFromLoraPath(lora.path)).find(Boolean) ??
-    null;
+  const camera = normalizeCameraMotionLoraState(
+    loras.slice(0, MAX_LORA_STACK),
+    null,
+    (path, scale) => ({ path, scale }),
+    MAX_LORA_STACK,
+  );
   return {
     ...next,
     prompt: metadata.prompt ?? "",
@@ -343,8 +345,8 @@ export function applyMetadataToForm(
       metadata.strength !== undefined && metadata.strength !== null
         ? metadata.strength
         : next.strength,
-    loras: loras.slice(0, MAX_LORA_STACK),
-    cameraControl,
+    loras: camera.loras,
+    cameraControl: camera.cameraControl,
     controlModel: metadata.control_model ?? "",
     controlScale: metadata.control_scale ?? next.controlScale,
     upscaleModel: metadata.upscale_model ?? "",

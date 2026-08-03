@@ -1267,4 +1267,44 @@ describe("generate form serialization helpers", () => {
       { path: "/loras/two.safetensors", scale: 1.1 },
     ]);
   });
+
+  it("does not infer camera motion from a metadata LoRA beyond the visible cap", () => {
+    const current = makeForm();
+    const next = applyMetadataToForm(
+      current,
+      {
+        prompt: "tracking shot",
+        model: "ltx-2-19b-distilled:fp8",
+        seed: 7,
+        steps: 8,
+        guidance: 3,
+        width: 768,
+        height: 512,
+        version: "0.1.0",
+        loras: [
+          { path: "one", scale: 1 },
+          { path: "two", scale: 1 },
+          { path: "three", scale: 1 },
+          { path: "four", scale: 1 },
+          { path: "camera-control:dolly-in", scale: 0.45 },
+        ],
+      },
+      {
+        models: [
+          makeModel({
+            name: "ltx-2-19b-distilled:fp8",
+            family: "ltx2",
+          }),
+        ],
+      },
+    );
+
+    expect(next.loras.map((lora) => lora.path)).toEqual([
+      "one",
+      "two",
+      "three",
+      "four",
+    ]);
+    expect(next.cameraControl).toBeNull();
+  });
 });
