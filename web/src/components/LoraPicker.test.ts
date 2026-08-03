@@ -135,6 +135,16 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(w.text()).toContain("moody lighting");
   });
 
+  it("renders an auto-download camera adapter before it is installed", async () => {
+    const w = mountPicker([{ path: "camera-control:dolly-in", scale: 0.5 }]);
+    await flushPromises();
+    const row = w.get("[data-test='lora-row']");
+    expect(row.get("select").text()).toContain("Dolly in camera control");
+    expect(
+      (row.get("input[type='range']").element as HTMLInputElement).value,
+    ).toBe("0.5");
+  });
+
   it("clicking a trigger-word chip emits append-prompt with the phrase", async () => {
     const w = mountPicker([
       {

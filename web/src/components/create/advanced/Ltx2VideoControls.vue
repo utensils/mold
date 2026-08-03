@@ -23,11 +23,15 @@ import type {
   SourceImageState,
   SourceMediaState,
 } from "../../../types";
+import { MAX_LORA_STACK } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
 import {
+  cameraMotionLoraPath,
+  cameraMotionLoraSlotAvailable,
   cameraMotionMode,
   isCameraMotionPreset,
   parseCameraControlAvailability,
+  syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import {
   DEFAULT_EXTEND_OVERLAP_FRAMES,
@@ -117,7 +121,7 @@ watch(
             (camera) => camera.id === props.modelValue.cameraControl,
           )
         ) {
-          patch({ cameraControl: null });
+          setCameraControl(null);
         }
       })
       .catch(() => {
@@ -134,6 +138,37 @@ watch(
 function patch(next: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...next });
 }
+
+function setCameraControl(next: string | null) {
+  if (
+    cameraMotionLoraPath(next) &&
+    !cameraMotionLoraSlotAvailable(
+      props.modelValue.loras,
+      props.modelValue.cameraControl,
+      MAX_LORA_STACK,
+    )
+  ) {
+    return;
+  }
+  patch({
+    cameraControl: next,
+    loras: syncCameraMotionLora(
+      props.modelValue.loras,
+      props.modelValue.cameraControl,
+      next,
+      (path, scale) => ({ path, scale, trainedWords: [] }),
+      MAX_LORA_STACK,
+    ),
+  });
+}
+
+const cameraSlotAvailable = computed(() =>
+  cameraMotionLoraSlotAvailable(
+    props.modelValue.loras,
+    props.modelValue.cameraControl,
+    MAX_LORA_STACK,
+  ),
+);
 
 // ── Audio decode toggle ───────────────────────────────────────────────
 // enableAudio is boolean | null; null lets the server default (on for MP4).
@@ -185,10 +220,10 @@ function setCameraMode(raw: string) {
   cameraMode.value = raw;
   if (raw === "custom") {
     if (cameraMotionMode(props.modelValue.cameraControl) !== "custom")
-      patch({ cameraControl: "" });
+      setCameraControl("");
     return;
   }
-  patch({ cameraControl: raw || null });
+  setCameraControl(raw || null);
 }
 
 // ── Spatial / temporal upscale (segmented; "" = native) ───────────────
@@ -441,11 +476,14 @@ function removeKeyframe(index: number) {
           v-for="preset in cameraControls"
           :key="preset.id"
           :value="preset.id"
+          :disabled="!cameraSlotAvailable"
         >
           {{ preset.label
           }}{{ preset.installed ? "" : " · downloads on first use" }}
         </option>
-        <option value="custom">Custom LoRA path…</option>
+        <option value="custom" :disabled="!cameraSlotAvailable">
+          Custom LoRA path…
+        </option>
       </select>
       <input
         v-if="cameraMode === 'custom'"
@@ -453,9 +491,7 @@ function removeKeyframe(index: number) {
         data-test="ltx2-camera-motion-custom"
         placeholder="/path/to/lora.safetensors"
         :value="modelValue.cameraControl ?? ''"
-        @input="
-          patch({ cameraControl: ($event.target as HTMLInputElement).value })
-        "
+        @input="setCameraControl(($event.target as HTMLInputElement).value)"
       />
       <p
         v-if="cameraControlsLoaded && cameraControls.length === 0"

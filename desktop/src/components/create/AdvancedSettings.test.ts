@@ -338,6 +338,14 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(options[1]?.attributes("disabled")).toBeUndefined();
     await wrapper.get("[data-test='camera-motion']").setValue("dolly-in");
     expect(form.cameraControl).toBe("dolly-in");
+    expect(form.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
   });
 
   it("keeps custom camera motion available when the host reports no built-ins", async () => {
@@ -359,11 +367,46 @@ describe("AdvancedSettings — video (LTX-2)", () => {
 
   it("reveals a custom camera-motion path input", async () => {
     const form = formFor("ltx2");
+    form.cameraControl = "dolly-in";
+    form.loras = [
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ];
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     await wrapper.get("[data-test='camera-motion']").setValue("custom");
     await wrapper.get("[data-test='camera-motion-custom']").setValue("/loras/pan.safetensors");
     expect(form.cameraControl).toBe("/loras/pan.safetensors");
+    expect(form.loras).toEqual([
+      {
+        path: "/loras/pan.safetensors",
+        name: "/loras/pan.safetensors",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
+  });
+
+  it("disables new camera choices when all four LoRA slots are occupied", async () => {
+    const form = formFor("ltx2");
+    form.loras = ["one", "two", "three", "four"].map((path) => ({
+      path,
+      name: path,
+      scale: 1,
+      trainedWords: [],
+    }));
+    const wrapper = mountSettings(form, {
+      cameraControls: [cameraControl("dolly-in", false)],
+      cameraControlsLoaded: true,
+    });
+    await openSection(wrapper, "Video");
+    const options = wrapper.get("[data-test='camera-motion']").findAll("option");
+    expect(options[1]?.attributes()).toHaveProperty("disabled");
+    expect(options[2]?.attributes()).toHaveProperty("disabled");
   });
 });
 

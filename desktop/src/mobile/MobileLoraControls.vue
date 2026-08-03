@@ -6,6 +6,7 @@ import { fetchLoras } from "../lib/api/loras";
 import type { LoraInfo } from "../lib/api/types";
 import { MAX_LORA_STACK, generationCapabilitiesForFamily } from "../lib/capabilities";
 import type { GenerateForm } from "../lib/generateForm";
+import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
 
 const props = defineProps<{
   form: GenerateForm;
@@ -65,7 +66,11 @@ function add(lora: LoraInfo): void {
 }
 
 function remove(index: number): void {
+  const removed = props.form.loras[index];
   props.form.loras.splice(index, 1);
+  if (removed?.path === cameraMotionLoraPath(props.form.cameraControl)) {
+    props.form.cameraControl = null;
+  }
 }
 
 watch(
@@ -76,6 +81,13 @@ watch(
     available.value = [];
     error.value = "";
     if (open.value) void load();
+  },
+);
+
+watch(
+  () => props.form.loras.length,
+  (length, previous) => {
+    if (length > previous) open.value = true;
   },
 );
 

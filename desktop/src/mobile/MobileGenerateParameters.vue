@@ -8,7 +8,7 @@ import type {
   Ltx2TemporalUpscale,
   ModelEntry,
 } from "../lib/api/types";
-import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import { generationCapabilitiesForFamily, MAX_LORA_STACK } from "../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../lib/chain";
 import {
   decideGenerateRequestRouting,
@@ -28,7 +28,13 @@ import {
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { fileToBase64, isStillImageFile } from "../lib/image";
-import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  cameraMotionLoraPath,
+  cameraMotionLoraSlotAvailable,
+  cameraMotionLoraLabel,
+  cameraMotionMode,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import {
   canOfferExtend,
   extendNewFrames,
@@ -185,11 +191,37 @@ watch(
 function setCameraMode(mode: string): void {
   cameraMode.value = mode;
   if (mode === "custom") {
-    if (cameraMotionMode(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+    if (cameraMotionMode(props.form.cameraControl) !== "custom") setCameraControl("");
   } else {
-    props.form.cameraControl = mode || null;
+    setCameraControl(mode || null);
   }
 }
+
+function setCameraControl(next: string | null): void {
+  if (
+    cameraMotionLoraPath(next) &&
+    !cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK)
+  ) {
+    return;
+  }
+  props.form.loras = syncCameraMotionLora(
+    props.form.loras,
+    props.form.cameraControl,
+    next,
+    (path, scale) => ({
+      path,
+      name: cameraMotionLoraLabel(path),
+      scale,
+      trainedWords: [],
+    }),
+    MAX_LORA_STACK,
+  );
+  props.form.cameraControl = next;
+}
+
+const cameraSlotAvailable = computed(() =>
+  cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK),
+);
 
 function hasAdvancedVideoValue(): boolean {
   return !!(
@@ -668,10 +700,15 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           @change="setCameraMode(($event.target as HTMLSelectElement).value)"
         >
           <option value="">None</option>
-          <option v-for="preset in cameraControls" :key="preset.id" :value="preset.id">
+          <option
+            v-for="preset in cameraControls"
+            :key="preset.id"
+            :value="preset.id"
+            :disabled="!cameraSlotAvailable"
+          >
             {{ preset.label }}{{ preset.installed ? "" : " · downloads on first use" }}
           </option>
-          <option value="custom">Custom LoRA path…</option>
+          <option value="custom" :disabled="!cameraSlotAvailable">Custom LoRA path…</option>
         </select>
       </label>
       <label
@@ -688,7 +725,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           autocapitalize="none"
           placeholder="/path/to/lora.safetensors"
           :value="form.cameraControl ?? ''"
-          @input="form.cameraControl = ($event.target as HTMLInputElement).value"
+          @input="setCameraControl(($event.target as HTMLInputElement).value)"
         />
       </label>
       <p

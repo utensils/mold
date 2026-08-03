@@ -26,6 +26,12 @@ import {
 import { composeStyle } from "../lib/stylePresets";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import {
+  cameraMotionFromLoraPath,
+  cameraMotionLoraPath,
+  normalizeCameraMotionLoraState,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
+import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
   guidanceOverridesToWire,
@@ -238,6 +244,19 @@ function modelDefaultsPatch(
     next.controlImage = null;
     next.controlModel = "";
   }
+  if (next.cameraControl) {
+    const cameraPath = cameraMotionLoraPath(next.cameraControl);
+    const cameraRows = current.loras.filter(
+      (lora) =>
+        lora.path === cameraPath || lora.path.startsWith("camera-control:"),
+    );
+    next.loras = syncCameraMotionLora(
+      cameraRows,
+      current.cameraControl,
+      next.cameraControl,
+      (path, scale) => ({ path, scale, trainedWords: [] }),
+    );
+  }
   return next;
 }
 
@@ -302,6 +321,9 @@ export function applyMetadataToForm(
         ]
       : []);
   const outputFormat = metadata.output_format ?? options.format ?? null;
+  const cameraControl =
+    loras.map((lora) => cameraMotionFromLoraPath(lora.path)).find(Boolean) ??
+    null;
   return {
     ...next,
     prompt: metadata.prompt ?? "",
@@ -322,6 +344,7 @@ export function applyMetadataToForm(
         ? metadata.strength
         : next.strength,
     loras: loras.slice(0, MAX_LORA_STACK),
+    cameraControl,
     controlModel: metadata.control_model ?? "",
     controlScale: metadata.control_scale ?? next.controlScale,
     upscaleModel: metadata.upscale_model ?? "",
@@ -464,13 +487,20 @@ function load(): GenerateFormState {
     if (parsed.version !== FORM_VERSION) {
       return defaultForm();
     }
-    return {
+    const restored = {
       ...defaultForm(),
       ...sanitizePersistedForm({
         ...defaultForm(),
         ...parsed,
       }),
     };
+    const camera = normalizeCameraMotionLoraState(
+      restored.loras,
+      restored.cameraControl,
+      (path, scale) => ({ path, scale, trainedWords: [] }),
+      MAX_LORA_STACK,
+    );
+    return { ...restored, ...camera };
   } catch {
     return defaultForm();
   }
@@ -614,13 +644,13 @@ export function useGenerateForm(): UseGenerateForm {
       const ltx2 = family === "ltx2" || family === "ltx-2";
       const cameraControl = s.cameraControl?.trim();
       if (ltx2 && cameraControl) {
-        loras = loras.slice(0, MAX_LORA_STACK - 1);
-        loras.push({
-          path: cameraControl.endsWith(".safetensors")
-            ? cameraControl
-            : `camera-control:${cameraControl}`,
-          scale: 1,
-        });
+        loras = syncCameraMotionLora(
+          loras,
+          cameraControl,
+          cameraControl,
+          (path, scale) => ({ path, scale }),
+          MAX_LORA_STACK,
+        );
       }
       // The style preset is baked into the OUTGOING request — prompt template
       // plus the preset's curated negative, merged after the user's own

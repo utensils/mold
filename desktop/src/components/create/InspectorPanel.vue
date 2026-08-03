@@ -17,7 +17,11 @@ import type {
   Ltx2ControlAdapterInfo,
   ModelEntry,
 } from "../../lib/api/types";
-import { isCameraMotionPreset, parseCameraControlAvailability } from "@studio/lib/cameraMotion";
+import {
+  isCameraMotionPreset,
+  parseCameraControlAvailability,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import {
   filterModelsForTarget,
@@ -132,6 +136,12 @@ watch(
         const compatible = (value: string | null) =>
           !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
         if (!compatible(props.form.cameraControl)) {
+          props.form.loras = syncCameraMotionLora(
+            props.form.loras,
+            props.form.cameraControl,
+            null,
+            (path, scale) => ({ path, name: path, scale, trainedWords: [] }),
+          );
           props.form.cameraControl = null;
         }
         for (const clip of draft.clips) {

@@ -69,7 +69,11 @@ import type {
   ModelEntry,
   ServerStatus,
 } from "../lib/api/types";
-import { isCameraMotionPreset, parseCameraControlAvailability } from "@studio/lib/cameraMotion";
+import {
+  isCameraMotionPreset,
+  parseCameraControlAvailability,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 import {
   buildAutoChainRequest,
@@ -554,7 +558,15 @@ watch(
         cameraControlsLoaded.value = true;
         const compatible = (value: string | null) =>
           !value || !isCameraMotionPreset(value) || cameras.some((camera) => camera.id === value);
-        if (!compatible(form.cameraControl)) form.cameraControl = null;
+        if (!compatible(form.cameraControl)) {
+          form.loras = syncCameraMotionLora(
+            form.loras,
+            form.cameraControl,
+            null,
+            (path, scale) => ({ path, name: path, scale, trainedWords: [] }),
+          );
+          form.cameraControl = null;
+        }
         for (const clip of draft.clips) {
           if (!compatible(clip.cameraControl)) clip.cameraControl = null;
         }

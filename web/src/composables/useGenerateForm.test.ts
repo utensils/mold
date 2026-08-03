@@ -142,6 +142,51 @@ describe("useGenerateForm", () => {
     expect(form.state.value.stylePreset).toBe("cinematic");
   });
 
+  it("upgrades a version 3 camera picker value into the visible LoRA stack", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 3,
+        model: "ltx-2-19b-distilled:fp8",
+        modelFamily: "ltx2",
+        cameraControl: "dolly-in",
+        loras: [],
+      }),
+    );
+
+    const form = useGenerateForm();
+    expect(form.state.value.cameraControl).toBe("dolly-in");
+    expect(form.state.value.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
+  });
+
+  it("clears a legacy picker-only camera value when all LoRA slots are occupied", () => {
+    const loras = ["one", "two", "three", "four"].map((path) => ({
+      path,
+      scale: 1,
+      trainedWords: [],
+    }));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 3,
+        model: "ltx-2-19b-distilled:fp8",
+        modelFamily: "ltx2",
+        cameraControl: "dolly-in",
+        loras,
+      }),
+    );
+
+    const form = useGenerateForm();
+    expect(form.state.value.cameraControl).toBeNull();
+    expect(form.state.value.loras).toEqual(loras);
+  });
+
   it("toRequest bakes the shared kit's style template without mutating the prompt", () => {
     const form = useGenerateForm();
     form.state.value.model = "flux2-klein:q4";
@@ -619,7 +664,18 @@ describe("useGenerateForm", () => {
     });
   });
 
-  it("reserves one LoRA slot for an LTX-2 camera control", () => {
+  it("uses the camera strength edited in the visible LoRA stack", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.cameraControl = "dolly-in";
+    form.state.value.loras = [{ path: "camera-control:dolly-in", scale: 0.45 }];
+    expect(form.toRequest().loras).toEqual([
+      { path: "camera-control:dolly-in", scale: 0.45 },
+    ]);
+  });
+
+  it("never evicts a user LoRA from a full stack to serialize camera control", () => {
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
@@ -633,7 +689,7 @@ describe("useGenerateForm", () => {
       { path: "one", scale: 1 },
       { path: "two", scale: 1 },
       { path: "three", scale: 1 },
-      { path: "camera-control:dolly-in", scale: 1 },
+      { path: "four", scale: 1 },
     ]);
   });
 
