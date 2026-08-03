@@ -5806,22 +5806,29 @@ fn checksum_file(path: &Path) -> anyhow::Result<String> {
 
 pub(crate) fn checksum_file_for_authority(path: &Path) -> anyhow::Result<String> {
     #[cfg(test)]
-    AUTHORITY_HASH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    AUTHORITY_HASH_COUNT.with(|count| count.set(count.get() + 1));
     checksum_file(path)
 }
 
+// Thread-local, not a process-wide atomic. `cargo test` runs this crate's
+// suite in one process across many threads, so a global counter reset by one
+// test counted every *other* test's authority hashes too — the
+// "delete hashes no unrelated media" assertion then failed whenever an
+// unrelated test hashed between its reset and its read. Each test observes
+// only work its own thread did, which is exactly what the assertion means.
 #[cfg(test)]
-static AUTHORITY_HASH_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static AUTHORITY_HASH_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn reset_authority_hash_count() {
-    AUTHORITY_HASH_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    AUTHORITY_HASH_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 fn authority_hash_count() -> usize {
-    AUTHORITY_HASH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    AUTHORITY_HASH_COUNT.with(|count| count.get())
 }
 
 fn publish_no_replace(staged: &Path, final_path: &Path) -> anyhow::Result<()> {
