@@ -12,8 +12,9 @@ import {
 const props = defineProps<{
   target: ApiTarget | null;
   suggestedBaseUrl: string;
-  hostLabel?: string;
+  hostLabel?: string | undefined;
 }>();
+const emit = defineEmits<{ sessionCreated: [] }>();
 
 const address = ref(props.suggestedBaseUrl);
 const session = ref<PairingSession | null>(null);
@@ -100,6 +101,7 @@ async function startPairing(): Promise<void> {
       color: { dark: "#111111", light: "#ffffff" },
     });
     session.value = next;
+    emit("sessionCreated");
     now.value = Math.floor(Date.now() / 1000);
     if (timer) clearInterval(timer);
     timer = setInterval(

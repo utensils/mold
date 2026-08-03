@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { mobilePairingUrl, parseMobilePairingPayload } from "./pairing";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  claimPairingSession,
+  mobilePairingUrl,
+  parseMobilePairingPayload,
+} from "./pairing";
 
 const payload = {
   type: "mold.mobile-pairing" as const,
@@ -10,6 +14,8 @@ const payload = {
   instance_id: "server-id",
   name: "Studio Mac",
 };
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("parseMobilePairingPayload", () => {
   it("accepts the versioned one-time pairing envelope", () => {
@@ -54,5 +60,35 @@ describe("parseMobilePairingPayload", () => {
         }),
       ),
     ).toThrow("not a supported Mold pairing code");
+  });
+});
+
+describe("claimPairingSession", () => {
+  it("identifies the client without putting its new credential in the request", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            api_key: "mold_pair_secret",
+            instance_id: "host-id",
+            hostname: "studio",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    await claimPairingSession("http://studio:7680", "one-use", {
+      name: "Mold on iPhone",
+      kind: "iphone",
+    });
+
+    const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      token: "one-use",
+      client_name: "Mold on iPhone",
+      client_kind: "iphone",
+    });
+    expect(String(init.body)).not.toContain("mold_pair_secret");
   });
 });

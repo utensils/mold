@@ -1185,7 +1185,13 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
       throw new Error("That pairing code expired. Create a new one in the host's Settings.");
     }
     const baseUrl = normalizeRemoteAddress(payload.base_url);
-    const claim = await claimPairingSession(baseUrl, payload.token);
+    const iPad =
+      /iPad/i.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const claim = await claimPairingSession(baseUrl, payload.token, {
+      name: iPad ? "Mold on iPad" : "Mold on iPhone",
+      kind: iPad ? "ipad" : "iphone",
+    });
     if (claim.instance_id !== payload.instance_id) {
       throw new Error("The pairing code was redeemed by a different Mold host.");
     }

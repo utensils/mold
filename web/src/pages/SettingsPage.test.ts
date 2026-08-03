@@ -91,6 +91,13 @@ describe("SettingsPage", () => {
                 civitai: { configured: false, source: null, masked: null },
               };
             }
+            if (String(input).endsWith("/api/pairing/clients")) {
+              return {
+                auth_required: true,
+                pairing_available: true,
+                clients: [],
+              };
+            }
             return { entries: [] };
           },
         }) as Response,

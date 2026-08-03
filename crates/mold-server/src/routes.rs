@@ -204,6 +204,8 @@ use crate::queue::clean_error_message;
         create_gallery_media_token,
         create_pairing_session,
         claim_pairing_session,
+        list_paired_clients,
+        revoke_paired_client,
         import_gallery_file,
         server_status,
         list_devices,
@@ -267,6 +269,8 @@ use crate::queue::clean_error_message;
         PairingSessionResponse,
         PairingClaimRequest,
         PairingClaimResponse,
+        PairedClientsResponse,
+        PairedClientResponse,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
         mold_core::DeviceState,
@@ -427,6 +431,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/gallery/media-token", post(create_gallery_media_token))
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
+        .route("/api/pairing/clients", get(list_paired_clients))
+        .route("/api/pairing/clients/:id", delete(revoke_paired_client))
         .route(
             "/api/gallery/import/:filename",
             put(import_gallery_file).layer(DefaultBodyLimit::max(
@@ -4915,6 +4921,8 @@ pub(crate) struct PairingSessionResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub(crate) struct PairingClaimRequest {
     pub(crate) token: Option<String>,
+    pub(crate) client_name: Option<String>,
+    pub(crate) client_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -4922,6 +4930,22 @@ pub(crate) struct PairingClaimResponse {
     pub(crate) api_key: Option<String>,
     pub(crate) instance_id: String,
     pub(crate) hostname: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct PairedClientResponse {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) client_kind: String,
+    pub(crate) created_at_ms: i64,
+    pub(crate) last_used_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct PairedClientsResponse {
+    pub(crate) auth_required: bool,
+    pub(crate) pairing_available: bool,
+    pub(crate) clients: Vec<PairedClientResponse>,
 }
 
 fn pairing_hostname() -> Option<String> {
@@ -4951,21 +4975,23 @@ async fn create_pairing_session(
     let key_set = auth_state.and_then(|Extension(state)| state);
     let (token, expires_at, auth_required) = match key_set {
         Some(key_set) => {
-            let Extension(authority) = authority.ok_or_else(|| {
+            let Extension(_) = authority.ok_or_else(|| {
                 ApiError::with_code(
-                    "API key authentication is required to start mobile pairing",
-                    "UNAUTHORIZED",
-                    StatusCode::UNAUTHORIZED,
+                    "only an operator API key can start mobile pairing",
+                    "PAIRING_OPERATOR_REQUIRED",
+                    StatusCode::FORBIDDEN,
                 )
             })?;
-            let (token, expires_at) =
-                key_set
-                    .issue_pairing_token(authority.api_key)
-                    .map_err(|error| {
-                        ApiError::internal(format!(
-                            "failed to create a secure pairing token: {error}"
-                        ))
-                    })?;
+            if !key_set.pairing_available() {
+                return Err(ApiError::with_code(
+                    "paired access is unavailable while the metadata database is disabled",
+                    "PAIRING_UNAVAILABLE",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ));
+            }
+            let (token, expires_at) = key_set.issue_pairing_token().map_err(|error| {
+                ApiError::internal(format!("failed to create a secure pairing token: {error}"))
+            })?;
             (Some(token), Some(expires_at), true)
         }
         None => (None, None, false),
@@ -5016,13 +5042,24 @@ async fn claim_pairing_session(
                         StatusCode::UNAUTHORIZED,
                     )
                 })?;
-            Some(key_set.claim_pairing_token(token).ok_or_else(|| {
-                ApiError::with_code(
-                    "pairing token is missing, expired, or already used",
-                    "PAIRING_TOKEN_INVALID",
-                    StatusCode::UNAUTHORIZED,
-                )
-            })?)
+            Some(
+                key_set
+                    .claim_pairing_token(
+                        token,
+                        request.client_name.as_deref().unwrap_or("Mold mobile"),
+                        request.client_kind.as_deref().unwrap_or("mobile"),
+                    )
+                    .map_err(|error| {
+                        ApiError::internal(format!("failed to create paired access: {error:#}"))
+                    })?
+                    .ok_or_else(|| {
+                        ApiError::with_code(
+                            "pairing token is missing, expired, or already used",
+                            "PAIRING_TOKEN_INVALID",
+                            StatusCode::UNAUTHORIZED,
+                        )
+                    })?,
+            )
         }
         None => None,
     };
@@ -5036,6 +5073,97 @@ async fn claim_pairing_session(
             hostname: pairing_hostname(),
         }),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/pairing/clients",
+    tag = "server",
+    responses(
+        (status = 200, description = "Paired client access grants", body = PairedClientsResponse),
+        (status = 403, description = "Operator API key is required"),
+    )
+)]
+async fn list_paired_clients(
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    authority: Option<Extension<crate::auth::PairingAuthority>>,
+) -> Result<Json<PairedClientsResponse>, ApiError> {
+    let key_set = auth_state.and_then(|Extension(state)| state);
+    let Some(key_set) = key_set else {
+        return Ok(Json(PairedClientsResponse {
+            auth_required: false,
+            pairing_available: true,
+            clients: Vec::new(),
+        }));
+    };
+    if authority.is_none() {
+        return Err(ApiError::with_code(
+            "only an operator API key can manage paired access",
+            "PAIRING_OPERATOR_REQUIRED",
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    Ok(Json(PairedClientsResponse {
+        auth_required: true,
+        pairing_available: key_set.pairing_available(),
+        clients: key_set
+            .paired_clients()
+            .into_iter()
+            .map(|client| PairedClientResponse {
+                id: client.id,
+                name: client.name,
+                client_kind: client.client_kind,
+                created_at_ms: client.created_at_ms,
+                last_used_at_ms: client.last_used_at_ms,
+            })
+            .collect(),
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/pairing/clients/{id}",
+    tag = "server",
+    params(("id" = String, Path, description = "Paired client grant id")),
+    responses(
+        (status = 204, description = "Paired client access revoked"),
+        (status = 403, description = "Operator API key is required"),
+        (status = 404, description = "Paired client was not found"),
+    )
+)]
+async fn revoke_paired_client(
+    Path(id): Path<String>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    authority: Option<Extension<crate::auth::PairingAuthority>>,
+) -> Result<StatusCode, ApiError> {
+    let key_set = auth_state
+        .and_then(|Extension(state)| state)
+        .ok_or_else(|| {
+            ApiError::with_code(
+                "authentication is disabled; there is no paired access to revoke",
+                "PAIRING_NOT_REQUIRED",
+                StatusCode::NOT_FOUND,
+            )
+        })?;
+    if authority.is_none() {
+        return Err(ApiError::with_code(
+            "only an operator API key can manage paired access",
+            "PAIRING_OPERATOR_REQUIRED",
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    if key_set
+        .revoke_paired_client(&id)
+        .map_err(|error| ApiError::internal(format!("failed to revoke paired access: {error:#}")))?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::with_code(
+            "paired client was not found",
+            "PAIRED_CLIENT_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        ))
+    }
 }
 
 /// Issue a short-lived credential for a browser media element.
@@ -6216,17 +6344,19 @@ mod tests {
 
     #[tokio::test]
     async fn production_pairing_handlers_issue_claim_and_reject_replay() {
-        let state = AppState::for_tests();
-        let key_set = Arc::new(crate::auth::ApiKeySet::new(
+        let mut state = AppState::for_tests();
+        let metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.metadata_db = metadata_db.clone();
+        let key_set = Arc::new(crate::auth::ApiKeySet::new_with_metadata_db(
             std::collections::HashSet::from(["phone-key".to_string()]),
+            metadata_db,
+            state.instance_id.as_ref().clone(),
         ));
         let auth_state = Some(key_set.clone());
         let created = create_pairing_session(
             State(state.clone()),
             Some(Extension(auth_state.clone())),
-            Some(Extension(crate::auth::PairingAuthority {
-                api_key: "phone-key".to_string(),
-            })),
+            Some(Extension(crate::auth::PairingAuthority)),
         )
         .await
         .unwrap()
@@ -6246,6 +6376,8 @@ mod tests {
             Some(Extension(auth_state.clone())),
             Json(PairingClaimRequest {
                 token: Some(token.clone()),
+                client_name: Some("Test iPhone".into()),
+                client_kind: Some("iphone".into()),
             }),
         )
         .await
@@ -6257,13 +6389,40 @@ mod tests {
             "no-store"
         );
         let claimed = response_json(claimed).await;
-        assert_eq!(claimed["api_key"], "phone-key");
+        let paired_key = claimed["api_key"].as_str().unwrap().to_string();
+        assert!(paired_key.starts_with("mold_pair_"));
+        assert_ne!(claimed["api_key"], "phone-key");
         assert_eq!(claimed["instance_id"], *state.instance_id);
+        assert!(key_set.contains(&paired_key));
+
+        let clients = list_paired_clients(
+            Some(Extension(auth_state.clone())),
+            Some(Extension(crate::auth::PairingAuthority)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(clients.clients.len(), 1);
+        assert_eq!(clients.clients[0].name, "Test iPhone");
+        assert_eq!(clients.clients[0].client_kind, "iphone");
+        revoke_paired_client(
+            Path(clients.clients[0].id.clone()),
+            Some(Extension(auth_state.clone())),
+            Some(Extension(crate::auth::PairingAuthority)),
+        )
+        .await
+        .unwrap();
+        assert!(!key_set.contains(&paired_key));
+        assert!(key_set.contains("phone-key"));
 
         let replay = match claim_pairing_session(
             State(state),
             Some(Extension(auth_state)),
-            Json(PairingClaimRequest { token: Some(token) }),
+            Json(PairingClaimRequest {
+                token: Some(token),
+                client_name: None,
+                client_kind: None,
+            }),
         )
         .await
         {
@@ -6288,7 +6447,11 @@ mod tests {
         let claimed = claim_pairing_session(
             State(state),
             Some(Extension(None)),
-            Json(PairingClaimRequest { token: None }),
+            Json(PairingClaimRequest {
+                token: None,
+                client_name: None,
+                client_kind: None,
+            }),
         )
         .await
         .unwrap()

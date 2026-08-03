@@ -14,6 +14,7 @@ mod device_preferences;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
+pub mod paired_clients;
 mod path;
 pub mod persist;
 mod prompt_history;
