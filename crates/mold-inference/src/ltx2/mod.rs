@@ -5,6 +5,7 @@ mod conditioning;
 pub(crate) mod convrot;
 mod execution;
 mod guidance;
+mod hdr;
 mod lora;
 pub mod media;
 mod model;
