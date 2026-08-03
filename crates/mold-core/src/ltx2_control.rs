@@ -62,6 +62,18 @@ impl Ltx2ControlAdapter {
     pub fn total_size_bytes(&self) -> u64 {
         self.files().map(|file| file.size_bytes).sum()
     }
+
+    /// The adapter's pre-computed text-embedding companion, if it ships one.
+    ///
+    /// Upstream's HDR pipeline takes these embeddings instead of encoding a
+    /// prompt, so the engine needs to find the file by name rather than
+    /// hardcoding it. Returns `None` for every adapter that encodes normally.
+    pub fn scene_embeddings_filename(&self) -> Option<&'static str> {
+        self.extra_files
+            .iter()
+            .map(|file| file.hf_filename)
+            .find(|name| name.contains("scene-emb"))
+    }
 }
 
 pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[

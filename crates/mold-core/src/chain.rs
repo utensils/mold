@@ -630,6 +630,8 @@ impl ChainRequest {
                 .join("\n")
         };
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             prompt,
             negative_prompt: first.negative_prompt.clone(),
             model: self.model.clone(),

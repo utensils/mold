@@ -83,6 +83,11 @@ pub struct NativePreparedRun {
 #[derive(Debug)]
 pub struct NativeRenderedVideo {
     pub frames: Vec<RgbImage>,
+    /// Scene-referred linear HDR frames, present only when the plan asked for
+    /// an EXR sidecar. Kept alongside the 8-bit frames rather than replacing
+    /// them: the gallery artifact is still the tonemapped video.
+    /// Number of EXR frames written as a sidecar during decode, if any.
+    pub hdr_frames_written: Option<usize>,
     pub audio_track: Option<NativeAudioTrack>,
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
@@ -494,6 +499,19 @@ impl Ltx2RuntimeSession {
             stage1_shape.height = implicit_x2_shape.height;
         }
         let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
+        if plan.scene_embeddings_path.is_some()
+            && prompt_requires_unconditional_context_for_plan(plan)?
+        {
+            // The saved embeddings are one conditional context; upstream's HDR
+            // pipeline is distilled and never runs classifier-free guidance.
+            // Reusing them as the negative would cancel guidance to nothing
+            // and quietly change what the user asked for, so refuse instead.
+            anyhow::bail!(
+                "pre-computed control embeddings carry no negative context, but this plan \
+                 needs one (guidance > 1.0). Run the control on its distilled checkpoint, \
+                 or drop the guidance override."
+            );
+        }
         let alt_prompt_env = ltx_debug_alt_prompt();
         // Chain path fast-path: if a previous `prepare()` already encoded
         // the exact same prompt+unconditional combo, reuse those embeddings
@@ -505,7 +523,22 @@ impl Ltx2RuntimeSession {
                 cached.encode_unconditional == encode_unconditional_prompt
                     && cached.token_pair == plan.prompt_tokens
             });
-        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if cache_hit {
+        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if let Some(path) =
+            plan.scene_embeddings_path.as_deref()
+        {
+            // Pre-computed context: no Gemma load, no encode. The encoder is
+            // left untaken so a later stage that does need it still finds it.
+            let scene_start = Instant::now();
+            let prompt = load_scene_embeddings(path)?;
+            log_timing("prepare.scene_embeddings", scene_start);
+            emit_phase_done(
+                progress,
+                ProgressPhase::PromptEncode,
+                "Loading control embeddings",
+                scene_start.elapsed(),
+            );
+            (false, candle_core::Device::Cpu, prompt, None)
+        } else if cache_hit {
             let cached = self
                 .cached_prompt_encoding
                 .as_ref()
@@ -789,6 +822,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativeRenderedVideo {
             frames,
+            hdr_frames_written: None,
             audio_track: None,
             has_audio: plan.execution_graph.wants_audio_output,
             audio_sample_rate: plan.execution_graph.wants_audio_output.then_some(48_000),
@@ -1298,6 +1332,45 @@ fn stage_multimodal_guider_params(
         apply_guidance_overrides(plan, &mut audio_params, overrides)?;
     }
     Ok(Some((video_params, audio_params)))
+}
+
+/// Build a prompt encoding from a control adapter's saved text embeddings.
+///
+/// Upstream saves `video_context` and `audio_context` with
+/// `safetensors.torch.save_file` and reads them back verbatim
+/// (`hdr_ic_lora.py:250-256`); there is no attention mask in the file because
+/// the pipeline attends to the whole fixed 1,024-token context. The
+/// connector's binary mask is therefore all ones — and the saved encodings are
+/// already post-connector output, so nothing further is applied to them.
+///
+/// The same tensors fill the unconditional slot. That slot is unread on the
+/// distilled pipelines these embeddings ship for; `prepare` refuses the plans
+/// where it would be read, rather than letting a duplicated context silently
+/// neutralize guidance.
+fn load_scene_embeddings(path: &str) -> Result<NativePromptEncoding> {
+    let device = candle_core::Device::Cpu;
+    let tensors = candle_core::safetensors::load(path, &device)
+        .with_context(|| format!("failed to read control text embeddings from '{path}'"))?;
+    let video_encoding = tensors
+        .get("video_context")
+        .with_context(|| format!("'{path}' has no `video_context` tensor"))?
+        .clone();
+    let audio_encoding = tensors.get("audio_context").cloned();
+
+    let (batch, sequence, _) = video_encoding.dims3().with_context(|| {
+        format!("`video_context` in '{path}' must be [batch, sequence, features]")
+    })?;
+    let attention_mask = Tensor::ones((batch, sequence), DType::U8, &device)?;
+
+    let conditional = crate::ltx2::text::connectors::EmbeddingsProcessorOutput {
+        video_encoding,
+        audio_encoding,
+        attention_mask,
+    };
+    Ok(NativePromptEncoding {
+        unconditional: conditional.clone(),
+        conditional,
+    })
 }
 
 fn prompt_requires_unconditional_context(plan: &Ltx2GeneratePlan) -> Result<bool> {
@@ -2536,7 +2609,7 @@ fn render_real_distilled_av(
             *guard = Some(latents.clone());
         }
     }
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "distilled",
         &mut vae,
         &latents,
@@ -2544,8 +2617,13 @@ fn render_real_distilled_av(
         dtype,
         device,
         debug_enabled,
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
@@ -2576,6 +2654,7 @@ fn render_real_distilled_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -2930,7 +3009,7 @@ fn render_real_two_stage_av(
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "two_stage",
         &mut vae,
         &latents,
@@ -2938,8 +3017,13 @@ fn render_real_two_stage_av(
         dtype,
         device,
         false,
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
@@ -2977,6 +3061,7 @@ fn render_real_two_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3139,7 +3224,7 @@ fn render_real_one_stage_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "one_stage",
         &mut vae,
         &latents,
@@ -3147,8 +3232,13 @@ fn render_real_one_stage_av(
         dtype,
         device,
         debug_enabled,
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_track =
         maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
@@ -3170,6 +3260,7 @@ fn render_real_one_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3329,7 +3420,7 @@ fn render_real_retake_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "retake",
         &mut vae,
         &latents,
@@ -3337,8 +3428,13 @@ fn render_real_retake_av(
         dtype,
         device,
         debug_enabled,
+        plan_hdr_exr_target(plan)
+            .as_ref()
+            .map(|(d, p)| (d.as_path(), *p)),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
@@ -3361,6 +3457,7 @@ fn render_real_retake_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames_written,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -4001,6 +4098,69 @@ fn mix_clean_latents_with_noise(
 
 fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
     debug_stage.is_some()
+}
+
+/// Fork the decoded VAE tensor into scene-referred linear HDR.
+///
+/// `decoded_video_to_frames` is the single float→u8 conversion in the whole
+/// LTX-2 path, so this is the one place HDR can diverge — everything past it
+/// is `RgbImage`. Keeps full float precision and does not resize: an EXR is
+/// for compositing, and resampling linear light after the grade defeats it.
+/// The EXR sidecar target for this plan, if one was requested.
+///
+/// Resolved once per decode so the four render paths cannot disagree about
+/// where the sequence goes or at what precision.
+fn plan_hdr_exr_target(
+    plan: &Ltx2GeneratePlan,
+) -> Option<(std::path::PathBuf, crate::ltx2::exr::ExrPrecision)> {
+    let dir = plan.hdr_exr_dir.as_deref()?;
+    let precision = if plan.hdr_exr_full_float {
+        crate::ltx2::exr::ExrPrecision::Full
+    } else {
+        crate::ltx2::exr::ExrPrecision::Half
+    };
+    Some((std::path::PathBuf::from(dir), precision))
+}
+
+/// Convert the decoded tensor to scene-referred linear HDR and write it out
+/// one frame at a time, returning how many frames landed.
+///
+/// Deliberately streaming rather than returning a `Vec<HdrFrame>`. Each frame
+/// holds `width * height * 3` `f32` samples, so buffering the clip scales with
+/// its length: 25 MB per frame at 1920x1088, which is 3 GB for a 5-second
+/// render and 12 GB at LTX-2's 20-second ceiling — on a card that is already
+/// holding the model. Only one frame is live at a time here.
+fn write_hdr_frames_streaming(
+    video: &Tensor,
+    dir: &Path,
+    precision: crate::ltx2::exr::ExrPrecision,
+) -> Result<usize> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create HDR EXR directory '{}'", dir.display()))?;
+    let video = video.to_dtype(DType::F32)?.i(0)?;
+    let count = video.dim(1)?;
+    for index in 0..count {
+        let frame = video
+            .i((.., index, .., ..))?
+            .permute((1, 2, 0))?
+            .contiguous()?;
+        let (height, width, channels) = frame.dims3()?;
+        if channels != 3 {
+            anyhow::bail!("expected decoded LTX-2 frame to have 3 channels, got {channels}");
+        }
+        let samples: Vec<f32> = frame.flatten_all()?.to_vec1()?;
+        let rgb = samples
+            .into_iter()
+            .map(crate::ltx2::hdr::vae_output_to_linear_hdr)
+            .collect();
+        let hdr_frame = crate::ltx2::exr::HdrFrame { width, height, rgb };
+        crate::ltx2::exr::write_exr_frame(
+            &crate::ltx2::exr::exr_frame_path(dir, index),
+            &hdr_frame,
+            precision,
+        )?;
+    }
+    Ok(count)
 }
 
 fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
@@ -5384,6 +5544,14 @@ fn load_ltx2_video_vae_inner(
 /// closes a real gap: the one-stage and retake paths emitted neither a
 /// `ProgressPhase::Vae` nor a decode timing, so the scheduler never learned a
 /// `vae_ms` for them and planned their decode as free.
+/// A decoded pass: 8-bit frames always, linear HDR frames when asked for.
+struct DecodedVideo {
+    frames: Vec<RgbImage>,
+    /// How many EXR frames the decode wrote, when a sidecar was requested.
+    /// A count rather than the pixels: the frames are already on disk.
+    hdr_frames_written: Option<usize>,
+}
+
 fn decode_video_frames_with_telemetry(
     pipeline: &str,
     vae: &mut AutoencoderKLLtx2Video,
@@ -5392,24 +5560,35 @@ fn decode_video_frames_with_telemetry(
     dtype: DType,
     device: &candle_core::Device,
     debug_enabled: bool,
+    hdr_exr: Option<(&Path, crate::ltx2::exr::ExrPrecision)>,
     progress: Option<&ProgressCallback>,
-) -> Result<Vec<RgbImage>> {
+) -> Result<DecodedVideo> {
     let decode_start = Instant::now();
     let probe = PhaseVramProbe::enter_if(format!("{pipeline}.vae_decode"), device.is_cuda());
     // Closure so a decode that dies of OOM is reported before it propagates.
-    let decoded = (|| -> Result<Vec<RgbImage>> {
+    let decoded = (|| -> Result<DecodedVideo> {
         let decode_latents = latents.to_dtype(dtype)?;
         configure_ltx2_vae_decode_memory_mode(vae, &decode_latents, device)?;
         let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
         if debug_enabled {
             log_tensor_stats("decoded_video", &video)?;
         }
+        // The EXR sidecar is written here, from the same tensor, because the
+        // 8-bit conversion below is lossy and HDR cannot be recovered from the
+        // frames afterwards. Streaming it frame-by-frame keeps peak memory at
+        // one frame instead of the whole clip.
+        let hdr_frames_written = hdr_exr
+            .map(|(dir, precision)| write_hdr_frames_streaming(&video, dir, precision))
+            .transpose()?;
         let frames = decoded_video_to_frames(&video, pixel_shape)?;
         if device.is_cuda() {
             device.synchronize()?;
         }
         drop(video);
-        Ok(frames)
+        Ok(DecodedVideo {
+            frames,
+            hdr_frames_written,
+        })
     })();
     log_ltx2_phase_vram_result(probe.finish(), &decoded, None, "");
     if decoded.is_ok() {
@@ -6360,6 +6539,8 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -6626,6 +6807,9 @@ mod tests {
             loras.len(),
         );
         Ltx2GeneratePlan {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
+            scene_embeddings_path: None,
             guidance_overrides: None,
             vram_grant_bytes: None,
             pipeline: PipelineKind::Distilled,
@@ -9342,5 +9526,79 @@ mod tests {
             body.contains("thread_gpu_ordinal()") && !body.contains("free_vram_bytes(0)"),
             "debug VRAM lines must sample the GPU this thread is bound to"
         );
+    }
+}
+
+#[cfg(test)]
+mod scene_embeddings_tests {
+    use super::*;
+
+    /// Writes a stand-in for the adapter's shipped embeddings file.
+    fn write_scene_embeddings(dir: &std::path::Path, with_audio: bool) -> String {
+        let path = dir.join("scene-emb.safetensors");
+        let device = candle_core::Device::Cpu;
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "video_context".to_string(),
+            Tensor::ones((1, 1024, 4096), DType::F32, &device).unwrap(),
+        );
+        if with_audio {
+            tensors.insert(
+                "audio_context".to_string(),
+                Tensor::ones((1, 1024, 2048), DType::F32, &device).unwrap(),
+            );
+        }
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn saved_embeddings_become_the_conditioning_without_encoding_a_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_scene_embeddings(temp.path(), true);
+
+        let prompt = load_scene_embeddings(&path).expect("embeddings must load");
+
+        assert_eq!(prompt.conditional.video_encoding.dims3().unwrap().2, 4096);
+        assert_eq!(
+            prompt
+                .conditional
+                .audio_encoding
+                .as_ref()
+                .expect("audio context is present")
+                .dims3()
+                .unwrap()
+                .2,
+            2048
+        );
+        // Upstream ships no mask; the whole fixed context is attended.
+        let mask: Vec<u8> = prompt
+            .conditional
+            .attention_mask
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(mask.len(), 1024);
+        assert!(mask.iter().all(|&value| value == 1));
+    }
+
+    #[test]
+    fn a_video_only_embeddings_file_still_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_scene_embeddings(temp.path(), false);
+        let prompt = load_scene_embeddings(&path).expect("embeddings must load");
+        assert!(prompt.conditional.audio_encoding.is_none());
+    }
+
+    #[test]
+    fn a_file_without_video_context_names_the_missing_tensor() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty.safetensors");
+        let tensors: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+
+        let err = load_scene_embeddings(&path.to_string_lossy()).unwrap_err();
+        assert!(format!("{err:#}").contains("video_context"), "got: {err:#}");
     }
 }

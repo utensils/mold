@@ -498,6 +498,8 @@ fn build_request(
     });
 
     GenerateRequest {
+        hdr_exr_dir: None,
+        hdr_exr_full_float: false,
         guidance_overrides: None,
         prompt: prompt.to_string(),
         negative_prompt: negative_prompt.clone(),

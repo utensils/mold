@@ -982,6 +982,34 @@ pub fn validate_generate_request_with_family(
         require_ltx2_family(family, "guidance_overrides")?;
         validate_guidance_overrides(overrides)?;
     }
+    if let Some(dir) = req.hdr_exr_dir.as_deref() {
+        require_ltx2_family(family, "hdr_exr_dir")?;
+        if dir.trim().is_empty() {
+            return Err("hdr_exr_dir must not be empty".to_string());
+        }
+        // The adapter is what makes the render HDR. Without it the decode
+        // would apply a LogC3 inverse to an ordinary SDR signal and write a
+        // wrongly-graded EXR that looks deliberate.
+        // Through the shared normalizer, not a raw compare: every other
+        // consumer accepts `HDR` and `hdr_`, so a bare `trim()` here would
+        // reject spellings the rest of the stack resolves fine.
+        if req
+            .ic_lora_control
+            .as_deref()
+            .map(crate::ltx2_control::normalize_control_id)
+            .as_deref()
+            != Some("hdr")
+        {
+            return Err(
+                "hdr_exr_dir requires ic_lora_control=hdr — EXR output is only meaningful for \
+                 the HDR adapter's LogC3 signal"
+                    .to_string(),
+            );
+        }
+    } else if req.hdr_exr_full_float {
+        return Err("hdr_exr_full_float requires hdr_exr_dir".to_string());
+    }
+
     if let Some(control) = req.ic_lora_control.as_deref() {
         require_ltx2_family(family, "ic_lora_control")?;
         if control.trim().is_empty() {
@@ -1363,8 +1391,121 @@ mod tests {
         assert_eq!(ltx2_max_frames_on_grid_at_fps(48), 601);
     }
 
+    /// EXR output is only meaningful for the HDR adapter's LogC3 signal.
+    /// Applying the inverse to an ordinary SDR render would write a
+    /// wrongly-graded file that looks deliberate — worse than a rejection.
+    #[test]
+    fn exr_output_requires_the_hdr_adapter() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("EXR without the HDR adapter must be rejected");
+        assert!(err.contains("ic_lora_control=hdr"), "got: {err}");
+
+        // With the adapter (and the pipeline it forces) it validates.
+        req.ic_lora_control = Some("hdr".to_string());
+        req.pipeline = Some(Ltx2PipelineMode::IcLora);
+        req.source_video_path = Some("/tmp/reference.mp4".to_string());
+        req.loras = Some(vec![LoraWeight {
+            path: "/models/hdr.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect("the HDR adapter makes EXR output valid");
+    }
+
+    #[test]
+    fn exr_options_are_rejected_for_non_ltx2_families() {
+        let mut req = valid_req();
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+        assert!(validate_generate_request_with_family(&req, Some("flux")).is_err());
+    }
+
+    #[test]
+    fn exr_precision_without_an_output_directory_is_rejected() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.hdr_exr_full_float = true;
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("a precision knob with nothing to write is a mistake");
+        assert!(err.contains("hdr_exr_dir"), "got: {err}");
+    }
+
+    /// Every other consumer resolves control ids through
+    /// `normalize_control_id`, so this gate must accept the same spellings —
+    /// otherwise `--ic-lora-control HDR` succeeds everywhere except here.
+    #[test]
+    fn exr_accepts_any_spelling_the_control_registry_accepts() {
+        // Case and surrounding whitespace only. A trailing `_` is *not* an
+        // alias: the normalizer maps `_` to `-`, so `hdr_` becomes `hdr-`,
+        // which is not a registered id anywhere in the stack.
+        for spelling in ["hdr", "HDR", " Hdr ", "\tHDR\n"] {
+            let mut req = valid_req();
+            req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+            req.output_format = Some(OutputFormat::Mp4);
+            req.source_video_path = Some("/tmp/reference.mp4".to_string());
+            req.pipeline = Some(Ltx2PipelineMode::IcLora);
+            req.ic_lora_control = Some(spelling.to_string());
+            req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+            let result = validate_generate_request_with_family(&req, Some("ltx2"));
+            assert!(
+                result.is_ok(),
+                "spelling {spelling:?} must be accepted, got: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exr_still_rejects_a_different_control() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.source_video_path = Some("/tmp/reference.mp4".to_string());
+        req.pipeline = Some(Ltx2PipelineMode::IcLora);
+        req.ic_lora_control = Some("union".to_string());
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("only the HDR adapter produces a LogC3 signal");
+        assert!(err.contains("ic_lora_control=hdr"), "got: {err}");
+    }
+
+    /// The gallery artifact is the tonemapped video, so the sidecar's location
+    /// is only discoverable from saved metadata.
+    #[test]
+    fn saved_metadata_records_where_the_exr_sequence_went() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.ic_lora_control = Some("hdr".to_string());
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+        req.hdr_exr_full_float = true;
+
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(metadata.hdr_exr_dir.as_deref(), Some("/tmp/shot_exr"));
+        assert!(metadata.hdr_exr_full_float);
+
+        let round_tripped: crate::OutputMetadata =
+            serde_json::from_str(&serde_json::to_string(&metadata).unwrap()).unwrap();
+        assert_eq!(round_tripped.hdr_exr_dir.as_deref(), Some("/tmp/shot_exr"));
+        assert!(round_tripped.hdr_exr_full_float);
+    }
+
+    /// An ordinary render must not gain the fields, so existing rows and
+    /// older readers see exactly the JSON they saw before.
+    #[test]
+    fn a_non_hdr_render_serializes_no_exr_fields() {
+        let metadata = crate::OutputMetadata::from_generate_request(&valid_req(), 7, None, "test");
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(!json.contains("hdr_exr"), "got: {json}");
+    }
+
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "a red apple".to_string(),
             negative_prompt: None,

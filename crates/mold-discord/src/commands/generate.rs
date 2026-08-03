@@ -215,6 +215,8 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     let enable_audio = if is_ltx2 { params.audio } else { None };
 
     GenerateRequest {
+        hdr_exr_dir: None,
+        hdr_exr_full_float: false,
         guidance_overrides: None,
         prompt: params.prompt.to_string(),
         negative_prompt: params.negative_prompt.map(|s| s.to_string()),

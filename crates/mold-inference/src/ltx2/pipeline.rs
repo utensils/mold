@@ -20,6 +20,33 @@ use super::preset;
 use super::runtime::{Ltx2RuntimeSession, NativeRenderedVideo};
 use super::text::gemma::GemmaAssets;
 use super::text::prompt_encoder::NativePromptEncoder;
+
+/// Locate the pre-computed text embeddings that ship beside an IC-LoRA
+/// control's weights.
+///
+/// Upstream's HDR pipeline takes `--text-embeddings` as a required argument
+/// and never encodes a prompt (`hdr_ic_lora.py:250-256`, `:383`), so when the
+/// companion is present it is the authority. The server reserves the control
+/// adapter as the first LoRA slot, and the companion is downloaded into that
+/// same directory, so the weights path locates it.
+///
+/// Returns `None` — and the ordinary Gemma encode runs — when the control is
+/// not one that ships embeddings, or when the file is not on disk.
+fn resolve_scene_embeddings_path(
+    req: &GenerateRequest,
+    loras: &[mold_core::LoraWeight],
+) -> Option<String> {
+    let control = req.ic_lora_control.as_deref()?;
+    let filename = mold_core::ltx2_control::LTX2_CONTROL_ADAPTERS
+        .iter()
+        .find(|adapter| adapter.id == control)?
+        .scene_embeddings_filename()?;
+    let weights = Path::new(&loras.first()?.path);
+    let candidate = weights.parent()?.join(filename);
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().into_owned())
+}
 use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
@@ -420,6 +447,9 @@ impl Ltx2Engine {
                 .map(|path| path.to_string_lossy().to_string());
 
         Ok(Ltx2GeneratePlan {
+            hdr_exr_dir: req.hdr_exr_dir.clone(),
+            hdr_exr_full_float: req.hdr_exr_full_float,
+            scene_embeddings_path: resolve_scene_embeddings_path(req, &loras),
             pipeline,
             preset,
             checkpoint_is_distilled: self.model_name.contains("distilled"),
@@ -822,6 +852,7 @@ impl Ltx2Engine {
         plan.num_frames = frames.len() as u32;
         let rendered = NativeRenderedVideo {
             frames,
+            hdr_frames_written: None,
             audio_track: outcome.audio,
             has_audio: false,
             audio_sample_rate: None,
@@ -926,6 +957,22 @@ impl Ltx2Engine {
         )?;
         self.checkpoint()?;
         Self::log_timing("pipeline.render_runtime", render_start);
+
+        // The EXR sequence is a sidecar: the gallery artifact stays the
+        // tonemapped video, because a frame sequence is many files and
+        // gigabytes that the one-file-per-generation model cannot hold.
+        // The frames were written during decode rather than buffered and
+        // written here: each one is width*height*3 f32, so holding the clip
+        // would cost 12 GB at LTX-2's 20-second 1080p ceiling.
+        if let (Some(dir), Some(written)) =
+            (plan.hdr_exr_dir.as_deref(), rendered.hdr_frames_written)
+        {
+            tracing::info!(
+                target: "mold::ltx2",
+                "wrote {written} EXR frame(s) to {dir}"
+            );
+        }
+
         let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
@@ -1707,6 +1754,8 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -1949,6 +1998,8 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -2009,6 +2060,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
@@ -2242,6 +2295,8 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             prompt: "test".to_string(),
             negative_prompt: None,
