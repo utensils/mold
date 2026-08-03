@@ -57,18 +57,31 @@ pub struct Ltx2Engine {
     gemma_variant: Option<String>,
 }
 
-fn validate_audio_output_request(req: &GenerateRequest, gap: Option<&str>) -> Result<()> {
-    if let Some(gap) = gap {
-        if execution::wants_audio_output(req) {
-            anyhow::bail!(
-                "LTX-2 audio output is unavailable for model '{}': the resolved checkpoint set is \
-                 missing {gap}. Set enable_audio=false and retry; this request was rejected \
-                 before generation starts.",
-                req.model
-            );
-        }
+/// Reject an audio-wanting request against a checkpoint set that cannot decode
+/// audio.
+///
+/// `gap` is a closure and the `wants_audio_output` test comes first, so the
+/// probe never runs for the common case. Computing it eagerly made every LTX-2
+/// request pay a safetensors header parse plus a formatted diagnostic string
+/// that only an audio request would ever read — and the detailed message now
+/// exists only when someone is about to see it, which is exactly when it
+/// should be detailed.
+fn validate_audio_output_request(
+    req: &GenerateRequest,
+    gap: impl FnOnce() -> Option<String>,
+) -> Result<()> {
+    if !execution::wants_audio_output(req) {
+        return Ok(());
     }
-    Ok(())
+    let Some(gap) = gap() else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "LTX-2 audio output is unavailable for model '{}': the resolved checkpoint set is \
+         missing {gap}. Set enable_audio=false and retry; this request was rejected before \
+         generation starts.",
+        req.model
+    );
 }
 
 impl Ltx2Engine {
@@ -385,7 +398,7 @@ impl Ltx2Engine {
         work_dir: &Path,
         output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
-        validate_audio_output_request(req, super::audio_output_gap(&self.paths).as_deref())?;
+        validate_audio_output_request(req, || super::audio_output_gap(&self.paths))?;
         let pipeline = self.select_pipeline(req)?;
         let gemma_root = self.gemma_root()?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
@@ -1791,7 +1804,8 @@ mod tests {
         req.enable_audio = Some(true);
 
         let err =
-            validate_audio_output_request(&req, Some("the audio VAE and the vocoder")).unwrap_err();
+            validate_audio_output_request(&req, || Some("the audio VAE and the vocoder".into()))
+                .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("cv:3143864"), "got: {message}");
         assert!(message.contains("enable_audio=false"), "got: {message}");
@@ -1807,7 +1821,41 @@ mod tests {
         );
 
         // A complete checkpoint set passes.
-        validate_audio_output_request(&req, None).expect("no gap means no rejection");
+        validate_audio_output_request(&req, || None).expect("no gap means no rejection");
+    }
+
+    /// The probe parses a safetensors header and formats a diagnostic string.
+    /// Only an audio request can ever read it, so a request that does not want
+    /// audio must not pay for it — this sits on the path of every LTX-2 render.
+    #[test]
+    fn audio_capability_probe_is_skipped_when_audio_is_not_wanted() {
+        use std::cell::Cell;
+
+        let probed = Cell::new(0usize);
+        let mut req = bare_t2v_req("ltx-2-19b-dev:fp8");
+        req.enable_audio = Some(false);
+        req.output_format = Some(OutputFormat::Mp4);
+
+        validate_audio_output_request(&req, || {
+            probed.set(probed.get() + 1);
+            Some("the vocoder".into())
+        })
+        .expect("audio was explicitly disabled");
+        assert_eq!(
+            probed.get(),
+            0,
+            "the probe must not run for a silent render"
+        );
+
+        // ...and it does run once the request actually wants audio.
+        req.enable_audio = Some(true);
+        let err = validate_audio_output_request(&req, || {
+            probed.set(probed.get() + 1);
+            Some("the vocoder".into())
+        })
+        .unwrap_err();
+        assert_eq!(probed.get(), 1);
+        assert!(err.to_string().contains("the vocoder"));
     }
 
     /// The message has to say *which* asset is missing, and separate "absent"
