@@ -62,7 +62,10 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
+import {
+  groupLogicalGalleryPrints,
+  sameLogicalGalleryPrint,
+} from "@studio/lib/galleryPrintIdentity";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -81,6 +84,8 @@ function loadViewMode(): ViewMode {
 }
 
 const entries = ref<HostGalleryImage[]>([]);
+/** Concrete device copies retained behind the deduplicated All view. */
+const rawEntries = ref<HostGalleryImage[]>([]);
 const models = ref<ModelInfoExtended[]>([]);
 // Hosts whose /api/gallery failed this refresh (surfaced, not hidden), and
 // how many non-origin hosts were attempted (drives the honest count line).
@@ -212,7 +217,7 @@ const keyOf = (entry: GalleryImage) =>
   printKey(entry as { hostId?: string; filename: string });
 
 function entryForKey(key: string): HostGalleryImage | null {
-  return entries.value.find((e) => keyOf(e) === key) ?? null;
+  return rawEntries.value.find((e) => keyOf(e) === key) ?? null;
 }
 
 /*
@@ -334,8 +339,15 @@ function deleteRouted(entry: GalleryImage): Promise<void> {
 }
 
 function copiesOf(entry: GalleryImage): HostGalleryImage[] {
-  return entries.value.filter((candidate) =>
+  return rawEntries.value.filter((candidate) =>
     sameLogicalGalleryPrint(entry, candidate),
+  );
+}
+
+function syncLogicalEntries(): void {
+  rawEntries.value.sort((a, b) => b.timestamp - a.timestamp);
+  entries.value = groupLogicalGalleryPrints(rawEntries.value).map(
+    (group) => group.representative,
   );
 }
 
@@ -361,7 +373,8 @@ async function handleDeleteMany(keys: string[]): Promise<number> {
     if (results[i]?.status === "fulfilled") deleted.add(t.key);
     else failed++;
   });
-  entries.value = entries.value.filter((e) => !deleted.has(keyOf(e)));
+  rawEntries.value = rawEntries.value.filter((e) => !deleted.has(keyOf(e)));
+  syncLogicalEntries();
   if (deleted.size > 0) {
     const next = new Set(selection.value);
     for (const key of deleted) next.delete(key);
@@ -426,7 +439,7 @@ async function deleteAllFiltered() {
 // ── Filtering ────────────────────────────────────────────────────────────────
 const hostOptions = computed(() => {
   const options = new Map<string, string>();
-  for (const entry of entries.value) {
+  for (const entry of rawEntries.value) {
     const id = entry.hostId ?? ORIGIN_HOST_ID;
     options.set(id, entry.hostLabel ?? getHost(id)?.name ?? id);
   }
@@ -436,7 +449,7 @@ const hostOptions = computed(() => {
 const hostFiltered = computed(() =>
   hostFilter.value === "all"
     ? entries.value
-    : entries.value.filter(
+    : rawEntries.value.filter(
         (entry) => (entry.hostId ?? ORIGIN_HOST_ID) === hostFilter.value,
       ),
 );
@@ -492,10 +505,11 @@ async function performRefresh() {
   errorMessage.value = null;
   try {
     const merged = await fetchMergedGallery(listHosts());
-    entries.value = merged.entries;
+    rawEntries.value = merged.rawEntries;
+    syncLogicalEntries();
     unreachableHostIds.value = merged.unreachableHostIds;
     remoteHostCount.value = merged.remoteHostCount;
-    reconcileFresh(merged.entries);
+    reconcileFresh(entries.value);
     // Only a total wipe-out (no host answered) is an error; one box down just
     // shows an "unreachable" note while the rest render.
     if (
@@ -682,13 +696,14 @@ async function onLightboxDelete(item: GalleryImage) {
   });
   if (!accepted) return;
   const key = keyOf(item);
-  const entryIdx = entries.value.findIndex((e) => keyOf(e) === key);
+  const entryIdx = rawEntries.value.findIndex((e) => keyOf(e) === key);
   if (entryIdx === -1) return;
   const removed = copiesOf(item);
   const removedKeys = new Set(removed.map((entry) => keyOf(entry)));
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
-  entries.value = entries.value.filter((e) => !removedKeys.has(keyOf(e)));
+  rawEntries.value = rawEntries.value.filter((e) => !removedKeys.has(keyOf(e)));
+  syncLogicalEntries();
   if (filtered.value.length === 0) {
     closeLightbox();
   } else {
@@ -703,9 +718,8 @@ async function onLightboxDelete(item: GalleryImage) {
   undoableAction({
     text: "Print deleted everywhere",
     undo: () => {
-      entries.value = [...entries.value, ...removed].sort(
-        (a, b) => b.timestamp - a.timestamp,
-      );
+      rawEntries.value = [...rawEntries.value, ...removed];
+      syncLogicalEntries();
     },
     commit: async () => {
       const results = await Promise.allSettled(
@@ -715,9 +729,8 @@ async function onLightboxDelete(item: GalleryImage) {
         (_, index) => results[index]?.status === "rejected",
       );
       if (failed.length > 0) {
-        entries.value = [...entries.value, ...failed].sort(
-          (a, b) => b.timestamp - a.timestamp,
-        );
+        rawEntries.value = [...rawEntries.value, ...failed];
+        syncLogicalEntries();
         toast(
           "error",
           `${failed.length} device ${failed.length === 1 ? "copy remains" : "copies remain"} because a delete failed.`,

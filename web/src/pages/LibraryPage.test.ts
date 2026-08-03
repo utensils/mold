@@ -63,6 +63,11 @@ vi.mock("../lib/multiHostGallery", async () => {
           hostLabel: "this server",
           ...e,
         })),
+        rawEntries: list.map((e) => ({
+          hostId: "origin",
+          hostLabel: "this server",
+          ...e,
+        })),
         reachableHostIds: ["origin"],
         unreachableHostIds: [],
         remoteHostCount: 0,
@@ -340,7 +345,7 @@ describe("LibraryPage", () => {
 
   it("reuse writes the form and routes to Create", async () => {
     const wrapper = await mounted();
-    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.find("[data-test='grid-open-last']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-reuse']").trigger("click");
     await flushPromises();
@@ -351,7 +356,7 @@ describe("LibraryPage", () => {
 
   it("reuse restores the selected model's family defaults", async () => {
     const wrapper = await mounted();
-    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    await wrapper.find("[data-test='grid-open']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-reuse']").trigger("click");
     await flushPromises();
@@ -365,7 +370,7 @@ describe("LibraryPage", () => {
     const wrapper = mountPage();
     await flushPromises();
 
-    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.find("[data-test='grid-open-last']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-delete']").trigger("click");
     await flushPromises();
@@ -474,11 +479,11 @@ describe("LibraryPage multi-host identity", () => {
     localStorage.clear();
   });
 
-  it("deletes a selected remote twin from every host that contains the print", async () => {
+  it("renders one logical twin and deletes it from every host", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
     await flushPromises();
-    expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("1");
 
     // entries[0] is the studio copy.
     await wrapper.find("[data-test='grid-open']").trigger("click");
@@ -497,18 +502,50 @@ describe("LibraryPage multi-host identity", () => {
     expect(deleteMock).toHaveBeenCalledWith("twin.png");
   });
 
-  it("deletes a selected local twin from every host that contains the print", async () => {
+  it("keeps each physical twin visible in its owning host filter", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
     await flushPromises();
 
-    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    const studio = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text() === "studio");
+    expect(studio).toBeTruthy();
+    await studio!.trigger("click");
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("1");
+    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
+      "studio-7680|twin.png",
+    );
+
+    await wrapper.find("[data-test='grid-open']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-delete']").trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).toContain("No prints yet");
 
+    vi.advanceTimersByTime(6000);
+    await flushPromises();
+    expect(deleteMock).toHaveBeenCalledWith("twin.png");
+    expect(hostDeleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680" }),
+      "twin.png",
+    );
+  });
+
+  it("deletes everywhere from a non-representative host-filter copy", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    const local = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text() === "this server");
+    await local!.trigger("click");
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.find("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("No prints yet");
     vi.advanceTimersByTime(6000);
     await flushPromises();
     expect(deleteMock).toHaveBeenCalledWith("twin.png");
@@ -564,7 +601,12 @@ describe("LibraryPage multi-host identity", () => {
     const wrapper = mountPage();
     await flushPromises();
 
-    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    const local = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text() === "this server");
+    expect(local).toBeTruthy();
+    await local!.trigger("click");
+    await wrapper.find("[data-test='grid-open']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-source']").trigger("click");
     await flushPromises();

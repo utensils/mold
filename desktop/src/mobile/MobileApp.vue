@@ -26,7 +26,10 @@ import {
   resolveSourceResolution,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import { sameLogicalGalleryPrint } from "@studio/lib/galleryPrintIdentity";
+import {
+  groupLogicalGalleryPrints,
+  sameLogicalGalleryPrint,
+} from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
   modelsForOutput,
@@ -415,6 +418,8 @@ const resultMediaLoadKey = ref(0);
 const objectUrls = new Set<string>();
 const handledGenerationClientIds = new Set<number>();
 let pendingGallery: PendingGalleryPrint[] = [];
+/** Every concrete device copy behind the deduplicated Library tiles. */
+let galleryCopies: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
 let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
@@ -2924,9 +2929,10 @@ async function performGalleryRefresh(): Promise<void> {
       }));
     }),
   );
-  pendingGallery = results
+  galleryCopies = results
     .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
     .sort((a, b) => b.timestamp - a.timestamp);
+  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
   const failed = results.filter((result) => result.status === "rejected").length;
   if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
   await loadMoreGalleryPage();
@@ -2952,7 +2958,7 @@ async function loadMoreGalleryPage(): Promise<void> {
       ...batch.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
     );
   }
-  markMobileLibrarySeen(gallery.value);
+  markMobileLibrarySeen(galleryCopies);
   galleryRemaining.value = pendingGallery.length;
   galleryLoadingMore.value = false;
 }
@@ -3120,9 +3126,8 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   const selected = allGalleryPrints().filter((print) =>
     gallerySelection.value.has(galleryPrintKey(print)),
   );
-  const all = allGalleryPrints();
   const groups = selected.map((print) =>
-    all.filter((candidate) => sameLogicalGalleryPrint(print, candidate)),
+    galleryCopies.filter((candidate) => sameLogicalGalleryPrint(print, candidate)),
   );
   const targets = new Map<string, GalleryPrint | PendingGalleryPrint>();
   for (const group of groups) {
@@ -3143,12 +3148,11 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     if (result.status === "fulfilled") deletedKeys.add(key);
     else failedKeys.add(key);
   });
-  for (const print of gallery.value) {
-    if (deletedKeys.has(galleryPrintKey(print))) revokeObjectUrl(print.thumbnailUrl);
-  }
-  gallery.value = gallery.value.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
-  pendingGallery = pendingGallery.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
-  galleryRemaining.value = pendingGallery.length;
+  for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
+  galleryCopies = galleryCopies.filter((print) => !deletedKeys.has(galleryPrintKey(print)));
+  gallery.value = [];
+  pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
+  await loadMoreGalleryPage();
 
   const failedPrints = groups.filter((group) =>
     group.some((print) => failedKeys.has(galleryPrintKey(print))),
@@ -3171,7 +3175,7 @@ function isFreshMobilePrint(print: GalleryPrint): boolean {
   return libraryPreviouslyVisited && seenAt != null && print.timestamp > seenAt;
 }
 
-function markMobileLibrarySeen(prints: GalleryPrint[]): void {
+function markMobileLibrarySeen(prints: Array<GalleryPrint | PendingGalleryPrint>): void {
   const seenAt = { ...librarySeenAtBaseline };
   for (const print of prints) {
     seenAt[print.hostId] = Math.max(seenAt[print.hostId] ?? 0, print.timestamp);

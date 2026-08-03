@@ -69,6 +69,11 @@ vi.mock("../lib/multiHostGallery", async () => {
           hostLabel: "this server",
           ...e,
         })),
+        rawEntries: list.map((e) => ({
+          hostId: "origin",
+          hostLabel: "this server",
+          ...e,
+        })),
         reachableHostIds: ["origin"],
         unreachableHostIds: [],
         remoteHostCount: 0,

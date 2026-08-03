@@ -3964,7 +3964,7 @@ describe("MobileApp gallery", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(1));
 
     await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
     await wrapper.findAll("[data-test='gallery-item']")[0]!.trigger("click");
