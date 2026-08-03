@@ -648,6 +648,12 @@ fn installed_catalog_models(
             extend_default_overlap_frames: Some(
                 mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
             ),
+            // Per-model, not per-family, because this is where a future
+            // pipeline that cannot chain would have to be caught.
+            supports_sequence: Some(
+                crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false)
+                    .supported,
+            ),
         });
     }
     out

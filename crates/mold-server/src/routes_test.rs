@@ -4851,6 +4851,48 @@ mod tests {
         }
     }
 
+    /// Sequence capability is advertised per model, so a picker never has to
+    /// infer it from the checkpoint name. Every LTX-2 checkpoint qualifies,
+    /// dev included — the old name heuristic hid dev checkpoints from the
+    /// Sequence picker even though the server chains them.
+    #[tokio::test]
+    async fn list_models_advertise_per_model_sequence_support() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        for name in [
+            "ltx-2-19b-distilled:fp8",
+            "ltx-2-19b-dev:fp8",
+            "ltx-2.3-22b-dev:fp8",
+        ] {
+            let model = models
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be listed"));
+            assert_eq!(
+                model["supports_sequence"], true,
+                "{name} must advertise sequence support"
+            );
+        }
+
+        let still = models
+            .iter()
+            .find(|m| m["name"] == "sd15:fp16")
+            .expect("sd15 must be listed");
+        assert_eq!(
+            still["supports_sequence"], false,
+            "a still-image family must not advertise sequence support"
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn list_models_reports_server_disk_and_remaining_download_bytes() {

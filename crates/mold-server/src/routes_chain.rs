@@ -748,9 +748,55 @@ pub async fn validate_chain(
     );
     crate::routes::plan_builtin_ltx2_camera_controls(&state, &generate).await?;
 
-    Ok(Json(ChainValidationResponse::from_normalized(
-        &req, warnings,
-    )))
+    let vram_estimate = chain_vram_estimate(&state, &req).await;
+    Ok(Json(
+        ChainValidationResponse::from_normalized(&req, warnings).with_vram_estimate(vram_estimate),
+    ))
+}
+
+/// Advisory peak-VRAM estimate for a normalized chain.
+///
+/// Stages execute strictly one at a time, so the chain's peak is the *max*
+/// over stages, never their sum. Each stage is priced through the same
+/// `build_stage_generate_request` the runner dispatches, so the number matches
+/// what admission will later re-derive.
+///
+/// Returns `None` — never a guess — when the model is not downloaded or no
+/// device sample exists. Validation is a pure normalization endpoint and must
+/// not become download-gated, and `fits` must never be fabricated.
+async fn chain_vram_estimate(
+    state: &AppState,
+    req: &ChainRequest,
+) -> Option<mold_core::chain::VramEstimate> {
+    let base_seed = req.seed.unwrap_or(0);
+    let mut worst_case_bytes = 0u64;
+    let mut fits = true;
+    let mut sampled_any = false;
+
+    for (idx, stage) in req.stages.iter().enumerate() {
+        let stage_seed = stage
+            .seed_offset
+            .map_or(base_seed, |offset| base_seed ^ offset);
+        let stage_request =
+            crate::chain_job_runner::build_stage_generate_request(stage, req, stage_seed, idx);
+        let estimate =
+            crate::model_manager::estimate_generation_memory(state, &stage_request).await;
+        let Ok(estimate) = estimate else {
+            // Model not downloaded yet, or paths unresolvable. Validate still
+            // answers; it just cannot price the run.
+            return None;
+        };
+        worst_case_bytes = worst_case_bytes.max(estimate.peak_memory_bytes);
+        if let Some(stage_fits) = estimate.fits_available_memory {
+            sampled_any = true;
+            fits &= stage_fits;
+        }
+    }
+
+    sampled_any.then_some(mold_core::chain::VramEstimate {
+        worst_case_bytes,
+        fits,
+    })
 }
 
 /// `POST /api/generate/chain` — synchronous chained video generation.
@@ -1400,6 +1446,26 @@ mod tests {
         state.metadata_db = Arc::new(Some(db));
         state.chain_jobs = Some(handle);
         state
+    }
+
+    /// Peak is the max over stages, never their sum: stages run one at a
+    /// time, so no two working sets are ever co-resident. Summing would make
+    /// a long sequence look infeasible on any card.
+    ///
+    /// The fixture has no model on disk, so the estimate is *withheld* rather
+    /// than guessed — and validation still answers. `fits` must never be
+    /// fabricated, and validate must not become download-gated.
+    #[tokio::test]
+    async fn chain_validation_withholds_vram_estimate_it_cannot_price() {
+        let state = AppState::for_tests();
+        let chain = req(OutputFormat::Mp4)
+            .normalise()
+            .expect("fixture chain must normalise");
+
+        assert!(
+            chain_vram_estimate(&state, &chain).await.is_none(),
+            "an unpriceable chain must yield no estimate, never a fabricated one"
+        );
     }
 
     #[tokio::test]

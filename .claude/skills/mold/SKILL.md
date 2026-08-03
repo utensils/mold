@@ -612,7 +612,7 @@ checkpoint is transformer-only; LTX-2.3 entries also pull the standalone Gemma
 hidden-state projection used by diffusion-only/quantized exports. Combined
 checkpoints keep using their bundled assets. ConvRot W4A4 exports full-stream
 automatically because the compatibility backend reconstructs BF16 block weights.
-Native multi-prompt chains accept one-stage and distilled LTX-2 checkpoints.
+Native multi-prompt chains accept every LTX-2 checkpoint; a dev checkpoint renders its clips through the two-stage pipeline, which costs roughly twice the wall time per clip because stage 1 runs CFG as two sequential forwards.
 Installed catalog checkpoints with opaque `cv:` / `hf:` IDs and no bundled
 spatial upscaler use the one-stage path and remain sequence-capable.
 Two-stage LTX-2 dev checkpoints are rejected before a durable sequence job is

@@ -322,9 +322,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     form.frames = 1305;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
-      "at most 1297 frames",
-    );
+    expect(wrapper.get("[data-test='chain-reject']").text()).toContain("at most 1297 frames");
   });
 
   it("renders compatible host camera controls enabled with first-use download copy", async () => {

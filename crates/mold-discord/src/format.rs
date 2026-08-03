@@ -1023,6 +1023,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }];
         let embed = format_model_list(&models);
@@ -1061,6 +1062,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
@@ -1089,6 +1091,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
@@ -1117,6 +1120,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
         ];

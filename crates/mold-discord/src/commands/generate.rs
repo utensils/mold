@@ -824,6 +824,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }
     }
@@ -939,6 +940,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }];
         assert_eq!(
@@ -972,6 +974,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
@@ -993,6 +996,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
         ];
@@ -1020,6 +1024,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
@@ -1052,6 +1057,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
@@ -1073,6 +1079,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
         ];
@@ -1101,6 +1108,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
             ModelInfoExtended {
@@ -1122,6 +1130,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             },
         ];

@@ -100,7 +100,6 @@ pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -
 ///
 /// `family` is the canonical family string (e.g. "ltx2").
 /// `quant` is the quantization slug ("fp8", "fp16", "q8", ...).
-/// `free_vram_bytes` is the current free VRAM on the primary GPU.
 /// `default_frames` is the model's own default frame count (manifest or
 /// catalog sidecar) and drives the recommended per-clip frames.
 /// `fps` is the frame rate the clips will render at; LTX-2's per-clip cap is
@@ -109,14 +108,11 @@ pub fn compute_limits(
     model: &str,
     family: &str,
     quant: &str,
-    free_vram_bytes: u64,
     default_frames: Option<u32>,
     fps: Option<u32>,
 ) -> ChainLimits {
     let fps = fps.filter(|value| *value > 0).unwrap_or(DEFAULT_CHAIN_FPS);
     let cap = family_cap_at_fps(family, fps).unwrap_or(97);
-    // Suppress unused for now; sub-project D wires free VRAM up.
-    let _ = free_vram_bytes;
     // Recommend the model's own default frame count (LTX-Video ships 25,
     // LTX-2 ships 97) so new clips start at what the model actually runs;
     // clamp to the family cap and snap down onto the 8n+1 grid. Without a
@@ -210,35 +206,28 @@ mod tests {
     /// family cap, so new clips default to what the model actually runs.
     #[test]
     fn recommended_uses_model_default_frames() {
-        let ltx_video = compute_limits(
-            "ltx-video-0.9.6:bf16",
-            "ltx-video",
-            "bf16",
-            0,
-            Some(25),
-            None,
-        );
+        let ltx_video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", Some(25), None);
         assert_eq!(ltx_video.frames_per_clip_cap, 97);
         assert_eq!(ltx_video.frames_per_clip_recommended, 25);
 
-        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, Some(97), None);
+        let ltx2 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", Some(97), None);
         assert_eq!(ltx2.frames_per_clip_recommended, 97);
 
         // No model default → fall back to the family cap (old behavior).
-        let unknown = compute_limits("cv:123", "ltx2", "", 0, None, None);
+        let unknown = compute_limits("cv:123", "ltx2", "", None, None);
         assert_eq!(
             unknown.frames_per_clip_recommended,
             family_cap("ltx2").unwrap()
         );
 
         // Off-grid defaults snap DOWN onto the 8n+1 grid.
-        let off_grid = compute_limits("cv:456", "ltx-video", "", 0, Some(30), None);
+        let off_grid = compute_limits("cv:456", "ltx-video", "", Some(30), None);
         assert_eq!(off_grid.frames_per_clip_recommended, 25);
 
         // Defaults above the cap clamp to the cap — 500 is over budget at the
         // chain default 24 fps only once the absolute guard is applied, so use
         // a low fps where the duration budget clearly binds.
-        let oversized = compute_limits("cv:789", "ltx2", "", 0, Some(500), Some(12));
+        let oversized = compute_limits("cv:789", "ltx2", "", Some(500), Some(12));
         assert_eq!(oversized.frames_per_clip_cap, 244);
         assert_eq!(oversized.frames_per_clip_recommended, 241);
     }
@@ -247,43 +236,29 @@ mod tests {
     /// carry the duration budget so clients can recompute it themselves.
     #[test]
     fn compute_limits_advertises_the_fps_it_used() {
-        let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(24));
+        let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(24));
         assert_eq!(at_24.fps, Some(24));
         assert_eq!(at_24.frames_per_clip_cap, 484);
         assert_eq!(at_24.frames_per_clip_runtime_seconds, Some(20));
 
-        let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(12));
+        let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(12));
         assert_eq!(at_12.frames_per_clip_cap, 244);
 
         // A zero/absent fps falls back to the chain default rather than
         // collapsing the cap to a single frame.
-        let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", 0, None, Some(0));
+        let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(0));
         assert_eq!(fallback.fps, Some(DEFAULT_CHAIN_FPS));
         assert_eq!(fallback.frames_per_clip_cap, 484);
 
         // ltx-video has no duration budget to advertise.
-        let video = compute_limits(
-            "ltx-video-0.9.6:bf16",
-            "ltx-video",
-            "bf16",
-            0,
-            None,
-            Some(30),
-        );
+        let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", None, Some(30));
         assert_eq!(video.frames_per_clip_runtime_seconds, None);
         assert_eq!(video.frames_per_clip_cap, 97);
     }
 
     #[test]
     fn compute_limits_for_distilled() {
-        let lim = compute_limits(
-            "ltx-2-19b-distilled:fp8",
-            "ltx2",
-            "fp8",
-            8_000_000_000,
-            None,
-            None,
-        );
+        let lim = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, None);
         let cap = family_cap("ltx2").unwrap();
         assert_eq!(lim.frames_per_clip_cap, cap);
         assert_eq!(lim.frames_per_clip_recommended, cap);
@@ -331,7 +306,7 @@ mod tests {
 
     #[test]
     fn ltx2_dev_legacy_alias_is_sequence_compatible() {
-        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0, None, None);
+        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", None, None);
         assert!(limits.supports_sequence);
         assert!(limits.sequence_unsupported_reason.is_none());
     }
@@ -351,7 +326,6 @@ mod tests {
             "ltx-video-0.9.7-distilled:fp8",
             "ltx-video",
             "fp8",
-            0,
             None,
             None,
         );

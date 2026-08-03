@@ -1175,6 +1175,12 @@ pub struct ModelInfoExtended {
     /// `extend_overlap_frames`. Present whenever `supports_extend` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_default_overlap_frames: Option<u32>,
+    /// Whether this model's effective runtime pipeline can render sequence
+    /// clips. `None` on servers that predate per-model advertisement; clients
+    /// fall back to their own conservative name heuristic, which is the right
+    /// answer against a server that would still reject the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_sequence: Option<bool>,
 }
 
 impl ModelInfoExtended {
@@ -1345,6 +1351,7 @@ mod model_display_name_tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }
     }

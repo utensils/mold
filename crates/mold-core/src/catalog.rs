@@ -18,6 +18,15 @@ fn resolution_defaults(family: &str) -> (Option<u64>, Vec<RecommendedDimensions>
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
 /// Hidden manifests are excluded from the catalog (CLI list, TUI model selector).
+/// Whether a family's runtime can render sequence clips at all.
+///
+/// This is the same answer `mold-server`'s `sequence_support` gives; it lives
+/// here too because `/api/models` must advertise it per model, and the picker
+/// on every surface reads it instead of guessing from the checkpoint name.
+fn chain_capable_family(family: &str) -> bool {
+    matches!(family, "ltx2" | "ltx-video")
+}
+
 pub fn build_model_catalog(
     config: &Config,
     loaded_model: Option<&str>,
@@ -96,6 +105,7 @@ pub fn build_model_catalog(
             nsfw: None,
             supports_audio: None,
             supports_extend: Some(manifest.family == "ltx2"),
+            supports_sequence: Some(chain_capable_family(&manifest.family)),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
@@ -110,13 +120,14 @@ pub fn build_model_catalog(
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
         let size_gb = size_gb_f64 as f32;
-        let family = model_cfg
+        let family: String = model_cfg
             .family
             .clone()
             .unwrap_or_else(|| "flux".to_string());
         let (max_pixels, recommended_dimensions, dimension_alignment) =
             resolution_defaults(&family);
         let is_ltx2 = family == "ltx2";
+        let sequence_capable = chain_capable_family(&family);
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -160,6 +171,7 @@ pub fn build_model_catalog(
             nsfw: None,
             supports_audio: None,
             supports_extend: Some(is_ltx2),
+            supports_sequence: Some(sequence_capable),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         });
     }
@@ -417,6 +429,7 @@ mod tests {
                 nsfw: None,
                 supports_audio: None,
                 supports_extend: None,
+                supports_sequence: None,
                 extend_default_overlap_frames: None,
             }
         }
