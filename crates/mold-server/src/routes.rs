@@ -968,26 +968,35 @@ async fn materialize_builtin_ltx2_control(
 
 /// Which of this adapter's files have not landed and verified.
 ///
-/// `path` is the **weights** file; companion files live beside it, so each is
-/// checked in that directory at its own recorded size. Checking only the
-/// weights would let a half-finished multi-file pull look complete and then
-/// fail at load. A path with no parent cannot be probed at all, so every file
-/// counts as outstanding.
+/// `path` is the **weights** file, and it is authoritative as given — the
+/// caller resolved it through the manifest, so its own name is checked rather
+/// than one reconstructed from the registry. Companion files have no such
+/// resolved path; they land beside the weights, so each is probed in that
+/// directory at its own recorded size. Checking only the weights would let a
+/// half-finished multi-file pull look complete and then fail at load.
+///
+/// A path with no parent cannot host companions, so an adapter that ships
+/// them counts them outstanding.
 fn control_missing_files(
     adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
     path: &std::path::Path,
 ) -> Vec<mold_core::ltx2_control::Ltx2ControlAdapterFile> {
-    let Some(dir) = path.parent() else {
-        return adapter.files().collect();
+    let landed = |candidate: &std::path::Path, size: u64| {
+        mold_core::download::has_sha256_marker(candidate)
+            || candidate
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() == size)
     };
     adapter
         .files()
         .filter(|file| {
-            let candidate = dir.join(file.hf_filename);
-            !(mold_core::download::has_sha256_marker(&candidate)
-                || candidate
-                    .metadata()
-                    .is_ok_and(|metadata| metadata.len() == file.size_bytes))
+            if file.hf_filename == adapter.hf_filename {
+                return !landed(path, file.size_bytes);
+            }
+            match path.parent() {
+                Some(dir) => !landed(&dir.join(file.hf_filename), file.size_bytes),
+                None => true,
+            }
         })
         .collect()
 }
@@ -6604,6 +6613,30 @@ mod tests {
             "a half-finished pull must not re-report the bytes already on disk"
         );
         assert!(!control_artifact_is_complete(adapter, &weights));
+    }
+
+    /// The caller resolves the weights path through the manifest, so it is
+    /// authoritative even when its basename is not the registry's `hf_filename`.
+    /// Reconstructing the name instead made a present single-file adapter read
+    /// as missing, and `materialize_builtin_ltx2_control` then blocked forever
+    /// waiting for a download nobody had queued.
+    #[test]
+    fn a_resolved_weights_path_counts_even_when_its_name_differs() {
+        let single_file = mold_core::ltx2_control::LTX2_CONTROL_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.extra_files.is_empty())
+            .expect("the registry must keep a single-file adapter");
+        let temp = tempfile::tempdir().unwrap();
+        let weights = temp.path().join("resolved-by-manifest.safetensors");
+        std::fs::write(&weights, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&weights, single_file.sha256).unwrap();
+
+        assert!(
+            control_missing_files(single_file, &weights).is_empty(),
+            "the given weights path is the artifact, not a name to rebuild"
+        );
+        assert!(control_artifact_is_complete(single_file, &weights));
+        assert_eq!(control_pending_download_bytes(single_file, &weights), 0);
     }
 
     #[test]
