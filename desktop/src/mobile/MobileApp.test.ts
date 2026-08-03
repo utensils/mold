@@ -4040,7 +4040,7 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
 
     await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
-    await wrapper.findAll("[data-test='gallery-item']")[0]!.trigger("click");
+    await wrapper.findAll("[data-test='gallery-item']")[1]!.trigger("click");
     const deleteButton = () =>
       wrapper!.get("[data-test='mobile-gallery-actions']").find("button.danger");
     await deleteButton().trigger("click");
@@ -4050,7 +4050,7 @@ describe("MobileApp gallery", () => {
     const deletePaths = apiFetchTo.mock.calls
       .filter(([, , init]) => init?.method === "DELETE")
       .map(([, path]) => path);
-    expect(deletePaths).toEqual(["/api/gallery/image/newest.mp4", "/api/gallery/image/middle.mp4"]);
+    expect(deletePaths).toEqual(["/api/gallery/image/oldest.mp4"]);
     expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(1);
   });
 

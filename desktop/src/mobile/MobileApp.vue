@@ -26,10 +26,7 @@ import {
   resolveSourceResolution,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import {
-  groupLogicalGalleryPrints,
-  sameLogicalGalleryPrint,
-} from "@studio/lib/galleryPrintIdentity";
+import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import {
   defaultClipFrames,
   modelsForOutput,
@@ -3126,9 +3123,14 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
   const selected = allGalleryPrints().filter((print) =>
     gallerySelection.value.has(galleryPrintKey(print)),
   );
-  const groups = selected.map((print) =>
-    galleryCopies.filter((candidate) => sameLogicalGalleryPrint(print, candidate)),
-  );
+  const logicalGroups = groupLogicalGalleryPrints(galleryCopies);
+  const groups = selected.map((print) => {
+    const key = galleryPrintKey(print);
+    return (
+      logicalGroups.find((group) => group.copies.some((copy) => galleryPrintKey(copy) === key))
+        ?.copies ?? [print]
+    );
+  });
   const targets = new Map<string, GalleryPrint | PendingGalleryPrint>();
   for (const group of groups) {
     for (const print of group) targets.set(galleryPrintKey(print), print);

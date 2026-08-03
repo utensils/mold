@@ -555,6 +555,61 @@ describe("LibraryPage multi-host identity", () => {
     );
   });
 
+  it("uses representative groups when deleting a chained host-filter copy", async () => {
+    vi.useFakeTimers();
+    const archive = {
+      id: "archive-7680",
+      name: "archive",
+      url: "http://archive:7680",
+      apiKey: "archive-key",
+    };
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([STUDIO, archive]),
+    );
+    const identified = (
+      hostId: string,
+      hostLabel: string,
+      filename: string,
+      timestamp: number,
+    ) => ({
+      ...makeEntry(filename, "shared", "flux-dev:q8", 42),
+      hostId,
+      hostLabel,
+      timestamp,
+      size_bytes: 4_096,
+    });
+    listGalleryMock.mockResolvedValue([
+      identified("origin", "this server", "newest.png", 6_000),
+      identified("studio-7680", "studio", "middle.png", 3_000),
+      identified("archive-7680", "archive", "oldest.png", 0),
+    ]);
+    const wrapper = mountPage();
+    await flushPromises();
+    const studio = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text() === "studio");
+    await studio!.trigger("click");
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.find("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+    vi.advanceTimersByTime(6_000);
+    await flushPromises();
+
+    expect(deleteMock).toHaveBeenCalledWith("newest.png");
+    expect(hostDeleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680" }),
+      "middle.png",
+    );
+    expect(hostDeleteMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: "archive-7680" }),
+      "oldest.png",
+    );
+    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
+      "archive-7680|oldest.png",
+    );
+  });
+
   it("bulk delete routes each selected twin to its own host", async () => {
     const wrapper = mountPage();
     await flushPromises();

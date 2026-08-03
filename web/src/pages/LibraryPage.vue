@@ -62,10 +62,7 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import {
-  groupLogicalGalleryPrints,
-  sameLogicalGalleryPrint,
-} from "@studio/lib/galleryPrintIdentity";
+import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -339,8 +336,11 @@ function deleteRouted(entry: GalleryImage): Promise<void> {
 }
 
 function copiesOf(entry: GalleryImage): HostGalleryImage[] {
-  return rawEntries.value.filter((candidate) =>
-    sameLogicalGalleryPrint(entry, candidate),
+  const key = keyOf(entry);
+  return (
+    groupLogicalGalleryPrints(rawEntries.value).find((group) =>
+      group.copies.some((copy) => keyOf(copy) === key),
+    )?.copies ?? []
   );
 }
 
