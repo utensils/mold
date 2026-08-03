@@ -405,6 +405,8 @@ const galleryLoading = ref(false);
 const galleryLoadingMore = ref(false);
 const galleryError = ref("");
 const galleryRemaining = ref(0);
+const gallerySentinel = ref<HTMLElement | null>(null);
+const gallerySentinelVisible = ref(false);
 const gallerySelectMode = ref(false);
 const gallerySelection = ref<Set<string>>(new Set());
 const galleryDeleteConfirming = ref(false);
@@ -426,6 +428,10 @@ let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
+let galleryLoadMoreQueued = false;
+let gallerySentinelObserver: IntersectionObserver | null = null;
+let galleryChainedFetches = 0;
+const MAX_GALLERY_CHAINED_FETCHES = 3;
 let resultMediaRecoveryClientId: number | null = null;
 let resultMediaRecoveryAttempts = 0;
 let hostProbeTimer: ReturnType<typeof setInterval> | null = null;
@@ -2955,7 +2961,21 @@ async function performGalleryRefresh(): Promise<void> {
 }
 
 function loadMoreGallery(): Promise<void> {
-  return enqueueGalleryOperation(loadMoreGalleryPage);
+  if (
+    galleryLoadMoreQueued ||
+    galleryLoading.value ||
+    galleryLoadingMore.value ||
+    galleryRemaining.value === 0
+  ) {
+    return Promise.resolve();
+  }
+  galleryLoadMoreQueued = true;
+  return enqueueGalleryOperation(async () => {
+    // The serialized operation is now running; `galleryLoadingMore` guards
+    // observer callbacks until the page settles.
+    galleryLoadMoreQueued = false;
+    await loadMoreGalleryPage();
+  });
 }
 
 async function loadMoreGalleryPage(): Promise<void> {
@@ -3350,6 +3370,34 @@ watch(tab, (next) => {
   if (next !== "hosts") hostDetailId.value = "";
 });
 
+watch(gallerySentinel, (sentinel) => {
+  gallerySentinelObserver?.disconnect();
+  gallerySentinelObserver = null;
+  gallerySentinelVisible.value = false;
+  if (!sentinel) return;
+  gallerySentinelObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) gallerySentinelVisible.value = entry.isIntersecting;
+      if (gallerySentinelVisible.value) {
+        galleryChainedFetches = 0;
+        void loadMoreGallery();
+      }
+    },
+    { root: mobileContent.value, rootMargin: "600px 0px" },
+  );
+  gallerySentinelObserver.observe(sentinel);
+});
+
+// Failed thumbnails can leave the sentinel in view without producing another
+// observer event. Advance a bounded number of pages so valid older prints
+// behind that failed page still become reachable.
+watch(galleryLoadingMore, (loading) => {
+  if (loading || !gallerySentinelVisible.value || galleryRemaining.value === 0) return;
+  if (galleryChainedFetches >= MAX_GALLERY_CHAINED_FETCHES) return;
+  galleryChainedFetches += 1;
+  void loadMoreGallery();
+});
+
 // One failed model load must not become a manual-Retry dead end: the 10s
 // probe already self-heals `host.online`, so a false→true transition on the
 // selected host re-runs the (epoch-guarded) model load automatically.
@@ -3434,6 +3482,8 @@ onBeforeUnmount(() => {
   stopPairingDeepLinks = null;
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
+  gallerySentinelObserver?.disconnect();
+  gallerySentinelObserver = null;
   stopSequenceTransport();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
@@ -4187,15 +4237,15 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div v-else class="empty-state">No prints found.</div>
-        <button
+        <div
           v-if="!galleryLoading && galleryRemaining"
-          class="secondary-button gallery-more"
-          type="button"
-          :disabled="galleryLoading || galleryLoadingMore"
-          @click="loadMoreGallery"
+          ref="gallerySentinel"
+          class="gallery-scroll-sentinel"
+          data-test="mobile-gallery-sentinel"
+          aria-live="polite"
         >
-          {{ galleryLoadingMore ? "Loading…" : `Load older prints (${galleryRemaining})` }}
-        </button>
+          {{ galleryLoadingMore ? "Loading older prints…" : "" }}
+        </div>
         <div
           v-if="gallerySelectMode"
           class="mobile-gallery-actions"

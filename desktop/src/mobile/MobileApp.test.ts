@@ -181,6 +181,34 @@ const openStreams: Array<{
   resolve: () => void;
 }> = [];
 
+class FakeIntersectionObserver {
+  static instances: FakeIntersectionObserver[] = [];
+  targets: Element[] = [];
+
+  constructor(private callback: IntersectionObserverCallback) {
+    FakeIntersectionObserver.instances.push(this);
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target);
+  }
+
+  disconnect(): void {
+    this.targets = [];
+  }
+
+  intersect(isIntersecting = true): void {
+    this.callback(
+      this.targets.map((target) => ({ isIntersecting, target }) as IntersectionObserverEntry),
+      this as unknown as IntersectionObserver,
+    );
+  }
+}
+
+function scrollToGallerySentinel(): void {
+  for (const observer of FakeIntersectionObserver.instances) observer.intersect();
+}
+
 function mountMobileApp(pinia: Pinia = createPinia()): VueWrapper {
   return mount(MobileApp, {
     attachTo: document.body,
@@ -208,6 +236,9 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  FakeIntersectionObserver.instances = [];
+  (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver =
+    FakeIntersectionObserver;
   localStorage.clear();
   localStorage.setItem(
     "mold.mobile.hosts.v1",
@@ -290,6 +321,7 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.themeFamily;
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
 });
 
 describe("MobileApp sequence generation", () => {
@@ -3384,7 +3416,7 @@ describe("MobileApp generation queue", () => {
     expect(galleryCalls).toBe(2);
   });
 
-  it("serializes Load older with a completion-triggered Gallery refresh", async () => {
+  it("auto-loads older prints on scroll and serializes with a completion refresh", async () => {
     const prints = Array.from({ length: 41 }, (_, index) => ({
       ...print,
       filename: `print-${index}.mp4`,
@@ -3405,7 +3437,10 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await submitPrompt("refresh after older page");
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    await vi.waitFor(() => expect(wrapper?.find("button.gallery-more").exists()).toBe(true));
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+    );
+    expect(wrapper.find("button.gallery-more").exists()).toBe(false);
 
     const olderThumbnail = { release: null as (() => void) | null };
     apiFetchTo.mockImplementationOnce(
@@ -3415,9 +3450,11 @@ describe("MobileApp generation queue", () => {
             resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
         }),
     );
-    await wrapper.get("button.gallery-more").trigger("click");
+    scrollToGallerySentinel();
     await vi.waitFor(() =>
-      expect(wrapper?.get("button.gallery-more").attributes("disabled")).toBeDefined(),
+      expect(wrapper?.get("[data-test='mobile-gallery-sentinel']").text()).toBe(
+        "Loading older prints…",
+      ),
     );
 
     openStreams[0]!.options.onEvent(
@@ -3451,6 +3488,43 @@ describe("MobileApp generation queue", () => {
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });
 
+  it("continues auto-loading when a failed page leaves the sentinel visible", async () => {
+    const prints = Array.from({ length: 81 }, (_, index) => ({
+      ...print,
+      filename: `print-${index}.mp4`,
+      timestamp: print.timestamp - index,
+    }));
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(prints);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    let thumbnailCall = 0;
+    apiFetchTo.mockImplementation(() => {
+      thumbnailCall += 1;
+      if (thumbnailCall > 40 && thumbnailCall <= 80) {
+        return Promise.reject(new Error("thumbnail unavailable"));
+      }
+      return Promise.resolve({
+        blob: () => Promise.resolve(new Blob([`thumbnail-${thumbnailCall}`])),
+      } as Response);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+    );
+
+    scrollToGallerySentinel();
+
+    await vi.waitFor(() => expect(thumbnailCall).toBe(81));
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(41);
+    expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+  });
+
   it("keeps focus stable when the viewer closes before a queued Gallery refresh starts", async () => {
     const prints = Array.from({ length: 41 }, (_, index) => ({
       ...print,
@@ -3472,7 +3546,9 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await submitPrompt("refresh after an early viewer close");
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    await vi.waitFor(() => expect(wrapper?.find("button.gallery-more").exists()).toBe(true));
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+    );
 
     const olderThumbnail = { release: null as (() => void) | null };
     apiFetchTo.mockImplementationOnce(
@@ -3482,9 +3558,11 @@ describe("MobileApp generation queue", () => {
             resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
         }),
     );
-    await wrapper.get("button.gallery-more").trigger("click");
+    scrollToGallerySentinel();
     await vi.waitFor(() =>
-      expect(wrapper?.get("button.gallery-more").attributes("disabled")).toBeDefined(),
+      expect(wrapper?.get("[data-test='mobile-gallery-sentinel']").text()).toBe(
+        "Loading older prints…",
+      ),
     );
 
     openStreams[0]!.options.onEvent(
