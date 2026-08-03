@@ -10134,6 +10134,7 @@ mod tests {
                 id: child_id.clone(),
                 generation: Box::new(gpu_job),
                 response: mold_core::GenerateResponse {
+                    audio: None,
                     images: Vec::new(),
                     video: None,
                     generation_time_ms: 1,
@@ -10316,6 +10317,7 @@ mod tests {
             id: fence.work_id.clone(),
             generation: Box::new(gpu_job),
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: None,
                 generation_time_ms: 1,
@@ -10473,6 +10475,7 @@ mod tests {
             id: child_id.clone(),
             generation: Box::new(gpu_job),
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: None,
                 generation_time_ms: 1,

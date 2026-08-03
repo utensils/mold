@@ -5636,6 +5636,8 @@ fn content_type_for_filename(name: &str) -> &'static str {
         "image/apng"
     } else if lower.ends_with(".mp4") {
         "video/mp4"
+    } else if lower.ends_with(".wav") {
+        "audio/wav"
     } else {
         "application/octet-stream"
     }
@@ -5803,6 +5805,22 @@ async fn get_gallery_thumbnail(
     let thumb_path = thumb_dir.join(format!("{clean_name}.png"));
     let lower = clean_name.to_ascii_lowercase();
     let is_video = lower.ends_with(".mp4");
+    // Audio outputs ship a waveform PNG written into the thumbnail cache at
+    // save time — there is nothing in a WAV for a raster decoder to read, so
+    // a missing cache entry goes straight to the placeholder.
+    let is_audio = lower.ends_with(".wav");
+    if is_audio && !thumb_path.is_file() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("image/svg+xml"),
+        );
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300"),
+        );
+        return Ok((headers, AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()));
+    }
 
     if !thumb_path.is_file() {
         // Generate thumbnail on-demand. Videos go through openh264 for a real
@@ -5873,6 +5891,8 @@ async fn get_gallery_thumbnail(
 
     Ok((headers, data))
 }
+
+const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
 
 const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 
@@ -6046,6 +6066,9 @@ fn warm_gallery_thumbnails(
                     Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
                 );
                 let is_video = matches!(ext.as_deref(), Some("mp4"));
+                // `.wav` is deliberately absent: its thumbnail is the waveform
+                // PNG written at save time, and there is nothing in the audio
+                // bytes for either decoder to render.
                 if is_raster || is_video {
                     let filename = path
                         .file_name()

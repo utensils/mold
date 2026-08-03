@@ -5,9 +5,9 @@ use crate::chain_job::{
 };
 use crate::error::MoldError;
 use crate::types::{
-    DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
-    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    AudioData, DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest,
+    GenerateResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire,
+    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -134,6 +134,7 @@ impl MoldClient {
         };
 
         Ok(GenerateResponse {
+            audio: None,
             images,
             generation_time_ms,
             model,
@@ -324,6 +325,37 @@ impl MoldClient {
                             complete.model
                         };
 
+                        // Detect an audio-only response via `audio_sample_rate`.
+                        // Checked before video: an audio print has no frames,
+                        // so the video probe below would fall through to the
+                        // image branch and hand the caller WAV bytes labelled
+                        // as an image.
+                        if let Some(sample_rate) = complete.audio_sample_rate {
+                            let thumbnail = complete
+                                .audio_thumbnail
+                                .as_deref()
+                                .and_then(|s| b64.decode(s).ok())
+                                .unwrap_or_default();
+                            return Ok(Some(GenerateResponse {
+                                images: Vec::new(),
+                                video: None,
+                                audio: Some(AudioData {
+                                    data: payload,
+                                    format: complete.format,
+                                    sample_rate,
+                                    channels: complete.audio_channels.unwrap_or(1),
+                                    duration_ms: complete.audio_duration_ms.unwrap_or(0),
+                                    thumbnail,
+                                    thumbnail_width: complete.width,
+                                    thumbnail_height: complete.height,
+                                }),
+                                generation_time_ms: complete.generation_time_ms,
+                                model,
+                                seed_used: complete.seed_used,
+                                gpu: complete.gpu,
+                            }));
+                        }
+
                         // Detect video response via video_frames field
                         let (images, video) = if let (Some(frames), Some(fps)) =
                             (complete.video_frames, complete.video_fps)
@@ -365,6 +397,7 @@ impl MoldClient {
                         };
 
                         return Ok(Some(GenerateResponse {
+                            audio: None,
                             images,
                             generation_time_ms: complete.generation_time_ms,
                             model,

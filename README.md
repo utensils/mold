@@ -189,6 +189,8 @@ with prompt, model, seed, and generation metadata.
   (`--pipeline lip-dub`), native MP4 output, checkpoint-dependent generated
   audio, and LTX-2 guidance overrides across CLI, web, desktop, iPhone, and TUI
   — LTX-2 / LTX-Video image-to-video can even run without a prompt
+- LTX-2 text-to-audio (`--pipeline t2a`): speech, ambience, or music from a
+  prompt with no video at all, as a WAV, from the CLI, web, and desktop
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
   re-renders only the changed clips, explicit remote-machine routing, and a

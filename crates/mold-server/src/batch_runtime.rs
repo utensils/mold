@@ -1622,6 +1622,7 @@ mod tests {
     fn committed_video_batch_retains_preview_under_final_gallery_name() {
         let result = GenerationJobResult {
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: Some(mold_core::VideoData {
                     data: b"mp4".to_vec(),
@@ -1663,6 +1664,7 @@ mod tests {
         std::fs::write(directory.path().join("child.png"), b"committed-image").unwrap();
         let compact = CompactBatchResult {
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: None,
                 generation_time_ms: 1,

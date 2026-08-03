@@ -27,11 +27,14 @@ use super::guidance::{
 use super::lora;
 use super::media;
 use super::model::{
-    audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
-    get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
-    temporally_upsample_frames_x2, video_token_positions,
+    audio_temporal_positions,
+    audio_transformer::Ltx2AudioTransformerModel,
+    cross_modal_temporal_positions, derive_stage1_render_shape, get_pixel_coords,
+    scale_video_time_to_seconds, spatially_upsample_frames, temporally_upsample_frames_x2,
+    video_token_positions,
     video_transformer::{
-        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxPreparedStaticInputs,
+        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxPreparedModalityStatic,
+        LtxPreparedStaticInputs,
     },
     video_vae::{AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig},
     AudioLatentShape, AudioPatchifier, DecodedAudio, Ltx2AudioDecoder, Ltx2AudioEncoder,
@@ -938,6 +941,39 @@ impl Ltx2RuntimeSession {
         })
     }
 
+    /// Render an audio-only plan. Separate entry point from
+    /// [`Self::render_native_video`] because T2A emits no frames at all — the
+    /// video renderer's synthetic-placeholder fallback would happily fabricate
+    /// some, which is exactly the wrong answer.
+    pub fn render_native_audio(
+        &self,
+        plan: &Ltx2GeneratePlan,
+        prepared: &NativePreparedRun,
+        progress: Option<&ProgressCallback>,
+        cancellation: Option<&InferenceCancellationToken>,
+    ) -> Result<NativeAudioTrack> {
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        if !plan.pipeline.is_audio_only() {
+            bail!(
+                "render_native_audio called for the LTX-2 {:?} pipeline, which renders video",
+                plan.pipeline
+            );
+        }
+        if !Path::new(&plan.checkpoint_path).is_file() {
+            bail!(
+                "missing LTX-2 checkpoint for text-to-audio: {}",
+                plan.checkpoint_path
+            );
+        }
+        let device = self
+            .device
+            .as_ref()
+            .context("native LTX-2 compute device was not initialized")?;
+        render_real_t2a_audio(plan, prepared, device, progress, cancellation)
+    }
+
     pub fn render_native_video(
         &self,
         plan: &Ltx2GeneratePlan,
@@ -947,6 +983,13 @@ impl Ltx2RuntimeSession {
     ) -> Result<NativeRenderedVideo> {
         if let Some(token) = cancellation {
             token.checkpoint()?;
+        }
+        if plan.pipeline.is_audio_only() {
+            bail!(
+                "the LTX-2 {:?} pipeline produces audio only; render it through \
+                 render_native_audio",
+                plan.pipeline
+            );
         }
         let device = self
             .device
@@ -1096,6 +1139,8 @@ impl Ltx2RuntimeSession {
             PipelineKind::Retake => {
                 render_real_retake_av(plan, prepared, device, progress, cancellation)
             }
+            // Rejected at the top of `render_native_video`; unreachable here.
+            PipelineKind::T2a => bail!("the LTX-2 text-to-audio pipeline produces no video frames"),
         };
         // Every failure from here on is a real failure. A checkpoint that is
         // present but unreadable is corrupt weights — a truncated download —
@@ -1445,6 +1490,23 @@ fn stage_multimodal_guider_defaults(
                 },
             ))
         }
+        // Text-to-audio. Upstream's audio guider constants
+        // (`ltx-pipelines/utils/constants.py:50-59`, `stg_blocks` retargeted
+        // to 28 for 2.3 at `:78`) with `modality_scale` pinned to 1.0 —
+        // audio-only generation has no video branch, so the cross-modal term
+        // is meaningless and upstream disables it explicitly at
+        // `ltx-pipelines/src/ltx_pipelines/t2a_one_stage.py:184`.
+        (PipelineKind::T2a, 0) => Some((
+            MultiModalGuiderParams::default(),
+            MultiModalGuiderParams {
+                cfg_scale: 7.0,
+                stg_scale: 1.0,
+                stg_blocks: vec![default_stg_block(plan)],
+                rescale_scale: 0.7,
+                modality_scale: 1.0,
+                skip_step: 0,
+            },
+        )),
         (PipelineKind::TwoStageHq, 0) => Some((
             MultiModalGuiderParams {
                 cfg_scale: 3.0,
@@ -1670,6 +1732,10 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         PipelineKind::IcLora => native_ic_lora,
         PipelineKind::LipDub => native_lip_dub,
         PipelineKind::Retake => native_retake,
+        // T2A produces no frames at all. It never reaches the video renderer —
+        // `render_native_video` rejects it up-front and callers route to
+        // `render_native_audio` instead.
+        PipelineKind::T2a => false,
     }
 }
 
@@ -5016,6 +5082,454 @@ fn run_real_distilled_stage(
     Ok((video_latents, audio_latents))
 }
 
+/// Upstream's non-distilled step count for the audio schedule: 40 for LTX-2.0
+/// (`ltx-pipelines/src/ltx_pipelines/utils/constants.py:39`) and 30 for
+/// LTX-2.3 (`:76`).
+fn t2a_default_steps(plan: &Ltx2GeneratePlan) -> u32 {
+    if plan.preset.name == "ltx-2.3-22b" {
+        30
+    } else {
+        40
+    }
+}
+
+/// The step count a T2A run actually uses.
+///
+/// The LTX-2 family default is 8, tuned for the *distilled* video ladder.
+/// T2A runs the plain flow-match scheduler, where 8 steps leave the audio
+/// latents far from the data manifold and the vocoder renders hiss. Raise a
+/// too-small request to the preset default and say so — a caller who asks for
+/// more than the default keeps their number.
+fn t2a_effective_steps(plan: &Ltx2GeneratePlan, progress: Option<&ProgressCallback>) -> u32 {
+    let minimum = t2a_default_steps(plan);
+    if plan.num_inference_steps >= minimum {
+        return plan.num_inference_steps;
+    }
+    emit_info(
+        progress,
+        format!(
+            "LTX-2 text-to-audio runs the non-distilled schedule; raising {} steps to {} \
+             (the {} default). Request more steps explicitly to override.",
+            plan.num_inference_steps, minimum, plan.preset.name
+        ),
+    );
+    minimum
+}
+
+/// The per-guider batch layout for an audio-only guided step.
+///
+/// Same trick as [`StaticMultimodalGuidanceBatch`]: the conditional,
+/// unconditional and STG-perturbed passes are stacked on the batch axis and
+/// evaluated in one transformer call. There is no modality slot — a modality
+/// pass isolates the audio↔video cross-attention, and audio-only has none.
+struct StaticAudioGuidanceBatch {
+    perturbations: BatchedPerturbationConfig,
+    repeat_count: usize,
+    cond_index: usize,
+    uncond_index: Option<usize>,
+    perturbed_index: Option<usize>,
+    static_inputs: LtxPreparedModalityStatic,
+}
+
+fn prepare_static_audio_guidance_batch(
+    transformer: &Ltx2AudioTransformerModel,
+    audio_context: &Tensor,
+    cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    audio_positions: &Tensor,
+    audio_guider: &MultiModalGuider,
+) -> Result<StaticAudioGuidanceBatch> {
+    let mut contexts = vec![audio_context.clone()];
+    let mut masks = vec![cond_mask.cloned()];
+    let mut perturbations = vec![PerturbationConfig::empty()];
+    let cond_index = 0usize;
+    let mut uncond_index = None;
+    let mut perturbed_index = None;
+
+    if audio_guider.do_unconditional_generation() {
+        let negative_context = audio_guider
+            .negative_context
+            .as_ref()
+            .context("missing unconditional audio context for text-to-audio guidance")?;
+        contexts.push(negative_context.clone());
+        masks.push(uncond_mask.cloned());
+        perturbations.push(PerturbationConfig::empty());
+        uncond_index = Some(perturbations.len() - 1);
+    }
+    if audio_guider.do_perturbed_generation() {
+        contexts.push(audio_context.clone());
+        masks.push(cond_mask.cloned());
+        perturbations.push(PerturbationConfig::new(vec![Perturbation::new(
+            PerturbationType::SkipAudioSelfAttention,
+            Some(audio_guider.params.stg_blocks.clone()),
+        )]));
+        perturbed_index = Some(perturbations.len() - 1);
+    }
+
+    let repeat_count = perturbations.len();
+    let batched_context = Tensor::cat(&contexts.iter().collect::<Vec<_>>(), 0)?;
+    let batched_mask = cat_optional_batches(&masks)?;
+    let batched_positions = repeat_batch(audio_positions, repeat_count)?;
+    let static_inputs = transformer.prepare_static_inputs(
+        &batched_context,
+        batched_mask.as_ref(),
+        None,
+        &batched_positions,
+    )?;
+
+    Ok(StaticAudioGuidanceBatch {
+        perturbations: BatchedPerturbationConfig::new(perturbations),
+        repeat_count,
+        cond_index,
+        uncond_index,
+        perturbed_index,
+        static_inputs,
+    })
+}
+
+fn audio_guided_denoise_step(
+    transformer: &Ltx2AudioTransformerModel,
+    audio_latents: &Tensor,
+    static_batch: &StaticAudioGuidanceBatch,
+    audio_sigma: &Tensor,
+    audio_timestep: &Tensor,
+    audio_guider: &MultiModalGuider,
+    step_idx: usize,
+) -> Result<Tensor> {
+    let batch = audio_latents.dim(0)?;
+    let batched_latents = repeat_batch(audio_latents, static_batch.repeat_count)?;
+    let batched_sigma = repeat_batch(audio_sigma, static_batch.repeat_count)?;
+    let batched_timestep = repeat_batch(audio_timestep, static_batch.repeat_count)?;
+
+    let all_velocity = transformer.forward_with_static_inputs(
+        &batched_latents,
+        &batched_sigma,
+        &batched_timestep,
+        &static_batch.static_inputs,
+        Some(&static_batch.perturbations),
+    )?;
+
+    let cond = denoised_from_velocity_with_sigma(
+        audio_latents,
+        &split_batch_chunk(&all_velocity, static_batch.cond_index, batch)?,
+        audio_timestep,
+    )?;
+    if audio_guider.should_skip_step(step_idx) {
+        return Ok(cond);
+    }
+    let uncond = match static_batch.uncond_index {
+        Some(index) => denoised_from_velocity_with_sigma(
+            audio_latents,
+            &split_batch_chunk(&all_velocity, index, batch)?,
+            audio_timestep,
+        )?,
+        None => cond.clone(),
+    };
+    let perturbed = match static_batch.perturbed_index {
+        Some(index) => denoised_from_velocity_with_sigma(
+            audio_latents,
+            &split_batch_chunk(&all_velocity, index, batch)?,
+            audio_timestep,
+        )?,
+        None => cond.clone(),
+    };
+    // `modality` collapses onto `cond`: with `modality_scale == 1.0` the term
+    // is multiplied by zero, and audio-only has no isolated modality pass to
+    // produce anyway.
+    audio_guider.calculate(&cond, &uncond, &perturbed, &cond)
+}
+
+/// One audio-only denoise: the sibling of [`run_real_distilled_stage`] with
+/// the video branch, the conditioning masks and the two-stage plumbing gone.
+#[allow(clippy::too_many_arguments)]
+fn run_real_audio_only_stage(
+    transformer: &Ltx2AudioTransformerModel,
+    audio_shape: AudioLatentShape,
+    audio_start_latents: &Tensor,
+    audio_positions: &Tensor,
+    audio_context: &Tensor,
+    uncond_audio_context: Option<&Tensor>,
+    cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    audio_guider_params: MultiModalGuiderParams,
+    sigmas_no_terminal: &[f32],
+    sampler_mode: SamplerMode,
+    audio_sampler_noise: Option<&Tensor>,
+    timing_label: Option<&str>,
+    debug_stage: Option<&str>,
+    progress: Option<&ProgressCallback>,
+    cancellation: Option<&InferenceCancellationToken>,
+) -> Result<Tensor> {
+    let device = audio_start_latents.device().clone();
+    let audio_patchifier = AudioPatchifier::new(
+        LTX2_AUDIO_SAMPLE_RATE,
+        LTX2_AUDIO_HOP_LENGTH,
+        LTX2_AUDIO_LATENT_DOWNSAMPLE_FACTOR,
+        true,
+        0,
+    );
+    let mut run_sigmas = sigmas_no_terminal.to_vec();
+    run_sigmas.push(0.0);
+
+    let mut audio_latents = audio_patchifier.patchify(audio_start_latents)?;
+    let audio_sampler_noise = audio_sampler_noise
+        .map(|noise| audio_patchifier.patchify(noise))
+        .transpose()?;
+
+    let audio_guider = MultiModalGuider::new(audio_guider_params, uncond_audio_context.cloned());
+    let static_batch = prepare_static_audio_guidance_batch(
+        transformer,
+        audio_context,
+        cond_mask,
+        uncond_mask,
+        audio_positions,
+        &audio_guider,
+    )?;
+
+    let mut transformer_secs = 0.0;
+    for (step_idx, sigma) in run_sigmas
+        .iter()
+        .copied()
+        .take(run_sigmas.len().saturating_sub(1))
+        .enumerate()
+    {
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        let step_start = Instant::now();
+        // Both stay rank-1 `[batch]`, matching the unmasked branch of
+        // `timestep_from_sigma_and_mask`. A rank-2 timestep would make
+        // `sigma_scale_for_sample` try to broadcast one value across the token
+        // axis and fail on the first step. There is no conditioning here, so
+        // there is no per-token denoise mask to carry either.
+        let audio_sigma = Tensor::full(sigma, (audio_latents.dim(0)?,), &device)?;
+        let audio_timestep = audio_sigma.clone();
+
+        let transformer_start = Instant::now();
+        let denoised = audio_guided_denoise_step(
+            transformer,
+            &audio_latents,
+            &static_batch,
+            &audio_sigma,
+            &audio_timestep,
+            &audio_guider,
+            step_idx,
+        )?;
+        transformer_secs += transformer_start.elapsed().as_secs_f64();
+
+        audio_latents = sampler_step(
+            sampler_mode,
+            &audio_latents,
+            &denoised,
+            &run_sigmas,
+            step_idx,
+            audio_sampler_noise.as_ref(),
+            "audio sampler noise missing for Res2S stage",
+        )?;
+
+        emit_denoise_progress(
+            progress,
+            step_idx + 1,
+            run_sigmas.len() - 1,
+            step_start.elapsed(),
+        );
+        if let Some(stage) = debug_stage {
+            eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
+            log_tensor_stats("step_audio_latents", &audio_latents)?;
+            log_tensor_stats("audio_x0", &denoised)?;
+        }
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+    }
+
+    if let Some(token) = cancellation {
+        token.checkpoint()?;
+    }
+    let audio_latents = audio_patchifier.unpatchify(&audio_latents, audio_shape)?;
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    if let Some(timing_label) = timing_label {
+        log_elapsed_secs(
+            &format!("{timing_label}.transformer_total"),
+            transformer_secs,
+        );
+    }
+    Ok(audio_latents)
+}
+
+/// Load the `audio_*` half of an LTX-2 checkpoint as a standalone denoiser.
+///
+/// Always eager: the audio branch is roughly a quarter of the per-block
+/// parameters and drops both cross-modal attentions, so the whole thing sits
+/// in a few GB — block streaming would buy nothing and cost a host round-trip
+/// per layer per step.
+fn load_ltx2_audio_transformer(
+    plan: &Ltx2GeneratePlan,
+    device: &candle_core::Device,
+    loras: &[LoraWeight],
+    progress: Option<&ProgressCallback>,
+) -> Result<Ltx2AudioTransformerModel> {
+    let probe = PhaseVramProbe::enter_if("audio_transformer_load".to_string(), device.is_cuda());
+    let result = (|| -> Result<Ltx2AudioTransformerModel> {
+        let config = ltx2_video_transformer_config(plan);
+        let lora_registry = super::lora::load_lora_registry(loras)?;
+        let checkpoint_path = Path::new(&plan.checkpoint_path);
+        let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+        let checkpoint_is_convrot =
+            !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+        let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
+            .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
+            .flatten();
+        let checkpoint_is_fp8 =
+            !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
+        let vb = if checkpoint_is_nvfp4 {
+            let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
+            VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+        } else if checkpoint_is_convrot {
+            let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+            VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+        } else if checkpoint_is_fp8 {
+            load_fp8_safetensors_with_callback(
+                std::slice::from_ref(&checkpoint_path),
+                device,
+                "LTX-2 audio transformer",
+                progress,
+            )?
+        } else {
+            let dtype = transformer_weight_dtype(plan, device);
+            load_safetensors_with_progress_callback(
+                std::slice::from_ref(&checkpoint_path),
+                dtype,
+                device,
+                "LTX-2 audio transformer",
+                progress,
+            )?
+        };
+        let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
+            vb
+        } else {
+            vb.rename_f(remap_ltx2_transformer_key)
+        };
+        Ok(Ltx2AudioTransformerModel::new(&config, vb, lora_registry)?)
+    })();
+    log_ltx2_phase_vram_result(probe.finish(), &result, None, "");
+    result
+}
+
+/// Render an audio-only (text-to-audio) request end to end.
+pub(crate) fn render_real_t2a_audio(
+    plan: &Ltx2GeneratePlan,
+    prepared: &NativePreparedRun,
+    device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
+    cancellation: Option<&InferenceCancellationToken>,
+) -> Result<NativeAudioTrack> {
+    if let Some(overrides) = plan.guidance_overrides.as_ref() {
+        if let Some(modality_scale) = overrides.modality_scale {
+            if (modality_scale - 1.0).abs() > f64::EPSILON {
+                bail!(
+                    "guidance_overrides.modality_scale must be 1.0 for the LTX-2 text-to-audio \
+                     pipeline (got {modality_scale}): audio-only generation has no video \
+                     modality for cross-modal guidance to act on"
+                );
+            }
+        }
+    }
+    let debug_enabled = ltx_debug_enabled();
+    let prompt_inputs = prepare_render_prompt_inputs(
+        prepared,
+        device,
+        RenderPromptInputOptions {
+            include_unconditional: true,
+            include_alt: false,
+        },
+    )?;
+    let audio_shape = prompt_inputs.audio_shape.context(
+        "LTX-2 text-to-audio requires audio latents, but the prepared run produced none",
+    )?;
+    let audio_positions = prompt_inputs
+        .audio_positions
+        .as_ref()
+        .context("LTX-2 text-to-audio requires audio positions")?;
+    let audio_context = prompt_inputs.audio_context.as_ref().context(
+        "LTX-2 text-to-audio requires audio prompt conditioning; this checkpoint's text encoder \
+         produced none",
+    )?;
+
+    let noise = seeded_randn(
+        plan.seed ^ 0x4155_4449_4f4c_5458,
+        &[
+            audio_shape.batch,
+            audio_shape.channels,
+            audio_shape.frames,
+            audio_shape.mel_bins,
+        ],
+        device,
+        DType::F32,
+    )?;
+    if debug_enabled {
+        log_tensor_stats("audio_context", audio_context)?;
+        log_tensor_stats("initial_audio_latents", &noise)?;
+    }
+
+    let (_, audio_guider_params) = stage_multimodal_guider_params(plan, 0)?
+        .context("LTX-2 text-to-audio requires multimodal guider parameters")?;
+    let steps = t2a_effective_steps(plan, progress);
+    let mut scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
+    scheduler.set_timesteps(Some(steps as usize), device, None, None, None)?;
+    let sigmas = scheduler
+        .sigmas()
+        .to_device(&candle_core::Device::Cpu)?
+        .to_vec1::<f32>()?;
+    let sigmas_no_terminal = &sigmas[..sigmas.len().saturating_sub(1)];
+
+    let dtype = gpu_dtype(device);
+    let stage_loras = stage_lora_stack(plan, 0)?;
+    let transformer = load_ltx2_audio_transformer(plan, device, &stage_loras, progress)?;
+    if debug_enabled {
+        log_debug_vram("after_t2a_transformer_load");
+    }
+
+    let audio_latents = run_real_audio_only_stage(
+        &transformer,
+        audio_shape,
+        &noise,
+        audio_positions,
+        audio_context,
+        prompt_inputs.uncond_audio_context.as_ref(),
+        None,
+        None,
+        audio_guider_params,
+        sigmas_no_terminal,
+        stage_sampler_mode(plan, 0)?,
+        None,
+        Some("t2a"),
+        debug_enabled.then_some("t2a"),
+        progress,
+        cancellation,
+    )?;
+    drop(transformer);
+    device.synchronize()?;
+    if debug_enabled {
+        log_debug_vram("after_t2a_transformer_drop");
+        log_tensor_stats("final_audio_latents", &audio_latents)?;
+    }
+
+    let track = render_native_audio_track(plan, &audio_latents, device, dtype)?.context(
+        "LTX-2 text-to-audio produced an empty waveform; the checkpoint's vocoder returned no \
+         samples",
+    )?;
+    drop(audio_latents);
+    drop(noise);
+    drop(prompt_inputs);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    Ok(track)
+}
+
 fn build_video_positions(
     pixel_shape: VideoPixelShape,
     device: &candle_core::Device,
@@ -5161,6 +5675,18 @@ fn maybe_render_native_audio_track(
     let audio_latents = audio_latents.context(
         "native LTX-2 audio output requested but the denoiser produced no audio latents",
     )?;
+    render_native_audio_track(plan, audio_latents, device, dtype)
+}
+
+/// Audio VAE → vocoder → interleaved f32 samples. Shared by the joint AV
+/// pipelines (which attach the result as an MP4 track) and by T2A (where it
+/// is the entire artifact).
+fn render_native_audio_track(
+    plan: &Ltx2GeneratePlan,
+    audio_latents: &Tensor,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Option<NativeAudioTrack>> {
     let decoder =
         Ltx2AudioDecoder::load_from_checkpoint(Path::new(&plan.checkpoint_path), dtype, device)?;
     let mel_spec = decoder.decode(&audio_latents.to_dtype(dtype)?)?;
@@ -7829,6 +8355,288 @@ mod tests {
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
         }
+    }
+
+    /// A T2A plan for `model`, with the pipeline and execution graph the
+    /// audio-only route actually builds.
+    fn t2a_plan(model: &str) -> Ltx2GeneratePlan {
+        let mut request = req(model, OutputFormat::Wav, None);
+        request.pipeline = Some(mold_core::Ltx2PipelineMode::T2a);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&request, temp_dir.path()).unwrap();
+        let preset = preset_for_model(model).unwrap();
+        let loras = crate::ltx2::lora::normalize_loras(&request);
+        let graph = crate::ltx2::execution::build_execution_graph(
+            &request,
+            PipelineKind::T2a,
+            &conditioning,
+            &preset,
+            loras.len(),
+        );
+        let mut plan = build_plan(&request, preset, conditioning);
+        plan.pipeline = PipelineKind::T2a;
+        plan.execution_graph = graph;
+        plan
+    }
+
+    /// Upstream's audio guider constants, with `modality_scale` pinned to 1.0
+    /// because audio-only has no video branch for the cross-modal term to act
+    /// on (`t2a_one_stage.py:184`). The STG block differs by checkpoint depth.
+    #[test]
+    fn t2a_audio_guider_matches_upstream_constants() {
+        for (model, expected_stg_block) in
+            [("ltx-2.3-22b-dev:fp8", 28usize), ("ltx-2-19b-dev:fp8", 29)]
+        {
+            let plan = t2a_plan(model);
+            let (video, audio) = super::stage_multimodal_guider_params(&plan, 0)
+                .unwrap()
+                .expect("t2a must define guider params");
+
+            assert_eq!(
+                video,
+                super::MultiModalGuiderParams::default(),
+                "{model}: the video guider is inert for audio-only"
+            );
+            assert_eq!(audio.cfg_scale, 7.0, "{model}");
+            assert_eq!(audio.stg_scale, 1.0, "{model}");
+            assert_eq!(audio.rescale_scale, 0.7, "{model}");
+            assert_eq!(audio.skip_step, 0, "{model}");
+            assert_eq!(audio.stg_blocks, vec![expected_stg_block], "{model}");
+            assert_eq!(
+                audio.modality_scale, 1.0,
+                "{model}: cross-modal guidance is meaningless without a video branch"
+            );
+        }
+    }
+
+    /// cfg 7.0 means the unconditional pass is required — if this went false
+    /// the prompt encoder would drop the negative encoding and the guided step
+    /// would silently degrade to a plain conditional one.
+    #[test]
+    fn t2a_requires_the_unconditional_context() {
+        let plan = t2a_plan("ltx-2.3-22b-dev:fp8");
+        assert!(super::stage_requires_unconditional_context(&plan, 0).unwrap());
+    }
+
+    /// The LTX-2 family default is 8 steps, tuned for the distilled *video*
+    /// ladder. T2A runs the plain flow-match scheduler, where 8 steps leave
+    /// the latents far from the manifold and the vocoder renders hiss. The
+    /// raise is disclosed, and a larger request is left alone.
+    #[test]
+    fn t2a_raises_too_few_steps_to_the_preset_default_and_says_so() {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let sink = messages.clone();
+        let progress: ProgressCallback = Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                sink.lock().unwrap().push(message);
+            }
+        });
+
+        let mut plan = t2a_plan("ltx-2.3-22b-dev:fp8");
+        plan.num_inference_steps = 8;
+        assert_eq!(super::t2a_effective_steps(&plan, Some(&progress)), 30);
+        let logged = messages.lock().unwrap().join("\n");
+        assert!(logged.contains("30"), "raise must be disclosed: {logged}");
+
+        let mut plan_19b = t2a_plan("ltx-2-19b-dev:fp8");
+        plan_19b.num_inference_steps = 8;
+        assert_eq!(super::t2a_effective_steps(&plan_19b, None), 40);
+
+        plan.num_inference_steps = 60;
+        let before = messages.lock().unwrap().len();
+        assert_eq!(super::t2a_effective_steps(&plan, Some(&progress)), 60);
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            before,
+            "a caller asking for more than the default keeps their number, silently"
+        );
+    }
+
+    /// End-to-end CPU run of the audio-only denoise: patchify, the guided
+    /// steps, and unpatchify back to `[batch, channels, frames, mel_bins]`.
+    ///
+    /// This is the shape contract the first GPU render would otherwise
+    /// discover: a rank-2 audio timestep makes `sigma_scale_for_sample`
+    /// broadcast one value across the token axis and fail on step 0, and a
+    /// mismatched guidance batch layout silently reads the wrong chunk.
+    #[test]
+    fn audio_only_stage_denoises_and_restores_the_latent_shape() {
+        use crate::ltx2::model::audio_transformer::Ltx2AudioTransformerModel;
+        use crate::ltx2::model::video_transformer::tests::{
+            av_transformer_var_builder_with_options, tiny_av_config,
+        };
+        use crate::ltx2::model::{AudioLatentShape, AudioPatchifier};
+
+        let config = tiny_av_config();
+        let vb = av_transformer_var_builder_with_options(config.clone(), false);
+        let transformer = Ltx2AudioTransformerModel::new(&config, vb, None).unwrap();
+
+        // `audio_in_channels` is 2 in the tiny config, and patchify folds
+        // `channels * mel_bins` into the token feature axis.
+        let shape = AudioLatentShape {
+            batch: 1,
+            channels: 2,
+            frames: 5,
+            mel_bins: 1,
+        };
+        let device = Device::Cpu;
+        let noise = Tensor::rand(
+            -1.0f32,
+            1.0,
+            (shape.batch, shape.channels, shape.frames, shape.mel_bins),
+            &device,
+        )
+        .unwrap();
+        let positions = AudioPatchifier::new(16_000, 160, 4, true, 0)
+            .get_patch_grid_bounds(shape, &device)
+            .unwrap();
+        let context = Tensor::rand(-1.0f32, 1.0, (1, 4, config.caption_channels), &device).unwrap();
+        let uncond = Tensor::rand(-1.0f32, 1.0, (1, 4, config.caption_channels), &device).unwrap();
+
+        let out = super::run_real_audio_only_stage(
+            &transformer,
+            shape,
+            &noise,
+            &positions,
+            &context,
+            Some(&uncond),
+            None,
+            None,
+            super::MultiModalGuiderParams {
+                cfg_scale: 7.0,
+                stg_scale: 1.0,
+                stg_blocks: vec![0],
+                rescale_scale: 0.7,
+                modality_scale: 1.0,
+                skip_step: 0,
+            },
+            &[1.0, 0.5],
+            crate::ltx2::execution::SamplerMode::Euler,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.dims(),
+            &[shape.batch, shape.channels, shape.frames, shape.mel_bins]
+        );
+        assert!(
+            out.flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite()),
+            "denoised audio latents must be finite"
+        );
+    }
+
+    /// The exact mechanism behind the rank-2 timestep bug, pinned on its own.
+    ///
+    /// `sigma_scale_for_sample` branches on rank: a rank-1 `[batch]` sigma is
+    /// one value per sample, while a rank-2 sigma is one value per *token* and
+    /// is reshaped to `[batch, tokens, 1]`. Handing it a `[batch, 1]` tensor —
+    /// which reads like "one sigma for this batch" — asks it to spread one
+    /// element across every token, and it fails. T2A therefore has to build a
+    /// rank-1 timestep, matching the unmasked branch of
+    /// `timestep_from_sigma_and_mask`.
+    #[test]
+    fn audio_sigma_scaling_requires_a_rank_one_per_batch_timestep() {
+        let device = Device::Cpu;
+        let sample = Tensor::zeros((1, 126, 128), DType::F32, &device).unwrap();
+
+        let rank_one = Tensor::full(0.5f32, (1,), &device).unwrap();
+        let scaled = super::sigma_scale_for_sample(&sample, &rank_one).unwrap();
+        assert_eq!(scaled.dims(), &[1, 1, 1]);
+
+        // The shape the first implementation produced.
+        let rank_two = Tensor::full(0.5f32, (1, 1), &device).unwrap();
+        assert!(
+            super::sigma_scale_for_sample(&sample, &rank_two).is_err(),
+            "a [batch, 1] sigma must not silently broadcast across 126 tokens"
+        );
+    }
+
+    /// Step 0 specifically. The rank-2 timestep failed on the very first
+    /// denoise step, so a one-step schedule is the smallest run that proves
+    /// the guided path is wired correctly — no later step can mask it, and no
+    /// later step is needed to expose it.
+    #[test]
+    fn audio_only_stage_completes_its_first_denoise_step() {
+        use crate::ltx2::model::audio_transformer::Ltx2AudioTransformerModel;
+        use crate::ltx2::model::video_transformer::tests::{
+            av_transformer_var_builder_with_options, tiny_av_config,
+        };
+        use crate::ltx2::model::{AudioLatentShape, AudioPatchifier};
+
+        let config = tiny_av_config();
+        let vb = av_transformer_var_builder_with_options(config.clone(), false);
+        let transformer = Ltx2AudioTransformerModel::new(&config, vb, None).unwrap();
+        let shape = AudioLatentShape {
+            batch: 1,
+            channels: 2,
+            frames: 5,
+            mel_bins: 1,
+        };
+        let device = Device::Cpu;
+        let noise = Tensor::rand(
+            -1.0f32,
+            1.0,
+            (shape.batch, shape.channels, shape.frames, shape.mel_bins),
+            &device,
+        )
+        .unwrap();
+        let positions = AudioPatchifier::new(16_000, 160, 4, true, 0)
+            .get_patch_grid_bounds(shape, &device)
+            .unwrap();
+        let context = Tensor::rand(-1.0f32, 1.0, (1, 4, config.caption_channels), &device).unwrap();
+        let uncond = Tensor::rand(-1.0f32, 1.0, (1, 4, config.caption_channels), &device).unwrap();
+
+        // Exactly one step: `sigmas_no_terminal` of length 1 becomes the
+        // schedule `[1.0, 0.0]`, so the loop body runs once, at step 0.
+        let out = super::run_real_audio_only_stage(
+            &transformer,
+            shape,
+            &noise,
+            &positions,
+            &context,
+            Some(&uncond),
+            None,
+            None,
+            super::MultiModalGuiderParams {
+                cfg_scale: 7.0,
+                stg_scale: 1.0,
+                stg_blocks: vec![0],
+                rescale_scale: 0.7,
+                modality_scale: 1.0,
+                skip_step: 0,
+            },
+            &[1.0],
+            crate::ltx2::execution::SamplerMode::Euler,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("the first denoise step must complete");
+        assert_eq!(
+            out.dims(),
+            &[shape.batch, shape.channels, shape.frames, shape.mel_bins]
+        );
+    }
+
+    /// T2A emits no frames. `render_native_video` must refuse it outright
+    /// rather than fall through to the synthetic-placeholder path, which would
+    /// happily fabricate a video for an audio request.
+    #[test]
+    fn t2a_never_reaches_the_video_renderer() {
+        let plan = t2a_plan("ltx-2.3-22b-dev:fp8");
+        assert!(!super::supports_real_video_path(&plan));
     }
 
     /// A Distilled FP8 plan at an explicit render shape.

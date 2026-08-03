@@ -7,6 +7,7 @@ import { blobToBase64 } from "../lib/image";
 import {
   evictMedia,
   galleryMediaPath,
+  isAudioItem,
   isVideoItem,
   streamableMediaUrl,
 } from "../lib/gallery/media";
@@ -59,10 +60,11 @@ const loading = ref(true);
 const loadError = ref("");
 const mediaLoadKey = ref(0);
 const video = computed(() => isVideoItem(props.item));
+const audio = computed(() => isAudioItem(props.item));
 const canReuse = computed(
   () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
 );
-const canUseSource = computed(() => props.canUseAsSource && !video.value);
+const canUseSource = computed(() => props.canUseAsSource && !video.value && !audio.value);
 const actionLabel = computed(() =>
   props.reusing ? "Loading prompt…" : canReuse.value ? "Use as prompt" : "Prompt unavailable",
 );
@@ -112,6 +114,8 @@ function currentMediaLoad(): MediaLoad {
     path: galleryMediaPath(props.item.filename, "host"),
     target: { baseUrl: props.target.baseUrl, apiKey: props.target.apiKey },
     cacheKey: props.cacheKey,
+    // Audio is small and not Range-streamed, so the legacy blob path is a
+    // fine fallback for it; only video must refuse to buffer whole files.
     allowLegacyBlob: !isVideoItem(props.item),
   };
 }
@@ -370,6 +374,24 @@ onBeforeUnmount(() => {
         aria-hidden="true"
         draggable="false"
       />
+      <div v-else-if="audio" class="gallery-viewer-audio">
+        <img
+          class="gallery-viewer-audio-waveform"
+          :src="thumbnailUrl"
+          :alt="`Waveform for ${item.filename}`"
+          draggable="false"
+        />
+        <audio
+          :key="mediaLoadKey"
+          class="gallery-viewer-audio-player"
+          :src="mediaUrl"
+          controls
+          preload="metadata"
+          data-test="gallery-viewer-audio"
+          @loadedmetadata="mediaReady"
+          @error="mediaFailed"
+        />
+      </div>
       <video
         v-else-if="video"
         :key="mediaLoadKey"
@@ -444,7 +466,7 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="gallery-viewer-actions">
-        <template v-if="!video">
+        <template v-if="!video && !audio">
           <button
             class="secondary-button gallery-viewer-copy"
             type="button"
@@ -505,6 +527,31 @@ onBeforeUnmount(() => {
   user-select: none;
   -webkit-user-drag: none;
   -webkit-touch-callout: default;
+}
+
+/* Audio has no raster to fill the stage: waveform above, transport below. */
+.gallery-viewer-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  width: 100%;
+  padding: 1rem;
+}
+
+.gallery-viewer-audio-waveform {
+  width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.gallery-viewer-audio-player {
+  width: 100%;
+  min-height: 44px;
 }
 
 .gallery-upscaled-badge {

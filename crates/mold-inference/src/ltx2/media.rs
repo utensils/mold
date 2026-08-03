@@ -654,6 +654,120 @@ pub(crate) fn encode_wav_f32_interleaved(
     Ok(out)
 }
 
+/// Encode interleaved f32 samples as a canonical 16-bit PCM WAV.
+///
+/// Deliberately not the 32-bit-float variant above: that one exists to hand a
+/// lossless intermediate to the AAC muxer, while this is the artifact users
+/// download and browsers play. WebKit — which renders both the desktop app and
+/// iPhone — does not decode float WAV reliably, and 16-bit PCM is the one
+/// format every `<audio>` element handles.
+///
+/// Samples are clamped to `[-1, 1]` before scaling, so a vocoder overshoot
+/// clips rather than wrapping to the opposite polarity.
+pub(crate) fn encode_wav_i16_interleaved(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Vec<u8>> {
+    if channels == 0 {
+        bail!("cannot encode a WAV with zero channels");
+    }
+    let bytes_per_sample = 2u16;
+    let block_align = channels
+        .checked_mul(bytes_per_sample)
+        .context("WAV block alignment overflowed")?;
+    let byte_rate = sample_rate
+        .checked_mul(block_align as u32)
+        .context("WAV byte rate overflowed")?;
+    let data_size = u32::try_from(samples.len() * bytes_per_sample as usize)
+        .context("WAV data chunk exceeds the 4 GiB RIFF limit")?;
+    let riff_size = 36u32
+        .checked_add(data_size)
+        .context("WAV RIFF size overflowed")?;
+
+    let mut out = Vec::with_capacity(44 + data_size as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    // WAVE_FORMAT_PCM
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        let clamped = sample.clamp(-1.0, 1.0);
+        let scaled = (clamped * i16::MAX as f32).round();
+        out.extend_from_slice(&(scaled as i16).to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Peak-envelope waveform PNG for an audio-only gallery tile.
+///
+/// Rendered here, where the samples already are, so web, desktop, iPhone and
+/// the TUI all get a legible thumbnail from the one artifact instead of each
+/// inventing a glyph. Monochrome on transparent: the gallery grid supplies the
+/// surface colour in whichever theme is active.
+pub(crate) fn render_waveform_thumbnail_png(
+    samples: &[f32],
+    channels: u16,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
+    use image::{ImageEncoder, Rgba, RgbaImage};
+
+    if width == 0 || height == 0 {
+        bail!("waveform thumbnail dimensions must be non-zero");
+    }
+    let channels = channels.max(1) as usize;
+    let frames = samples.len() / channels;
+    let mut image = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+    let ink = Rgba([0xE8, 0xE8, 0xEA, 0xFF]);
+    let mid = (height - 1) as f32 / 2.0;
+
+    for column in 0..width {
+        // Peak envelope over the frames this column covers. Averaging would
+        // flatten transients into a smear; the peak is what a waveform is.
+        let (mut low, mut high) = (0.0f32, 0.0f32);
+        if frames > 0 {
+            let start = (column as u64 * frames as u64 / width as u64) as usize;
+            let end =
+                (((column as u64 + 1) * frames as u64 / width as u64) as usize).max(start + 1);
+            for frame in start..end.min(frames) {
+                for channel in 0..channels {
+                    let sample = samples[frame * channels + channel].clamp(-1.0, 1.0);
+                    low = low.min(sample);
+                    high = high.max(sample);
+                }
+            }
+        }
+        // Always paint at least the centre line so silence reads as "an audio
+        // file that is silent" rather than as a failed thumbnail.
+        let top = (mid - high * mid).round().clamp(0.0, (height - 1) as f32) as u32;
+        let bottom = (mid - low * mid).round().clamp(0.0, (height - 1) as f32) as u32;
+        for y in top.min(bottom)..=top.max(bottom) {
+            image.put_pixel(column, y, ink);
+        }
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            image.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .context("failed to encode the LTX-2 waveform thumbnail")?;
+    Ok(png)
+}
+
 #[cfg(feature = "mp4")]
 fn recommended_aac_bitrate(sample_rate: u32, channels: u16) -> u32 {
     match (sample_rate, channels) {
@@ -962,5 +1076,91 @@ mod tests {
         );
         assert_eq!(&wav[36..40], b"data");
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 16);
+    }
+}
+
+/// Audio-artifact helpers. Deliberately outside the `mp4`-gated module above:
+/// text-to-audio ships in a default build, so its encoder and thumbnail must
+/// be covered without the AAC feature.
+#[cfg(test)]
+mod audio_tests {
+    use super::{encode_wav_i16_interleaved, render_waveform_thumbnail_png};
+
+    fn read_u16(bytes: &[u8], at: usize) -> u16 {
+        u16::from_le_bytes([bytes[at], bytes[at + 1]])
+    }
+
+    fn read_u32(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    /// 16-bit PCM, not the 32-bit float variant: WebKit renders both the
+    /// desktop app and iPhone, and its float-WAV support is patchy.
+    #[test]
+    fn wav_i16_encoder_writes_canonical_pcm_stereo_header() {
+        let wav = encode_wav_i16_interleaved(&[0.25, -0.25, 0.5, -0.5], 48_000, 2).unwrap();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(read_u32(&wav, 16), 16, "PCM fmt chunk is 16 bytes");
+        assert_eq!(read_u16(&wav, 20), 1, "WAVE_FORMAT_PCM");
+        assert_eq!(read_u16(&wav, 22), 2, "channels");
+        assert_eq!(read_u32(&wav, 24), 48_000, "sample rate");
+        assert_eq!(read_u32(&wav, 28), 48_000 * 4, "byte rate");
+        assert_eq!(read_u16(&wav, 32), 4, "block align");
+        assert_eq!(read_u16(&wav, 34), 16, "bits per sample");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(read_u32(&wav, 40), 8, "four i16 samples");
+        assert_eq!(wav.len(), 44 + 8);
+
+        let first = i16::from_le_bytes([wav[44], wav[45]]);
+        assert_eq!(first, (0.25 * i16::MAX as f32).round() as i16);
+    }
+
+    /// A vocoder overshoot must clip, not wrap: `(1.5 * 32767) as i16`
+    /// saturates in Rust but the *negative* overshoot is what flips polarity
+    /// in a naive cast, turning a loud peak into a loud opposite peak.
+    #[test]
+    fn wav_i16_encoder_clamps_out_of_range_samples() {
+        let wav = encode_wav_i16_interleaved(&[1.5, -1.5], 24_000, 1).unwrap();
+        assert_eq!(i16::from_le_bytes([wav[44], wav[45]]), i16::MAX);
+        assert_eq!(i16::from_le_bytes([wav[46], wav[47]]), -i16::MAX);
+    }
+
+    #[test]
+    fn wav_i16_encoder_rejects_zero_channels() {
+        assert!(encode_wav_i16_interleaved(&[0.0], 48_000, 0).is_err());
+    }
+
+    #[test]
+    fn waveform_thumbnail_is_a_decodable_png_of_the_requested_size() {
+        let samples: Vec<f32> = (0..4_800)
+            .map(|index| (index as f32 * 0.01).sin() * 0.8)
+            .collect();
+        let png = render_waveform_thumbnail_png(&samples, 2, 320, 180).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(decoded.width(), 320);
+        assert_eq!(decoded.height(), 180);
+    }
+
+    /// Silence must still render something. A blank tile is indistinguishable
+    /// from a failed thumbnail, and "the file is silent" is exactly the thing
+    /// a user needs the gallery to tell them.
+    #[test]
+    fn waveform_thumbnail_draws_a_centre_line_for_silence() {
+        use image::GenericImageView;
+
+        let png = render_waveform_thumbnail_png(&[0.0; 1_000], 1, 64, 33).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        let opaque = (0..decoded.width())
+            .filter(|x| decoded.get_pixel(*x, 16).0[3] > 0)
+            .count();
+        assert_eq!(opaque as u32, decoded.width());
+    }
+
+    #[test]
+    fn waveform_thumbnail_rejects_zero_dimensions() {
+        assert!(render_waveform_thumbnail_png(&[0.0], 1, 0, 32).is_err());
+        assert!(render_waveform_thumbnail_png(&[0.0], 1, 32, 0).is_err());
     }
 }

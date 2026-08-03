@@ -1,3 +1,4 @@
+pub mod audio_transformer;
 pub mod audio_vae;
 pub mod patchifiers;
 pub mod rope;

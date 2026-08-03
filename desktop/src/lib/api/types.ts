@@ -166,7 +166,14 @@ export interface ModelEntry {
 
 // ── Generation ───────────────────────────────────────────────────────────
 
-export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4";
+export type OutputFormat =
+  | "png"
+  | "jpeg"
+  | "webp"
+  | "gif"
+  | "apng"
+  | "mp4"
+  | "wav";
 
 /** Scheduler override for UNet families (SD1.5, SDXL). Mirrors mold-core's
  * kebab-case enum; only these string variants are surfaced in the desktop UI. */
@@ -184,8 +191,8 @@ export type Ltx2PipelineMode =
   | "keyframe"
   | "a2-vid"
   | "retake"
-  | "lip-dub";
-
+  | "lip-dub"
+  | "t2a";
 /** Spatial latent upscale factor. Mirrors mold-core `Ltx2SpatialUpscale`
  * (`X1_5` → `"x1-5"`, `X2` → `"x2"`). */
 export type Ltx2SpatialUpscale = "x1-5" | "x2";

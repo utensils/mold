@@ -7,6 +7,8 @@ const props = withDefaults(
   defineProps<{
     path: string;
     video?: boolean;
+    /** Audio-only print: renders a transport instead of a raster element. */
+    audio?: boolean;
     alt?: string;
     controls?: boolean;
     /** Explicit host to fetch from; defaults to the primary connection. */
@@ -14,7 +16,7 @@ const props = withDefaults(
     /** Blob-cache bucket, usually the origin host id. */
     cacheKey?: string | null;
   }>(),
-  { video: false, alt: "", controls: false, target: null, cacheKey: null },
+  { video: false, audio: false, alt: "", controls: false, target: null, cacheKey: null },
 );
 
 const src = ref<string | null>(null);
@@ -47,6 +49,7 @@ onMounted(load);
     playsinline
     disablepictureinpicture
   />
+  <audio v-else-if="audio && src" :src="src" class="w-full" controls />
   <img v-else-if="src" :src="src" :alt="alt" class="h-full w-full object-cover" draggable="false" />
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">
     <span class="edge-code">UNREADABLE</span>

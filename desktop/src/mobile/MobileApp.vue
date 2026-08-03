@@ -96,7 +96,7 @@ import {
   hydrateGenerationTemplate,
   type GenerationTemplate,
 } from "../lib/generationTemplates";
-import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import { galleryMediaPath, isAudioItem, isVideoItem } from "../lib/gallery/media";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -4212,7 +4212,12 @@ onBeforeUnmount(() => {
               :alt="print.metadata.prompt || print.filename"
               loading="lazy"
             />
-            <span v-if="isVideoItem(print)" class="gallery-video-badge" aria-hidden="true">▶</span>
+            <span
+              v-if="isVideoItem(print) || isAudioItem(print)"
+              class="gallery-video-badge"
+              aria-hidden="true"
+              >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+            >
             <span
               v-if="!gallerySelectMode && isFreshMobilePrint(print)"
               class="gallery-new-badge"

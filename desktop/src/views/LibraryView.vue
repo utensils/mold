@@ -18,7 +18,7 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { galleryMediaPath, isVideoItem, mediaPath } from "../lib/gallery/media";
+import { galleryMediaPath, isAudioItem, isVideoItem, mediaPath } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
 import {
   planSequenceReuse,
@@ -412,6 +412,7 @@ const kindOptions = computed(() => [
   { value: "all" as GalleryKindFilter, label: "All" },
   { value: "image" as GalleryKindFilter, label: "Images" },
   { value: "video" as GalleryKindFilter, label: "Video" },
+  { value: "audio" as GalleryKindFilter, label: "Audio" },
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
@@ -562,6 +563,7 @@ const selectedEntry = computed<MergedPrint | null>(
 
 /** Shared with the store's kind filter so badge and chips never disagree. */
 const isVideo = (i: GalleryImage) => isVideoItem(i);
+const isAudio = (i: GalleryImage) => isAudioItem(i);
 
 async function copyImage(entry: MergedPrint) {
   try {
@@ -952,10 +954,10 @@ onUnmounted(() => {
               Upscaled
             </span>
             <span
-              v-if="isVideo(laid.item)"
+              v-if="isVideo(laid.item) || isAudio(laid.item)"
               class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
             >
-              ▶
+              {{ isAudio(laid.item) ? "♪" : "▶" }}
             </span>
             <span
               v-if="selectMode"
@@ -1054,6 +1056,7 @@ onUnmounted(() => {
       :index="selectedIndex"
       :count="gallery.filtered.length"
       :video="isVideo(selectedEntry.item)"
+      :audio="isAudio(selectedEntry.item)"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
       :target="targetFor(selectedEntry)"
       :cache-key="selectedEntry.sourceKey"

@@ -61,6 +61,7 @@ const kind = computed(() =>
   props.item ? mediaKind(props.item.format, props.item.filename) : "image",
 );
 const isVideoFile = computed(() => kind.value === "video");
+const isAudioFile = computed(() => kind.value === "audio");
 
 /*
  * Full-size media is addressed on the host that owns the print. Keyless hosts
@@ -139,9 +140,11 @@ function resolveMedia() {
 
 watch(() => props.item, resolveMedia, { immediate: true });
 
-const blockedTitle = computed(() =>
-  isVideoFile.value ? "Can't stream this clip" : "Can't load this print",
-);
+const blockedTitle = computed(() => {
+  if (isVideoFile.value) return "Can't stream this clip";
+  if (isAudioFile.value) return "Can't play this take";
+  return "Can't load this print";
+});
 
 const prompt = computed(() => props.item?.metadata.prompt ?? "");
 const modelLabel = computed(() =>
@@ -307,6 +310,15 @@ function onDelete() {
             playsinline
             :muted="muted"
           />
+          <div v-else-if="isAudioFile && mediaSrc" class="lb__audio">
+            <img
+              v-if="posterSrc"
+              :src="posterSrc"
+              :alt="`Waveform for ${item.filename}`"
+              class="lb__audio-waveform"
+            />
+            <audio :src="mediaSrc" class="lb__audio-player" controls autoplay />
+          </div>
           <img
             v-else-if="mediaSrc"
             :src="mediaSrc"
@@ -610,6 +622,15 @@ function onDelete() {
             playsinline
             :muted="muted"
           />
+          <div v-else-if="isAudioFile && mediaSrc" class="lb__audio">
+            <img
+              v-if="posterSrc"
+              :src="posterSrc"
+              :alt="`Waveform for ${item.filename}`"
+              class="lb__audio-waveform"
+            />
+            <audio :src="mediaSrc" class="lb__audio-player" controls autoplay />
+          </div>
           <img
             v-else-if="mediaSrc"
             :src="mediaSrc"
@@ -788,6 +809,29 @@ function onDelete() {
   max-height: 100%;
   object-fit: contain;
   display: block;
+}
+
+/* An audio print has a waveform tile and a transport, stacked — there is no
+   raster to fill the stage with. */
+.lb__audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  width: min(100%, 42rem);
+  padding: 1rem;
+}
+
+.lb__audio-waveform {
+  width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  display: block;
+}
+
+.lb__audio-player {
+  width: 100%;
 }
 
 /* Shown instead of the media when the owning host can't serve it — a video on

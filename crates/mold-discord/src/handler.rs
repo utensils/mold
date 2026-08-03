@@ -86,10 +86,21 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
     Ok(())
 }
 
-/// Pick the attachment bytes we want to send to Discord. Video responses take
-/// precedence over image payloads; oversized MP4s fall back to the GIF preview
-/// the server always bundles so users still see *something* in their channel.
+/// Pick the attachment bytes we want to send to Discord. Audio and video
+/// responses take precedence over image payloads; oversized MP4s fall back to
+/// the GIF preview the server always bundles so users still see *something* in
+/// their channel.
 pub fn select_attachment(resp: &mold_core::GenerateResponse, seed: u64) -> Option<DiscordPayload> {
+    if let Some(audio) = resp.audio.as_ref() {
+        // Discord renders a `.wav` attachment with its own inline player, so
+        // the waveform PNG stays out of the channel — it exists for gallery
+        // tiles, and posting it would read as a second, silent output.
+        return Some(DiscordPayload {
+            filename: format!("mold-{seed}.{}", audio.format.extension()),
+            data: audio.data.clone(),
+            note: None,
+        });
+    }
     if let Some(video) = resp.video.as_ref() {
         let primary_too_big = video.data.len() > MAX_ATTACHMENT_BYTES;
         let has_preview = !video.gif_preview.is_empty();
@@ -196,6 +207,7 @@ mod tests {
 
     fn video_response(data: Vec<u8>, preview: Vec<u8>, format: OutputFormat) -> GenerateResponse {
         GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(VideoData {
                 data,
@@ -263,6 +275,7 @@ mod tests {
     #[test]
     fn select_attachment_falls_back_to_images_when_no_video() {
         let resp = GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: vec![1, 2, 3],
                 format: OutputFormat::Png,
@@ -284,6 +297,7 @@ mod tests {
     #[test]
     fn select_attachment_returns_none_when_empty() {
         let resp = GenerateResponse {
+            audio: None,
             images: vec![],
             video: None,
             generation_time_ms: 10,

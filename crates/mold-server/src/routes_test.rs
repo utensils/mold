@@ -228,6 +228,7 @@ mod tests {
                 }]
             };
             Ok(GenerateResponse {
+                audio: None,
                 images,
                 generation_time_ms: 1,
                 model: req.model.clone(),

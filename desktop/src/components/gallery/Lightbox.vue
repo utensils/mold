@@ -24,6 +24,8 @@ const props = withDefaults(
     index: number;
     count: number;
     video: boolean;
+    /** Audio-only print: no raster to show, a transport instead. */
+    audio?: boolean;
     source?: GallerySource;
     /** Origin host to fetch media from; null = the primary connection. */
     target?: ApiTarget | null;
@@ -40,6 +42,7 @@ const props = withDefaults(
     canEditSequence?: boolean;
   }>(),
   {
+    audio: false,
     source: "host",
     target: null,
     cacheKey: null,
@@ -157,7 +160,11 @@ async function copyImage() {
 
 function imageMenu(): MenuEntry[] {
   return [
-    { label: "Copy image", disabled: props.video, action: () => void copyImage() },
+    {
+      label: "Copy image",
+      disabled: props.video || props.audio,
+      action: () => void copyImage(),
+    },
     {
       label: "Copy file path",
       action: () =>
@@ -231,7 +238,25 @@ async function saveMedia() {
           class="relative flex h-full w-full items-center justify-center overflow-hidden"
           @contextmenu="contextMenu.open($event, imageMenu())"
         >
+          <div v-if="audio" class="flex w-full max-w-2xl flex-col items-center gap-4 p-4">
+            <AuthedMedia
+              :path="galleryMediaPath(item.filename, source, true)"
+              :target="target"
+              :cache-key="cacheKey"
+              :alt="meta.prompt"
+              class="!object-contain"
+            />
+            <AuthedMedia
+              :path="galleryMediaPath(item.filename, source)"
+              :target="target"
+              :cache-key="cacheKey"
+              audio
+              controls
+              :alt="meta.prompt"
+            />
+          </div>
           <AuthedMedia
+            v-else
             :path="galleryMediaPath(item.filename, source)"
             :target="target"
             :cache-key="cacheKey"
@@ -458,7 +483,7 @@ async function saveMedia() {
             class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
             @click="saveMedia"
           >
-            {{ video ? "Save video" : "Save image" }}
+            {{ audio ? "Save audio" : video ? "Save video" : "Save image" }}
           </button>
         </div>
         <div class="mt-2 flex gap-2.5">

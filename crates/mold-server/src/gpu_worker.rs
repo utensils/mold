@@ -2876,8 +2876,9 @@ fn process_job_with_sink(
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
 
-            if response.images.is_empty() && response.video.is_none() {
-                let err_msg = "generation error: engine returned no images or video".to_string();
+            if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
+                let err_msg =
+                    "generation error: engine returned no images, video, or audio".to_string();
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent {
                         message: err_msg.clone(),
@@ -2898,10 +2899,20 @@ fn process_job_with_sink(
                     height: video.height,
                     index: 0,
                 }
+            } else if let Some(ref audio) = response.audio {
+                // Waveform tile stands in for the raster payload; the real
+                // audio bytes travel on `response.audio`.
+                ImageData {
+                    data: audio.thumbnail.clone(),
+                    format: OutputFormat::Png,
+                    width: audio.thumbnail_width,
+                    height: audio.thumbnail_height,
+                    index: 0,
+                }
             } else {
                 unreachable!("checked above");
             };
-            if response.video.is_none() {
+            if response.video.is_none() && response.audio.is_none() {
                 if let Some(upscale_model) = job
                     .request
                     .upscale_model
@@ -3082,7 +3093,24 @@ fn finish_generation_success(
         let generation_time_ms = response.generation_time_ms as i64;
         let db = job.metadata_db.as_ref().as_ref();
         let events = Some(job.events.as_ref());
-        if let Some(ref video) = response.video {
+        if let Some(ref audio) = response.audio {
+            // Record the waveform tile's raster size — see the queue's
+            // single-worker path for why.
+            let mut audio_metadata = metadata.clone();
+            audio_metadata.apply_output_dimensions(audio.thumbnail_width, audio.thumbnail_height);
+            saved_names.output = crate::queue::save_audio_to_dir(
+                dir,
+                &audio.data,
+                &audio.thumbnail,
+                audio.format,
+                &job.model,
+                &audio_metadata,
+                Some(generation_time_ms),
+                db,
+                events,
+                &job.gallery_publication_gate,
+            );
+        } else if let Some(ref video) = response.video {
             saved_names.output = save_video_to_dir(
                 dir,
                 &video.data,
@@ -4494,6 +4522,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             std::fs::remove_file(&self.weights)?;
             Ok(GenerateResponse {
+                audio: None,
                 images: vec![self.generated.clone()],
                 video: None,
                 generation_time_ms: 1,
@@ -4531,6 +4560,7 @@ mod tests {
                 .recv()
                 .unwrap();
             Ok(GenerateResponse {
+                audio: None,
                 images: vec![ImageData {
                     data: vec![1, 2, 3],
                     format: OutputFormat::Png,
@@ -5130,6 +5160,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             self.record("generate");
             Ok(GenerateResponse {
+                audio: None,
                 images: vec![ImageData {
                     data: vec![1, 2, 3],
                     format: OutputFormat::Png,
@@ -6354,6 +6385,7 @@ mod tests {
             .unwrap();
             let original = fake_upscale_image();
             let response = GenerateResponse {
+                audio: None,
                 images: vec![original.clone()],
                 video: None,
                 generation_time_ms: 1,
@@ -8325,6 +8357,7 @@ mod tests {
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
         let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
         let mut response = GenerateResponse {
+            audio: None,
             images: vec![],
             video: None,
             generation_time_ms: 10,

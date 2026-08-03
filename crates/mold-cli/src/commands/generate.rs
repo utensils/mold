@@ -332,7 +332,14 @@ pub async fn run(
     validate_cli_batch_for_family(family.as_deref(), batch)?;
 
     // Default video models to a sensible container unless the user explicitly picked one.
-    let output_format = if format == OutputFormat::Png && effective_frames.is_some() {
+    // An audio-only pipeline goes to WAV instead: it emits no frames, so both
+    // the raster default and the video default would be rejected outright.
+    let audio_only_pipeline = ltx2
+        .pipeline
+        .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
+    let output_format = if audio_only_pipeline && format == OutputFormat::Png {
+        OutputFormat::Wav
+    } else if format == OutputFormat::Png && effective_frames.is_some() {
         if is_ltx2 {
             OutputFormat::Mp4
         } else {
@@ -346,6 +353,7 @@ pub async fn run(
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
     // delegate to the chain helper. Only LTX-2 distilled is chainable in v1;
     // other video families error fast rather than silently over-producing.
+    // `decide_chain_routing` declines outright for an audio-only pipeline.
     {
         use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
         let routing_fps = effective_fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
@@ -356,6 +364,7 @@ pub async fn run(
             clip_frames,
             motion_tail,
             routing_fps,
+            ltx2.pipeline,
         );
         match decision {
             ChainRoutingDecision::SingleClip => {
@@ -644,16 +653,29 @@ pub async fn run(
             control_scale
         );
     }
-    let is_video = effective_frames.is_some();
+    // An audio-only pipeline still reads `frames`/`fps` — that is how its
+    // duration is expressed — but it renders no frames, so nothing downstream
+    // should describe it as video.
+    let is_video = effective_frames.is_some() && !audio_only_pipeline;
     if let Some(f) = effective_frames {
         let effective_fps = effective_fps.unwrap_or(24);
-        status!(
-            "{} Video mode: {} frames @ {} fps",
-            theme::icon_mode(),
-            f,
-            effective_fps,
-        );
-        if is_ltx2 {
+        if audio_only_pipeline {
+            status!(
+                "{} Audio mode: {:.2}s ({} frames @ {} fps)",
+                theme::icon_mode(),
+                f as f64 / effective_fps.max(1) as f64,
+                f,
+                effective_fps,
+            );
+        } else {
+            status!(
+                "{} Video mode: {} frames @ {} fps",
+                theme::icon_mode(),
+                f,
+                effective_fps,
+            );
+        }
+        if is_ltx2 && !audio_only_pipeline {
             let audio_mode = if enable_audio == Some(false) {
                 "silent"
             } else {
@@ -662,14 +684,25 @@ pub async fn run(
             status!("{} LTX-2 pipeline: {}", theme::icon_mode(), audio_mode);
         }
     }
-    status!(
-        "{} Generating {}x{} ({} steps, guidance {:.1})",
-        theme::icon_info(),
-        effective_width,
-        effective_height,
-        effective_steps,
-        effective_guidance,
-    );
+    if audio_only_pipeline {
+        // No raster to report. Printing the request's width and height here
+        // would describe a frame this pipeline never renders.
+        status!(
+            "{} Generating audio ({} steps, guidance {:.1})",
+            theme::icon_info(),
+            effective_steps,
+            effective_guidance,
+        );
+    } else {
+        status!(
+            "{} Generating {}x{} ({} steps, guidance {:.1})",
+            theme::icon_info(),
+            effective_width,
+            effective_height,
+            effective_steps,
+            effective_guidance,
+        );
+    }
     status!("{}", "─".repeat(40).dimmed());
 
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
@@ -799,6 +832,7 @@ pub async fn run(
         }
 
         GenerateResponse {
+            audio: None,
             images: all_images,
             video: last_video,
             generation_time_ms: total_time_ms,
@@ -808,8 +842,27 @@ pub async fn run(
         }
     };
 
-    // Output: video or image.
-    if let Some(ref video) = response.video {
+    // Output: audio, video, or image.
+    if let Some(ref audio) = response.audio {
+        // --- Audio-only output (LTX-2 text-to-audio) ---
+        if piped && output.is_none() {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&audio.data)?;
+            stdout.flush()?;
+        } else {
+            save_and_preview_audio(
+                audio,
+                &output,
+                model,
+                preview,
+                Some(PersistArgs {
+                    request: &req,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }),
+            )?;
+        }
+    } else if let Some(ref video) = response.video {
         // --- Video output ---
         if batch > 1 {
             // Batch clips were persisted per item before aggregation.
@@ -1519,6 +1572,7 @@ fn finalize_local_batch_outputs(
     }
 
     Ok(GenerateResponse {
+        audio: None,
         images: all_images,
         video: last_video,
         generation_time_ms: total_time_ms,
@@ -1957,6 +2011,89 @@ fn save_and_preview_video(
         }
     }
     Ok(())
+}
+
+/// Save an audio-only output to disk and cache its waveform thumbnail.
+///
+/// Audio has no raster frame, so both the TUI gallery cell and the server's
+/// on-demand thumbnailer would come up empty. The waveform PNG the engine
+/// already rendered is written into the shared thumbnail cache here, at the
+/// only moment where it exists.
+fn save_and_preview_audio(
+    audio: &mold_core::AudioData,
+    output: &Option<String>,
+    model: &str,
+    preview: bool,
+    persist: Option<PersistArgs<'_>>,
+) -> anyhow::Result<()> {
+    let filename = match output {
+        Some(path) if path == "-" => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&audio.data)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        Some(path) => path.clone(),
+        None => default_filename(
+            model,
+            mold_core::time::now_epoch_ms_u64(),
+            audio.format.extension(),
+            1,
+            0,
+        ),
+    };
+
+    if std::path::Path::new(&filename).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), filename);
+    }
+    std::fs::write(&filename, &audio.data)?;
+    status!(
+        "{} Saved: {} ({:.2}s, {} Hz, {} ch)",
+        theme::icon_done(),
+        filename.bold(),
+        audio.duration_ms as f64 / 1000.0,
+        audio.sample_rate,
+        audio.channels,
+    );
+    cache_audio_waveform_thumbnail(std::path::Path::new(&filename), &audio.thumbnail);
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(&filename),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            audio.format,
+            Some((audio.thumbnail_width, audio.thumbnail_height)),
+        );
+    }
+    if preview && !audio.thumbnail.is_empty() {
+        preview_image(&audio.thumbnail);
+    }
+    Ok(())
+}
+
+fn cache_audio_waveform_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
+    if png_bytes.is_empty() {
+        return;
+    }
+    let Some(leaf) = saved.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let thumb_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails");
+    if std::fs::create_dir_all(&thumb_dir).is_err() {
+        return;
+    }
+    for path in mold_core::media_paths::audio_waveform_thumbnail_paths(&thumb_dir, leaf) {
+        if let Err(error) = std::fs::write(&path, png_bytes) {
+            tracing::warn!(
+                "failed to cache waveform thumbnail {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Save a single image to disk and optionally preview it inline.
@@ -2403,6 +2540,7 @@ mod tests {
         let prompts = vec!["first clip".to_string(), "second clip".to_string()];
         let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
         let response = GenerateResponse {
+            audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {
                 data: b"successful-video".to_vec(),

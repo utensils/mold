@@ -64,7 +64,7 @@ import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 
-type FilterKind = "all" | "images" | "video";
+type FilterKind = "all" | "images" | "video" | "audio";
 type ViewMode = "feed" | "grid";
 
 // Persist the layout. The redesign is grid-first, so `grid` is the default;
@@ -107,6 +107,7 @@ const filterOptions: SegmentOption<FilterKind>[] = [
   { value: "all", label: "All" },
   { value: "images", label: "Images" },
   { value: "video", label: "Video" },
+  { value: "audio", label: "Audio" },
 ];
 
 // Seed the search from the global nav's `?q=` and keep the two in sync.
@@ -459,6 +460,7 @@ const kindFiltered = computed(() => {
   return hostFiltered.value.filter((e) => {
     const k = mediaKind(e.format, e.filename);
     if (filter.value === "video") return k === "video" || k === "animated";
+    if (filter.value === "audio") return k === "audio";
     return k === "image";
   });
 });

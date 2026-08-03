@@ -1529,6 +1529,7 @@ impl Flux2Engine {
         tracing::info!(generation_time_ms, seed, "sequential generation complete");
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -1866,6 +1867,7 @@ impl Flux2Engine {
         tracing::info!(generation_time_ms, seed, "generation complete");
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),

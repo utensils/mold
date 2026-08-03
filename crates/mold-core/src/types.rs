@@ -503,6 +503,13 @@ impl GenerateRequest {
         if self.output_format.is_some() {
             return self;
         }
+        // An audio-only pipeline has no frames to encode, so the family
+        // default (mp4) would be rejected by the validator. Resolve it to the
+        // one container that can hold the artifact it actually produces.
+        if self.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only) {
+            self.output_format = Some(OutputFormat::Wav);
+            return self;
+        }
         self.output_format = Some(match family {
             Some("ltx2") | Some("ltx-video") => OutputFormat::Mp4,
             _ => OutputFormat::Png,
@@ -539,6 +546,7 @@ pub enum Ltx2PipelineMode {
     A2Vid,
     Retake,
     LipDub,
+    T2a,
 }
 
 impl Ltx2PipelineMode {
@@ -546,7 +554,7 @@ impl Ltx2PipelineMode {
     /// TypeScript string union, and
     /// `ltx2_pipeline_typescript_unions_match_the_wire_contract` pins them to
     /// it — a member that does not deserialize 422s the whole request.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::OneStage,
         Self::TwoStage,
         Self::TwoStageHq,
@@ -556,6 +564,7 @@ impl Ltx2PipelineMode {
         Self::A2Vid,
         Self::Retake,
         Self::LipDub,
+        Self::T2a,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -569,7 +578,15 @@ impl Ltx2PipelineMode {
             Self::A2Vid => "a2-vid",
             Self::Retake => "retake",
             Self::LipDub => "lip-dub",
+            Self::T2a => "t2a",
         }
+    }
+
+    /// Whether this pipeline produces an audio-only artifact rather than
+    /// video frames. Audio-only plans skip every spatial stage, so callers
+    /// must not reason about `width`/`height`/`spatial_upscale` for them.
+    pub const fn is_audio_only(self) -> bool {
+        matches!(self, Self::T2a)
     }
 }
 
@@ -717,6 +734,13 @@ pub struct GenerateResponse {
     /// Video output data. Present only for video model families (e.g. ltx-video).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoData>,
+    /// Audio-only output data (additive). Present only for audio-only
+    /// pipelines — currently LTX-2 text-to-audio. Deliberately a separate
+    /// slot from `video`: every existing consumer reads a populated `video`
+    /// as "this response is a video", so reshaping `VideoData` around a
+    /// frameless artifact would mis-render it everywhere at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioData>,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
     #[schema(example = "flux-schnell:q8")]
@@ -779,6 +803,36 @@ pub struct VideoData {
     /// Number of audio channels when audio is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_channels: Option<u32>,
+}
+
+/// Audio-only output from an audio-generating pipeline (LTX-2 text-to-audio).
+///
+/// `thumbnail` is a rendered waveform PNG produced where the samples already
+/// are, so every gallery surface — web, desktop, iPhone and the TUI — draws a
+/// legible tile from the one artifact instead of each inventing its own glyph.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AudioData {
+    /// Encoded audio bytes in the requested format (currently WAV).
+    pub data: Vec<u8>,
+    /// Output format. Always an [`OutputFormat::is_audio`] variant.
+    pub format: OutputFormat,
+    /// Sample rate in Hz, as produced by the vocoder.
+    #[schema(example = 48000)]
+    pub sample_rate: u32,
+    /// Channel count in the encoded stream.
+    #[schema(example = 2)]
+    pub channels: u32,
+    /// Total encoded duration in milliseconds.
+    #[schema(example = 5040)]
+    pub duration_ms: u64,
+    /// Rendered waveform PNG for gallery grids and the TUI cell.
+    pub thumbnail: Vec<u8>,
+    /// Raster size of `thumbnail`. Audio has no dimensions of its own, so
+    /// this is what gallery rows record and what grids lay the tile out with.
+    #[schema(example = 640)]
+    pub thumbnail_width: u32,
+    #[schema(example = 360)]
+    pub thumbnail_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1017,6 +1071,7 @@ pub enum OutputFormat {
     Apng,
     Webp,
     Mp4,
+    Wav,
 }
 
 impl OutputFormat {
@@ -1029,6 +1084,7 @@ impl OutputFormat {
             OutputFormat::Apng => "png", // APNG files are valid PNGs — .png opens natively everywhere
             OutputFormat::Webp => "webp",
             OutputFormat::Mp4 => "mp4",
+            OutputFormat::Wav => "wav",
         }
     }
 
@@ -1041,6 +1097,7 @@ impl OutputFormat {
             OutputFormat::Apng => "image/apng",
             OutputFormat::Webp => "image/webp",
             OutputFormat::Mp4 => "video/mp4",
+            OutputFormat::Wav => "audio/wav",
         }
     }
 
@@ -1050,6 +1107,15 @@ impl OutputFormat {
             self,
             OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4
         )
+    }
+
+    /// Whether this format carries audio samples and no raster frames.
+    ///
+    /// Audio-only artifacts are neither images nor videos: gallery grids
+    /// render their sidecar waveform thumbnail, and every "is this a video"
+    /// branch must stay `false` so nothing tries to seek frames out of them.
+    pub fn is_audio(&self) -> bool {
+        matches!(self, OutputFormat::Wav)
     }
 }
 
@@ -1070,6 +1136,7 @@ impl std::str::FromStr for OutputFormat {
             "apng" => Ok(OutputFormat::Apng),
             "webp" => Ok(OutputFormat::Webp),
             "mp4" => Ok(OutputFormat::Mp4),
+            "wav" => Ok(OutputFormat::Wav),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -2301,6 +2368,23 @@ pub struct SseCompleteEvent {
     /// Number of audio channels (when audio is present).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_audio_channels: Option<u32>,
+
+    // ── Audio-only fields (additive; absent for image and video responses) ──
+    /// Sample rate in Hz. Presence of this field signals an audio-only
+    /// response, where `image` carries the encoded audio bytes and `format`
+    /// is an [`OutputFormat::is_audio`] variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<u32>,
+    /// Channel count of the encoded audio stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<u32>,
+    /// Total encoded duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_duration_ms: Option<u64>,
+    /// Base64-encoded waveform PNG for the gallery tile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_thumbnail: Option<String>,
+
     /// GPU ordinal that handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
@@ -2496,6 +2580,51 @@ mod tests {
         assert!("".parse::<OutputFormat>().is_err());
         assert!("bmp".parse::<OutputFormat>().is_err());
         assert!("tiff".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn wav_is_audio_and_never_video() {
+        assert_eq!("wav".parse::<OutputFormat>().unwrap(), OutputFormat::Wav);
+        assert_eq!(OutputFormat::Wav.extension(), "wav");
+        assert_eq!(OutputFormat::Wav.content_type(), "audio/wav");
+        assert_eq!(
+            serde_json::to_value(OutputFormat::Wav).unwrap(),
+            serde_json::json!("wav")
+        );
+        assert!(OutputFormat::Wav.is_audio());
+        // The whole point of a separate predicate: every `is_video` branch —
+        // thumbnail extraction, frame seeking, the ▶ badge — must skip audio.
+        assert!(!OutputFormat::Wav.is_video());
+        for format in [
+            OutputFormat::Png,
+            OutputFormat::Jpeg,
+            OutputFormat::Gif,
+            OutputFormat::Apng,
+            OutputFormat::Webp,
+            OutputFormat::Mp4,
+        ] {
+            assert!(!format.is_audio(), "{format:?} must not be audio");
+        }
+    }
+
+    #[test]
+    fn audio_only_pipeline_defaults_output_format_to_wav() {
+        // The ltx2 family default is mp4, which the validator rejects for an
+        // audio-only pipeline — normalisation has to know the difference.
+        let json = r#"{"prompt":"rain on a tin roof","model":"ltx-2.3-22b-dev:fp8","width":1216,"height":704,"steps":30,"batch_size":1,"pipeline":"t2a"}"#;
+        let mut req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.pipeline, Some(Ltx2PipelineMode::T2a));
+        req.normalise_output_format(Some("ltx2"));
+        assert_eq!(req.resolved_output_format(), OutputFormat::Wav);
+
+        let mut explicit: GenerateRequest = serde_json::from_str(json).unwrap();
+        explicit.output_format = Some(OutputFormat::Mp4);
+        explicit.normalise_output_format(Some("ltx2"));
+        assert_eq!(
+            explicit.resolved_output_format(),
+            OutputFormat::Mp4,
+            "an explicit format still wins; the validator rejects it separately"
+        );
     }
 
     #[test]
@@ -3440,6 +3569,7 @@ mod tests {
                 Ltx2PipelineMode::A2Vid => "a2-vid",
                 Ltx2PipelineMode::Retake => "retake",
                 Ltx2PipelineMode::LipDub => "lip-dub",
+                Ltx2PipelineMode::T2a => "t2a",
             }
         }
 
@@ -3563,6 +3693,10 @@ mod tests {
     #[test]
     fn sse_complete_event_roundtrip() {
         let event = SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: "iVBOR...".to_string(),
             format: OutputFormat::Png,
             width: 1024,
@@ -4123,6 +4257,10 @@ mod tests {
     #[test]
     fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
         let output = |index| SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: String::new(),
             format: OutputFormat::Png,
             width: 64,
@@ -4476,6 +4614,10 @@ mod tests {
     #[test]
     fn sse_complete_event_video_roundtrip() {
         let event = SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: "dmlkZW9fYnl0ZXM=".to_string(), // "video_bytes" base64
             format: OutputFormat::Mp4,
             width: 832,
@@ -4524,6 +4666,10 @@ mod tests {
     #[test]
     fn sse_complete_event_video_no_audio_omits_audio_fields() {
         let event = SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: "data".to_string(),
             format: OutputFormat::Gif,
             width: 512,
@@ -4598,6 +4744,10 @@ mod tests {
     fn sse_complete_event_image_no_video_fields_in_json() {
         // An image-only event should not include any video_* keys in JSON
         let event = SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: "aW1n".to_string(),
             format: OutputFormat::Png,
             width: 1024,

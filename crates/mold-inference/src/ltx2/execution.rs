@@ -57,6 +57,15 @@ pub(crate) struct Ltx2ExecutionGraph {
 }
 
 pub(crate) fn wants_audio_output(req: &GenerateRequest) -> bool {
+    // An audio-only pipeline has nothing else to emit, so the audio branch is
+    // not optional there — `enable_audio` cannot switch it off (the validator
+    // rejects `enable_audio=false` alongside `pipeline=t2a`).
+    if req
+        .pipeline
+        .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only)
+    {
+        return true;
+    }
     req.enable_audio
         .unwrap_or(req.resolved_output_format() == OutputFormat::Mp4)
 }
@@ -90,6 +99,37 @@ pub(crate) fn build_execution_graph(
     }
     if uses_audio_conditioning {
         blocks.push(ExecutionBlock::SourceAudioEncoder);
+    }
+
+    // Audio-only: one denoise pass over the audio branch, then the audio VAE
+    // and vocoder. No source encoders, no spatial upsampler, no video decoder.
+    if pipeline.is_audio_only() {
+        let stage1 = DenoisePassPlan {
+            block: ExecutionBlock::Stage1Denoise,
+            sampler: SamplerMode::Euler,
+            guidance: GuidanceMode::Multimodal,
+            uses_distilled_checkpoint: false,
+            apply_distilled_lora: false,
+        };
+        return Ltx2ExecutionGraph {
+            preset_name: preset.name,
+            feature_extractor: preset.feature_extractor,
+            wants_audio_output: true,
+            uses_reference_video_conditioning: false,
+            uses_audio_conditioning: false,
+            uses_keyframe_conditioning: false,
+            uses_retake_masking: false,
+            stacked_lora_count,
+            blocks: vec![
+                ExecutionBlock::PromptEncoder,
+                ExecutionBlock::TextFeatureExtractor,
+                stage1.block,
+                ExecutionBlock::AudioDecoder,
+                ExecutionBlock::Vocoder,
+                ExecutionBlock::Export,
+            ],
+            denoise_passes: vec![stage1],
+        };
     }
 
     let stage1 = DenoisePassPlan {
@@ -380,6 +420,51 @@ mod tests {
             .denoise_passes
             .iter()
             .all(|pass| pass.uses_distilled_checkpoint));
+    }
+
+    /// The audio-only graph must not carry a single spatial stage. A stray
+    /// `SpatialUpsampler` or `VideoDecoder` here would make the scheduler
+    /// price VRAM for a video render that never happens, and the runtime
+    /// would load a video VAE it has no latents for.
+    #[test]
+    fn t2a_execution_graph_skips_every_video_stage() {
+        let mut request = req("ltx-2.3-22b-dev:fp8");
+        request.pipeline = Some(mold_core::Ltx2PipelineMode::T2a);
+        request.output_format = Some(OutputFormat::Wav);
+        let work_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&request, work_dir.path()).unwrap();
+        let preset = preset_for_model("ltx-2.3-22b-dev:fp8").unwrap();
+        let graph = build_execution_graph(&request, PipelineKind::T2a, &conditioning, &preset, 0);
+
+        assert_eq!(
+            graph.blocks,
+            vec![
+                ExecutionBlock::PromptEncoder,
+                ExecutionBlock::TextFeatureExtractor,
+                ExecutionBlock::Stage1Denoise,
+                ExecutionBlock::AudioDecoder,
+                ExecutionBlock::Vocoder,
+                ExecutionBlock::Export,
+            ]
+        );
+        assert_eq!(graph.denoise_passes.len(), 1);
+        assert_eq!(graph.denoise_passes[0].guidance, GuidanceMode::Multimodal);
+        assert_eq!(graph.denoise_passes[0].sampler, SamplerMode::Euler);
+        assert!(!graph.denoise_passes[0].uses_distilled_checkpoint);
+        assert!(!graph.denoise_passes[0].apply_distilled_lora);
+        assert!(graph.wants_audio_output);
+    }
+
+    /// `enable_audio=false` cannot silence an audio-only pipeline — there
+    /// would be nothing left to emit. (The validator rejects the combination
+    /// outright; this pins the engine-side behaviour independently.)
+    #[test]
+    fn t2a_wants_audio_output_regardless_of_enable_audio() {
+        let mut request = req("ltx-2.3-22b-dev:fp8");
+        request.pipeline = Some(mold_core::Ltx2PipelineMode::T2a);
+        request.output_format = Some(OutputFormat::Wav);
+        request.enable_audio = Some(false);
+        assert!(super::wants_audio_output(&request));
     }
 
     #[test]

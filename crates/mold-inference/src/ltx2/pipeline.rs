@@ -3,7 +3,8 @@
 use anyhow::{bail, Context, Result};
 use candle_core::Device;
 use mold_core::{
-    GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat, VideoData,
+    AudioData, GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat,
+    VideoData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,6 +60,11 @@ use crate::progress::{InferenceCancellationToken, ProgressCallback};
 /// than a hard pin (hard-pinning a single pixel frame past the motion tail
 /// would make continuations feel like cuts back to the starting shot).
 const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.4;
+
+/// Waveform thumbnail raster for audio-only gallery tiles. 16:9 so an audio
+/// print sits in the same grid cell as a video print without reflowing it.
+const AUDIO_THUMBNAIL_WIDTH: u32 = 640;
+const AUDIO_THUMBNAIL_HEIGHT: u32 = 360;
 
 pub struct Ltx2Engine {
     model_name: String,
@@ -371,6 +377,7 @@ impl Ltx2Engine {
                 Ltx2PipelineMode::A2Vid => PipelineKind::A2Vid,
                 Ltx2PipelineMode::Retake => PipelineKind::Retake,
                 Ltx2PipelineMode::LipDub => PipelineKind::LipDub,
+                Ltx2PipelineMode::T2a => PipelineKind::T2a,
             });
         }
 
@@ -908,6 +915,7 @@ impl Ltx2Engine {
             .map(|probe| probe.fps)
             .unwrap_or(plan.frame_rate);
         Ok(GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(VideoData {
                 data: output_bytes,
@@ -941,6 +949,9 @@ impl Ltx2Engine {
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.is_extend() {
             return self.extend_inner(req);
+        }
+        if self.select_pipeline(req)?.is_audio_only() {
+            return self.generate_audio_inner(req);
         }
         self.checkpoint()?;
         if !self.loaded {
@@ -1058,6 +1069,7 @@ impl Ltx2Engine {
         };
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(VideoData {
                 data: output_bytes,
@@ -1075,6 +1087,97 @@ impl Ltx2Engine {
                     .or(duration_ms),
                 audio_sample_rate,
                 audio_channels,
+            }),
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            model: self.model_name.clone(),
+            seed_used: plan.seed,
+            gpu: None,
+        })
+    }
+
+    /// Text-to-audio: render an audio-only artifact.
+    ///
+    /// Parallel to [`Self::generate_inner`] rather than a branch inside it —
+    /// almost none of the video path applies (no frames, no video VAE, no
+    /// container mux, no probe), and the parts that do are the four lines
+    /// below.
+    fn generate_audio_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.checkpoint()?;
+        if !self.loaded {
+            self.load()?;
+        }
+        self.checkpoint()?;
+        let start = Instant::now();
+        self.emit("Preparing native LTX-2 text-to-audio request");
+
+        // Ahead of `materialize_request`, whose shared audio guard advises
+        // "set enable_audio=false" — advice a text-to-audio request cannot
+        // take, because audio is the only thing it produces.
+        if let Some(gap) = super::audio_output_gap(&self.paths) {
+            bail!(
+                "LTX-2 text-to-audio is unavailable for model '{}': the resolved checkpoint set \
+                 is missing {gap}. Choose a checkpoint that ships them; this request was \
+                 rejected before generation starts.",
+                req.model
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
+        let native_output = work_dir.path().join("ltx2-native-output.wav");
+        let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        self.checkpoint()?;
+
+        let mut runtime = match self.native_runtime.take() {
+            Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
+            _ => self.create_runtime_session(&plan)?,
+        };
+        self.emit("Encoding prompt and preparing native LTX-2 runtime state");
+        let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                self.native_runtime = Some(runtime);
+                return Err(err);
+            }
+        };
+        self.emit("Executing native LTX-2 text-to-audio runtime");
+        let render_result = runtime.render_native_audio(
+            &plan,
+            &prepared,
+            self.on_progress.as_ref(),
+            self.cancellation.as_ref(),
+        );
+        self.native_runtime = Some(runtime);
+        let track = render_result?;
+        self.checkpoint()?;
+
+        let channels = u32::from(track.channels.max(1));
+        let frames = track.interleaved_samples.len() as u64 / u64::from(channels);
+        let duration_ms = (frames * 1000).div_ceil(u64::from(track.sample_rate.max(1)));
+        let data = media::encode_wav_i16_interleaved(
+            &track.interleaved_samples,
+            track.sample_rate,
+            track.channels,
+        )?;
+        let thumbnail = media::render_waveform_thumbnail_png(
+            &track.interleaved_samples,
+            track.channels,
+            AUDIO_THUMBNAIL_WIDTH,
+            AUDIO_THUMBNAIL_HEIGHT,
+        )?;
+        Self::log_timing("pipeline.encode_native_audio", start);
+
+        Ok(GenerateResponse {
+            images: vec![],
+            video: None,
+            audio: Some(AudioData {
+                data,
+                format: OutputFormat::Wav,
+                sample_rate: track.sample_rate,
+                channels,
+                duration_ms,
+                thumbnail,
+                thumbnail_width: AUDIO_THUMBNAIL_WIDTH,
+                thumbnail_height: AUDIO_THUMBNAIL_HEIGHT,
             }),
             generation_time_ms: start.elapsed().as_millis() as u64,
             model: self.model_name.clone(),

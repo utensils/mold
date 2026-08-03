@@ -2586,6 +2586,7 @@ impl QwenImageEngine {
         );
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -2931,6 +2932,7 @@ impl QwenImageEngine {
         )?;
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -3469,6 +3471,7 @@ impl QwenImageEngine {
         tracing::info!(generation_time_ms, seed, "Qwen-Image generation complete");
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),

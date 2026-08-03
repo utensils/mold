@@ -345,6 +345,7 @@ fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
         Ltx2PipelineArg::A2Vid => Ltx2PipelineMode::A2Vid,
         Ltx2PipelineArg::Retake => Ltx2PipelineMode::Retake,
         Ltx2PipelineArg::LipDub => Ltx2PipelineMode::LipDub,
+        Ltx2PipelineArg::T2a => Ltx2PipelineMode::T2a,
     })
 }
 

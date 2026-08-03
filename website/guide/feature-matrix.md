@@ -141,17 +141,23 @@ complete workflows.
 - LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
   audio-to-video, keyframe, retake, lip dub, public IC-LoRA, spatial upscale,
   and temporal upscale workflows.
+- LTX-2's native CUDA path is validated across text+audio-video, text-to-audio,
+  image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial
+  upscale, and temporal upscale workflows.
+- LTX-2 renders audio on its own with `--pipeline t2a` (`pipeline: "t2a"`):
+  no video, duration from `frames`/`fps`, and a 16-bit PCM stereo `wav`
+  artifact that lands in the gallery with a rendered waveform tile.
 - LTX-2's multimodal guider exposes optional per-request overrides for STG
   scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
   stride on the CLI and in web, desktop, iPhone, and TUI Advanced video controls. They apply to the
-  `two-stage`, `two-stage-hq`, `keyframe`, and `a2-vid` pipelines; unset fields
-  keep each pipeline's own constants. The TUI uses bounded keyboard cycles for
-  the numeric guidance values and validates comma-separated STG blocks before
-  closing the editor; untouched values remain absent from the request. Its
-  Video accordion also exposes the shared `enable_audio` contract as a
-  checkpoint-aware default/on/off choice and family-gated `spatial_upscale` /
-  `temporal_upscale` native modes. The remaining pipeline, conditioning-file,
-  and chain-job controls remain a separate tracked gap.
+  `two-stage`, `two-stage-hq`, `keyframe`, `a2-vid`, and `t2a` pipelines; unset
+  fields keep each pipeline's own constants. The TUI uses bounded keyboard
+  cycles for the numeric guidance values and validates comma-separated STG
+  blocks before closing the editor; untouched values remain absent from the
+  request. Its Video accordion also exposes the shared `enable_audio` contract
+  as a checkpoint-aware default/on/off choice and family-gated
+  `spatial_upscale` / `temporal_upscale` native modes. The remaining pipeline,
+  conditioning-file, and chain-job controls remain a separate tracked gap.
 - LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
   not supported in this release.
 

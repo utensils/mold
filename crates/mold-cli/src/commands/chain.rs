@@ -75,10 +75,21 @@ pub fn decide_chain_routing(
     clip_frames_flag: Option<u32>,
     motion_tail: u32,
     fps: u32,
+    pipeline: Option<mold_core::Ltx2PipelineMode>,
 ) -> ChainRoutingDecision {
     let Some(total_frames) = frames else {
         return ChainRoutingDecision::SingleClip;
     };
+
+    // An audio-only pipeline is never chained. Its `frames` is a duration, not
+    // a render shape — the per-clip cap exists because one consumer GPU can
+    // only hold so many *video* latents, and there are no clips to stitch. The
+    // rule lives here rather than at the call site so a second caller cannot
+    // reintroduce it: before this guard, `--pipeline t2a --frames 121` became
+    // a two-stage 177-frame video render.
+    if pipeline.is_some_and(mold_core::Ltx2PipelineMode::is_audio_only) {
+        return ChainRoutingDecision::SingleClip;
+    }
 
     // Auto-chaining is an LTX-2 routing behaviour. Every LTX-2 pipeline now
     // renders sequence clips, so the old `model.contains("distilled")` test is
@@ -996,13 +1007,59 @@ mod tests {
             None,
             4,
             24,
+            None,
         );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
+    /// Regression: `--pipeline t2a --frames 121` used to exceed the 97-frame
+    /// per-clip *video* cap and get auto-chained, turning a 5-second audio
+    /// request into a two-stage 177-frame video render. Audio has no clips to
+    /// stitch and no per-clip VRAM ceiling — its `frames` is a duration.
+    #[test]
+    fn routing_never_chains_an_audio_only_pipeline() {
+        for frames in [121u32, 400, 600] {
+            let d = decide_chain_routing(
+                Some(frames),
+                Some("ltx2"),
+                "ltx-2-19b-dev:fp8",
+                None,
+                17,
+                24,
+                Some(mold_core::Ltx2PipelineMode::T2a),
+            );
+            assert_eq!(
+                d,
+                ChainRoutingDecision::SingleClip,
+                "t2a at {frames} frames must stay a single request"
+            );
+        }
+
+        // The same frame count on a video pipeline still chains, so the guard
+        // is scoped to audio rather than disabling auto-chaining outright.
+        let video = decide_chain_routing(
+            Some(400),
+            Some("ltx2"),
+            "ltx-2-19b-dev:fp8",
+            None,
+            17,
+            24,
+            Some(mold_core::Ltx2PipelineMode::TwoStage),
+        );
+        assert!(matches!(video, ChainRoutingDecision::Chain { .. }));
+    }
+
     #[test]
     fn routing_single_clip_when_frames_absent() {
-        let d = decide_chain_routing(None, Some("ltx2"), "ltx-2-19b-distilled:fp8", None, 4, 24);
+        let d = decide_chain_routing(
+            None,
+            Some("ltx2"),
+            "ltx-2-19b-distilled:fp8",
+            None,
+            4,
+            24,
+            None,
+        );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
@@ -1015,6 +1072,7 @@ mod tests {
             None,
             4,
             24,
+            None,
         );
         assert_eq!(
             d,
@@ -1027,7 +1085,7 @@ mod tests {
 
     #[test]
     fn routing_rejects_non_distilled_over_cap() {
-        let d = decide_chain_routing(Some(200), Some("flux"), "flux-dev:q4", None, 4, 24);
+        let d = decide_chain_routing(Some(200), Some("flux"), "flux-dev:q4", None, 4, 24, None);
         match d {
             ChainRoutingDecision::Rejected { reason } => {
                 assert!(
@@ -1050,7 +1108,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             "cv:3143864",
         ] {
-            let decision = decide_chain_routing(Some(400), Some("ltx2"), model, None, 17, 24);
+            let decision = decide_chain_routing(Some(400), Some("ltx2"), model, None, 17, 24, None);
             assert!(
                 matches!(decision, ChainRoutingDecision::Chain { .. }),
                 "{model} must auto-chain, got {decision:?}"
@@ -1062,7 +1120,15 @@ mod tests {
     fn routing_rejects_non_ltx2_family_over_cap() {
         // ltx-video (not ltx2) is not chainable in v1, so anything past its own
         // single-request ceiling has nowhere to go.
-        let d = decide_chain_routing(Some(500), Some("ltx-video"), "ltx-video:0.9.6", None, 4, 24);
+        let d = decide_chain_routing(
+            Some(500),
+            Some("ltx-video"),
+            "ltx-video:0.9.6",
+            None,
+            4,
+            24,
+            None,
+        );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
 
@@ -1070,7 +1136,15 @@ mod tests {
     /// stricter than the server: ltx-video accepts up to the global ceiling.
     #[test]
     fn routing_keeps_non_chainable_families_single_up_to_their_own_ceiling() {
-        let d = decide_chain_routing(Some(249), Some("ltx-video"), "ltx-video:0.9.6", None, 4, 24);
+        let d = decide_chain_routing(
+            Some(249),
+            Some("ltx-video"),
+            "ltx-video:0.9.6",
+            None,
+            4,
+            24,
+            None,
+        );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
@@ -1086,6 +1160,7 @@ mod tests {
             Some(201),
             4,
             24,
+            None,
         );
         assert_eq!(
             d,
@@ -1108,6 +1183,7 @@ mod tests {
             Some(400),
             4,
             12,
+            None,
         );
         assert_eq!(
             d,
@@ -1130,6 +1206,7 @@ mod tests {
             None,
             4,
             24,
+            None,
         );
         assert_eq!(
             d,
@@ -1149,6 +1226,7 @@ mod tests {
             Some(65),
             4,
             24,
+            None,
         );
         assert_eq!(
             d,
@@ -1168,6 +1246,7 @@ mod tests {
             Some(49),
             49,
             24,
+            None,
         );
         match d {
             ChainRoutingDecision::Rejected { reason } => {
@@ -1189,6 +1268,7 @@ mod tests {
             None,
             97,
             24,
+            None,
         );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }

@@ -18,6 +18,9 @@ pub(crate) enum PipelineKind {
     A2Vid,
     Retake,
     LipDub,
+    /// Text-to-audio: audio-only generation with no video modality at all.
+    /// Upstream's `T2AOneStagePipeline`.
+    T2a,
 }
 
 impl PipelineKind {
@@ -39,6 +42,13 @@ impl PipelineKind {
     /// locked to the reference through the refinement.
     pub(crate) fn keeps_reference_video_in_stage_two(self) -> bool {
         matches!(self, Self::LipDub)
+    }
+
+    /// Whether this pipeline renders audio samples instead of video frames.
+    /// Audio-only plans skip every spatial stage and the video VAE, and their
+    /// `width`/`height`/`spatial_upscale` fields carry no meaning.
+    pub(crate) fn is_audio_only(self) -> bool {
+        matches!(self, Self::T2a)
     }
 }
 

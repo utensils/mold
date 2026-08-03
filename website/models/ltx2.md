@@ -38,6 +38,7 @@ disk requirements.
 ## Implemented Request Surface
 
 - Text-to-audio+video with synchronized MP4 output
+- Text-to-audio (audio only, no video) via `--pipeline t2a`
 - First-frame image-to-video via `--image`, with an
   [optional prompt](#the-prompt-is-optional-for-image-to-video)
 - Audio-to-video via `--audio-file`
@@ -59,6 +60,7 @@ It covers the real-runtime route for these published workflow combinations:
 | Workflow                      | 19B                                   | 22B / LTX-2.3       | Coverage                                       |
 | ----------------------------- | ------------------------------------- | ------------------- | ---------------------------------------------- |
 | Text-to-audio+video           | Yes                                   | Yes                 | Planning test + manual CUDA smoke              |
+| Text-to-audio (audio only)    | Yes                                   | Yes                 | Block-parity + planning tests + manual CUDA    |
 | First-frame image-to-video    | Yes                                   | Yes                 | Planning test                                  |
 | Audio-to-video                | Yes                                   | Yes                 | Planning test                                  |
 | Keyframe interpolation        | Yes                                   | Yes                 | Planning test                                  |
@@ -357,6 +359,52 @@ mold run ltx-2.3-22b-distilled:fp8 \
   --format mp4
 ```
 
+## Text-to-audio
+
+`--pipeline t2a` renders sound with no video at all — speech, ambience, or
+music straight from a prompt. It is upstream's `T2AOneStagePipeline`.
+
+```bash
+mold run ltx-2.3-22b-dev:fp8 \
+  "heavy rain on a tin roof, distant thunder" \
+  --pipeline t2a \
+  --frames 121 --fps 24 \
+  --output rain.wav
+```
+
+Things worth knowing:
+
+- **Duration comes from `--frames` / `--fps`,** the same pair a video render
+  uses: 121 frames at 24 fps is 5.04 seconds. There is no separate duration
+  flag, because the model's temporal budget is expressed in the video clock
+  either way.
+- **The output is a 16-bit PCM stereo WAV** at the vocoder's own rate — 24 kHz,
+  or 48 kHz on checkpoints that ship the bandwidth-extension stage. `--format`
+  defaults to `wav` for this pipeline and rejects every other value; `wav`
+  likewise requires `--pipeline t2a`.
+- **It needs a checkpoint with audio.** A video-only LTX-2 export has no audio
+  VAE or vocoder, and the request is refused before any weights load.
+- **Steps default to the non-distilled schedule** — 40 on LTX-2 19B, 30 on
+  LTX-2.3 22B. The family's usual 8-step default is tuned for the distilled
+  _video_ ladder and produces hiss here, so a smaller `--steps` is raised to
+  the preset default and the run says so. A larger value is used as given.
+- **No conditioning inputs.** `--image`, `--video`, `--audio-file`,
+  `--keyframe`, `--retake`, the upscalers, and `--upscale` are all rejected
+  rather than silently ignored.
+- **No auto-chaining.** A long video request is split into clips because one
+  GPU can only hold so many video latents; audio has neither clips nor that
+  ceiling, so a large `--frames` stays a single request.
+- **`--modality-scale` must stay `1.0`.** Cross-modal guidance steers the
+  audio↔video attention, and there is no video branch here.
+
+Audio prints land in the gallery like any other output, with a rendered
+waveform as the tile. Web, desktop, and the CLI all play or save them; the
+Library's kind filter gains an **Audio** chip.
+
+Audio-only generation loads just the `audio_*` half of the checkpoint — about
+a quarter of the per-block parameters, with both cross-modal attentions gone —
+so it fits comfortably on a 24 GB card without block streaming.
+
 ## Advanced guidance controls
 
 LTX-2's multimodal guider takes more than the base guidance scale. Each
@@ -386,9 +434,10 @@ mold run ltx-2-19b-distilled:fp8 \
 Three limits are worth knowing before you reach for these:
 
 - **Only pipelines that run the multimodal guider read them.** That is
-  `two-stage`, `two-stage-hq`, `keyframe`, and `a2-vid`. The `distilled`,
-  `one-stage`, `ic-lora`, and `retake` pipelines pin guidance to their own
-  path and the overrides are inert there.
+  `two-stage`, `two-stage-hq`, `keyframe`, `a2-vid`, and `t2a`. The
+  `distilled`, `one-stage`, `ic-lora`, and `retake` pipelines pin guidance to
+  their own path and the overrides are inert there. `t2a` additionally rejects
+  a `--modality-scale` other than `1.0`, since it has no video branch.
 - **They never switch a guider on.** `a2-vid` runs audio positive-only by
   design; an override tunes the video guider and leaves the audio guider off
   rather than buying an extra transformer pass you did not ask for.
