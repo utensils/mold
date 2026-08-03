@@ -804,16 +804,17 @@ impl Ltx2RuntimeSession {
         progress: Option<&ProgressCallback>,
         cancellation: Option<&InferenceCancellationToken>,
     ) -> Result<Option<NativeRenderedVideo>> {
-        // Order matters. A missing checkpoint means there are no weights to
-        // render with — the synthetic path is the only thing left, and the
-        // unit tests rely on it. But once real weights are on disk, refusing
-        // the real path and quietly returning plausible-looking placeholder
-        // frames is worse than any error: the user gets a file that looks
-        // like a render and is not one.
-        if !Path::new(&plan.checkpoint_path).is_file() {
+        // Order matters. A checkpoint with no bytes to read means there are no
+        // weights to render with — the synthetic path is the only thing left,
+        // and the unit tests rely on it. But once real weights are on disk,
+        // refusing the real path and quietly returning plausible-looking
+        // placeholder frames is worse than any error: the user gets a file
+        // that looks like a render and is not one. A checkpoint that *does*
+        // carry bytes must parse or fail; see the error handling below.
+        if checkpoint_has_no_weights(Path::new(&plan.checkpoint_path)) {
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
-                    "[ltx2-debug] real path rejected because checkpoint is missing: {}",
+                    "[ltx2-debug] real path rejected because checkpoint has no weights: {}",
                     plan.checkpoint_path
                 );
             }
@@ -865,18 +866,14 @@ impl Ltx2RuntimeSession {
                 render_real_retake_av(plan, prepared, device, progress, cancellation)
             }
         };
-        match render {
-            Ok(rendered) => Ok(Some(rendered)),
-            Err(err) if is_placeholder_checkpoint_error(&err) => {
-                if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-                    eprintln!(
-                        "[ltx2-debug] real path fell back due to placeholder checkpoint error: {err:#}"
-                    );
-                }
-                Ok(None)
-            }
-            Err(err) => Err(err),
-        }
+        // Every failure from here on is a real failure. A checkpoint that is
+        // present but unreadable is corrupt weights — a truncated download —
+        // and `candle` surfaces the `safetensors` error transparently, so it
+        // arrives as bare text like "header too small". Matching that text and
+        // rendering the synthetic gradient instead produced a file with the
+        // requested size, length and frame rate, containing no picture, and
+        // reported it as a successful save while hiding the corruption.
+        render.map(Some)
     }
 }
 
@@ -2144,11 +2141,40 @@ fn blend_conditioned_denoised(
         .map_err(Into::into)
 }
 
-fn is_placeholder_checkpoint_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("header too small")
-        || message.contains("invalid header")
-        || message.contains("failed to parse safetensor")
+/// Whether the checkpoint carries no weights at all — absent, not a regular
+/// file, or present but zero-length.
+///
+/// Zero-length is the signature of a download that never landed, and it is
+/// what the unit tests write as a stand-in for real weights. It is deliberately
+/// *not* the same as a short-but-non-empty file: those bytes are a truncated
+/// real checkpoint, and quietly rendering the synthetic gradient for them hands
+/// the user a correctly sized video with no picture while hiding the
+/// corruption.
+fn checkpoint_has_no_weights(path: &Path) -> bool {
+    stat_reports_no_weights(
+        std::fs::metadata(path)
+            .map(|metadata| (metadata.is_file(), metadata.len()))
+            .map_err(|err| err.kind()),
+    )
+}
+
+/// Classify a checkpoint's stat result as "no weights to read".
+///
+/// Split from the filesystem call so the permission and I/O cases are testable:
+/// the suite runs under a mapped root user, where a `chmod`-based fixture would
+/// not actually deny anything.
+///
+/// Only [`std::io::ErrorKind::NotFound`] means absent. A permission or
+/// transient I/O error is a real failure and must fall through to the load,
+/// which reports it with the checkpoint named — treating it as "no weights"
+/// would hide it behind exactly the plausible-looking gradient this module
+/// exists to stop producing.
+fn stat_reports_no_weights(stat: std::result::Result<(bool, u64), std::io::ErrorKind>) -> bool {
+    match stat {
+        Ok((is_file, len)) => !is_file || len == 0,
+        Err(std::io::ErrorKind::NotFound) => true,
+        Err(_) => false,
+    }
 }
 
 fn render_real_distilled_av(
@@ -4841,6 +4867,52 @@ fn load_ltx2_av_transformer_with_loras(
     result
 }
 
+/// Open the checkpoint the selected backend expects. Split out so the caller
+/// can attach one piece of context — naming the file — to every backend's
+/// failure.
+fn ltx2_transformer_var_builder<'a>(
+    plan: &Ltx2GeneratePlan,
+    checkpoint_path: &Path,
+    device: &candle_core::Device,
+    checkpoint_is_nvfp4: bool,
+    checkpoint_is_convrot: bool,
+    checkpoint_is_fp8: bool,
+    progress: Option<&ProgressCallback>,
+) -> Result<VarBuilder<'a>> {
+    if checkpoint_is_nvfp4 {
+        let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            gpu_dtype(device),
+            device.clone(),
+        ));
+    }
+    if checkpoint_is_convrot {
+        let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            gpu_dtype(device),
+            device.clone(),
+        ));
+    }
+    if checkpoint_is_fp8 {
+        return load_fp8_safetensors_with_callback(
+            std::slice::from_ref(&checkpoint_path),
+            device,
+            "LTX-2 transformer",
+            progress,
+        );
+    }
+    let dtype = transformer_weight_dtype(plan, device);
+    load_safetensors_with_progress_callback(
+        std::slice::from_ref(&checkpoint_path),
+        dtype,
+        device,
+        "LTX-2 transformer",
+        progress,
+    )
+}
+
 fn load_ltx2_av_transformer_with_loras_inner(
     plan: &Ltx2GeneratePlan,
     stage: Ltx2StageShape,
@@ -4853,6 +4925,29 @@ fn load_ltx2_av_transformer_with_loras_inner(
     let force_eager = crate::runtime_env::value("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
+    // Absence of the synthetic gradient is not proof a LoRA was applied, so say
+    // what actually resolved: the ordered stack, each adapter's scale, and how
+    // many transformer layers it landed on.
+    if ltx_debug_enabled() {
+        let layers = lora_registry
+            .as_ref()
+            .map(|registry| registry.layer_count())
+            .unwrap_or(0);
+        eprintln!(
+            "[ltx2-debug] lora stack for {}x{}x{}: {} adapter(s) -> {} layer(s)",
+            stage.width,
+            stage.height,
+            stage.frames,
+            loras.len(),
+            layers
+        );
+        for (index, lora) in loras.iter().enumerate() {
+            eprintln!(
+                "[ltx2-debug]   lora[{index}] scale={} path={}",
+                lora.scale, lora.path
+            );
+        }
+    }
     let checkpoint_path = Path::new(&plan.checkpoint_path);
     let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
     let checkpoint_is_convrot =
@@ -4868,29 +4963,26 @@ fn load_ltx2_av_transformer_with_loras_inner(
         .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
         .flatten();
     let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
-    let vb = if checkpoint_is_nvfp4 {
-        let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
-        VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
-    } else if checkpoint_is_convrot {
-        let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
-        VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
-    } else if checkpoint_is_fp8 {
-        load_fp8_safetensors_with_callback(
-            std::slice::from_ref(&checkpoint_path),
-            device,
-            "LTX-2 transformer",
-            progress,
-        )?
-    } else {
-        let dtype = transformer_weight_dtype(plan, device);
-        load_safetensors_with_progress_callback(
-            std::slice::from_ref(&checkpoint_path),
-            dtype,
-            device,
-            "LTX-2 transformer",
-            progress,
-        )?
-    };
+    // `candle` re-exports the `safetensors` error transparently, so a corrupt
+    // or truncated checkpoint arrives as bare text ("header too small") with
+    // nothing identifying the file. Name it here: this is the error the user
+    // now sees instead of a silently synthesized gradient.
+    let vb = ltx2_transformer_var_builder(
+        plan,
+        checkpoint_path,
+        device,
+        checkpoint_is_nvfp4,
+        checkpoint_is_convrot,
+        checkpoint_is_fp8,
+        progress,
+    )
+    .with_context(|| {
+        format!(
+            "failed to load LTX-2 transformer checkpoint {}; the file may be corrupt or \
+             incompletely downloaded — re-pull the model and retry",
+            checkpoint_path.display()
+        )
+    })?;
     let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
         vb
     } else {
@@ -6992,6 +7084,91 @@ mod tests {
         assert_eq!(rendered.audio_channels, None);
     }
 
+    /// A checkpoint that is present but unreadable is corrupt real weights —
+    /// a truncated or interrupted download — not a test placeholder. Swapping
+    /// it for the synthetic gradient hands the user a file with the requested
+    /// size, length and frame rate that contains no picture, and reports it as
+    /// a successful save, while hiding the corruption that caused it.
+    #[test]
+    fn corrupt_checkpoint_fails_loudly_instead_of_rendering_the_synthetic_gradient() {
+        let req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+
+        // Four bytes is a present, non-empty file that is too short to hold a
+        // safetensors header length. Candle surfaces the `safetensors` error
+        // transparently, so this arrives verbatim as "header too small" —
+        // exactly the text the old placeholder heuristic matched on.
+        let checkpoint = temp_dir.path().join("ltx2-truncated.safetensors");
+        std::fs::write(&checkpoint, [0u8; 4]).unwrap();
+        plan.checkpoint_path = checkpoint.to_string_lossy().into_owned();
+        plan.vae_checkpoint_path = plan.checkpoint_path.clone();
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let error = session
+            .render_native_video(&plan, &prepared, None, None)
+            .expect_err("a corrupt checkpoint must fail, not render placeholder frames");
+
+        // The message has to name the checkpoint: "header too small" alone
+        // gives the user nothing to act on.
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("ltx2-truncated.safetensors"),
+            "error must name the offending checkpoint, got: {rendered}"
+        );
+    }
+
+    /// The boundary the corrupt-checkpoint fix turns on: no bytes means no
+    /// weights (a download that never landed, and what the tests stub), while
+    /// any bytes at all are a checkpoint that must parse or fail.
+    #[test]
+    fn checkpoint_has_no_weights_separates_empty_from_truncated() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let missing = temp_dir.path().join("absent.safetensors");
+        assert!(super::checkpoint_has_no_weights(&missing));
+
+        let empty = temp_dir.path().join("empty.safetensors");
+        std::fs::write(&empty, []).unwrap();
+        assert!(super::checkpoint_has_no_weights(&empty));
+
+        let truncated = temp_dir.path().join("truncated.safetensors");
+        std::fs::write(&truncated, [0u8; 4]).unwrap();
+        assert!(
+            !super::checkpoint_has_no_weights(&truncated),
+            "a short but non-empty checkpoint is corrupt weights, not an absent download"
+        );
+
+        assert!(super::checkpoint_has_no_weights(temp_dir.path()));
+    }
+
+    /// An unreadable checkpoint is not an absent one. A permission or transient
+    /// I/O error must reach the loader — which names the file — rather than
+    /// being classified as "nothing downloaded" and rendered as a gradient.
+    #[test]
+    fn stat_reports_no_weights_only_treats_not_found_as_absent() {
+        use std::io::ErrorKind;
+
+        assert!(super::stat_reports_no_weights(Err(ErrorKind::NotFound)));
+        assert!(super::stat_reports_no_weights(Ok((true, 0))));
+        assert!(super::stat_reports_no_weights(Ok((false, 4096))));
+        assert!(!super::stat_reports_no_weights(Ok((true, 4))));
+
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+            ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !super::stat_reports_no_weights(Err(kind)),
+                "{kind:?} is a real failure and must not select the placeholder path"
+            );
+        }
+    }
+
     #[test]
     fn runtime_prepare_derives_retake_mask_from_request_range() {
         let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
@@ -7936,6 +8113,41 @@ mod tests {
         assert_eq!(stage2_loras, plan.loras);
         assert_eq!(stage1_loras[0].scale, 0.63);
         assert_eq!(stage2_loras[0].scale, 0.63);
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    /// The exact combination users reported as a rainbow gradient: a distilled
+    /// image-to-video run carrying a *stack* of two camera-control adapters.
+    /// Both must survive into both denoising stages in request order — dropping
+    /// one silently changes the motion, and refusing the plan used to swap the
+    /// whole render for synthetic frames.
+    #[test]
+    fn supports_real_video_path_accepts_two_stacked_loras_with_a_source_image() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        req.loras = Some(vec![
+            LoraWeight {
+                path: "/tmp/camera-control-dolly-in.safetensors".to_string(),
+                scale: 0.8,
+            },
+            LoraWeight {
+                path: "/tmp/camera-control-jib-up.safetensors".to_string(),
+                scale: 0.5,
+            },
+        ]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        assert!(source_image_only_conditioning(&plan));
+        let stage1_loras = super::stage_lora_stack(&plan, 0).unwrap();
+        let stage2_loras = super::stage_lora_stack(&plan, 1).unwrap();
+        assert_eq!(stage1_loras, plan.loras);
+        assert_eq!(stage2_loras, plan.loras);
+        assert_eq!(stage1_loras.len(), 2);
+        assert_eq!(stage1_loras[0].scale, 0.8);
+        assert_eq!(stage1_loras[1].scale, 0.5);
         assert!(super::supports_real_video_path(&plan));
     }
 

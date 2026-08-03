@@ -26,6 +26,13 @@ impl Ltx2LoraRegistry {
         self.layers.is_empty()
     }
 
+    /// How many transformer layers this stack actually resolved onto. Zero
+    /// layers with a non-empty stack means the adapters named nothing the
+    /// checkpoint has.
+    pub(crate) fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
     #[cfg(test)]
     fn contains_layer(&self, key: &str) -> bool {
         self.layers.contains_key(key)
@@ -387,6 +394,57 @@ mod tests {
         assert!((adapters[0].scale - 1.0).abs() < 1e-6);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Two camera-control adapters that touch the same layer must both apply,
+    /// in request order. Keying the registry by layer alone would let the
+    /// second silently replace the first, so a two-LoRA stack would quietly
+    /// render as one.
+    #[test]
+    fn load_lora_registry_stacks_two_adapters_on_one_layer() {
+        let key = "diffusion_model.transformer_blocks.0.attn1.to_q";
+        let mut paths = Vec::new();
+        for (index, rank) in [2usize, 4usize].into_iter().enumerate() {
+            let path = temp_file(&format!("stack-{index}"));
+            let a_data = vec![0u8; rank * 4 * std::mem::size_of::<f32>()];
+            let b_data = vec![0u8; 8 * rank * std::mem::size_of::<f32>()];
+            let mut tensors = HashMap::new();
+            tensors.insert(
+                format!("{key}.lora_A.weight"),
+                TensorView::new(SafeDtype::F32, vec![rank, 4], &a_data).unwrap(),
+            );
+            tensors.insert(
+                format!("{key}.lora_B.weight"),
+                TensorView::new(SafeDtype::F32, vec![8, rank], &b_data).unwrap(),
+            );
+            serialize_to_file(&tensors, &None, &path).unwrap();
+            paths.push(path);
+        }
+
+        let registry = load_lora_registry(&[
+            LoraWeight {
+                path: paths[0].to_string_lossy().to_string(),
+                scale: 0.8,
+            },
+            LoraWeight {
+                path: paths[1].to_string_lossy().to_string(),
+                scale: 0.5,
+            },
+        ])
+        .unwrap()
+        .unwrap();
+
+        let adapters = registry.adapters_for(key);
+        assert_eq!(adapters.len(), 2, "both adapters must stack on the layer");
+        // No `alpha` tensor, so the user scale passes through untouched and
+        // pins the order.
+        assert!((adapters[0].scale - 0.8).abs() < 1e-6);
+        assert!((adapters[1].scale - 0.5).abs() < 1e-6);
+        assert_eq!(registry.layer_count(), 1);
+
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
