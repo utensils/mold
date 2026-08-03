@@ -237,6 +237,8 @@ pub struct Ltx2Options {
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub pipeline: Option<Ltx2PipelineMode>,
     pub ic_lora_control: Option<String>,
+    pub hdr_exr_dir: Option<String>,
+    pub hdr_exr_full_float: bool,
     pub loras: Option<Vec<LoraWeight>>,
     pub retake_range: Option<TimeRange>,
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
@@ -299,6 +301,8 @@ pub async fn run(
         keyframes,
         pipeline,
         ic_lora_control,
+        hdr_exr_dir,
+        hdr_exr_full_float,
         loras,
         retake_range,
         spatial_upscale,
@@ -500,8 +504,8 @@ pub async fn run(
     );
 
     let mut req = GenerateRequest {
-        hdr_exr_dir: None,
-        hdr_exr_full_float: false,
+        hdr_exr_dir,
+        hdr_exr_full_float,
         guidance_overrides,
         prompt: prompt.to_string(),
         negative_prompt: effective_negative_prompt.clone(),

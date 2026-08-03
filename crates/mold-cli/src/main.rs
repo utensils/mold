@@ -730,6 +730,17 @@ Examples:
         #[arg(long, value_name = "ID", help_heading = "Video", requires = "video")]
         ic_lora_control: Option<String>,
 
+        /// Also write the render as an OpenEXR sequence in this directory, in
+        /// scene-referred linear HDR. Requires `--ic-lora-control hdr`, whose
+        /// adapter is what makes the render HDR. The ordinary video is still
+        /// written and is what lands in the gallery.
+        #[arg(long, value_name = "DIR", help_heading = "Video")]
+        hdr_exr_dir: Option<String>,
+
+        /// Write EXR samples at full 32-bit float instead of 16-bit half.
+        #[arg(long, help_heading = "Video", requires = "hdr_exr_dir")]
+        hdr_exr_full_float: bool,
+
         /// Retake time range in the form <start:end> seconds.
         #[arg(long, help_heading = "Video")]
         retake: Option<String>,
@@ -1612,6 +1623,8 @@ async fn run() -> anyhow::Result<()> {
             keyframe,
             pipeline,
             ic_lora_control,
+            hdr_exr_dir,
+            hdr_exr_full_float,
             retake,
             spatial_upscale,
             temporal_upscale,
@@ -1757,6 +1770,8 @@ async fn run() -> anyhow::Result<()> {
                 keyframe,
                 pipeline,
                 ic_lora_control,
+                hdr_exr_dir,
+                hdr_exr_full_float,
                 retake,
                 spatial_upscale,
                 temporal_upscale,

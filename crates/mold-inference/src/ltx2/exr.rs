@@ -15,6 +15,7 @@ use exr::meta::attribute::Chromaticities;
 use exr::prelude::*;
 
 /// One frame of scene-referred linear RGB.
+#[derive(Debug)]
 pub(crate) struct HdrFrame {
     pub width: usize,
     pub height: usize,

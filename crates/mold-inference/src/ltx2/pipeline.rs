@@ -420,6 +420,8 @@ impl Ltx2Engine {
                 .map(|path| path.to_string_lossy().to_string());
 
         Ok(Ltx2GeneratePlan {
+            hdr_exr_dir: req.hdr_exr_dir.clone(),
+            hdr_exr_full_float: req.hdr_exr_full_float,
             pipeline,
             preset,
             checkpoint_is_distilled: self.model_name.contains("distilled"),
@@ -822,6 +824,7 @@ impl Ltx2Engine {
         plan.num_frames = frames.len() as u32;
         let rendered = NativeRenderedVideo {
             frames,
+            hdr_frames: None,
             audio_track: outcome.audio,
             has_audio: false,
             audio_sample_rate: None,
@@ -926,6 +929,32 @@ impl Ltx2Engine {
         )?;
         self.checkpoint()?;
         Self::log_timing("pipeline.render_runtime", render_start);
+
+        // The EXR sequence is a sidecar: the gallery artifact stays the
+        // tonemapped video, because a frame sequence is many files and
+        // gigabytes that the one-file-per-generation model cannot hold.
+        if let (Some(dir), Some(hdr_frames)) =
+            (plan.hdr_exr_dir.as_deref(), rendered.hdr_frames.as_ref())
+        {
+            let exr_start = Instant::now();
+            let precision = if plan.hdr_exr_full_float {
+                crate::ltx2::exr::ExrPrecision::Full
+            } else {
+                crate::ltx2::exr::ExrPrecision::Half
+            };
+            let written = crate::ltx2::exr::write_exr_sequence(
+                std::path::Path::new(dir),
+                hdr_frames,
+                precision,
+            )?;
+            Self::log_timing("pipeline.write_exr_sequence", exr_start);
+            tracing::info!(
+                target: "mold::ltx2",
+                "wrote {} EXR frame(s) to {dir}",
+                written.len()
+            );
+        }
+
         let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;

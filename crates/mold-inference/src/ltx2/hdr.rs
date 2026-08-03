@@ -51,8 +51,9 @@ pub(crate) fn linear_to_logc3(value: f32) -> f32 {
 
 /// sRGB opto-electronic transfer function (IEC 61966-2-1), used to tonemap
 /// linear HDR into the SDR preview at EV 0 (`media_io.py:769-772`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn linear_to_srgb(value: f32) -> f32 {
-    let v = value.max(0.0).min(1.0);
+    let v = value.clamp(0.0, 1.0);
     if v <= 0.003_130_8 {
         v * 12.92
     } else {

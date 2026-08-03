@@ -27,6 +27,11 @@ impl PipelineKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Ltx2GeneratePlan {
+    /// Directory for the EXR sidecar, when the request asked for one. The
+    /// decode has to know before it runs: the 8-bit conversion is lossy, so
+    /// HDR cannot be recovered from the frames afterwards.
+    pub(crate) hdr_exr_dir: Option<String>,
+    pub(crate) hdr_exr_full_float: bool,
     pub(crate) pipeline: PipelineKind,
     pub(crate) preset: Ltx2ModelPreset,
     pub(crate) checkpoint_is_distilled: bool,

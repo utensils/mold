@@ -83,6 +83,10 @@ pub struct NativePreparedRun {
 #[derive(Debug)]
 pub struct NativeRenderedVideo {
     pub frames: Vec<RgbImage>,
+    /// Scene-referred linear HDR frames, present only when the plan asked for
+    /// an EXR sidecar. Kept alongside the 8-bit frames rather than replacing
+    /// them: the gallery artifact is still the tonemapped video.
+    pub hdr_frames: Option<Vec<crate::ltx2::exr::HdrFrame>>,
     pub audio_track: Option<NativeAudioTrack>,
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
@@ -789,6 +793,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativeRenderedVideo {
             frames,
+            hdr_frames: None,
             audio_track: None,
             has_audio: plan.execution_graph.wants_audio_output,
             audio_sample_rate: plan.execution_graph.wants_audio_output.then_some(48_000),
@@ -2536,7 +2541,7 @@ fn render_real_distilled_av(
             *guard = Some(latents.clone());
         }
     }
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "distilled",
         &mut vae,
         &latents,
@@ -2544,8 +2549,11 @@ fn render_real_distilled_av(
         dtype,
         device,
         debug_enabled,
+        plan.hdr_exr_dir.is_some(),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames = decoded.hdr;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
@@ -2576,6 +2584,7 @@ fn render_real_distilled_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -2930,7 +2939,7 @@ fn render_real_two_stage_av(
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "two_stage",
         &mut vae,
         &latents,
@@ -2938,8 +2947,11 @@ fn render_real_two_stage_av(
         dtype,
         device,
         false,
+        plan.hdr_exr_dir.is_some(),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames = decoded.hdr;
     drop(vae);
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
@@ -2977,6 +2989,7 @@ fn render_real_two_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3139,7 +3152,7 @@ fn render_real_one_stage_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "one_stage",
         &mut vae,
         &latents,
@@ -3147,8 +3160,11 @@ fn render_real_one_stage_av(
         dtype,
         device,
         debug_enabled,
+        plan.hdr_exr_dir.is_some(),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames = decoded.hdr;
     drop(vae);
     let audio_track =
         maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
@@ -3170,6 +3186,7 @@ fn render_real_one_stage_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -3329,7 +3346,7 @@ fn render_real_retake_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    let frames = decode_video_frames_with_telemetry(
+    let decoded = decode_video_frames_with_telemetry(
         "retake",
         &mut vae,
         &latents,
@@ -3337,8 +3354,11 @@ fn render_real_retake_av(
         dtype,
         device,
         debug_enabled,
+        plan.hdr_exr_dir.is_some(),
         progress,
     )?;
+    let frames = decoded.frames;
+    let hdr_frames = decoded.hdr;
     drop(vae);
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
@@ -3361,6 +3381,7 @@ fn render_real_retake_av(
 
     Ok(NativeRenderedVideo {
         frames,
+        hdr_frames,
         audio_track,
         has_audio,
         audio_sample_rate,
@@ -4001,6 +4022,34 @@ fn mix_clean_latents_with_noise(
 
 fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
     debug_stage.is_some()
+}
+
+/// Fork the decoded VAE tensor into scene-referred linear HDR.
+///
+/// `decoded_video_to_frames` is the single float→u8 conversion in the whole
+/// LTX-2 path, so this is the one place HDR can diverge — everything past it
+/// is `RgbImage`. Keeps full float precision and does not resize: an EXR is
+/// for compositing, and resampling linear light after the grade defeats it.
+fn decoded_video_to_hdr_frames(video: &Tensor) -> Result<Vec<crate::ltx2::exr::HdrFrame>> {
+    let video = video.to_dtype(DType::F32)?.i(0)?;
+    let mut frames = Vec::with_capacity(video.dim(1)?);
+    for index in 0..video.dim(1)? {
+        let frame = video
+            .i((.., index, .., ..))?
+            .permute((1, 2, 0))?
+            .contiguous()?;
+        let (height, width, channels) = frame.dims3()?;
+        if channels != 3 {
+            anyhow::bail!("expected decoded LTX-2 frame to have 3 channels, got {channels}");
+        }
+        let samples: Vec<f32> = frame.flatten_all()?.to_vec1()?;
+        let rgb = samples
+            .into_iter()
+            .map(crate::ltx2::hdr::vae_output_to_linear_hdr)
+            .collect();
+        frames.push(crate::ltx2::exr::HdrFrame { width, height, rgb });
+    }
+    Ok(frames)
 }
 
 fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
@@ -5384,6 +5433,12 @@ fn load_ltx2_video_vae_inner(
 /// closes a real gap: the one-stage and retake paths emitted neither a
 /// `ProgressPhase::Vae` nor a decode timing, so the scheduler never learned a
 /// `vae_ms` for them and planned their decode as free.
+/// A decoded pass: 8-bit frames always, linear HDR frames when asked for.
+struct DecodedVideo {
+    frames: Vec<RgbImage>,
+    hdr: Option<Vec<crate::ltx2::exr::HdrFrame>>,
+}
+
 fn decode_video_frames_with_telemetry(
     pipeline: &str,
     vae: &mut AutoencoderKLLtx2Video,
@@ -5392,24 +5447,30 @@ fn decode_video_frames_with_telemetry(
     dtype: DType,
     device: &candle_core::Device,
     debug_enabled: bool,
+    want_hdr: bool,
     progress: Option<&ProgressCallback>,
-) -> Result<Vec<RgbImage>> {
+) -> Result<DecodedVideo> {
     let decode_start = Instant::now();
     let probe = PhaseVramProbe::enter_if(format!("{pipeline}.vae_decode"), device.is_cuda());
     // Closure so a decode that dies of OOM is reported before it propagates.
-    let decoded = (|| -> Result<Vec<RgbImage>> {
+    let decoded = (|| -> Result<DecodedVideo> {
         let decode_latents = latents.to_dtype(dtype)?;
         configure_ltx2_vae_decode_memory_mode(vae, &decode_latents, device)?;
         let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
         if debug_enabled {
             log_tensor_stats("decoded_video", &video)?;
         }
+        // Both come from the same tensor: the 8-bit conversion is lossy, so
+        // HDR cannot be recovered from the frames afterwards.
+        let hdr = want_hdr
+            .then(|| decoded_video_to_hdr_frames(&video))
+            .transpose()?;
         let frames = decoded_video_to_frames(&video, pixel_shape)?;
         if device.is_cuda() {
             device.synchronize()?;
         }
         drop(video);
-        Ok(frames)
+        Ok(DecodedVideo { frames, hdr })
     })();
     log_ltx2_phase_vram_result(probe.finish(), &decoded, None, "");
     if decoded.is_ok() {
@@ -6628,6 +6689,8 @@ mod tests {
             loras.len(),
         );
         Ltx2GeneratePlan {
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
             guidance_overrides: None,
             vram_grant_bytes: None,
             pipeline: PipelineKind::Distilled,
