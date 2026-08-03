@@ -43,6 +43,7 @@ import {
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
+import { normalizeCameraMotionLoraState } from "@studio/lib/cameraMotion";
 import {
   guidanceOverrideCount,
   guidanceOverridesError,
@@ -148,6 +149,7 @@ import type {
   SourceFitPolicy,
   SourceImageState,
 } from "../types";
+import { MAX_LORA_STACK } from "../types";
 function loadMuted(): boolean {
   try {
     return localStorage.getItem("mold.gallery.muted") !== "false";
@@ -2738,6 +2740,14 @@ function openJob(job: Job) {
   form.state.value.loras = (
     request.loras ?? (request.lora ? [request.lora] : [])
   ).map((lora) => ({ ...lora, trainedWords: [] }));
+  const camera = normalizeCameraMotionLoraState(
+    form.state.value.loras,
+    null,
+    (path, scale) => ({ path, scale, trainedWords: [] }),
+    MAX_LORA_STACK,
+  );
+  form.state.value.loras = camera.loras;
+  form.state.value.cameraControl = camera.cameraControl;
   form.state.value.frames = request.frames ?? null;
   form.state.value.fps = request.fps ?? null;
   form.state.value.enableAudio = request.enable_audio ?? null;

@@ -359,11 +359,28 @@ describe("MobileGenerateParameters", () => {
     await wrapper.get("[data-test='mobile-camera-motion']").setValue("dolly-in");
     expect(form.enableAudio).toBe(true);
     expect(form.cameraControl).toBe("dolly-in");
+    expect(form.loras).toEqual([
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 1,
+        trainedWords: [],
+      },
+    ]);
+    form.loras[0]!.scale = 0.45;
     await wrapper.get("[data-test='mobile-camera-motion']").setValue("custom");
     await wrapper
       .get("[data-test='mobile-camera-motion-custom']")
       .setValue("/models/camera/custom.safetensors");
     expect(form.cameraControl).toBe("/models/camera/custom.safetensors");
+    expect(form.loras).toEqual([
+      {
+        path: "/models/camera/custom.safetensors",
+        name: "/models/camera/custom.safetensors",
+        scale: 0.45,
+        trainedWords: [],
+      },
+    ]);
 
     const disclosure = wrapper.get("[data-test='mobile-ltx2-disclosure']");
     expect(disclosure.attributes("aria-expanded")).toBe("false");
@@ -401,6 +418,20 @@ describe("MobileGenerateParameters", () => {
     expect(form.retakeRange).toBeNull();
     await attachFile(wrapper, "[data-test='mobile-ltx2-audio-file']", new File(["a"], "voice.wav"));
     expect(form.audioFile).toEqual({ filename: "voice.wav", base64: "b64:voice.wav" });
+  });
+
+  it("disables new camera choices when all four LoRA slots are occupied", () => {
+    const initial = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    initial.loras = ["one", "two", "three", "four"].map((path) => ({
+      path,
+      name: path,
+      scale: 1,
+      trainedWords: [],
+    }));
+    const { wrapper } = mountParameters(initial);
+    const options = wrapper.get("[data-test='mobile-camera-motion']").findAll("option");
+    expect(options[1]?.attributes()).toHaveProperty("disabled");
+    expect(options[2]?.attributes()).toHaveProperty("disabled");
   });
 
   it("edits guidance overrides and blocks invalid values before submission", async () => {

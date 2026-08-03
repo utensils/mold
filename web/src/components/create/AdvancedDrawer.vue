@@ -52,6 +52,7 @@ import {
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
 import {
+  cameraMotionLoraPath,
   cameraMotionMode,
   parseCameraControlAvailability,
   isCameraMotionPreset,
@@ -336,7 +337,14 @@ const seedModes = [
 
 // ── LoRA / placement passthrough ──────────────────────────────────────
 function setLoras(loras: LoraSelection[]) {
-  patch({ loras });
+  const cameraPath = cameraMotionLoraPath(props.modelValue.cameraControl);
+  patch({
+    loras,
+    cameraControl:
+      cameraPath && !loras.some((lora) => lora.path === cameraPath)
+        ? null
+        : props.modelValue.cameraControl,
+  });
 }
 function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });

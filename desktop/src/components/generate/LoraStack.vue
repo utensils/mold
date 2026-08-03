@@ -4,6 +4,7 @@ import type { GenerateForm } from "../../lib/generateForm";
 import { MAX_LORA_STACK } from "../../lib/capabilities";
 import { fetchLoras } from "../../lib/api/loras";
 import type { LoraInfo } from "../../lib/api/types";
+import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
 
 const props = defineProps<{ form: GenerateForm; model: string }>();
 const emit = defineEmits<{ (e: "append-word", word: string): void }>();
@@ -39,7 +40,11 @@ function addLora(l: LoraInfo) {
 }
 
 function removeLora(index: number) {
+  const removed = props.form.loras[index];
   props.form.loras.splice(index, 1);
+  if (removed?.path === cameraMotionLoraPath(props.form.cameraControl)) {
+    props.form.cameraControl = null;
+  }
 }
 
 // Close and reset the picker when the model changes — the family may differ.

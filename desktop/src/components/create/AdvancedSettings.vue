@@ -20,7 +20,11 @@ import type {
   Ltx2ControlAdapterInfo,
   OutputFormat,
 } from "../../lib/api/types";
-import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
+import {
+  generationCapabilitiesForFamily,
+  MAX_LORA_STACK,
+  outputFormatsForFamily,
+} from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import {
   decideGenerateRequestRouting,
@@ -35,7 +39,13 @@ import {
   fpsValidationError,
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { cameraMotionMode } from "@studio/lib/cameraMotion";
+import {
+  cameraMotionLoraPath,
+  cameraMotionLoraSlotAvailable,
+  cameraMotionLoraLabel,
+  cameraMotionMode,
+  syncCameraMotionLora,
+} from "@studio/lib/cameraMotion";
 import {
   canOfferExtend,
   extendNewFrames,
@@ -163,11 +173,37 @@ watch(
 function setCameraMode(mode: string) {
   uiCameraMode.value = mode;
   if (mode === "custom") {
-    if (cameraMotionMode(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+    if (cameraMotionMode(props.form.cameraControl) !== "custom") setCameraControl("");
   } else {
-    props.form.cameraControl = mode === "" ? null : mode;
+    setCameraControl(mode === "" ? null : mode);
   }
 }
+
+function setCameraControl(next: string | null) {
+  if (
+    cameraMotionLoraPath(next) &&
+    !cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK)
+  ) {
+    return;
+  }
+  props.form.loras = syncCameraMotionLora(
+    props.form.loras,
+    props.form.cameraControl,
+    next,
+    (path, scale) => ({
+      path,
+      name: cameraMotionLoraLabel(path),
+      scale,
+      trainedWords: [],
+    }),
+    MAX_LORA_STACK,
+  );
+  props.form.cameraControl = next;
+}
+
+const cameraSlotAvailable = computed(() =>
+  cameraMotionLoraSlotAvailable(props.form.loras, props.form.cameraControl, MAX_LORA_STACK),
+);
 
 const keyframePickerOpen = ref(false);
 const pipelineOptions: Ltx2PipelineMode[] = [
@@ -546,10 +582,15 @@ function reset() {
             @change="setCameraMode(($event.target as HTMLSelectElement).value)"
           >
             <option value="">None</option>
-            <option v-for="p in cameraControls" :key="p.id" :value="p.id">
+            <option
+              v-for="p in cameraControls"
+              :key="p.id"
+              :value="p.id"
+              :disabled="!cameraSlotAvailable"
+            >
               {{ p.label }}{{ p.installed ? "" : " · downloads on first use" }}
             </option>
-            <option value="custom">Custom LoRA path…</option>
+            <option value="custom" :disabled="!cameraSlotAvailable">Custom LoRA path…</option>
           </select>
           <input
             v-if="uiCameraMode === 'custom'"
@@ -560,7 +601,7 @@ function reset() {
             aria-label="Camera motion LoRA path"
             class="ms-input data-mono ms-input--mt"
             :value="form.cameraControl ?? ''"
-            @input="form.cameraControl = ($event.target as HTMLInputElement).value"
+            @input="setCameraControl(($event.target as HTMLInputElement).value)"
           />
           <p
             v-if="cameraControlsLoaded && cameraControls.length === 0"

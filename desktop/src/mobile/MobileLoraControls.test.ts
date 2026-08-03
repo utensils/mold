@@ -67,6 +67,55 @@ describe("MobileLoraControls", () => {
     expect(form.loras).toHaveLength(1);
   });
 
+  it("opens immediately when another control adds an auto-download LoRA", async () => {
+    const form = reactive(newGenerateForm());
+    form.model = "ltx-2-19b-distilled:fp8";
+    form.family = "ltx2";
+    const wrapper = mount(MobileLoraControls, { props: { form, target } });
+
+    form.loras.push({
+      path: "camera-control:dolly-in",
+      name: "Dolly in camera control",
+      scale: 1,
+      trainedWords: [],
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("[data-test='mobile-lora-disclosure']").attributes("aria-expanded")).toBe(
+      "true",
+    );
+    expect(wrapper.get("[data-test='mobile-lora-row']").text()).toContain(
+      "Dolly in camera control",
+    );
+  });
+
+  it("clears the camera picker when its LoRA row is removed", async () => {
+    const form = reactive(newGenerateForm());
+    form.model = "ltx-2-19b-distilled:fp8";
+    form.family = "ltx2";
+    form.cameraControl = "dolly-in";
+    form.loras = [
+      {
+        path: "camera-control:dolly-in",
+        name: "Dolly in camera control",
+        scale: 0.5,
+        trainedWords: [],
+      },
+    ];
+    const wrapper = mount(MobileLoraControls, { props: { form, target } });
+
+    await wrapper.vm.$nextTick();
+    if (
+      wrapper.get("[data-test='mobile-lora-disclosure']").attributes("aria-expanded") === "false"
+    ) {
+      await wrapper.get("[data-test='mobile-lora-disclosure']").trigger("click");
+    }
+    await wrapper.get("[data-test='mobile-lora-remove-0']").trigger("click");
+
+    expect(form.loras).toEqual([]);
+    expect(form.cameraControl).toBeNull();
+  });
+
   it("reloads the available adapters when generation moves to another host", async () => {
     const form = reactive(newGenerateForm());
     form.model = "flux:fp16";

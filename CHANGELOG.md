@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Auto-download camera controls now appear in the LoRA stack as soon as they are selected.** Web, desktop, and iPhone Create expose the adapter's strength immediately, preserve that strength when switching motions, remove the picker selection with the row, and send the displayed value instead of silently forcing camera adapters back to 1.0 at submit time. The iPhone LoRA disclosure opens automatically when the camera row arrives, and not-yet-installed presets retain a readable label while they download on first use.
 - **LTX-2 19B camera controls now download and run through real distilled inference.** The hidden single-file camera adapters no longer enter checkpoint configuration and fail after their verified bytes land. Distilled image-to-video requests with a LoRA stay on the native LTX-2 path and load the ordered adapter stack in both denoising stages, matching upstream, instead of silently producing the synthetic rainbow fallback while preserving only the opening source frame.
 
 ### Added
