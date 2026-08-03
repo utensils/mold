@@ -737,8 +737,19 @@ impl ChainRequest {
     /// - `self.stages.len() <= MAX_CHAIN_STAGES`.
     /// - All auto-expand fields are `None` (caller must use `self.stages`).
     pub fn normalise(mut self) -> Result<Self> {
-        crate::validation::validate_generation_dimensions(self.width, self.height, None)
-            .map_err(MoldError::Validation)?;
+        // Resolve the family from the manifest rather than passing `None`.
+        // With a family-aware ceiling and grid, a `None` check is not merely
+        // loose — it is a different answer: it would reject a 1920x1088 LTX-2
+        // sequence the HTTP path admits, and accept a 16-aligned size the
+        // LTX-2 VAE's /32 grid cannot render. `None` remains correct for an
+        // opaque catalog ID with no manifest, exactly as before.
+        let family = crate::manifest::find_manifest(&self.model).map(|m| m.family.clone());
+        crate::validation::validate_generation_dimensions(
+            self.width,
+            self.height,
+            family.as_deref(),
+        )
+        .map_err(MoldError::Validation)?;
 
         if self.stages.is_empty() {
             let prompt = self.prompt.take().ok_or_else(|| {

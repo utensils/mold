@@ -9119,7 +9119,7 @@ mod tests {
             .await
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(limits["frames_per_clip_cap"], 484);
+        assert_eq!(limits["frames_per_clip_cap"], 481);
         assert_eq!(limits["fps"], 24);
         assert_eq!(limits["frames_per_clip_runtime_seconds"], 20);
         assert_eq!(limits["max_stages"], 16);
@@ -9206,7 +9206,7 @@ mod tests {
         assert_eq!(ltx2["default_frames"], 97);
         assert_eq!(ltx2["default_fps"], 24);
         assert_eq!(
-            ltx2["max_frames"], 484,
+            ltx2["max_frames"], 481,
             "the 20s temporal RoPE budget at the model's own 24 fps default",
         );
         assert_eq!(ltx2["max_runtime_seconds"], 20);
@@ -9303,7 +9303,7 @@ mod tests {
             .unwrap();
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
-        assert_eq!(limits["frames_per_clip_cap"], 484);
+        assert_eq!(limits["frames_per_clip_cap"], 481);
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",

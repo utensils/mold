@@ -4058,8 +4058,11 @@ mod tests {
                 .map(|(idx, transition)| stage(&format!("stage {idx}"), transition))
                 .collect(),
             motion_tail_frames: 1,
+            // 32-aligned: the LTX-2 VAE compresses spatially by 32, and the
+            // fixture names an ltx2 model. 64x48 only ever passed because
+            // `normalise` checked with no family and used the /16 grid.
             width: 64,
-            height: 48,
+            height: 64,
             fps: 8,
             seed: Some(42),
             steps: 2,

@@ -47,6 +47,23 @@ export function ltx2MaxFramesAtFps(
 }
 
 /**
+ * `ltx2MaxFramesAtFps` snapped down onto the `8n+1` grid the server enforces.
+ *
+ * The raw ceiling is not requestable — 20 x 24 + 4 = 484 and 483 % 8 == 3 — so
+ * a control clamped to it submits a frame count the server rejects. The
+ * server advertises this value on `/api/models.max_frames`; this mirror is the
+ * fallback for a host that predates it.
+ */
+export function ltx2MaxFramesOnGridAtFps(
+  fps: number | null | undefined,
+  runtimeSeconds: number = LTX2_MAX_RUNTIME_SECONDS,
+  absolute: number = LTX2_MAX_FRAMES_ABSOLUTE,
+): number {
+  const cap = ltx2MaxFramesAtFps(fps, runtimeSeconds, absolute);
+  return cap <= 1 ? 1 : cap - ((cap - 1) % 8);
+}
+
+/**
  * Single-request frame ceiling for `family` at `fps`. `null` when the family
  * is not a video family and therefore publishes no frame ceiling.
  */
@@ -56,7 +73,7 @@ export function maxFramesForFamilyAtFps(
 ): number | null {
   const normalized = (family ?? "").trim().toLowerCase();
   if (normalized === "ltx2" || normalized === "ltx-2") {
-    return ltx2MaxFramesAtFps(fps);
+    return ltx2MaxFramesOnGridAtFps(fps);
   }
   if (normalized === "ltx-video") return MAX_FRAMES_GLOBAL;
   return null;

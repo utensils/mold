@@ -51,7 +51,9 @@ const currentAspect = computed(() =>
   aspectRatioLabel(width.value, height.value, props.model ?? props.family),
 );
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
-const resolutionError = computed(() => resolutionValidationError(width.value, height.value));
+const resolutionError = computed(() =>
+  resolutionValidationError(width.value, height.value, props.model),
+);
 const sourceResolution = computed(() =>
   props.sourceDimensions
     ? resolveSourceResolution(props.sourceDimensions, props.model ?? props.family)

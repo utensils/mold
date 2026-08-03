@@ -172,8 +172,8 @@ mod tests {
             family_cap("ltx2"),
             mold_core::validation::max_frames_for_family_at_fps("ltx2", DEFAULT_CHAIN_FPS),
         );
-        assert_eq!(family_cap_at_fps("ltx2", 12), Some(244));
-        assert_eq!(family_cap_at_fps("ltx2", 24), Some(484));
+        assert_eq!(family_cap_at_fps("ltx2", 12), Some(241));
+        assert_eq!(family_cap_at_fps("ltx2", 24), Some(481));
     }
 
     #[test]
@@ -228,7 +228,7 @@ mod tests {
         // chain default 24 fps only once the absolute guard is applied, so use
         // a low fps where the duration budget clearly binds.
         let oversized = compute_limits("cv:789", "ltx2", "", Some(500), Some(12));
-        assert_eq!(oversized.frames_per_clip_cap, 244);
+        assert_eq!(oversized.frames_per_clip_cap, 241);
         assert_eq!(oversized.frames_per_clip_recommended, 241);
     }
 
@@ -238,17 +238,17 @@ mod tests {
     fn compute_limits_advertises_the_fps_it_used() {
         let at_24 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(24));
         assert_eq!(at_24.fps, Some(24));
-        assert_eq!(at_24.frames_per_clip_cap, 484);
+        assert_eq!(at_24.frames_per_clip_cap, 481);
         assert_eq!(at_24.frames_per_clip_runtime_seconds, Some(20));
 
         let at_12 = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(12));
-        assert_eq!(at_12.frames_per_clip_cap, 244);
+        assert_eq!(at_12.frames_per_clip_cap, 241);
 
         // A zero/absent fps falls back to the chain default rather than
         // collapsing the cap to a single frame.
         let fallback = compute_limits("ltx-2-19b-distilled:fp8", "ltx2", "fp8", None, Some(0));
         assert_eq!(fallback.fps, Some(DEFAULT_CHAIN_FPS));
-        assert_eq!(fallback.frames_per_clip_cap, 484);
+        assert_eq!(fallback.frames_per_clip_cap, 481);
 
         // ltx-video has no duration budget to advertise.
         let video = compute_limits("ltx-video-0.9.6:bf16", "ltx-video", "bf16", None, Some(30));

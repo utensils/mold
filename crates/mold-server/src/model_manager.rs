@@ -609,7 +609,9 @@ fn installed_catalog_models(
                     &sidecar.family,
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
-                max_pixels: Some(mold_core::validation::MAX_PIXELS),
+                max_pixels: Some(mold_core::validation::max_pixels_for_family(Some(
+                    &sidecar.family,
+                ))),
                 recommended_dimensions: mold_core::validation::recommended_dimensions(
                     &sidecar.family,
                 )
@@ -2206,7 +2208,7 @@ mod tests {
         assert_eq!(video_only[0].defaults.default_fps, Some(24));
         assert_eq!(
             video_only[0].defaults.max_frames,
-            Some(484),
+            Some(481),
             "the 20s LTX-2 temporal budget at the sidecar's 24 fps default",
         );
         assert_eq!(video_only[0].defaults.max_runtime_seconds, Some(20));

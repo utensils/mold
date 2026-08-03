@@ -6,6 +6,19 @@ use crate::{
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
 /// (1328x1328), other models at ≤1MP. Headroom for non-square aspect ratios.
 pub const MAX_PIXELS: u64 = 1_800_000;
+/// LTX-2's own ceiling: upstream's shipped `LTX_2_3_HQ_PARAMS` renders
+/// 1920x1088 (stage 1 at 960x544, refined x2), which is 2,088,960 px. The
+/// flat 1.8 MP limit made mold unable to express the reference
+/// implementation's own top-end preset.
+pub const LTX2_MAX_PIXELS: u64 = 1_920 * 1_088;
+/// Per-axis span, independent of the pixel budget.
+///
+/// The checkpoints ship `positional_embedding_max_pos = [20, 2048, 2048]` and
+/// RoPE normalizes pixel positions by it, so an axis past 2048 lands outside
+/// the trained [-1, 1] range with no error raised. 3200x512 is only 1.64 MP
+/// and still out of distribution. Going beyond this needs tiled stage-2
+/// refinement with renormalized positions, not a larger single denoise.
+pub const LTX2_MAX_AXIS_PIXELS: u32 = 2_048;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
 pub const FLUX2_DEV_MAX_REFERENCE_IMAGES: usize = 4;
@@ -91,6 +104,21 @@ pub fn ltx2_max_frames_at_fps(fps: u32) -> u32 {
         .min(LTX2_MAX_FRAMES_ABSOLUTE)
 }
 
+/// [`ltx2_max_frames_at_fps`] snapped down onto the `8n+1` grid the validator
+/// actually enforces.
+///
+/// The raw cap is not requestable: `20 * 24 + 4 = 484` and `483 % 8 == 3`, so a
+/// client that clamps a slider to the advertised maximum and submits gets a
+/// 422. At 48 fps the absolute guard bites first — 964 clamps to 604, which is
+/// equally off-grid — so this matters at every rate, not just the default.
+pub fn ltx2_max_frames_on_grid_at_fps(fps: u32) -> u32 {
+    let cap = ltx2_max_frames_at_fps(fps);
+    if cap <= 1 {
+        return 1;
+    }
+    cap - ((cap - 1) % 8)
+}
+
 /// Per-family single-request frame ceiling at `fps` — the value `/api/models`
 /// advertises as `max_frames`. Must stay in agreement with
 /// `validate_generate_request`'s rejections, which consume this helper.
@@ -99,7 +127,10 @@ pub fn ltx2_max_frames_at_fps(fps: u32) -> u32 {
 /// family reports the flat global ceiling.
 pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
     match family {
-        "ltx2" => Some(ltx2_max_frames_at_fps(fps)),
+        // Advertise the value a client can actually submit. The raw duration
+        // ceiling sits off the `8n+1` grid at every fps, so a slider clamped
+        // to it produced a 422.
+        "ltx2" => Some(ltx2_max_frames_on_grid_at_fps(fps)),
         "ltx-video" => Some(MAX_FRAMES_GLOBAL),
         _ => None,
     }
@@ -128,8 +159,24 @@ pub fn frame_step_for_family(family: &str) -> Option<u32> {
     matches!(family, "ltx2" | "ltx-video").then_some(8)
 }
 
-fn megapixel_limit_label() -> String {
-    format!("{:.1}MP", MAX_PIXELS as f64 / 1_000_000.0)
+fn megapixel_limit_label_for(limit: u64) -> String {
+    format!("{:.1}MP", limit as f64 / 1_000_000.0)
+}
+
+/// Total-pixel ceiling for a generation family.
+pub fn max_pixels_for_family(family: Option<&str>) -> u64 {
+    match family {
+        Some("ltx2") => LTX2_MAX_PIXELS,
+        _ => MAX_PIXELS,
+    }
+}
+
+/// Per-axis ceiling for a generation family, where one exists.
+pub fn max_axis_pixels_for_family(family: Option<&str>) -> Option<u32> {
+    match family {
+        Some("ltx2") => Some(LTX2_MAX_AXIS_PIXELS),
+        _ => None,
+    }
 }
 
 /// Required pixel grid for a generation family.
@@ -170,12 +217,24 @@ pub fn validate_generation_dimensions(
         ));
     }
 
+    if let Some(axis_limit) = max_axis_pixels_for_family(family) {
+        let longest = width.max(height);
+        if longest > axis_limit {
+            return Err(format!(
+                "{width}x{height} has a {longest}px axis, beyond the {axis_limit}px span these \
+                 checkpoints were trained on — positions past it are out of distribution. \
+                 Render at or below {axis_limit}px on the long edge."
+            ));
+        }
+    }
+
+    let limit = max_pixels_for_family(family);
     let pixels = width as u64 * height as u64;
-    if pixels > MAX_PIXELS {
+    if pixels > limit {
         return Err(format!(
             "{width}x{height} = {:.2} megapixels exceeds the {} limit (VAE VRAM constraint)",
             pixels as f64 / 1_000_000.0,
-            megapixel_limit_label()
+            megapixel_limit_label_for(limit)
         ));
     }
 
@@ -190,15 +249,42 @@ fn mib_label(bytes: usize) -> String {
 /// Both dimensions are rounded down to multiples of 16.
 /// Returns the original dimensions unchanged if already within limits.
 pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
+    clamp_to_family_pixel_limit(w, h, None)
+}
+
+/// Family-aware counterpart to [`clamp_to_megapixel_limit`].
+///
+/// Both the ceiling and the rounding grid come from the family. Clamping an
+/// LTX-2 source projection with the shared 1.8 MP limit and a /16 grid would
+/// shrink a canvas the validator would have accepted, and could land off the
+/// /32 grid it requires — a silent downgrade followed by a rejection.
+pub fn clamp_to_family_pixel_limit(w: u32, h: u32, family: Option<&str>) -> (u32, u32) {
+    let limit = max_pixels_for_family(family);
+    let align = dimension_alignment_for_family(family);
+    let axis_limit = max_axis_pixels_for_family(family);
+
     let pixels = w as u64 * h as u64;
-    if pixels <= MAX_PIXELS {
+    let within_axis = axis_limit.is_none_or(|axis| w.max(h) <= axis);
+    if pixels <= limit && within_axis {
         return (w, h);
     }
-    let scale = (MAX_PIXELS as f64 / pixels as f64).sqrt();
-    let new_w = ((w as f64 * scale) as u32 / 16) * 16;
-    let new_h = ((h as f64 * scale) as u32 / 16) * 16;
+
+    let mut scale = if pixels > limit {
+        (limit as f64 / pixels as f64).sqrt()
+    } else {
+        1.0
+    };
+    if let Some(axis) = axis_limit {
+        let longest = w.max(h) as f64;
+        if longest * scale > axis as f64 {
+            scale = axis as f64 / longest;
+        }
+    }
+
+    let new_w = ((w as f64 * scale) as u32 / align) * align;
+    let new_h = ((h as f64 * scale) as u32 / align) * align;
     // Ensure we don't produce zero dimensions
-    (new_w.max(16), new_h.max(16))
+    (new_w.max(align), new_h.max(align))
 }
 
 /// Fit source image dimensions into a model's native resolution bounding box,
@@ -814,9 +900,17 @@ pub fn validate_generate_request_with_family(
             };
             let stage1_cap = ltx2_max_frames_at_fps(stage1_fps);
             if stage1_frames > stage1_cap {
+                // Quote a frame count the user can actually submit. The raw
+                // duration ceiling is off the 8n+1 grid, so naming it sends
+                // them straight into a second rejection.
                 let delivered_cap = match req.temporal_upscale {
                     Some(crate::Ltx2TemporalUpscale::X2) => (stage1_cap - 1) * 2 + 1,
                     None => stage1_cap,
+                };
+                let delivered_cap = if delivered_cap > 1 {
+                    delivered_cap - ((delivered_cap - 1) % 8)
+                } else {
+                    delivered_cap
                 };
                 return Err(format!(
                     "frames ({frames}) exceeds the LTX-2 / LTX-2.3 temporal RoPE budget of \
@@ -1094,6 +1188,23 @@ const LTX_VIDEO_DIMS: &[(u32, u32)] = &[
     (512, 768),  // 2:3
 ];
 
+/// LTX-2 / LTX-2.3. Adds upstream's shipped 1080p HQ pair and the 9:16
+/// transpose of the 19B/22B default. Every entry is 32-aligned, inside
+/// `LTX2_MAX_PIXELS`, and has both axes within `LTX2_MAX_AXIS_PIXELS`.
+const LTX2_DIMS: &[(u32, u32)] = &[
+    (704, 480),   // 22:15 (compact sample bucket)
+    (768, 512),   // 3:2 (native)
+    (512, 512),   // 1:1
+    (1024, 576),  // 16:9
+    (1216, 704),  // 16:9 (LTX-2 19B/22B default)
+    (704, 1216),  // 9:16 portrait transpose of the default
+    (576, 1024),  // 9:16
+    (768, 768),   // 1:1
+    (512, 768),   // 2:3
+    (1920, 1088), // 16:9 1080p — upstream's LTX_2_3_HQ_PARAMS
+    (1088, 1920), // 9:16 1080p
+];
+
 /// Return the list of recommended (width, height) pairs for a model family.
 ///
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
@@ -1109,7 +1220,8 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "qwen-image" => QWEN_IMAGE_DIMS,
         "qwen-image-edit" => QWEN_IMAGE_DIMS,
         "wuerstchen" => WUERSTCHEN_DIMS,
-        "ltx-video" | "ltx2" => LTX_VIDEO_DIMS,
+        "ltx-video" => LTX_VIDEO_DIMS,
+        "ltx2" => LTX2_DIMS,
         _ => &[],
     }
 }
@@ -1149,6 +1261,107 @@ pub fn dimension_warning(width: u32, height: u32, family: &str) -> Option<String
 mod tests {
     use super::*;
     use crate::OutputFormat;
+
+    /// Upstream's own shipped LTX-2.3 HQ default is 1920x1088
+    /// (`LTX_2_3_HQ_PARAMS`: stage 1 at 960x544, refined x2). That is
+    /// 2,088,960 px, so the flat 1.8 MP ceiling made mold unable to express
+    /// the reference implementation's own top-end preset.
+    #[test]
+    fn ltx2_admits_upstreams_shipped_1080p_shape() {
+        assert!(validate_generation_dimensions(1920, 1088, Some("ltx2")).is_ok());
+        assert!(validate_generation_dimensions(1088, 1920, Some("ltx2")).is_ok());
+    }
+
+    #[test]
+    fn non_ltx2_families_keep_the_default_ceiling() {
+        for family in [Some("flux"), Some("ltx-video"), Some("sdxl"), None] {
+            let err = validate_generation_dimensions(1920, 1088, family)
+                .expect_err("only LTX-2 gets the raised ceiling");
+            assert!(
+                err.contains("1.8MP"),
+                "{family:?} must still report the default limit, got: {err}"
+            );
+        }
+    }
+
+    /// Independent of the pixel budget. The checkpoints ship
+    /// `positional_embedding_max_pos = [20, 2048, 2048]` and normalize pixel
+    /// positions by it, so an axis past 2048 is out of distribution even when
+    /// the frame is small: 3200x512 is only 1.64 MP but its width position is
+    /// 1.5625, far outside the trained [-1, 1].
+    #[test]
+    fn ltx2_rejects_an_axis_beyond_the_rope_span() {
+        let err = validate_generation_dimensions(3200, 512, Some("ltx2"))
+            .expect_err("an over-wide axis must be rejected on its own merits");
+        assert!(
+            err.contains("2048"),
+            "the error must name the axis limit, got: {err}"
+        );
+        // The transpose is equally out of distribution.
+        assert!(validate_generation_dimensions(512, 3200, Some("ltx2")).is_err());
+        // Exactly at the span is in distribution, when the pixel budget also
+        // allows it: 2048x992 is 2.03 MP, 2048x1024 would be 2.10 MP and is
+        // rejected on pixels instead. The two limits are independent.
+        assert!(validate_generation_dimensions(2048, 992, Some("ltx2")).is_ok());
+        assert!(validate_generation_dimensions(2048, 1024, Some("ltx2"))
+            .expect_err("over the pixel budget")
+            .contains("megapixels"));
+    }
+
+    #[test]
+    fn ltx2_recommended_dimensions_are_grid_aligned_and_inside_the_family_ceiling() {
+        for &(width, height) in recommended_dimensions("ltx2") {
+            assert!(
+                validate_generation_dimensions(width, height, Some("ltx2")).is_ok(),
+                "advertised preset {width}x{height} must be admissible"
+            );
+        }
+    }
+
+    /// The issue's named 9:16 shape.
+    #[test]
+    fn ltx2_offers_portrait_presets() {
+        let presets = recommended_dimensions("ltx2");
+        assert!(
+            presets.contains(&(704, 1216)),
+            "704x1216 portrait must be advertised, got: {presets:?}"
+        );
+        assert!(
+            presets.iter().any(|(w, h)| h > w && w * h > 1_000_000),
+            "a high-resolution portrait preset must be advertised, got: {presets:?}"
+        );
+    }
+
+    /// The advertised cap must be requestable. A client that clamps to it and
+    /// submits should not get a 422 for being off the `8n+1` grid.
+    #[test]
+    fn ltx2_grid_snapped_cap_is_actually_requestable() {
+        for fps in [6, 12, 24, 30, 48, 60, 120] {
+            let cap = ltx2_max_frames_on_grid_at_fps(fps);
+            assert_eq!(
+                (cap - 1) % 8,
+                0,
+                "the advertised cap at {fps} fps must sit on the 8n+1 grid"
+            );
+            assert!(cap <= ltx2_max_frames_at_fps(fps));
+
+            let mut req = valid_req();
+            req.model = "ltx-2-19b-distilled:fp8".to_string();
+            req.width = 768;
+            req.height = 512;
+            req.output_format = Some(OutputFormat::Mp4);
+            req.frames = Some(cap);
+            req.fps = Some(fps);
+            validate_generate_request_with_family(&req, Some("ltx2")).unwrap_or_else(|err| {
+                panic!("the advertised cap {cap} at {fps} fps must validate, got: {err}")
+            });
+        }
+        // The raw ceilings are off-grid in both directions, which is the bug.
+        assert_eq!(ltx2_max_frames_at_fps(24), 484);
+        assert_eq!(ltx2_max_frames_on_grid_at_fps(24), 481);
+        assert_eq!(ltx2_max_frames_at_fps(48), LTX2_MAX_FRAMES_ABSOLUTE);
+        assert_eq!(ltx2_max_frames_on_grid_at_fps(48), 601);
+    }
 
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
@@ -2077,11 +2290,13 @@ mod tests {
     /// wire contract can't drift from the actual rejection rules.
     #[test]
     fn frame_constraint_helpers_match_validator_behavior() {
+        // Advertised values are grid-snapped so a client that clamps to them
+        // can actually submit; the raw duration ceiling is off the 8n+1 grid.
         assert_eq!(
             max_frames_for_family("ltx2"),
-            Some(ltx2_max_frames_at_fps(LTX2_DEFAULT_FPS))
+            Some(ltx2_max_frames_on_grid_at_fps(LTX2_DEFAULT_FPS))
         );
-        assert_eq!(max_frames_for_family_at_fps("ltx2", 12), Some(244));
+        assert_eq!(max_frames_for_family_at_fps("ltx2", 12), Some(241));
         assert_eq!(max_frames_for_family_at_fps("ltx-video", 12), Some(257));
         assert_eq!(max_frames_for_family("ltx-video"), Some(257));
         assert_eq!(max_frames_for_family("flux"), None);
@@ -2151,7 +2366,9 @@ mod tests {
         req.frames = Some(489); // 20.2s at 24 fps — one grid step past the budget
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("489"), "got: {err}");
-        assert!(err.contains("484"), "got: {err}");
+        // The quoted ceiling is grid-snapped so it is directly usable: 484 is
+        // the exact budget but 483 % 8 == 3, so retrying at 484 would fail again.
+        assert!(err.contains("481"), "got: {err}");
         assert!(err.contains("RoPE"), "got: {err}");
     }
 
@@ -2170,7 +2387,8 @@ mod tests {
 
         req.fps = Some(6);
         let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("124"), "got: {err}");
+        // 20s at 6 fps is 124 frames; 121 is that budget on the 8n+1 grid.
+        assert!(err.contains("121"), "got: {err}");
     }
 
     #[test]
@@ -2181,10 +2399,12 @@ mod tests {
         req.fps = Some(120);
         req.frames = Some(609); // first 8n+1 value past the 604-frame guard
         let err = validate_generate_request(&req).unwrap_err();
+        // The absolute guard binds here, quoted on the 8n+1 grid (604 -> 601).
         assert!(
-            err.contains(&LTX2_MAX_FRAMES_ABSOLUTE.to_string()),
+            err.contains(&ltx2_max_frames_on_grid_at_fps(120).to_string()),
             "got: {err}"
         );
+        assert_eq!(ltx2_max_frames_on_grid_at_fps(120), 601);
     }
 
     #[test]

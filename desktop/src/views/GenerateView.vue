@@ -478,7 +478,7 @@ const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family, form.model));
 const formValidationError = computed(
   () =>
-    resolutionValidationError(form.width, form.height) ??
+    resolutionValidationError(form.width, form.height, selectedEntry.value ?? null) ??
     stepsValidationError(form.steps) ??
     guidanceValidationError(form.guidance) ??
     (caps.value.supportsVideo ? frames8n1Error(form.frames) : null) ??
