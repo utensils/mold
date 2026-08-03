@@ -1859,9 +1859,10 @@ impl App {
         self.sync_generate_capabilities();
     }
 
-    /// Recompute Create rows from the selected model and the current catalog's
-    /// checkpoint-specific audio fact. An incompatible model clears a stale
-    /// audio override before it can leak into another family.
+    /// Recompute Create rows from the selected model's family and the current
+    /// catalog's checkpoint-specific audio fact. An incompatible model clears
+    /// stale audio and LTX-2 latent-upscale overrides before they can leak into
+    /// another family.
     fn sync_generate_capabilities(&mut self) {
         let model = &self.generate.params.model;
         let family = family_for_model(model, &self.config);
