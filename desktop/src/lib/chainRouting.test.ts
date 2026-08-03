@@ -81,12 +81,18 @@ describe("decideChainRouting", () => {
     });
   });
 
-  it("rejects ltx2-non-distilled models when frames exceed the single-clip budget", () => {
-    // ltx2 family but non-distilled: only the distilled path implements
-    // chain rendering on the server. 489 frames is past even the single-clip
-    // duration budget at the default 24 fps, so there is nowhere to route it.
-    const d = decideChainRouting(489, "ltx2", "ltx-2-19b:fp8");
-    expect(d.kind).toBe("reject");
+  it("chains every ltx2 checkpoint past the single-clip budget", () => {
+    // Chain capability is a property of the family: every LTX-2 pipeline
+    // renders sequence clips, so a dev checkpoint routes exactly like a
+    // distilled one. It used to be rejected outright.
+    for (const model of [
+      "ltx-2-19b:fp8",
+      "ltx-2-19b-dev:fp8",
+      "ltx-2.3-22b-dev:fp8",
+      "ltx-2.3-22b-distilled:fp8",
+    ]) {
+      expect(decideChainRouting(489, "ltx2", model).kind).toBe("chain");
+    }
   });
 
   it("rejects entirely-unknown families when frames exceed the single-clip budget", () => {
@@ -180,12 +186,11 @@ describe("decideChainRouting", () => {
     });
   });
 
-  it("applies the distilled-only chain gate to the 'ltx-2' alias too", () => {
-    // Non-distilled ltx2 (via the alias) still can't chain — only the distilled
-    // path implements chain rendering on the server. 489 frames is past even
-    // the single-clip duration budget at the default 24 fps.
+  it("chains through the 'ltx-2' family alias too", () => {
+    // The alias canonicalizes to ltx2, which is chain-capable regardless of
+    // whether the checkpoint name says "distilled".
     const d = decideChainRouting(489, "ltx-2", "ltx-2-19b:fp8");
-    expect(d.kind).toBe("reject");
+    expect(d.kind).toBe("chain");
   });
 });
 

@@ -328,7 +328,17 @@ impl From<&ChainRequest> for ChainScript {
 /// release.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VramEstimate {
+    /// Peak VRAM the heaviest single stage is predicted to reach — the max
+    /// over stages, never their sum. Sequence stages execute strictly one at
+    /// a time, so no two working sets are ever co-resident; summing would
+    /// report roughly N times the truth and make a long sequence look
+    /// infeasible on any card, which is the exact opposite of the signal a
+    /// user needs. A long sequence costs time, not memory.
     pub worst_case_bytes: u64,
+    /// Whether every stage fit the roomiest sampled device at validation
+    /// time. **Advisory only.** Admission re-derives placement from live
+    /// device facts, so this must never gate submission — VRAM freed between
+    /// validate and submit would strand a job that would have run.
     pub fits: bool,
 }
 
@@ -410,6 +420,14 @@ impl ChainValidationResponse {
             warnings,
             vram_estimate: None,
         }
+    }
+
+    /// Attach an advisory VRAM estimate. Separate from `from_normalized`
+    /// because the estimate needs live device facts the core crate cannot see.
+    #[must_use]
+    pub fn with_vram_estimate(mut self, estimate: Option<VramEstimate>) -> Self {
+        self.vram_estimate = estimate;
+        self
     }
 }
 

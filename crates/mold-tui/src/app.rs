@@ -10376,6 +10376,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }
     }
@@ -12019,6 +12020,7 @@ mod tests {
             nsfw: None,
             supports_audio: None,
             supports_extend: None,
+            supports_sequence: None,
             extend_default_overlap_frames: None,
         }
     }

@@ -1016,7 +1016,9 @@ impl Ltx2Engine {
         let pipeline = self.select_pipeline(req)?;
         if !pipeline_supports_render_chain(pipeline) {
             bail!(
-                "render-chain v1 supports one-stage and distilled LTX-2 pipelines, got {:?}",
+                "sequence clips render through the one-stage, distilled, two-stage, and \
+                 two-stage-hq LTX-2 pipelines; {:?} conditions on inputs a clip carry cannot \
+                 supply",
                 pipeline,
             );
         }
@@ -1167,8 +1169,22 @@ pub(crate) fn stitch_extend_frames(
     Ok(source)
 }
 
+/// Pipelines whose runtime honours the chain contract: a hard frame-0 token
+/// replacement from the carry tail, re-encoded at each stage's own pixel grid.
+///
+/// Two-stage qualifies because `render_real_two_stage_av` already re-loads
+/// conditioning at the stage-2 pixel shape — the same thing upstream's
+/// `ti2vid_two_stages` does with its image conditionings — and because the
+/// carry is decoded RGB, not a latent, so it survives stage 1's implicit x2
+/// downsample without a shape mismatch.
 fn pipeline_supports_render_chain(pipeline: PipelineKind) -> bool {
-    matches!(pipeline, PipelineKind::OneStage | PipelineKind::Distilled)
+    matches!(
+        pipeline,
+        PipelineKind::OneStage
+            | PipelineKind::Distilled
+            | PipelineKind::TwoStage
+            | PipelineKind::TwoStageHq
+    )
 }
 
 impl ChainStageRenderer for Ltx2Engine {
@@ -2223,10 +2239,34 @@ mod tests {
     }
 
     #[test]
-    fn render_chain_stage_rejects_multi_pass_pipeline() {
-        // A model name without "distilled" in it selects `PipelineKind::TwoStage`
-        // via `select_pipeline`, which must be rejected up-front by the chain
-        // entry point before any runtime work happens.
+    fn render_chain_stage_rejects_a_pipeline_a_clip_carry_cannot_feed() {
+        // Keyframe routes every conditioning item through the guiding-latent
+        // path, so a frame-0 carry becomes a soft attractor instead of the
+        // hard prefix pin the chain contract needs. Reject it up front,
+        // before any runtime work happens.
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let mut req = request(OutputFormat::Mp4, Some(false));
+        req.pipeline = Some(mold_core::Ltx2PipelineMode::Keyframe);
+        let err = engine
+            .render_chain_stage(&req, None, 4)
+            .expect_err("must fail on a pipeline a clip carry cannot feed");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Keyframe") || msg.contains("keyframe"),
+            "error must name the offending pipeline, got: {msg}",
+        );
+    }
+
+    /// A two-stage model must get *past* the gate. It will still fail later on
+    /// the placeholder fixture checkpoint — the point is that the failure is
+    /// no longer the gate.
+    #[test]
+    fn render_chain_stage_admits_a_two_stage_pipeline() {
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b:fp8".to_string(),
             dummy_paths(),
@@ -2234,27 +2274,54 @@ mod tests {
         );
         engine.loaded = true;
         let req = request(OutputFormat::Mp4, Some(false));
-        let err = engine
-            .render_chain_stage(&req, None, 4)
-            .expect_err("must fail on multi-pass pipeline");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("one-stage") && msg.contains("distilled"),
-            "error must name the pipeline constraint, got: {msg}",
-        );
+        let carry = ChainTail {
+            frames: 4,
+            tail_rgb_frames: vec![image::RgbImage::new(64, 64); 4],
+        };
+        if let Err(err) = engine.render_chain_stage(&req, Some(&carry), 4) {
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains("sequence clips render through"),
+                "two-stage must not be rejected by the chain gate, got: {msg}",
+            );
+        }
     }
 
+    /// Two-stage joins the chain-capable set: `render_real_two_stage_av`
+    /// already re-encodes conditioning at the stage-2 pixel shape, and the
+    /// carry is decoded RGB rather than a latent, so it survives the x2 grid
+    /// change by construction.
+    ///
+    /// The other four stay out for conditioning reasons, not effort:
+    /// `Keyframe` routes every condition — including a frame-0 carry — through
+    /// the guiding-latent path, which is a soft attractor where the chain
+    /// contract needs a hard prefix pin; `A2Vid` and `IcLora` require
+    /// conditioning that is mutually exclusive with the carry; and `Retake`
+    /// regenerates a window of an existing clip, which has no "next clip".
     #[test]
-    fn render_chain_supports_one_stage_and_distilled_pipelines() {
-        assert!(super::pipeline_supports_render_chain(
-            PipelineKind::OneStage
-        ));
-        assert!(super::pipeline_supports_render_chain(
-            PipelineKind::Distilled
-        ));
-        assert!(!super::pipeline_supports_render_chain(
-            PipelineKind::TwoStage
-        ));
+    fn render_chain_supports_single_stage_distilled_and_two_stage_pipelines() {
+        for supported in [
+            PipelineKind::OneStage,
+            PipelineKind::Distilled,
+            PipelineKind::TwoStage,
+            PipelineKind::TwoStageHq,
+        ] {
+            assert!(
+                super::pipeline_supports_render_chain(supported),
+                "{supported:?} must be chain-capable"
+            );
+        }
+        for unsupported in [
+            PipelineKind::Keyframe,
+            PipelineKind::A2Vid,
+            PipelineKind::IcLora,
+            PipelineKind::Retake,
+        ] {
+            assert!(
+                !super::pipeline_supports_render_chain(unsupported),
+                "{unsupported:?} must stay out of the chain path"
+            );
+        }
     }
 
     #[test]

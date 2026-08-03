@@ -4233,9 +4233,12 @@ async fn capabilities_chain_limits(
         .and_then(|value| value.parse::<u32>().ok())
         .or(default_fps);
 
-    // TODO(sub-project D): pass live free VRAM from AppState.
+    // Chain limits are model-derived on purpose: a recommendation that moved
+    // with transient GPU pressure would make the clip-length options flicker
+    // in a picker the SPA caches per model. The VRAM-aware answer lives on
+    // `POST /api/generate/chain/validate`, which prices the actual stages.
     let mut limits =
-        crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0, default_frames, fps);
+        crate::chain_limits::compute_limits(&raw_model, &family, &quant, default_frames, fps);
     limits.supports_audio = supports_audio;
     Json(limits).into_response()
 }

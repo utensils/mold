@@ -3349,7 +3349,9 @@ pub(crate) fn effective_request(manifest: &ChainJobManifest) -> anyhow::Result<C
     Ok(request)
 }
 
-fn build_stage_generate_request(
+/// Exposed to `routes_chain` so the advisory VRAM estimate prices exactly
+/// the request dispatch will render, rather than an approximation of it.
+pub(crate) fn build_stage_generate_request(
     stage: &ChainStage,
     chain: &ChainRequest,
     stage_seed: u64,
