@@ -111,6 +111,30 @@ should compare generated contact sheets or clips from that fixed seed.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 
+### HDR output
+
+The HDR IC-LoRA re-grades a reference video into ARRI LogC3, which is a _log_
+signal — an ordinary 8-bit export throws away the range the adapter exists to
+produce. Ask for an EXR sequence alongside the video:
+
+```bash
+mold run "a neon alley at dusk" \
+  --model ltx-2.3-22b-distilled:fp8 \
+  --pipeline ic-lora --ic-lora-control hdr \
+  --video reference.mp4 \
+  --hdr-exr-dir ./shot_exr
+```
+
+One `frame_00000.exr` per frame, scene-referred linear, sRGB/Rec.709 primaries
+with a D65 white point. Add `--hdr-exr-full-float` for 32-bit samples instead
+of the 16-bit default.
+
+The EXR sequence is a **sidecar**, not the gallery artifact: a sequence is many
+files and gigabytes, so the ordinary tonemapped video is still written and is
+what appears in the Library. Note that LogC3's toe decodes pure black slightly
+below zero (about -0.0173); that is faithful to the transfer function and is
+written verbatim, so a compositor sees the same values upstream produces.
+
 ### Resolution
 
 LTX-2 renders up to **1920x1088** — upstream's own shipped LTX-2.3 HQ shape —
