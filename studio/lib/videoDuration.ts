@@ -89,5 +89,6 @@ export function formatVideoDuration(frames: number, fps: number): string {
   if (seconds >= 10 && Math.abs(seconds - Math.round(seconds)) < 0.05) {
     return `${Math.round(seconds)}s`;
   }
+  if (seconds < 0.1) return `${seconds.toFixed(2)}s`;
   return `${seconds.toFixed(1)}s`;
 }

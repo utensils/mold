@@ -753,8 +753,7 @@ fn tui_max_video_frames(grid: (u32, Option<u32>, Option<u32>, u32), fps: u32) ->
     } else {
         fixed_frames
     };
-    cap.saturating_sub(cap.saturating_sub(1) % step)
-        .max(step + 1)
+    cap.saturating_sub(cap.saturating_sub(1) % step).max(1)
 }
 
 /// State for the Generate view.
@@ -3923,8 +3922,7 @@ impl App {
                 let fps = p.fps.max(1);
                 let seconds = (p.frames as f64 / fps as f64 + delta as f64).max(0.1);
                 let target = (seconds * fps as f64).round() as u32;
-                let snapped =
-                    (((target.saturating_sub(1) + step / 2) / step) * step + 1).max(step + 1);
+                let snapped = ((target.saturating_sub(1) + step / 2) / step) * step + 1;
                 p.frames = snapped.min(tui_max_video_frames(grid, fps));
             }
             ParamField::Strength => {
@@ -3934,7 +3932,7 @@ impl App {
                 let grid = video_grid.expect("frames has video grid");
                 let step = grid.0;
                 p.frames = (p.frames as i64 + delta as i64 * step as i64)
-                    .clamp((step + 1) as i64, tui_max_video_frames(grid, p.fps) as i64)
+                    .clamp(1, tui_max_video_frames(grid, p.fps) as i64)
                     as u32;
             }
             ParamField::Fps => {
@@ -9715,6 +9713,7 @@ mod tests {
         assert_eq!(tui_max_video_frames(ltx2_grid, 12), 241);
         assert_eq!(tui_max_video_frames(ltx2_grid, 24), 481);
         assert_eq!(tui_max_video_frames(ltx2_grid, 48), 601);
+        assert_eq!(tui_max_video_frames((8, None, None, 1), 24), 1);
     }
 
     #[tokio::test]

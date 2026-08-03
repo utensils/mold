@@ -40,5 +40,6 @@ describe("video duration controls", () => {
   it("clamps manual values to the requestable model grid", () => {
     expect(clampVideoFrames(999, 24, ltx2)).toBe(481);
     expect(clampVideoFrames(1, 24, ltx2)).toBe(1);
+    expect(formatVideoDuration(1, 24)).toBe("0.04s");
   });
 });
