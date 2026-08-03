@@ -898,8 +898,9 @@ async fn materialize_local_builtin_control(
         .expect("control registry and hidden manifests must stay in sync");
     let file = manifest
         .files
-        .first()
-        .expect("control manifests contain one adapter file");
+        .iter()
+        .find(|file| file.hf_filename == adapter.hf_filename)
+        .expect("control registry and hidden manifests must stay in sync");
     let path = config
         .resolved_models_dir()
         .join(mold_core::manifest::storage_path(manifest, file));
@@ -1012,14 +1013,22 @@ fn local_camera_control_artifact_is_complete(
             .is_ok_and(|metadata| metadata.len() == preset.size_bytes)
 }
 
+/// Local twin of the server's `control_artifact_is_complete`: every file the
+/// adapter needs, each at its own recorded size.
 fn local_control_artifact_is_complete(
     adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
     path: &std::path::Path,
 ) -> bool {
-    mold_core::download::has_sha256_marker(path)
-        || path
-            .metadata()
-            .is_ok_and(|metadata| metadata.len() == adapter.size_bytes)
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    adapter.files().all(|file| {
+        let candidate = dir.join(file.hf_filename);
+        mold_core::download::has_sha256_marker(&candidate)
+            || candidate
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() == file.size_bytes)
+    })
 }
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.

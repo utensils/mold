@@ -891,10 +891,14 @@ async fn plan_builtin_ltx2_control(
         .map_err(ApiError::validation)?;
     let manifest = mold_core::manifest::find_manifest(adapter.download_model)
         .expect("control registry and hidden manifests must stay in sync");
+    // An adapter may ship companion files (HDR carries pre-computed prompt
+    // embeddings), so resolve the weights by name instead of taking whichever
+    // file happens to be first.
     let file = manifest
         .files
-        .first()
-        .expect("control manifests contain one adapter file");
+        .iter()
+        .find(|file| file.hf_filename == adapter.hf_filename)
+        .expect("control registry and hidden manifests must stay in sync");
     let path = config
         .resolved_models_dir()
         .join(mold_core::manifest::storage_path(manifest, file));
@@ -962,14 +966,25 @@ async fn materialize_builtin_ltx2_control(
     Ok(())
 }
 
+/// Whether every file this adapter needs has landed and verified.
+///
+/// `path` is the weights file; companion files live beside it, so each is
+/// checked at its own recorded size. Checking only the weights would let a
+/// half-finished multi-file pull look complete and fail at load.
 fn control_artifact_is_complete(
     adapter: &mold_core::ltx2_control::Ltx2ControlAdapter,
     path: &std::path::Path,
 ) -> bool {
-    mold_core::download::has_sha256_marker(path)
-        || path
-            .metadata()
-            .is_ok_and(|metadata| metadata.len() == adapter.size_bytes)
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    adapter.files().all(|file| {
+        let candidate = dir.join(file.hf_filename);
+        mold_core::download::has_sha256_marker(&candidate)
+            || candidate
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() == file.size_bytes)
+    })
 }
 
 async fn normalize_generation_placement(
@@ -3999,12 +4014,13 @@ async fn capabilities_ltx2_control_adapters(
                 id: adapter.id.to_string(),
                 label: adapter.label.to_string(),
                 guide: adapter.guide.to_string(),
-                size_bytes: adapter.size_bytes,
+                size_bytes: adapter.total_size_bytes(),
                 installed,
                 download_model: adapter.download_model.to_string(),
                 download_repo: adapter.hf_repo.to_string(),
                 download_filename: adapter.hf_filename.to_string(),
                 download_sha256: adapter.sha256.to_string(),
+                gated: adapter.gated,
             }
         })
         .collect();
