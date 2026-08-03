@@ -64,3 +64,48 @@ export function sameLogicalGalleryPrint(
     Math.abs(a.timestamp - b.timestamp) <= GALLERY_IDENTITY_WINDOW_SECS
   );
 }
+
+export interface LogicalGalleryPrintGroup<T> {
+  /** The first copy in the input order, used as the rendered print. */
+  representative: T;
+  /** Every physical copy, including the representative. */
+  copies: T[];
+}
+
+/**
+ * Collapse physical copies from any number of hosts into logical prints.
+ * Callers control which copy represents a group by ordering the input first.
+ */
+export function groupLogicalGalleryPrints<T extends GalleryPrintIdentityInput>(
+  items: readonly T[],
+): LogicalGalleryPrintGroup<T>[] {
+  const groups: LogicalGalleryPrintGroup<T>[] = [];
+  const byFilename = new Map<string, LogicalGalleryPrintGroup<T>>();
+  const byIdentity = new Map<string, LogicalGalleryPrintGroup<T>[]>();
+
+  for (const item of items) {
+    const identity = galleryPrintIdentity(item);
+    let group = byFilename.get(item.filename);
+    if (!group && identity) {
+      group = byIdentity
+        .get(identity)
+        ?.find((candidate) =>
+          sameLogicalGalleryPrint(candidate.representative, item),
+        );
+    }
+
+    if (!group) {
+      group = { representative: item, copies: [] };
+      groups.push(group);
+    }
+    group.copies.push(item);
+    byFilename.set(item.filename, group);
+    if (identity) {
+      const candidates = byIdentity.get(identity) ?? [];
+      if (!candidates.includes(group)) candidates.push(group);
+      byIdentity.set(identity, candidates);
+    }
+  }
+
+  return groups;
+}

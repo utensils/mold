@@ -5,13 +5,11 @@
  * with its owning host, and merges newest-first. A per-host failure degrades
  * to an "unreachable" note — the grid never blanks because one box is down.
  *
- * Dedupe is intentionally minimal: the host registry already collapses one
- * box reached by several addresses to a single entry (instance-UUID dedupe),
- * so we don't double-count instances here. The desktop app additionally
- * collapses cross-host copies of the same print by filename / seed+byte-size,
- * but that only exists because desktop auto-saves remote outputs locally; web
- * doesn't, so that heavier collapse is deliberately deferred.
+ * Physical copies are retained for host filters and delete-everywhere, while
+ * the All view receives one representative per logical print regardless of
+ * which pair of hosts contains the copies.
  */
+import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 import { hostGallery } from "../components/machines/hostClient";
 import type { GalleryImage } from "../types";
@@ -24,8 +22,10 @@ export interface HostGalleryImage extends GalleryImage {
 }
 
 export interface MergedGallery {
-  /** Every reachable host's prints, merged newest-first, host-tagged. */
+  /** Logical prints for the All view, merged newest-first and deduplicated. */
   entries: HostGalleryImage[];
+  /** Every physical copy for host filters and device-routed actions. */
+  rawEntries: HostGalleryImage[];
   /** Hosts whose /api/gallery succeeded. */
   reachableHostIds: string[];
   /** Hosts that failed (network, authentication, or incompatible API) — surfaced as an
@@ -76,11 +76,18 @@ export async function fetchMergedGallery(
     }
   });
 
-  // Newest first across all hosts.
+  // Newest first across all hosts. The first copy becomes the representative,
+  // so a newer reachable copy supplies media/actions when no local preference
+  // exists (web has no special local filesystem bucket).
   entries.sort((a, b) => b.timestamp - a.timestamp);
+  const rawEntries = entries;
+  const deduplicated = groupLogicalGalleryPrints(rawEntries).map(
+    (group) => group.representative,
+  );
 
   return {
-    entries,
+    entries: deduplicated,
+    rawEntries,
     reachableHostIds,
     unreachableHostIds,
     remoteHostCount: hosts.filter((h) => h.id !== ORIGIN_HOST_ID).length,
