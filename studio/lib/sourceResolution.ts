@@ -1,5 +1,5 @@
 import {
-  MAX_GENERATION_PIXELS,
+  maxPixelsForFamily,
   type ModelResolutionContract,
 } from "./resolutions";
 
@@ -76,7 +76,9 @@ export function resolveSourceResolution(
   const minimumDimension = minimumAligned(alignment);
   const advertisedMaxPixels = positiveInteger(
     contract?.max_pixels,
-    MAX_GENERATION_PIXELS,
+    // Family-aware fallback: clamping an LTX-2 source to the shared 1.8 MP
+    // limit would shrink a canvas the server would have accepted.
+    maxPixelsForFamily(contract?.family),
   );
   const maxPixels = advertisedMaxPixels;
   const sourcePixels = sourceWidth * sourceHeight;

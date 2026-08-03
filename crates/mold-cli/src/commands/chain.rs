@@ -1098,7 +1098,9 @@ mod tests {
 
     #[test]
     fn routing_clip_frames_above_the_model_budget_clamps_to_the_budget() {
-        // 12 fps → a 20s budget is 244 frames, so 400 must clamp to 244.
+        // 12 fps → a 20s budget is 244 frames, but 244 is off the 8n+1 grid
+        // (243 % 8 == 3), so clamping to it produced a clip-frame count the
+        // server rejects. The advertised cap is now grid-snapped to 241.
         let d = decide_chain_routing(
             Some(900),
             Some("ltx2"),
@@ -1110,7 +1112,7 @@ mod tests {
         assert_eq!(
             d,
             ChainRoutingDecision::Chain {
-                clip_frames: 244,
+                clip_frames: 241,
                 motion_tail: 4,
             },
         );

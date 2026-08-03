@@ -136,13 +136,20 @@ describe("MobileResolutionPicker", () => {
     ]);
     expect(single[1]?.attributes("aria-checked")).toBe("true");
 
-    const pair = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
-    expect(pair.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+    // LTX-2's 16:9 bucket now reaches upstream's shipped 1080p shape
+    // (1920x1088 = 2.1 MP) on top of the existing two tiers.
+    const trio = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
+    expect(trio.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
       "0.6 MP",
       "0.9 MP",
+      "2.1 MP",
     ]);
-    expect(pair.map((segment) => segment.get(".ms-seg__sub").text())).toEqual(["Standard", "High"]);
-    expect(pair[0]?.attributes("aria-checked")).toBe("true");
+    expect(trio.map((segment) => segment.get(".ms-seg__sub").text())).toEqual([
+      "Compact",
+      "Standard",
+      "High",
+    ]);
+    expect(trio[0]?.attributes("aria-checked")).toBe("true");
   });
 
   it("shows each aspect choice as a proportionally accurate frame", async () => {

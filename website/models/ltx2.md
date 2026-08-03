@@ -111,6 +111,21 @@ should compare generated contact sheets or clips from that fixed seed.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 
+### Resolution
+
+LTX-2 renders up to **1920x1088** — upstream's own shipped LTX-2.3 HQ shape —
+on a 32-pixel grid. Both axes must stay at or below **2048px**: the checkpoints
+normalize RoPE pixel positions by that span, so a longer edge is outside the
+trained range even when the frame's total area is small. `/api/models` carries
+the per-model `max_pixels`, `dimension_alignment`, and `recommended_dimensions`
+so clients do not hardcode any of it.
+
+Going beyond roughly 2K needs tiled stage-2 refinement with renormalized
+positions, which mold does not implement yet. Note also that a single-pass
+render at 1080p on the 19B checkpoint can show edge artifacts, since that is
+well above the resolution it was trained at; 1216x704 remains the quality
+sweet spot.
+
 ## The prompt is optional for image-to-video
 
 LTX-2 and the older `ltx-video` family accept an **empty prompt**, but only when

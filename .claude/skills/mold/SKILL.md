@@ -966,7 +966,7 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 - Quantized models (q4/q6/q8) use less VRAM than fp16/bf16
 - FP8 safetensors models auto-convert to Q8 GGUF on first use (fits 24GB cards)
 - `--eager` trades VRAM for speed (keeps encoders loaded between generations)
-- Dimensions must be multiples of 16; total pixels capped at ~1.1 megapixels
+- Dimensions must be multiples of 16 (32 for LTX video families); total pixels capped at 1.8 MP, or 2.09 MP for LTX-2 (1920x1088) with both axes at or below 2048px
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
 - LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects

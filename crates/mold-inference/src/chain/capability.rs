@@ -65,7 +65,9 @@ pub fn capability_for_family(family: &str) -> Option<ChainCapability> {
 pub fn frames_per_clip_cap_at_fps(family: &str, fps: u32) -> Option<u32> {
     let capability = capability_for_family(family)?;
     Some(match capability.runtime_seconds_cap {
-        Some(_) => mold_core::validation::ltx2_max_frames_at_fps(fps),
+        // Grid-snapped: a clip cap that is not itself a valid frame count
+        // sends a client that clamps to it straight into a 422.
+        Some(_) => mold_core::validation::ltx2_max_frames_on_grid_at_fps(fps),
         None => capability.frames_per_clip_cap,
     })
 }

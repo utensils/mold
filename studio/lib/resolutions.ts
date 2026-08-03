@@ -22,6 +22,35 @@ export interface ModelResolutionContract {
 }
 
 export const MAX_GENERATION_PIXELS = 1_800_000;
+/**
+ * LTX-2's own ceiling: upstream's shipped LTX_2_3_HQ_PARAMS renders 1920x1088.
+ * The server advertises this per model on `/api/models.max_pixels`, which is
+ * authoritative — these constants are only the fallback for a host that
+ * predates the raised ceiling.
+ */
+export const LTX2_MAX_GENERATION_PIXELS = 1_920 * 1_088;
+/**
+ * Per-axis span, independent of the pixel budget. The checkpoints normalize
+ * RoPE pixel positions by 2048, so a longer axis is out of distribution even
+ * when the frame is small.
+ */
+export const LTX2_MAX_AXIS_PIXELS = 2_048;
+
+export function maxPixelsForFamily(family: string | null | undefined): number {
+  return family === "ltx2" ? LTX2_MAX_GENERATION_PIXELS : MAX_GENERATION_PIXELS;
+}
+
+export function maxAxisPixelsForFamily(
+  family: string | null | undefined,
+): number | null {
+  return family === "ltx2" ? LTX2_MAX_AXIS_PIXELS : null;
+}
+
+export function dimensionAlignmentForFamily(
+  family: string | null | undefined,
+): number {
+  return family === "ltx-video" || family === "ltx2" ? 32 : 16;
+}
 
 function gcd(a: number, b: number): number {
   let x = Math.max(1, Math.round(Math.abs(a)));
@@ -92,6 +121,20 @@ const VIDEO = [
   p(768, 768),
   p(512, 768),
 ];
+/** LTX-2 adds upstream's 1080p HQ pair and a 9:16 transpose of the default. */
+const LTX2_VIDEO = [
+  p(704, 480, "22:15"),
+  p(768, 512),
+  p(512, 512),
+  p(1024, 576),
+  p(1216, 704, "16:9"),
+  p(704, 1216, "9:16"),
+  p(576, 1024),
+  p(768, 768),
+  p(512, 768),
+  p(1920, 1088, "16:9"),
+  p(1088, 1920, "9:16"),
+];
 
 const BY_FAMILY: Record<string, ResolutionPreset[]> = {
   sd15: SD15,
@@ -105,7 +148,7 @@ const BY_FAMILY: Record<string, ResolutionPreset[]> = {
   "qwen-image-edit": QWEN_IMAGE,
   wuerstchen: [p(1024, 1024)],
   "ltx-video": VIDEO,
-  ltx2: VIDEO,
+  ltx2: LTX2_VIDEO,
 };
 
 export function presetsForFamily(family: string): ResolutionPreset[] {
@@ -118,8 +161,11 @@ export function presetsForModel(
   if (typeof model === "string") return presetsForFamily(model);
   const advertised = model.recommended_dimensions ?? [];
   if (advertised.length === 0) return presetsForFamily(model.family);
-  const maxPixels = model.max_pixels ?? MAX_GENERATION_PIXELS;
-  const alignment = model.dimension_alignment ?? 16;
+  // The server's advertised values win; the family fallbacks only cover a
+  // host that predates them.
+  const maxPixels = model.max_pixels ?? maxPixelsForFamily(model.family);
+  const alignment =
+    model.dimension_alignment ?? dimensionAlignmentForFamily(model.family);
   return advertised
     .filter(
       ({ width, height }) =>

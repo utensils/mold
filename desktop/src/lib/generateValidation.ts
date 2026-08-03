@@ -1,9 +1,14 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
+import {
+  dimensionAlignmentForFamily,
+  maxAxisPixelsForFamily,
+  maxPixelsForFamily,
+  type ModelResolutionContract,
+} from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 
-export const MAX_GENERATION_PIXELS = 1_800_000;
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
 // MiB. Keep the whole iPhone conditioning payload below 45 MiB so the request
@@ -75,17 +80,33 @@ export function fpsValidationError(value: number): string | null {
     : "FPS must be a whole number from 1 to 60.";
 }
 
-export function resolutionValidationError(width: number, height: number): string | null {
+/**
+ * `contract` is the selected model's advertised resolution limits. Supply it
+ * wherever the model row is in scope: the ceiling and the pixel grid are
+ * family-specific, and hard-coding 1.8 MP / 16 px rejected LTX-2 shapes the
+ * server accepts while admitting off-grid ones it does not.
+ */
+export function resolutionValidationError(
+  width: number,
+  height: number,
+  contract?: ModelResolutionContract | null,
+): string | null {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
     return "Width and height must each be at least 64 pixels.";
   }
-  if (width % 16 !== 0 || height % 16 !== 0) {
-    return "Width and height must be multiples of 16.";
+  const alignment = contract?.dimension_alignment ?? dimensionAlignmentForFamily(contract?.family);
+  if (width % alignment !== 0 || height % alignment !== 0) {
+    return `Width and height must be multiples of ${alignment}.`;
   }
+  const axisLimit = maxAxisPixelsForFamily(contract?.family);
+  if (axisLimit && Math.max(width, height) > axisLimit) {
+    return `${width} × ${height} exceeds the ${axisLimit}px span this model was trained on. Keep the long edge at or below ${axisLimit}px.`;
+  }
+  const maxPixels = contract?.max_pixels ?? maxPixelsForFamily(contract?.family);
   const megapixels = (width * height) / 1_000_000;
-  return width * height <= MAX_GENERATION_PIXELS
+  return width * height <= maxPixels
     ? null
-    : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below 1.8 MP.`;
+    : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below ${(maxPixels / 1_000_000).toFixed(1)} MP.`;
 }
 
 /**

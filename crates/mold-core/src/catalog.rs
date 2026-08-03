@@ -2,17 +2,19 @@ use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, vi
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended, RecommendedDimensions};
 
 fn resolution_defaults(family: &str) -> (Option<u64>, Vec<RecommendedDimensions>, Option<u32>) {
+    // Route through the validator's own helpers rather than restating the
+    // rules: `/api/models` is the single source clients read, so an
+    // advertisement that disagrees with admission is a rejected request the
+    // user was told would work.
     (
-        Some(crate::validation::MAX_PIXELS),
+        Some(crate::validation::max_pixels_for_family(Some(family))),
         crate::validation::recommended_dimensions(family)
             .iter()
             .map(|&(width, height)| RecommendedDimensions { width, height })
             .collect(),
-        Some(if matches!(family, "ltx-video" | "ltx2") {
-            32
-        } else {
-            16
-        }),
+        Some(crate::validation::dimension_alignment_for_family(Some(
+            family,
+        ))),
     )
 }
 
@@ -264,11 +266,12 @@ mod tests {
             .expect("an ltx2 manifest model should exist");
         assert_eq!(ltx2.defaults.default_frames, Some(97));
         assert_eq!(ltx2.defaults.default_fps, Some(24));
-        // The LTX-2 ceiling is a 20s duration, so the advertised scalar is the
-        // frame count that budget buys at this model's own default fps.
+        // The LTX-2 ceiling is a 20s duration, so the advertised scalar is
+        // the frame count that budget buys at this model's own default fps —
+        // snapped onto the 8n+1 grid so a client can submit it.
         assert_eq!(
             ltx2.defaults.max_frames,
-            Some(crate::validation::ltx2_max_frames_at_fps(24)),
+            Some(crate::validation::ltx2_max_frames_on_grid_at_fps(24)),
             "temporal RoPE ceiling at the model's default fps",
         );
         assert_eq!(ltx2.defaults.max_runtime_seconds, Some(20));
@@ -279,7 +282,8 @@ mod tests {
         assert_eq!(ltx2.defaults.frame_step, Some(8));
         assert_eq!(
             ltx2.defaults.max_pixels,
-            Some(crate::validation::MAX_PIXELS)
+            Some(crate::validation::LTX2_MAX_PIXELS),
+            "LTX-2 advertises its own raised ceiling, not the shared default"
         );
         assert_eq!(ltx2.defaults.dimension_alignment, Some(32));
         assert!(

@@ -5,6 +5,7 @@ import {
   LTX2_MAX_RUNTIME_SECONDS,
   MAX_FRAMES_GLOBAL,
   ltx2MaxFramesAtFps,
+  ltx2MaxFramesOnGridAtFps,
   maxFramesForFamilyAtFps,
 } from "./videoBudget";
 
@@ -42,8 +43,10 @@ describe("ltx2MaxFramesAtFps", () => {
 
 describe("maxFramesForFamilyAtFps", () => {
   it("only ltx2 has an fps-dependent ceiling", () => {
-    expect(maxFramesForFamilyAtFps("ltx2", 12)).toBe(244);
-    expect(maxFramesForFamilyAtFps("ltx-2", 12)).toBe(244);
+    // The advertised value is grid-snapped so a client that clamps to it can
+    // actually submit: 244 is the raw 20s budget at 12 fps, but 243 % 8 == 3.
+    expect(maxFramesForFamilyAtFps("ltx2", 12)).toBe(241);
+    expect(maxFramesForFamilyAtFps("ltx-2", 12)).toBe(241);
     expect(maxFramesForFamilyAtFps("ltx-video", 12)).toBe(MAX_FRAMES_GLOBAL);
     expect(maxFramesForFamilyAtFps("ltx-video", 30)).toBe(MAX_FRAMES_GLOBAL);
   });
@@ -52,5 +55,19 @@ describe("maxFramesForFamilyAtFps", () => {
     expect(maxFramesForFamilyAtFps("flux", 24)).toBeNull();
     expect(maxFramesForFamilyAtFps("", 24)).toBeNull();
     expect(maxFramesForFamilyAtFps(null, 24)).toBeNull();
+  });
+});
+
+describe("ltx2MaxFramesOnGridAtFps", () => {
+  it("snaps the duration budget onto the 8n+1 grid the server enforces", () => {
+    for (const fps of [6, 12, 24, 30, 48, 60, 120]) {
+      const cap = ltx2MaxFramesOnGridAtFps(fps);
+      expect((cap - 1) % 8, `${fps} fps`).toBe(0);
+      expect(cap).toBeLessThanOrEqual(ltx2MaxFramesAtFps(fps));
+    }
+    expect(ltx2MaxFramesOnGridAtFps(24)).toBe(481);
+    expect(ltx2MaxFramesOnGridAtFps(12)).toBe(241);
+    // Above 30 fps the absolute guard binds first, and 604 is off-grid too.
+    expect(ltx2MaxFramesOnGridAtFps(48)).toBe(601);
   });
 });
