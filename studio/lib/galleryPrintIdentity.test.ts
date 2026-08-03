@@ -87,4 +87,28 @@ describe("gallery print identity", () => {
       "render-c",
     ]);
   });
+
+  it("does not transitively chain copies outside the representative's time window", () => {
+    const identified = (
+      hostId: string,
+      filename: string,
+      timestamp: number,
+    ) => ({
+      hostId,
+      filename,
+      timestamp,
+      size_bytes: 4_096,
+      metadata: { seed: 42, model: "flux-dev:q8" },
+    });
+
+    const groups = groupLogicalGalleryPrints([
+      identified("render-a", "newest.png", 6_000),
+      identified("render-b", "middle.png", 3_000),
+      identified("render-c", "oldest.png", 0),
+    ]);
+
+    expect(
+      groups.map((group) => group.copies.map((copy) => copy.hostId)),
+    ).toEqual([["render-a", "render-b"], ["render-c"]]);
+  });
 });

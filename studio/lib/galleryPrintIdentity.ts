@@ -90,11 +90,7 @@ export function groupLogicalGalleryPrints<T extends GalleryPrintIdentityInput>(
       group = byIdentity
         .get(identity)
         ?.find((candidate) =>
-          candidate.copies.some(
-            (copy) =>
-              Math.abs(copy.timestamp - item.timestamp) <=
-              GALLERY_IDENTITY_WINDOW_SECS,
-          ),
+          sameLogicalGalleryPrint(candidate.representative, item),
         );
     }
 

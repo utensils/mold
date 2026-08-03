@@ -105,6 +105,33 @@ describe("fetchMergedGallery", () => {
       "render-b",
     ]);
   });
+
+  it("keeps a chained legacy identity outside the representative window visible", async () => {
+    const hosts = [
+      host("render-a", "render a"),
+      host("render-b", "render b"),
+      host("render-c", "render c"),
+    ];
+    const timestamps = new Map([
+      ["render-a", 6_000],
+      ["render-b", 3_000],
+      ["render-c", 0],
+    ]);
+    const fetcher = vi.fn(async (h: HostEntry) => [
+      {
+        ...img(`${h.id}.png`, timestamps.get(h.id)!),
+        size_bytes: 4_096,
+        metadata: { prompt: "shared", model: "flux", seed: 42 } as never,
+      },
+    ]);
+
+    const res = await fetchMergedGallery(hosts, fetcher);
+
+    expect(res.entries.map((entry) => entry.hostId)).toEqual([
+      "render-a",
+      "render-c",
+    ]);
+  });
 });
 
 describe("printKey", () => {
