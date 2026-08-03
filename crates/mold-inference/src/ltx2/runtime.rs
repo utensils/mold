@@ -2344,6 +2344,7 @@ fn render_real_distilled_av(
         fps: plan.frame_rate as f32,
     };
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
+    report_stage2_trained_span(stage2_video_latent_shape);
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning = maybe_load_stage_video_conditioning(
@@ -2748,6 +2749,7 @@ fn render_real_two_stage_av(
         fps: plan.frame_rate as f32,
     };
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
+    report_stage2_trained_span(stage2_video_latent_shape);
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning = maybe_load_stage_video_conditioning(
@@ -5722,6 +5724,31 @@ fn ltx_debug_timings_enabled() -> bool {
 // the memory authority, and no probe result is ever fed back into admission.
 
 const LTX2_VRAM_TARGET: &str = "mold::ltx2::vram";
+
+/// Report whether stage 2 is running a shape past the span the checkpoints'
+/// RoPE was trained on, and what tile layout would bring it back inside.
+///
+/// A render beyond that span still produces a picture, which is exactly why
+/// it needs saying out loud: the failure mode is degraded structure, not an
+/// error. Reported once per stage-2 pass so the operator can correlate it
+/// with the output.
+fn report_stage2_trained_span(shape: VideoLatentShape) {
+    let plan = crate::ltx2::tiling::plan_stage2_tiling(shape.frames, shape.height, shape.width);
+    if plan.is_untiled() {
+        return;
+    }
+    tracing::info!(
+        target: LTX2_VRAM_TARGET,
+        "[ltx2-vram] stage 2 latent {}x{} exceeds the {}-cell span these checkpoints were \
+         trained on; tiled refinement would use {}x{} tiles (not yet enabled — see \
+         https://github.com/utensils/mold/issues/673). Expect degraded structure at this size.",
+        shape.width,
+        shape.height,
+        crate::ltx2::tiling::TRAINED_SPATIAL_LATENT_SPAN,
+        plan.width.num_tiles,
+        plan.height.num_tiles,
+    );
+}
 
 thread_local! {
     /// The residency plan the most recent transformer build on this thread
