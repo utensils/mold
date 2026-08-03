@@ -2706,9 +2706,13 @@ button:disabled {
   }
 }
 
-.gallery-more {
-  width: 100%;
+.gallery-scroll-sentinel {
+  min-height: 1px;
   margin-top: 14px;
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  text-align: center;
 }
 
 .mobile-catalog {
