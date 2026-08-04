@@ -200,6 +200,10 @@ with prompt, model, seed, and generation metadata.
   block offloading, and LTX-2 spatial tiling (`--spatial-tile`) for stage-2
   refinement and VAE decode past the resolutions the checkpoints were
   trained on
+- LTX-2 output up to 4K by composition — stage 1 at half size, a learned x2
+  upsample, then a tiled stage-2 refinement — with a 1280x704 → 4096x2176
+  ladder and portrait transposes. Above 1080p is unqualified on consumer
+  GPUs; see [the resolution notes](https://utensils.io/mold/models/ltx2#resolution)
 - Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated
   REST/SSE clients
 

@@ -893,6 +893,54 @@ mod tests {
         assert!(acc.iter().all(|total| (total - 1.0).abs() < 1e-5));
     }
 
+    /// `Ltx2OutputRung` promises clients a stage-1 shape and a tile count for
+    /// every advertised rung, and `mold-core` cannot see the engine that has to
+    /// produce them. Pin the two together here: a rung that names arithmetic
+    /// the engine does not perform is a lie told at picker resolution.
+    #[test]
+    fn advertised_rungs_match_the_engines_own_arithmetic() {
+        use crate::ltx2::model::derive_stage1_render_shape;
+        use mold_core::validation::LTX2_OUTPUT_RUNGS;
+        use mold_core::Ltx2SpatialUpscale;
+
+        for rung in LTX2_OUTPUT_RUNGS {
+            let engine_stage1 = derive_stage1_render_shape(
+                rung.width,
+                rung.height,
+                25,
+                24,
+                Some(Ltx2SpatialUpscale::X2),
+                None,
+            );
+            assert_eq!(
+                rung.stage1_shape(),
+                (engine_stage1.width, engine_stage1.height),
+                "{} stage-1 shape must be what the engine renders",
+                rung.id
+            );
+
+            // Stage 2 refines the target's own latent grid.
+            let latent_width = rung.width as usize / LATENT_SPATIAL_STRIDE;
+            let latent_height = rung.height as usize / LATENT_SPATIAL_STRIDE;
+            let planned = plan_stage2_tiling(13, latent_height, latent_width);
+            assert_eq!(
+                rung.stage2_tiles(),
+                (
+                    planned.width.num_tiles as u32,
+                    planned.height.num_tiles as u32
+                ),
+                "{} tile counts must be what the tiler plans",
+                rung.id
+            );
+            assert_eq!(
+                rung.requires_tiled_stage2(),
+                planned != TileCountConfig::untiled(),
+                "{} must agree with the tiler on whether it needs tiling at all",
+                rung.id
+            );
+        }
+    }
+
     #[test]
     fn a_decode_that_fits_is_not_tiled_even_at_4k() {
         // 3840x2160 latent cells, but the caller says the workspace fits.

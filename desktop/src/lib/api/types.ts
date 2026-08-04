@@ -124,6 +124,13 @@ export interface ModelEntry {
   default_width: number;
   default_height: number;
   max_pixels?: number | null;
+  /**
+   * Per-axis ceiling, independent of `max_pixels` (additive). Per model,
+   * not per family: a checkpoint that ships the spatial upsampler composes
+   * stage 1 at half size plus a tiled stage-2 refinement and reaches twice
+   * the trained RoPE span; one that does not is capped at the span.
+   */
+  max_axis_pixels?: number | null;
   recommended_dimensions?: { width: number; height: number }[];
   dimension_alignment?: number | null;
   description: string;

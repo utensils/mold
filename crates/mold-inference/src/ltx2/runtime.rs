@@ -673,6 +673,7 @@ impl Ltx2RuntimeSession {
         progress: Option<&ProgressCallback>,
     ) -> Result<NativePreparedRun> {
         let prepare_total_start = Instant::now();
+        reject_oversized_axis_without_composition(plan)?;
         let mut stage1_shape = derive_stage1_render_shape(
             plan.width,
             plan.height,
@@ -1395,16 +1396,40 @@ const DISTILLED_STAGE1_SIGMAS_NO_TERMINAL: &[f32] = &[
 
 const DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.909375, 0.725, 0.421875];
 
+/// Refuse a resolution past the trained RoPE span on a pipeline that denoises
+/// the requested shape once.
+///
+/// `mold_core::validation` already refuses this at admission, gated on the same
+/// `refines_spatially` predicate. This is the backstop for the paths that reach
+/// the engine without it — a plan reconstructed from persisted state, or a
+/// pipeline forced after validation — because the failure it prevents is a
+/// finished video with degraded structure and no error anywhere.
+fn reject_oversized_axis_without_composition(plan: &Ltx2GeneratePlan) -> Result<()> {
+    let span = mold_core::validation::LTX2_MAX_AXIS_PIXELS;
+    let longest = plan.width.max(plan.height);
+    if longest <= span || pipeline_uses_two_stage_spatial_refinement(plan.pipeline) {
+        return Ok(());
+    }
+    bail!(
+        "{}x{} has a {longest}px axis, past the {span}px span these checkpoints were trained on, \
+         and the {:?} pipeline denoises the requested shape in one pass — there is no tiled \
+         refinement to renormalize positions. Use a checkpoint that ships the spatial upsampler, \
+         or render at or below {span}px on the long edge.",
+        plan.width,
+        plan.height,
+        plan.pipeline,
+    );
+}
+
+/// Whether this pipeline renders stage 1 reduced and refines the upsampled
+/// result.
+///
+/// Delegates to `Ltx2PipelineMode::refines_spatially` rather than restating the
+/// set: `mold_core::validation` admits resolutions past the trained RoPE span
+/// on exactly this predicate, and a copy that drifted would admit a shape this
+/// function then renders in one out-of-distribution pass.
 fn pipeline_uses_two_stage_spatial_refinement(pipeline: PipelineKind) -> bool {
-    matches!(
-        pipeline,
-        PipelineKind::Distilled
-            | PipelineKind::TwoStage
-            | PipelineKind::TwoStageHq
-            | PipelineKind::IcLora
-            | PipelineKind::Keyframe
-            | PipelineKind::A2Vid
-    )
+    pipeline.wire_mode().refines_spatially()
 }
 
 fn effective_native_guidance_scale(plan: &Ltx2GeneratePlan) -> f64 {
@@ -3186,13 +3211,22 @@ fn plan_stage2_tiles(shape: VideoLatentShape) -> Result<Vec<Tile>> {
             TRAINED_SPATIAL_LATENT_SPAN,
         );
     } else if past_trained_span {
-        tracing::warn!(
-            target: LTX2_VRAM_TARGET,
-            "[ltx2-vram] stage 2 latent {}x{} exceeds the {}-cell span these checkpoints were \
-             trained on and tiling is disabled; expect degraded structure at this size",
+        // Refusing beats rendering. The failure mode here is not an error but
+        // a plausible-looking video with degraded large-scale structure, and a
+        // user who turned tiling off to save time would have no way to tell
+        // that is what they got. Nothing that was renderable before this
+        // ceiling rose can reach this branch: `LTX2_MAX_AXIS_PIXELS` did not
+        // admit an oversized axis at all.
+        bail!(
+            "stage 2 has to refine a {}x{} latent, past the {}-cell span these checkpoints were \
+             trained on, but spatial tiling is disabled. Positions past the span are out of \
+             distribution and the render would be quietly degraded rather than fail. Drop \
+             --spatial-tile off (or MOLD_LTX2_SPATIAL_TILE) to let auto-tiling handle it, or \
+             render at or below {}px on the long edge.",
             shape.width,
             shape.height,
             TRAINED_SPATIAL_LATENT_SPAN,
+            mold_core::validation::LTX2_MAX_AXIS_PIXELS,
         );
     }
     Ok(tiles)

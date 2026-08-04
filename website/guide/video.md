@@ -19,18 +19,35 @@ mold run ltx-2-19b-distilled:fp8 "a cat walks through autumn leaves" --frames 97
 
 ## Resolution and spatial tiling
 
-Both axes must stay at or below 2048px: LTX-2 normalizes RoPE pixel positions
-by that span, so a longer edge is outside the trained range even when the
-frame's area is small. Past that span, stage-2 refinement and the VAE decode
-run over overlapping spatial tiles instead of the whole frame, each tile
-denoised as a sequence starting at zero and recombined with a trapezoidal
-blend.
+LTX-2 normalizes RoPE pixel positions by a 2048px span, so a longer edge is
+outside the trained range even when the frame's area is small. A checkpoint
+that ships the spatial upsampler reaches past it by **composing**: stage 1
+renders at half the requested size, the learned upsampler doubles it, and
+stage 2 refines the result over tiles each brought back inside the span. That
+puts the ceiling at 4096px on the long edge — exactly where a single halving
+stops landing stage 1 inside the span — and gives an output ladder of
+1280x704, 1920x1088, 2560x1408, 3840x2176 and 4096x2176. A checkpoint that
+renders in one pass stays capped at 2048px and 1920x1088.
+
+There is nothing to assemble by hand: choose the output size and mold runs the
+composition. `/api/models` advertises the per-model `max_pixels`,
+`max_axis_pixels` and `recommended_dimensions`, so a picker never offers a rung
+the selected checkpoint would reject.
+
+**Above 1080p is unqualified on consumer hardware.** Each stage-2 tile is a
+full denoise pass, so 4K runs four of them on top of a stage 1 that is itself a
+1080p render. Upstream's own table puts 4K at 48–80 GB — for a different
+pipeline, so it is a reference point rather than mold's requirement. A rung
+that does not fit fails with an out-of-memory error; mold does not silently
+render something smaller. See
+[LTX-2 → Resolution](/models/ltx2#resolution) for the full table and caveats.
 
 `--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` reads) takes
 `auto` — the default, which tiles only where it buys something — `off`, or an
-explicit `<px>` / `<px>:<overlap>` in multiples of 32. Because `auto` cannot
-engage inside the trained span, no resolution that renders today is affected.
-See [LTX-2 → Spatial tiling](/models/ltx2#spatial-tiling-spatial-tile).
+explicit `<px>` / `<px>:<overlap>` in multiples of 32. `auto` engages exactly
+at the span and no earlier, so every resolution up to 1080p renders as it
+always has; `off` past the span is refused rather than quietly degraded. See
+[LTX-2 → Spatial tiling](/models/ltx2#spatial-tiling-spatial-tile).
 
 ## Multi-prompt scripts (v2)
 

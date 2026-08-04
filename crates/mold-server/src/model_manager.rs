@@ -5,7 +5,7 @@ use std::sync::Arc;
 use mold_core::{
     build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentOption,
     ModelComponentStatus, ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended,
-    ModelPaths, RecommendedDimensions,
+    ModelPaths,
 };
 #[cfg(test)]
 use mold_inference::device::ActivationFamily;
@@ -589,6 +589,7 @@ fn installed_catalog_models(
                 _ => sidecar.name.clone(),
             });
 
+        let resolution = mold_core::catalog::resolution_defaults(&sidecar.id, &sidecar.family);
         out.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
@@ -609,22 +610,14 @@ fn installed_catalog_models(
                     &sidecar.family,
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
-                max_pixels: Some(mold_core::validation::max_pixels_for_family(Some(
-                    &sidecar.family,
-                ))),
-                recommended_dimensions: mold_core::validation::recommended_dimensions(
-                    &sidecar.family,
-                )
-                .iter()
-                .map(|&(width, height)| RecommendedDimensions { width, height })
-                .collect(),
-                dimension_alignment: Some(
-                    if matches!(sidecar.family.as_str(), "ltx-video" | "ltx2") {
-                        32
-                    } else {
-                        16
-                    },
-                ),
+                // Per model, through the same helper the manifest catalog
+                // uses. An installed `cv:` / `hf:` checkpoint has no spatial
+                // upsampler, so it advertises the single-pass ceiling and
+                // never offers a composed rung it would then reject.
+                max_pixels: resolution.max_pixels,
+                max_axis_pixels: resolution.max_axis_pixels,
+                recommended_dimensions: resolution.recommended_dimensions,
+                dimension_alignment: resolution.dimension_alignment,
                 description,
             },
             info: ModelInfo {

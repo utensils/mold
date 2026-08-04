@@ -601,10 +601,22 @@ pub(crate) fn validate_and_normalize_chain_family(
         .clone()
         .or_else(|| manifest.map(|model| model.family.clone()))
         .unwrap_or_default();
-    mold_core::validate_generation_dimensions(
+    // A clip is one generation, so the composed ceiling applies here exactly
+    // as it does to a single shot. `resolved_model.spatial_upscaler` is the
+    // config-supplied override; the shared resolver reads the manifest, so a
+    // model that only has the component through config keeps the conservative
+    // single-pass ceiling rather than being admitted on a path the engine
+    // might not take.
+    let composition = if family == "ltx2" {
+        mold_core::validation::ltx2_spatial_composition(&req.model, None)
+    } else {
+        mold_core::validation::Ltx2SpatialComposition::SinglePass
+    };
+    mold_core::validate_generation_dimensions_composed(
         req.width,
         req.height,
         (!family.is_empty()).then_some(family.as_str()),
+        composition,
     )
     .map_err(ApiError::validation)?;
 

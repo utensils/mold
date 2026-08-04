@@ -1,21 +1,50 @@
 use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, visible_manifests};
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended, RecommendedDimensions};
 
-fn resolution_defaults(family: &str) -> (Option<u64>, Vec<RecommendedDimensions>, Option<u32>) {
+/// The resolution contract `/api/models` advertises for one model.
+pub struct ResolutionDefaults {
+    pub max_pixels: Option<u64>,
+    pub max_axis_pixels: Option<u32>,
+    pub recommended_dimensions: Vec<RecommendedDimensions>,
+    pub dimension_alignment: Option<u32>,
+}
+
+/// Build the advertised resolution contract for a specific model.
+///
+/// Per model, not per family: an LTX-2 checkpoint that ships the spatial
+/// upsampler renders stage 1 halved and refines it over tiles, which is what
+/// lets it hold an axis past the trained RoPE span. One that does not cannot,
+/// and offering it the composed rungs would advertise a size it rejects.
+pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
     // Route through the validator's own helpers rather than restating the
     // rules: `/api/models` is the single source clients read, so an
     // advertisement that disagrees with admission is a rejected request the
     // user was told would work.
-    (
-        Some(crate::validation::max_pixels_for_family(Some(family))),
-        crate::validation::recommended_dimensions(family)
-            .iter()
-            .map(|&(width, height)| RecommendedDimensions { width, height })
-            .collect(),
-        Some(crate::validation::dimension_alignment_for_family(Some(
+    let composition = if family == "ltx2" {
+        crate::validation::ltx2_spatial_composition(model, None)
+    } else {
+        crate::validation::Ltx2SpatialComposition::SinglePass
+    };
+    ResolutionDefaults {
+        max_pixels: Some(crate::validation::max_pixels_for_family_composed(
+            Some(family),
+            composition,
+        )),
+        max_axis_pixels: crate::validation::max_axis_pixels_for_family_composed(
+            Some(family),
+            composition,
+        ),
+        recommended_dimensions: crate::validation::recommended_dimensions_composed(
+            family,
+            composition,
+        )
+        .into_iter()
+        .map(|(width, height)| RecommendedDimensions { width, height })
+        .collect(),
+        dimension_alignment: Some(crate::validation::dimension_alignment_for_family(Some(
             family,
         ))),
-    )
+    }
 }
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
@@ -37,8 +66,7 @@ pub fn build_model_catalog(
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
 
     for manifest in visible_manifests() {
-        let (max_pixels, recommended_dimensions, dimension_alignment) =
-            resolution_defaults(&manifest.family);
+        let resolution = resolution_defaults(&manifest.name, &manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
@@ -69,9 +97,10 @@ pub fn build_model_catalog(
                     &manifest.family,
                 ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
-                max_pixels,
-                recommended_dimensions,
-                dimension_alignment,
+                max_pixels: resolution.max_pixels,
+                max_axis_pixels: resolution.max_axis_pixels,
+                recommended_dimensions: resolution.recommended_dimensions,
+                dimension_alignment: resolution.dimension_alignment,
                 description: model_cfg
                     .description
                     .unwrap_or_else(|| manifest.name.clone()),
@@ -126,8 +155,7 @@ pub fn build_model_catalog(
             .family
             .clone()
             .unwrap_or_else(|| "flux".to_string());
-        let (max_pixels, recommended_dimensions, dimension_alignment) =
-            resolution_defaults(&family);
+        let resolution = resolution_defaults(name, &family);
         let is_ltx2 = family == "ltx2";
         let sequence_capable = chain_capable_family(&family);
 
@@ -149,9 +177,10 @@ pub fn build_model_catalog(
                 max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(&family),
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
-                max_pixels,
-                recommended_dimensions,
-                dimension_alignment,
+                max_pixels: resolution.max_pixels,
+                max_axis_pixels: resolution.max_axis_pixels,
+                recommended_dimensions: resolution.recommended_dimensions,
+                dimension_alignment: resolution.dimension_alignment,
                 description: model_cfg
                     .description
                     .clone()
@@ -280,10 +309,19 @@ mod tests {
             Some(crate::validation::LTX2_MAX_FRAMES_ABSOLUTE)
         );
         assert_eq!(ltx2.defaults.frame_step, Some(8));
+        // Every manifest LTX-2 checkpoint ships the spatial upsampler, so it
+        // composes: stage 1 halved, one x2 rung, tiled stage-2 refinement.
+        // Its advertised ceiling is the composed one, not the family's
+        // single-pass value.
         assert_eq!(
             ltx2.defaults.max_pixels,
-            Some(crate::validation::LTX2_MAX_PIXELS),
-            "LTX-2 advertises its own raised ceiling, not the shared default"
+            Some(crate::validation::LTX2_COMPOSED_MAX_PIXELS),
+            "a composing LTX-2 checkpoint advertises the composed ceiling"
+        );
+        assert_eq!(
+            ltx2.defaults.max_axis_pixels,
+            Some(crate::validation::LTX2_COMPOSED_MAX_AXIS_PIXELS),
+            "the per-axis span is advertised separately from the pixel budget"
         );
         assert_eq!(ltx2.defaults.dimension_alignment, Some(32));
         assert!(
@@ -293,6 +331,30 @@ mod tests {
                 .any(|size| size.width == 1216 && size.height == 704),
             "LTX-2's default landscape bucket must be advertised to every client",
         );
+        assert!(
+            ltx2.defaults
+                .recommended_dimensions
+                .iter()
+                .any(|size| size.width == 3840 && size.height == 2176),
+            "a composing checkpoint must advertise the 4K UHD rung",
+        );
+        // Every advertised bucket has to be admissible for this exact model,
+        // or the picker offers a size the server rejects.
+        for size in &ltx2.defaults.recommended_dimensions {
+            assert!(
+                crate::validation::validate_generation_dimensions_composed(
+                    size.width,
+                    size.height,
+                    Some("ltx2"),
+                    crate::validation::ltx2_spatial_composition(&ltx2.info.name, None),
+                )
+                .is_ok(),
+                "{}x{} is advertised for {} but not admissible",
+                size.width,
+                size.height,
+                ltx2.info.name
+            );
+        }
 
         let ltx_video = catalog
             .iter()

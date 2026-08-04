@@ -1,7 +1,6 @@
 use image::{imageops, Rgb, RgbImage};
+use mold_core::validation::LTX2_SPATIAL_LATENT_STRIDE;
 use mold_core::{Ltx2SpatialUpscale, Ltx2TemporalUpscale};
-
-const LTX2_SPATIAL_LATENT_STRIDE: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stage1RenderShape {

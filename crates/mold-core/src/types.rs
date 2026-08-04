@@ -588,6 +588,29 @@ impl Ltx2PipelineMode {
     pub const fn is_audio_only(self) -> bool {
         matches!(self, Self::T2a)
     }
+
+    /// Whether this pipeline renders stage 1 at a reduced size and refines the
+    /// upsampled result, rather than denoising the requested shape once.
+    ///
+    /// This is what decides whether a resolution past the trained RoPE span is
+    /// reachable at all, so admission (`mold_core::validation`) and the engine
+    /// (`ltx2::runtime::pipeline_uses_two_stage_spatial_refinement`) must agree
+    /// on it exactly — the engine delegates here rather than restating the set.
+    ///
+    /// `LipDub` is deliberately absent: it renders through the two-stage
+    /// driver but is pinned to the reference clip's resolution, so it never
+    /// composes a larger output. `Retake` and `OneStage` denoise once.
+    pub const fn refines_spatially(self) -> bool {
+        matches!(
+            self,
+            Self::Distilled
+                | Self::TwoStage
+                | Self::TwoStageHq
+                | Self::IcLora
+                | Self::Keyframe
+                | Self::A2Vid
+        )
+    }
 }
 
 impl std::fmt::Display for Ltx2PipelineMode {
@@ -1213,6 +1236,17 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 1800000)]
     pub max_pixels: Option<u64>,
+    /// Server-authoritative per-axis ceiling, independent of `max_pixels`
+    /// (additive; absent where the family has no axis limit).
+    ///
+    /// LTX-2 normalizes RoPE pixel positions by the trained span, so a long
+    /// edge past it is out of distribution however small the frame is. The
+    /// value is per model, not per family: a checkpoint that ships the spatial
+    /// upsampler composes stage 1 at half size plus a tiled stage-2
+    /// refinement and reaches twice the span, one that does not cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 2048)]
+    pub max_axis_pixels: Option<u32>,
     /// Runnable, family-appropriate buckets used by every Studio surface.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommended_dimensions: Vec<RecommendedDimensions>,

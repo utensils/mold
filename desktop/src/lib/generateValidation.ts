@@ -3,8 +3,8 @@ import type { GenerateForm } from "./generateForm";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
 import {
   dimensionAlignmentForFamily,
-  maxAxisPixelsForFamily,
-  maxPixelsForFamily,
+  maxAxisPixelsForModel,
+  maxPixelsForModel,
   type ModelResolutionContract,
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
@@ -98,11 +98,13 @@ export function resolutionValidationError(
   if (width % alignment !== 0 || height % alignment !== 0) {
     return `Width and height must be multiples of ${alignment}.`;
   }
-  const axisLimit = maxAxisPixelsForFamily(contract?.family);
+  // Per model, not per family: a checkpoint that ships the spatial upsampler
+  // composes past the trained span, one that does not cannot.
+  const axisLimit = maxAxisPixelsForModel(contract);
   if (axisLimit && Math.max(width, height) > axisLimit) {
-    return `${width} × ${height} exceeds the ${axisLimit}px span this model was trained on. Keep the long edge at or below ${axisLimit}px.`;
+    return `${width} × ${height} exceeds the ${axisLimit}px span this model can hold. Keep the long edge at or below ${axisLimit}px.`;
   }
-  const maxPixels = contract?.max_pixels ?? maxPixelsForFamily(contract?.family);
+  const maxPixels = maxPixelsForModel(contract);
   const megapixels = (width * height) / 1_000_000;
   return width * height <= maxPixels
     ? null
