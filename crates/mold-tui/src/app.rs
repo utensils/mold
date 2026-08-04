@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
+    validation::{MAX_STG_BLOCKS, MAX_STG_BLOCK_INDEX},
     Config, GenerateResponse, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
     ModelInfoExtended, OutputFormat, Scheduler, ServerStatus, SseProgressEvent,
 };
@@ -839,9 +840,6 @@ fn adjust_optional_u32(current: Option<u32>, delta: i32, max: u32) -> Option<u32
 }
 
 fn parse_stg_blocks_input(input: &str) -> std::result::Result<Option<Vec<u32>>, String> {
-    const MAX_STG_BLOCK_INDEX: u32 = 64;
-    const MAX_STG_BLOCKS: usize = 8;
-
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Ok(None);
