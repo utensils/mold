@@ -42,6 +42,7 @@ impl PipelineKind {
             Self::A2Vid => Mode::A2Vid,
             Self::Retake => Mode::Retake,
             Self::LipDub => Mode::LipDub,
+            Self::T2a => Mode::T2a,
         }
     }
 

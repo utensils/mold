@@ -2051,7 +2051,10 @@ function validateSubmit(): boolean {
     currentModel.value,
     form.state.value.pipeline,
   );
-  if (maxAxis && Math.max(form.state.value.width, form.state.value.height) > maxAxis) {
+  if (
+    maxAxis &&
+    Math.max(form.state.value.width, form.state.value.height) > maxAxis
+  ) {
     composerError.value = `${form.state.value.width} × ${form.state.value.height} exceeds the ${maxAxis}px span this model can hold. Keep the long edge at or below ${maxAxis}px.`;
     return false;
   }
