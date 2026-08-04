@@ -2010,6 +2010,33 @@ mod tests {
             .contains("upscale_model"));
     }
 
+    /// ControlNet is refused for `t2a` by the family gate, not by the
+    /// pipeline's own conditioning list. A ControlNet pair requires an SD1.5
+    /// family and `pipeline` requires `ltx2`, so the two can never both be
+    /// satisfied — the audio-only runtime cannot be reached with a control
+    /// model loaded. Pinned here because the t2a rejection list reads as
+    /// though it were the only guard, and a future refactor that relaxed
+    /// `require_controlnet_capable_family` would silently open that door.
+    #[test]
+    fn ltx2_t2a_cannot_carry_controlnet_inputs() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = 0.8;
+
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("ControlNet"), "got: {err}");
+
+        // And the mirror case: a control model without an image is refused on
+        // the same family grounds rather than reaching the audio pipeline.
+        req.control_image = None;
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("ControlNet"), "got: {err}");
+    }
+
     #[test]
     fn ltx2_t2a_rejects_enable_audio_false() {
         let mut req = valid_req();
