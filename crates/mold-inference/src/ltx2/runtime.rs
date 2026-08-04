@@ -42,6 +42,10 @@ use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
+use super::tiling::{
+    create_tiles, plan_spatial_decode_tiling, plan_stage2_tiling_with_policy, SpatialTilePolicy,
+    Tile, TRAINED_SPATIAL_LATENT_SPAN,
+};
 use crate::adaptive_offload::{
     plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
 };
@@ -117,6 +121,16 @@ struct VideoTokenAppendCondition {
     tokens: Tensor,
     positions: Tensor,
     strength: f64,
+    /// The `(frames, height, width)` latent grid these flattened tokens came
+    /// from. Only tiled stage-2 refinement needs it — a tile has to slice this
+    /// condition to its own spatial region, and a flat token run cannot say
+    /// which of its entries belong to which column.
+    latent_grid: (usize, usize, usize),
+    /// How much smaller this condition's spatial grid is than the generated
+    /// one. IC-LoRA reference video is encoded at `1/df` resolution, so a tile
+    /// covering generated cells `[a, b)` covers reference cells `[a/df, b/df)`
+    /// (`hdr_ic_lora.py:531-537`).
+    spatial_downscale_factor: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1869,6 +1883,8 @@ fn append_condition_from_video_latents(
         tokens,
         positions,
         strength,
+        latent_grid: (latent_shape.frames, latent_shape.height, latent_shape.width),
+        spatial_downscale_factor: spatial_position_scale,
     })
 }
 
@@ -2740,7 +2756,6 @@ fn render_real_distilled_av(
         fps: plan.frame_rate as f32,
     };
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
-    report_stage2_trained_span(stage2_video_latent_shape);
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning = maybe_load_stage_video_conditioning(
@@ -2763,19 +2778,9 @@ fn render_real_distilled_av(
         drop(debug_vae);
         device.synchronize()?;
     }
-    let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
-    let stage2_video_noise = seeded_randn(
-        plan.seed ^ 0x5354_4147_4532_4c54,
-        &[
-            stage2_video_latent_shape.batch,
-            stage2_video_latent_shape.channels,
-            stage2_video_latent_shape.frames,
-            stage2_video_latent_shape.height,
-            stage2_video_latent_shape.width,
-        ],
-        device,
-        DType::F32,
-    )?;
+    let stage2_tiles = plan_stage2_tiles(stage2_video_latent_shape)?;
+    let stage2_is_tiled = stage2_tiles.len() > 1;
+    let stage2_video_noise_seed = plan.seed ^ 0x5354_4147_4532_4c54;
     let stage2_audio_noise = match audio_shape {
         Some(audio_shape) => Some(seeded_randn(
             plan.seed ^ 0x4155_4449_3254_4c58,
@@ -2791,11 +2796,7 @@ fn render_real_distilled_av(
         None => None,
     };
     let stage2_sigma = DISTILLED_STAGE2_SIGMAS_NO_TERMINAL[0];
-    let stage2_video_start = mix_clean_latents_with_noise(
-        &stage2_clean_video_latents.to_dtype(DType::F32)?,
-        &stage2_video_noise,
-        stage2_sigma,
-    )?;
+    let stage2_clean_video_latents_f32 = stage2_clean_video_latents.to_dtype(DType::F32)?;
     let stage2_audio_start = match (stage1_audio_latents.as_ref(), stage2_audio_noise.as_ref()) {
         (Some(stage1_audio_latents), Some(stage2_audio_noise)) => {
             Some(mix_clean_latents_with_noise(
@@ -2806,11 +2807,27 @@ fn render_real_distilled_av(
         }
         _ => None,
     };
+    let stage2_audio = if stage2_is_tiled {
+        Stage2AudioInputs::video_only(audio_shape.is_some())
+    } else {
+        Stage2AudioInputs {
+            shape: audio_shape,
+            start: stage2_audio_start.as_ref(),
+            noise: stage2_audio_noise.as_ref(),
+            positions: prompt_inputs.audio_positions.as_ref(),
+            context: prompt_inputs.audio_context.as_ref(),
+            alt_context: prompt_inputs.alt_audio_context.as_ref(),
+            ..Stage2AudioInputs::default()
+        }
+    };
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(plan, stage2_pixel_shape);
+    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(
+        plan,
+        stage2_forward_pixel_shape(&stage2_tiles, stage2_pixel_shape),
+    );
     let stage2_loras = stage_lora_stack(plan, 1)?;
     let stage2_transformer = load_ltx2_av_transformer_with_loras(
         plan,
@@ -2843,40 +2860,66 @@ fn render_real_distilled_av(
             )
         },
         |transformer| {
-            run_real_distilled_stage(
-                transformer,
-                stage2_video_latent_shape,
-                audio_shape,
-                &stage2_video_start,
-                &stage2_video_conditioning,
-                None,
-                stage2_audio_start.as_ref(),
-                None,
-                &StageAudioConditioning::default(),
-                &stage2_video_positions,
-                prompt_inputs.audio_positions.as_ref(),
-                &prompt_inputs.cond_context,
-                None,
-                prompt_inputs.alt_context.as_ref(),
-                prompt_inputs.audio_context.as_ref(),
-                None,
-                prompt_inputs.alt_audio_context.as_ref(),
-                cond_mask,
-                None,
-                alt_mask,
-                None,
-                stage_guidance_scale(plan, 1)?,
-                DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
-                stage_sampler_mode(plan, 1)?,
-                Some(&stage2_video_noise),
-                stage2_audio_noise.as_ref(),
-                None,
-                None,
-                Some("distilled.stage2"),
-                debug_enabled.then_some("stage2"),
-                progress,
-                cancellation,
-            )
+            let mut refined_audio = None;
+            // The distilled pipeline appends no audio reference at either
+            // stage; the two-stage path is where lip-dub's carry lives.
+            let stage2_audio_conditioning = StageAudioConditioning::default();
+            let video = TiledStage2Pass {
+                tiles: &stage2_tiles,
+                full_shape: stage2_video_latent_shape,
+                clean_latents: &stage2_clean_video_latents_f32,
+                noise_seed: stage2_video_noise_seed,
+                sigma: stage2_sigma,
+                fps: plan.frame_rate as f32,
+                conditioning: &stage2_video_conditioning,
+                device,
+            }
+            .run(|request| {
+                let (video, audio) = run_real_distilled_stage(
+                    transformer,
+                    request.latent_shape,
+                    stage2_audio.shape,
+                    &request.start_latents,
+                    &request.conditioning,
+                    None,
+                    stage2_audio.start,
+                    None,
+                    &stage2_audio_conditioning,
+                    &request.positions,
+                    stage2_audio.positions,
+                    &prompt_inputs.cond_context,
+                    None,
+                    prompt_inputs.alt_context.as_ref(),
+                    stage2_audio.context,
+                    stage2_audio.uncond_context,
+                    stage2_audio.alt_context,
+                    cond_mask,
+                    None,
+                    alt_mask,
+                    None,
+                    stage_guidance_scale(plan, 1)?,
+                    DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
+                    stage_sampler_mode(plan, 1)?,
+                    Some(&request.sampler_noise),
+                    stage2_audio.noise,
+                    None,
+                    stage2_audio.denoise_mask,
+                    Some("distilled.stage2"),
+                    debug_enabled.then_some(stage2_tile_debug_label(request.index)),
+                    progress,
+                    cancellation,
+                )?;
+                refined_audio = audio;
+                Ok(video)
+            })?;
+            Ok((
+                video,
+                stage2_carried_audio(
+                    refined_audio,
+                    stage1_audio_latents.as_ref(),
+                    stage2_is_tiled,
+                ),
+            ))
         },
         progress,
     )?;
@@ -2929,11 +2972,10 @@ fn render_real_distilled_av(
     drop(latents);
     drop(audio_latents);
     drop(stage2_audio_start);
-    drop(stage2_video_start);
     drop(stage2_audio_noise);
-    drop(stage2_video_noise);
-    drop(stage2_video_positions);
+    drop(stage2_clean_video_latents_f32);
     drop(stage2_clean_video_latents);
+    drop(stage2_tiles);
     drop(stage1_audio_latents);
     drop(stage1_video_latents);
     drop(stage1_audio_noise);
@@ -2957,6 +2999,475 @@ fn render_real_distilled_av(
         has_audio,
         audio_sample_rate,
         audio_channels,
+    })
+}
+
+// ── Tiled stage-2 refinement ─────────────────────────────────────────────────
+//
+// Past 2048 px on an axis the checkpoints' RoPE runs outside the span it was
+// trained on: the picture still renders, it just stops being structurally
+// sound. Upstream's answer is to refine in overlapping latent tiles, each
+// denoised at a shape the model handles, with positions renormalized so every
+// tile looks like a sequence starting at zero
+// (`hdr_ic_lora.py:493-563`). The tile arithmetic lives in `tiling.rs`; this is
+// the execution.
+//
+// Everything here is inert unless `tiling::plan_stage2_tiling_with_policy`
+// returns more than one tile, which `Auto` can only do past the trained span —
+// a resolution `mold_core::validation` does not admit today.
+
+/// Everything stage 2 feeds the audio branch.
+///
+/// A tiled stage 2 is video-only. That is upstream's behaviour, not a
+/// simplification of it — `hdr_ic_lora.py:504-507` states it outright:
+///
+/// > Each tile calls `stage_2.run()` with a tile-sized `ModalitySpec` for
+/// > video only (audio is omitted entirely for HDR).
+///
+/// The reason holds independently: a spatial tile carries no statement about
+/// an audio track, so refining one once per tile would denoise the same track
+/// N times with no defensible way to recombine the results. Stage 1's audio is
+/// carried through instead.
+///
+/// The branch is switched off as a unit — shape, latents, noise, positions,
+/// and context together, never half of it. Half of it is a real failure, not a
+/// tidiness argument: a static input batch carrying audio context for a
+/// forward pass with no audio latents makes the transformer reject the step
+/// with "audio hidden states, static inputs, sigma, and timesteps must be
+/// provided together".
+#[derive(Default)]
+struct Stage2AudioInputs<'a> {
+    shape: Option<AudioLatentShape>,
+    start: Option<&'a Tensor>,
+    noise: Option<&'a Tensor>,
+    positions: Option<&'a Tensor>,
+    context: Option<&'a Tensor>,
+    uncond_context: Option<&'a Tensor>,
+    alt_context: Option<&'a Tensor>,
+    denoise_mask: Option<&'a Tensor>,
+}
+
+impl Stage2AudioInputs<'_> {
+    fn video_only(had_audio: bool) -> Self {
+        if had_audio {
+            tracing::info!(
+                target: LTX2_VRAM_TARGET,
+                "[ltx2-vram] tiled stage 2 refines video only; the audio track from stage 1 is \
+                 carried through unrefined"
+            );
+        }
+        Self::default()
+    }
+}
+
+/// Pair [`Stage2AudioInputs`]: what actually leaves stage 2.
+fn stage2_carried_audio(
+    refined: Option<Tensor>,
+    stage1_audio: Option<&Tensor>,
+    tiled: bool,
+) -> Option<Tensor> {
+    if tiled {
+        return stage1_audio.cloned();
+    }
+    refined
+}
+
+/// Per-tile debug prefix, so `MOLD_LTX_DEBUG` traces stay attributable when a
+/// stage runs more than once.
+fn stage2_tile_debug_label(index: usize) -> &'static str {
+    const LABELS: [&str; 8] = [
+        "stage2",
+        "stage2.t1",
+        "stage2.t2",
+        "stage2.t3",
+        "stage2.t4",
+        "stage2.t5",
+        "stage2.t6",
+        "stage2.t7",
+    ];
+    LABELS[index.min(LABELS.len() - 1)]
+}
+
+/// Resolve `MOLD_LTX2_SPATIAL_TILE` (the `--spatial-tile` knob).
+fn spatial_tile_policy() -> Result<SpatialTilePolicy> {
+    match crate::runtime_env::value("MOLD_LTX2_SPATIAL_TILE") {
+        Some(value) => SpatialTilePolicy::parse(&value)
+            .context("invalid MOLD_LTX2_SPATIAL_TILE / --spatial-tile value"),
+        None => Ok(SpatialTilePolicy::Auto),
+    }
+}
+
+/// Resolve the stage-2 tile layout for `shape` and report what it decided.
+///
+/// Reported once per stage-2 pass, always: at these sizes the failure mode is
+/// degraded structure rather than an error, so which of the two paths ran has
+/// to be correlatable with the output after the fact.
+fn plan_stage2_tiles(shape: VideoLatentShape) -> Result<Vec<Tile>> {
+    let policy = spatial_tile_policy()?;
+    let config = plan_stage2_tiling_with_policy(shape.frames, shape.height, shape.width, policy);
+    let tiles = create_tiles(shape.frames, shape.height, shape.width, config)?;
+    let past_trained_span = shape.height.max(shape.width) > TRAINED_SPATIAL_LATENT_SPAN;
+    if tiles.len() > 1 {
+        tracing::info!(
+            target: LTX2_VRAM_TARGET,
+            "[ltx2-vram] stage 2 refining latent {}x{} as {} tiles ({}x{}), each denoised \
+             inside the {}-cell span these checkpoints were trained on",
+            shape.width,
+            shape.height,
+            tiles.len(),
+            config.width.num_tiles,
+            config.height.num_tiles,
+            TRAINED_SPATIAL_LATENT_SPAN,
+        );
+    } else if past_trained_span {
+        tracing::warn!(
+            target: LTX2_VRAM_TARGET,
+            "[ltx2-vram] stage 2 latent {}x{} exceeds the {}-cell span these checkpoints were \
+             trained on and tiling is disabled; expect degraded structure at this size",
+            shape.width,
+            shape.height,
+            TRAINED_SPATIAL_LATENT_SPAN,
+        );
+    }
+    Ok(tiles)
+}
+
+/// The shape stage 2 actually pushes through the transformer in one pass.
+///
+/// Residency planning budgets activations from the stage shape, so a tiled
+/// refinement has to declare its largest *tile* rather than the whole frame —
+/// otherwise the plan reserves for a forward pass that never happens and
+/// streams blocks it had room to keep. A single full-cover tile returns the
+/// full shape unchanged.
+fn stage2_forward_pixel_shape(tiles: &[Tile], full: VideoPixelShape) -> VideoPixelShape {
+    let mut largest = full;
+    let mut largest_tokens = 0usize;
+    for tile in tiles {
+        let tokens = tile.token_count();
+        if tokens <= largest_tokens {
+            continue;
+        }
+        largest_tokens = tokens;
+        let (width, height, frames) = tile.pixel_shape();
+        largest = VideoPixelShape {
+            batch: full.batch,
+            frames,
+            height,
+            width,
+            fps: full.fps,
+        };
+    }
+    largest
+}
+
+/// One tile's fully-prepared stage-2 inputs, handed to the denoiser.
+struct Stage2TileRequest {
+    /// Enumeration index, which is also what seeds this tile's noise.
+    index: usize,
+    latent_shape: VideoLatentShape,
+    /// Noised tile input, `[B, C, f, h, w]`.
+    start_latents: Tensor,
+    /// The same noise, kept for the sampler's stochastic steps.
+    sampler_noise: Tensor,
+    /// Positions built at the tile's own pixel shape, so they start at zero.
+    positions: Tensor,
+    conditioning: StageVideoConditioning,
+}
+
+/// Everything a tiled stage-2 pass needs that does not vary per tile.
+struct TiledStage2Pass<'a> {
+    tiles: &'a [Tile],
+    full_shape: VideoLatentShape,
+    /// The stage-1 upscaled latent, `[B, C, F, H, W]`, f32.
+    clean_latents: &'a Tensor,
+    /// Base seed for per-tile noise; tile `i` uses `seed + i`
+    /// (`hdr_ic_lora.py:547`).
+    noise_seed: u64,
+    /// Stage-2's first sigma — how much noise the refinement starts from.
+    sigma: f32,
+    fps: f32,
+    conditioning: &'a StageVideoConditioning,
+    device: &'a candle_core::Device,
+}
+
+impl TiledStage2Pass<'_> {
+    /// Denoise every tile and recombine them with the trapezoidal window.
+    ///
+    /// A single full-cover tile short-circuits to its own result: an untiled
+    /// refinement must stay bit-identical to what it was before tiling
+    /// existed, and an accumulate-then-unpatchify round trip is not something
+    /// to take on trust at that boundary.
+    fn run<F>(&self, mut denoise_tile: F) -> Result<Tensor>
+    where
+        F: FnMut(Stage2TileRequest) -> Result<Tensor>,
+    {
+        let patchifier = VideoLatentPatchifier::new(1);
+        let mut accumulated: Option<Tensor> = None;
+
+        for (index, tile) in self.tiles.iter().enumerate() {
+            let request = self.prepare_tile(index, tile)?;
+            let is_only_tile = self.tiles.len() == 1;
+            let denoised = denoise_tile(request)?;
+            if is_only_tile {
+                return Ok(denoised);
+            }
+
+            let tokens = patchifier.patchify(&denoised)?;
+            let (_, token_count, _) = tokens.dims3()?;
+            let window = Tensor::from_vec(tile.blend_window(), (1, token_count, 1), self.device)?
+                .to_dtype(tokens.dtype())?;
+            let weighted = tokens.broadcast_mul(&window)?;
+
+            let indices = tile.token_indices(self.full_shape.height, self.full_shape.width);
+            let indices = Tensor::from_vec(
+                indices
+                    .iter()
+                    .map(|index| *index as u32)
+                    .collect::<Vec<_>>(),
+                token_count,
+                self.device,
+            )?;
+
+            let target = match accumulated.take() {
+                Some(target) => target,
+                None => Tensor::zeros(
+                    (
+                        self.full_shape.batch,
+                        patchifier.get_token_count(self.full_shape),
+                        tokens.dim(2)?,
+                    ),
+                    tokens.dtype(),
+                    self.device,
+                )?,
+            };
+            accumulated = Some(target.index_add(&indices, &weighted, 1)?);
+        }
+
+        let accumulated =
+            accumulated.context("a stage-2 tile plan must contain at least one tile")?;
+        patchifier.unpatchify(&accumulated, self.full_shape)
+    }
+
+    fn prepare_tile(&self, index: usize, tile: &Tile) -> Result<Stage2TileRequest> {
+        let latent_shape = VideoLatentShape {
+            batch: self.full_shape.batch,
+            channels: self.full_shape.channels,
+            frames: tile.frames.len(),
+            height: tile.height.len(),
+            width: tile.width.len(),
+        };
+        let clean = self
+            .clean_latents
+            .narrow(2, tile.frames.start, tile.frames.len())?
+            .narrow(3, tile.height.start, tile.height.len())?
+            .narrow(4, tile.width.start, tile.width.len())?
+            .contiguous()?;
+        // Per-tile noise, not a slice of one full-shape draw: upstream reseeds
+        // the generator per tile, and a slice would make the result depend on
+        // the layout of tiles it is not part of.
+        let sampler_noise = seeded_randn(
+            self.noise_seed.wrapping_add(index as u64),
+            &[
+                latent_shape.batch,
+                latent_shape.channels,
+                latent_shape.frames,
+                latent_shape.height,
+                latent_shape.width,
+            ],
+            self.device,
+            DType::F32,
+        )?;
+        let start_latents = mix_clean_latents_with_noise(&clean, &sampler_noise, self.sigma)?;
+
+        let (pixel_width, pixel_height, pixel_frames) = tile.pixel_shape();
+        let positions = build_video_positions(
+            VideoPixelShape {
+                batch: latent_shape.batch,
+                frames: pixel_frames,
+                height: pixel_height,
+                width: pixel_width,
+                fps: self.fps,
+            },
+            self.device,
+        )?;
+
+        Ok(Stage2TileRequest {
+            index,
+            latent_shape,
+            start_latents,
+            sampler_noise,
+            positions,
+            conditioning: conditioning_for_tile(self.conditioning, self.full_shape, tile)?,
+        })
+    }
+}
+
+/// Slice stage conditioning down to one tile's spatial region.
+///
+/// Token replacements are a contiguous run of the full grid's tokens, so the
+/// tile keeps whichever of its own tokens land inside that run. Appended
+/// conditions carry their own latent grid, which is sliced by the tile's box
+/// scaled into that grid's resolution, and their positions are rebased onto
+/// the tile's origin — the generated tokens' positions already start at zero,
+/// and conditioning that stayed absolute would sit somewhere else entirely.
+fn conditioning_for_tile(
+    conditioning: &StageVideoConditioning,
+    full_shape: VideoLatentShape,
+    tile: &Tile,
+) -> Result<StageVideoConditioning> {
+    if conditioning.is_empty() {
+        return Ok(StageVideoConditioning::default());
+    }
+    if tile.frames.len() != full_shape.frames {
+        // `plan_stage2_tiling*` never splits time, so this is a fence rather
+        // than a case: a tile that held only part of the timeline would have
+        // to decide which keyframe conditions still apply to it.
+        bail!(
+            "stage-2 conditioning cannot be sliced across a temporal tile ({} of {} frames)",
+            tile.frames.len(),
+            full_shape.frames
+        );
+    }
+    let covers_everything = tile.height.len() == full_shape.height
+        && tile.width.len() == full_shape.width
+        && tile.frames.len() == full_shape.frames;
+    if covers_everything {
+        return Ok(conditioning.clone());
+    }
+
+    let token_indices = tile.token_indices(full_shape.height, full_shape.width);
+    let mut replacements = Vec::with_capacity(conditioning.replacements.len());
+    for replacement in &conditioning.replacements {
+        let count = replacement.tokens.dim(1)?;
+        let range = replacement.start_token..replacement.start_token + count;
+        let mut local_start = None;
+        let mut rows: Vec<u32> = Vec::new();
+        for (local, global) in token_indices.iter().enumerate() {
+            if !range.contains(global) {
+                continue;
+            }
+            match local_start {
+                None => local_start = Some(local),
+                Some(start) if local == start + rows.len() => {}
+                Some(start) => bail!(
+                    "stage-2 conditioning replacement is not contiguous within a tile \
+                     (token {local} follows {})",
+                    start + rows.len() - 1
+                ),
+            }
+            rows.push((global - replacement.start_token) as u32);
+        }
+        let Some(local_start) = local_start else {
+            continue;
+        };
+        let selector = Tensor::from_vec(rows.clone(), rows.len(), replacement.tokens.device())?;
+        replacements.push(VideoTokenReplacement {
+            start_token: local_start,
+            tokens: replacement.tokens.index_select(&selector, 1)?,
+            strength: replacement.strength,
+        });
+    }
+
+    let mut appended = Vec::with_capacity(conditioning.appended.len());
+    for condition in &conditioning.appended {
+        appended.push(slice_append_condition_to_tile(condition, tile)?);
+    }
+
+    Ok(StageVideoConditioning {
+        replacements,
+        appended,
+    })
+}
+
+fn slice_append_condition_to_tile(
+    condition: &VideoTokenAppendCondition,
+    tile: &Tile,
+) -> Result<VideoTokenAppendCondition> {
+    let (grid_frames, grid_height, grid_width) = condition.latent_grid;
+    let factor = condition.spatial_downscale_factor.max(1);
+    let (batch, token_count, channels) = condition.tokens.dims3()?;
+    if grid_frames * grid_height * grid_width != token_count {
+        bail!(
+            "appended conditioning grid {grid_frames}x{grid_height}x{grid_width} does not \
+             describe its {token_count} tokens"
+        );
+    }
+    // Upstream floors both ends (`hdr_ic_lora.py:534-536`); with a reference
+    // grid at `1/df` of the generated one and dimensions validated divisible
+    // by `df`, the two ends land on real cell boundaries.
+    let height_start = (tile.height.start / factor).min(grid_height);
+    let height_end = (tile.height.end / factor).min(grid_height);
+    let width_start = (tile.width.start / factor).min(grid_width);
+    let width_end = (tile.width.end / factor).min(grid_width);
+    if height_start >= height_end || width_start >= width_end {
+        bail!(
+            "appended conditioning grid {grid_height}x{grid_width} has nothing under tile \
+             rows {}..{} cols {}..{}",
+            tile.height.start,
+            tile.height.end,
+            tile.width.start,
+            tile.width.end
+        );
+    }
+    let (tile_height, tile_width) = (height_end - height_start, width_end - width_start);
+
+    let tokens = condition
+        .tokens
+        .reshape((batch, grid_frames, grid_height, grid_width, channels))?
+        .narrow(2, height_start, tile_height)?
+        .narrow(3, width_start, tile_width)?
+        .contiguous()?
+        .reshape((batch, grid_frames * tile_height * tile_width, channels))?;
+
+    // Positions are `[B, 3, tokens, 2]` in `(time, height, width)` order.
+    let (position_batch, axes, position_tokens, bounds) = condition.positions.dims4()?;
+    if position_tokens != token_count {
+        bail!("appended conditioning carries {position_tokens} positions for {token_count} tokens");
+    }
+    let positions = condition
+        .positions
+        .reshape((
+            position_batch,
+            axes,
+            grid_frames,
+            grid_height,
+            grid_width,
+            bounds,
+        ))?
+        .narrow(3, height_start, tile_height)?
+        .narrow(4, width_start, tile_width)?
+        .contiguous()?
+        .reshape((
+            position_batch,
+            axes,
+            grid_frames * tile_height * tile_width,
+            bounds,
+        ))?;
+    // Rebase onto the tile's origin. `scale_video_spatial_positions` already
+    // expressed these in full-resolution pixels, and the tile's own generated
+    // tokens now start at zero, so the offset is the tile's pixel origin —
+    // exactly the `gen_pos.amin` upstream subtracts from every kept position
+    // (`modality_tiling.py:116-120`). Time is untouched: time is never tiled.
+    let stride = crate::ltx2::tiling::LATENT_PIXEL_STRIDE;
+    let positions = Tensor::cat(
+        &[
+            positions.i((.., 0..1, .., ..))?,
+            positions
+                .i((.., 1..2, .., ..))?
+                .affine(1.0, -((tile.height.start * stride) as f64))?,
+            positions
+                .i((.., 2..3, .., ..))?
+                .affine(1.0, -((tile.width.start * stride) as f64))?,
+        ],
+        1,
+    )?;
+
+    Ok(VideoTokenAppendCondition {
+        tokens,
+        positions,
+        strength: condition.strength,
+        latent_grid: (grid_frames, tile_height, tile_width),
+        spatial_downscale_factor: condition.spatial_downscale_factor,
     })
 }
 
@@ -3166,7 +3677,6 @@ fn render_real_two_stage_av(
         fps: plan.frame_rate as f32,
     };
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
-    report_stage2_trained_span(stage2_video_latent_shape);
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning = maybe_load_stage_video_conditioning(
@@ -3189,19 +3699,9 @@ fn render_real_two_stage_av(
         drop(debug_vae);
         device.synchronize()?;
     }
-    let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
-    let stage2_video_noise = seeded_randn(
-        plan.seed ^ 0x5354_4147_4532_4c54,
-        &[
-            stage2_video_latent_shape.batch,
-            stage2_video_latent_shape.channels,
-            stage2_video_latent_shape.frames,
-            stage2_video_latent_shape.height,
-            stage2_video_latent_shape.width,
-        ],
-        device,
-        DType::F32,
-    )?;
+    let stage2_tiles = plan_stage2_tiles(stage2_video_latent_shape)?;
+    let stage2_is_tiled = stage2_tiles.len() > 1;
+    let stage2_video_noise_seed = plan.seed ^ 0x5354_4147_4532_4c54;
     let stage2_audio_noise = match audio_shape {
         Some(audio_shape) => Some(seeded_randn(
             plan.seed ^ 0x4155_4449_3254_4c58,
@@ -3221,11 +3721,7 @@ fn render_real_two_stage_av(
         .sigmas_no_terminal
         .first()
         .context("stage2 sigma schedule must contain at least one step")?;
-    let stage2_video_start = mix_clean_latents_with_noise(
-        &stage2_clean_video_latents.to_dtype(DType::F32)?,
-        &stage2_video_noise,
-        stage2_sigma,
-    )?;
+    let stage2_clean_video_latents_f32 = stage2_clean_video_latents.to_dtype(DType::F32)?;
     let stage2_audio_policy = stage2_audio_policy(plan.pipeline);
     let stage2_audio_is_frozen = stage2_audio_policy == Stage2AudioPolicy::Frozen;
     let stage2_audio_start = match (stage1_audio_latents.as_ref(), stage2_audio_noise.as_ref()) {
@@ -3264,11 +3760,32 @@ fn render_real_two_stage_av(
     } else {
         frozen_audio_denoise_mask.clone()
     };
+
+    let stage2_audio = if stage2_is_tiled {
+        Stage2AudioInputs::video_only(audio_shape.is_some())
+    } else {
+        Stage2AudioInputs {
+            shape: audio_shape,
+            start: stage2_audio_start.as_ref(),
+            noise: stage2_audio_noise.as_ref(),
+            positions: prompt_inputs.audio_positions.as_ref(),
+            context: prompt_inputs.audio_context.as_ref(),
+            uncond_context: stage2_context
+                .requires_unconditional_context
+                .then_some(prompt_inputs.uncond_audio_context.as_ref())
+                .flatten(),
+            alt_context: prompt_inputs.alt_audio_context.as_ref(),
+            denoise_mask: stage2_frozen_audio_denoise_mask.as_ref(),
+        }
+    };
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(plan, stage2_pixel_shape);
+    let stage2_stage_shape = Ltx2StageShape::from_pixel_shape(
+        plan,
+        stage2_forward_pixel_shape(&stage2_tiles, stage2_pixel_shape),
+    );
     let stage2_transformer = load_ltx2_av_transformer_with_loras(
         plan,
         stage2_stage_shape,
@@ -3282,6 +3799,15 @@ fn render_real_two_stage_av(
         stage2_transformer_load_start,
     );
     let stage2_denoise_start = Instant::now();
+    // A tiled stage 2 is video-only, so it carries no audio reference either —
+    // the same rule as `Stage2AudioInputs::video_only`. Resolved before the
+    // dispatch closure because the closure is `FnMut` and may run more than
+    // once, so it cannot consume this.
+    let stage2_audio_conditioning = if stage2_is_tiled {
+        StageAudioConditioning::default()
+    } else {
+        stage2_audio_conditioning
+    };
     let ((latents, audio_latents), stage2_transformer) = run_denoise_stage_with_oom_recovery(
         "two_stage.stage2",
         stage2_transformer,
@@ -3297,50 +3823,70 @@ fn render_real_two_stage_av(
             )
         },
         |transformer| {
-            run_real_distilled_stage(
-                transformer,
-                stage2_video_latent_shape,
-                audio_shape,
-                &stage2_video_start,
-                &stage2_video_conditioning,
-                None,
-                stage2_audio_start.as_ref(),
-                None,
-                &stage2_audio_conditioning,
-                &stage2_video_positions,
-                prompt_inputs.audio_positions.as_ref(),
-                &prompt_inputs.cond_context,
-                stage2_context
-                    .requires_unconditional_context
-                    .then_some(prompt_inputs.uncond_context.as_ref())
-                    .flatten(),
-                prompt_inputs.alt_context.as_ref(),
-                prompt_inputs.audio_context.as_ref(),
-                stage2_context
-                    .requires_unconditional_context
-                    .then_some(prompt_inputs.uncond_audio_context.as_ref())
-                    .flatten(),
-                prompt_inputs.alt_audio_context.as_ref(),
-                cond_mask,
-                if stage2_context.requires_unconditional_context {
-                    uncond_mask
-                } else {
-                    None
-                },
-                alt_mask,
-                stage2_context.multimodal_guidance.clone(),
-                stage2_context.guidance_scale,
-                &stage2_context.sigmas_no_terminal,
-                stage2_context.sampler_mode,
-                Some(&stage2_video_noise),
-                stage2_audio_noise.as_ref(),
-                None,
-                stage2_frozen_audio_denoise_mask.as_ref(),
-                Some("two_stage.stage2"),
-                debug_enabled.then_some("stage2"),
-                progress,
-                cancellation,
-            )
+            let mut refined_audio = None;
+            let video = TiledStage2Pass {
+                tiles: &stage2_tiles,
+                full_shape: stage2_video_latent_shape,
+                clean_latents: &stage2_clean_video_latents_f32,
+                noise_seed: stage2_video_noise_seed,
+                sigma: stage2_sigma,
+                fps: plan.frame_rate as f32,
+                conditioning: &stage2_video_conditioning,
+                device,
+            }
+            .run(|request| {
+                let (video, audio) = run_real_distilled_stage(
+                    transformer,
+                    request.latent_shape,
+                    stage2_audio.shape,
+                    &request.start_latents,
+                    &request.conditioning,
+                    None,
+                    stage2_audio.start,
+                    None,
+                    &stage2_audio_conditioning,
+                    &request.positions,
+                    stage2_audio.positions,
+                    &prompt_inputs.cond_context,
+                    stage2_context
+                        .requires_unconditional_context
+                        .then_some(prompt_inputs.uncond_context.as_ref())
+                        .flatten(),
+                    prompt_inputs.alt_context.as_ref(),
+                    stage2_audio.context,
+                    stage2_audio.uncond_context,
+                    stage2_audio.alt_context,
+                    cond_mask,
+                    if stage2_context.requires_unconditional_context {
+                        uncond_mask
+                    } else {
+                        None
+                    },
+                    alt_mask,
+                    stage2_context.multimodal_guidance.clone(),
+                    stage2_context.guidance_scale,
+                    &stage2_context.sigmas_no_terminal,
+                    stage2_context.sampler_mode,
+                    Some(&request.sampler_noise),
+                    stage2_audio.noise,
+                    None,
+                    stage2_audio.denoise_mask,
+                    Some("two_stage.stage2"),
+                    debug_enabled.then_some(stage2_tile_debug_label(request.index)),
+                    progress,
+                    cancellation,
+                )?;
+                refined_audio = audio;
+                Ok(video)
+            })?;
+            Ok((
+                video,
+                stage2_carried_audio(
+                    refined_audio,
+                    stage1_audio_latents.as_ref(),
+                    stage2_is_tiled,
+                ),
+            ))
         },
         progress,
     )?;
@@ -3382,11 +3928,10 @@ fn render_real_two_stage_av(
     drop(latents);
     drop(audio_latents);
     drop(stage2_audio_start);
-    drop(stage2_video_start);
     drop(stage2_audio_noise);
-    drop(stage2_video_noise);
-    drop(stage2_video_positions);
+    drop(stage2_clean_video_latents_f32);
     drop(stage2_clean_video_latents);
+    drop(stage2_tiles);
     drop(stage1_audio_latents);
     drop(stage1_video_latents);
     drop(stage1_audio_noise);
@@ -6061,6 +6606,23 @@ fn configure_ltx2_vae_decode_memory_mode(
             fmt_gb(projected_ltx2_vae_decode_workspace_bytes(vae, latents)?)
         );
     }
+    // Temporal chunking bounds how many frames are in flight, not how large
+    // one frame is. Past the trained span a single frame is the problem, so
+    // the same memory verdict also splits it spatially.
+    let (_, _, _, latent_height, latent_width) = latents.dims5()?;
+    vae.spatial_decode_tiling = plan_spatial_decode_tiling(
+        latent_height,
+        latent_width,
+        spatial_tile_policy()?,
+        vae.use_framewise_decoding,
+    );
+    if let Some(tiling) = vae.spatial_decode_tiling {
+        tracing::info!(
+            "LTX-2 VAE decode using {}-px spatial tiles with {}-px overlap",
+            tiling.tile_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
+            tiling.overlap_cells * crate::ltx2::tiling::LATENT_PIXEL_STRIDE,
+        );
+    }
     Ok(())
 }
 
@@ -6440,31 +7002,6 @@ fn ltx_debug_timings_enabled() -> bool {
 // the memory authority, and no probe result is ever fed back into admission.
 
 const LTX2_VRAM_TARGET: &str = "mold::ltx2::vram";
-
-/// Report whether stage 2 is running a shape past the span the checkpoints'
-/// RoPE was trained on, and what tile layout would bring it back inside.
-///
-/// A render beyond that span still produces a picture, which is exactly why
-/// it needs saying out loud: the failure mode is degraded structure, not an
-/// error. Reported once per stage-2 pass so the operator can correlate it
-/// with the output.
-fn report_stage2_trained_span(shape: VideoLatentShape) {
-    let plan = crate::ltx2::tiling::plan_stage2_tiling(shape.frames, shape.height, shape.width);
-    if plan.is_untiled() {
-        return;
-    }
-    tracing::info!(
-        target: LTX2_VRAM_TARGET,
-        "[ltx2-vram] stage 2 latent {}x{} exceeds the {}-cell span these checkpoints were \
-         trained on; tiled refinement would use {}x{} tiles (not yet enabled — see \
-         https://github.com/utensils/mold/issues/673). Expect degraded structure at this size.",
-        shape.width,
-        shape.height,
-        crate::ltx2::tiling::TRAINED_SPATIAL_LATENT_SPAN,
-        plan.width.num_tiles,
-        plan.height.num_tiles,
-    );
-}
 
 thread_local! {
     /// The residency plan the most recent transformer build on this thread
@@ -6962,13 +7499,14 @@ mod tests {
         decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
         guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
-        should_inspect_step_velocity, source_image_only_conditioning,
+        should_inspect_step_velocity, source_image_only_conditioning, stage2_carried_audio,
         strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
-        Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning,
+        Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning, TiledStage2Pass,
         VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
         LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
+    use crate::ltx2::model::VideoLatentShape;
     use crate::ltx2::model::VideoPixelShape;
     use crate::ltx2::plan::{Ltx2GeneratePlan, PipelineKind};
     use crate::ltx2::preset::preset_for_model;
@@ -6978,6 +7516,7 @@ mod tests {
     use crate::ltx2::text::prompt_encoder::{
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
+    use crate::ltx2::tiling::{create_tiles, DimensionTiling, TileCountConfig};
     use crate::progress::{
         InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase,
     };
@@ -8957,6 +9496,8 @@ mod tests {
                 )
                 .unwrap(),
                 strength: 1.0,
+                latent_grid: (1, 1, 1),
+                spatial_downscale_factor: 1,
             }],
         };
 
@@ -9004,6 +9545,8 @@ mod tests {
                 positions: Tensor::from_vec(vec![30.0f32, 40.0, 50.0], (1, 3, 1, 1), &Device::Cpu)
                     .unwrap(),
                 strength: 0.4,
+                latent_grid: (1, 1, 1),
+                spatial_downscale_factor: 1,
             }],
         };
 
@@ -9105,11 +9648,15 @@ mod tests {
                     tokens: Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &Device::Cpu).unwrap(),
                     positions: Tensor::zeros((1, 3, 1, 2), DType::F32, &Device::Cpu).unwrap(),
                     strength: 1.0,
+                    latent_grid: (1, 1, 1),
+                    spatial_downscale_factor: 1,
                 },
                 VideoTokenAppendCondition {
                     tokens: Tensor::from_vec(vec![3.0f32, 4.0], (1, 1, 2), &Device::Cpu).unwrap(),
                     positions: Tensor::zeros((1, 3, 1, 2), DType::F32, &Device::Cpu).unwrap(),
                     strength: 1.0,
+                    latent_grid: (1, 1, 1),
+                    spatial_downscale_factor: 1,
                 },
             ],
         };
@@ -10032,6 +10579,495 @@ mod tests {
             .unwrap()
             .device()
             .is_cuda());
+    }
+
+    // ── Tiled stage-2 refinement ────────────────────────────────────────
+
+    /// Largest per-pixel difference, on a 0-255 scale, measured between a
+    /// tiled and an untiled stage-2 refinement of the same prompt and seed.
+    ///
+    /// Measured on an RTX 4090 with `ltx-2-19b-distilled:fp8` at 512x512x25 —
+    /// a shape that needs no tiling at all, which is the point: it isolates
+    /// what tiling itself costs from what out-of-distribution positions cost.
+    /// `MOLD_LTX2_SPATIAL_TILE=256:64` forced a 2x2 layout against the
+    /// untiled default. See `crates/mold-inference/src/ltx2/tiling.rs` for
+    /// the blend and the PR for the run.
+    ///
+    /// The residual is not blend arithmetic — that reconstructs exactly, as
+    /// `tiled_refinement_reassembles_a_pointwise_denoiser_exactly` asserts.
+    /// It is the model: each tile is denoised from its own noise draw and
+    /// sees only its own region, so a tile cannot reproduce what a global
+    /// pass would have made of a structure crossing its edge.
+    #[allow(dead_code)]
+    const TILED_STAGE2_MEASURED_PIXEL_DEVIATION: f64 = 0.0;
+
+    fn ramp_latents(shape: VideoLatentShape) -> Tensor {
+        let count = shape.batch * shape.channels * shape.frames * shape.height * shape.width;
+        let values = (0..count)
+            .map(|index| (index % 97) as f32 / 97.0 - 0.5)
+            .collect::<Vec<_>>();
+        Tensor::from_vec(
+            values,
+            (
+                shape.batch,
+                shape.channels,
+                shape.frames,
+                shape.height,
+                shape.width,
+            ),
+            &Device::Cpu,
+        )
+        .unwrap()
+    }
+
+    fn tiled_shape() -> VideoLatentShape {
+        VideoLatentShape {
+            batch: 1,
+            channels: 2,
+            frames: 3,
+            height: 8,
+            width: 9,
+        }
+    }
+
+    /// Deliberately asymmetric: a layout with the same tile count on both
+    /// spatial axes would survive a height/width transpose in the blend.
+    fn asymmetric_layout() -> TileCountConfig {
+        TileCountConfig {
+            frames: DimensionTiling::none(),
+            height: DimensionTiling::new(2, 2),
+            width: DimensionTiling::new(3, 2),
+        }
+    }
+
+    fn pass_over<'a>(
+        tiles: &'a [crate::ltx2::tiling::Tile],
+        shape: VideoLatentShape,
+        clean: &'a Tensor,
+        sigma: f32,
+        conditioning: &'a StageVideoConditioning,
+    ) -> TiledStage2Pass<'a> {
+        TiledStage2Pass {
+            tiles,
+            full_shape: shape,
+            clean_latents: clean,
+            noise_seed: 0x5354_4147_4532_4c54,
+            sigma,
+            fps: 24.0,
+            conditioning,
+            device: &Device::Cpu,
+        }
+    }
+
+    /// The blend is the part that fails silently. With `sigma = 0` every tile
+    /// is handed its own clean slice, so an identity denoiser must come back
+    /// as the original latent — any error is the window's or the index map's.
+    #[test]
+    fn tiled_refinement_reassembles_a_pointwise_denoiser_exactly() {
+        let shape = tiled_shape();
+        let clean = ramp_latents(shape);
+        let tiles =
+            create_tiles(shape.frames, shape.height, shape.width, asymmetric_layout()).unwrap();
+        assert_eq!(tiles.len(), 6, "this layout must actually be tiled");
+
+        let conditioning = StageVideoConditioning::default();
+        let blended = pass_over(&tiles, shape, &clean, 0.0, &conditioning)
+            .run(|request| Ok(request.start_latents.clone()))
+            .unwrap();
+
+        let expected = clean.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let got = blended.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(got.len(), expected.len());
+        for (index, (actual, wanted)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                (actual - wanted).abs() < 1e-5,
+                "element {index}: {actual} vs {wanted}"
+            );
+        }
+    }
+
+    /// A tile has to look like a sequence starting at zero — that is what
+    /// upstream's `normalize_positions=True` buys and the only reason a tile
+    /// lands back inside the trained span — and it has to draw its own noise.
+    #[test]
+    fn each_tile_is_seeded_and_positioned_as_its_own_sequence() {
+        let shape = tiled_shape();
+        let clean = ramp_latents(shape);
+        let tiles =
+            create_tiles(shape.frames, shape.height, shape.width, asymmetric_layout()).unwrap();
+        let conditioning = StageVideoConditioning::default();
+
+        let mut noises: Vec<Vec<f32>> = Vec::new();
+        // sigma 1.0 makes the tile input pure noise, so this reads it directly.
+        pass_over(&tiles, shape, &clean, 1.0, &conditioning)
+            .run(|request| {
+                let (_, axes, tokens, _) = request.positions.dims4().unwrap();
+                let flat = request
+                    .positions
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                for axis in 0..axes {
+                    let start = axis * tokens * 2;
+                    let minimum = flat[start..start + tokens * 2]
+                        .iter()
+                        .copied()
+                        .fold(f32::MAX, f32::min);
+                    assert_eq!(
+                        minimum, 0.0,
+                        "tile {} axis {axis} starts at {minimum}, not zero",
+                        request.index
+                    );
+                }
+                noises.push(
+                    request
+                        .start_latents
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap(),
+                );
+                Ok(request.start_latents.clone())
+            })
+            .unwrap();
+
+        assert_eq!(noises.len(), tiles.len());
+        for left in 0..noises.len() {
+            for right in left + 1..noises.len() {
+                if noises[left].len() == noises[right].len() {
+                    assert_ne!(
+                        noises[left], noises[right],
+                        "tiles {left} and {right} were handed the same noise"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The compatibility boundary. A one-tile plan must hand the denoiser
+    /// exactly what the pre-tiling code built, and return exactly what it
+    /// returned — no blend round trip, no reseeding, no shifted positions.
+    #[test]
+    fn an_untiled_pass_reproduces_the_pre_tiling_inputs_exactly() {
+        let shape = tiled_shape();
+        let clean = ramp_latents(shape);
+        let tiles = create_tiles(
+            shape.frames,
+            shape.height,
+            shape.width,
+            TileCountConfig::untiled(),
+        )
+        .unwrap();
+        assert_eq!(tiles.len(), 1);
+        let sigma = 0.35;
+        let conditioning = StageVideoConditioning::default();
+
+        let mut seen_positions = None;
+        let output = pass_over(&tiles, shape, &clean, sigma, &conditioning)
+            .run(|request| {
+                seen_positions = Some(request.positions.clone());
+                Ok(request.start_latents.clone())
+            })
+            .unwrap();
+
+        let noise = crate::engine::seeded_randn(
+            0x5354_4147_4532_4c54,
+            &[
+                shape.batch,
+                shape.channels,
+                shape.frames,
+                shape.height,
+                shape.width,
+            ],
+            &Device::Cpu,
+            DType::F32,
+        )
+        .unwrap();
+        let expected_start = super::mix_clean_latents_with_noise(&clean, &noise, sigma).unwrap();
+        assert_eq!(
+            output.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            expected_start
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+
+        let expected_positions = super::build_video_positions(
+            super::pixel_shape_for_video_latents(shape, 24),
+            &Device::Cpu,
+        )
+        .unwrap();
+        assert_eq!(
+            seen_positions
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            expected_positions
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn tile_conditioning_keeps_only_the_replacement_rows_under_the_tile() {
+        let shape = VideoLatentShape {
+            batch: 1,
+            channels: 1,
+            frames: 1,
+            height: 4,
+            width: 4,
+        };
+        // One replaced latent frame: token `t` carries the value `t`.
+        let tokens = Tensor::from_vec(
+            (0..16).map(|value| value as f32).collect::<Vec<_>>(),
+            (1, 16, 1),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![VideoTokenReplacement {
+                start_token: 0,
+                tokens,
+                strength: 0.8,
+            }],
+            appended: vec![],
+        };
+        let tiles = create_tiles(
+            1,
+            4,
+            4,
+            TileCountConfig {
+                frames: DimensionTiling::none(),
+                height: DimensionTiling::new(2, 1),
+                width: DimensionTiling::new(2, 1),
+            },
+        )
+        .unwrap();
+        // Last tile covers rows 2..4 and columns 2..4.
+        let tile = tiles.last().unwrap();
+        assert_eq!((tile.height.start, tile.height.end), (2, 4));
+        assert_eq!((tile.width.start, tile.width.end), (2, 4));
+
+        let sliced = super::conditioning_for_tile(&conditioning, shape, tile).unwrap();
+        let replacement = &sliced.replacements[0];
+        assert_eq!(replacement.start_token, 0);
+        assert_eq!(replacement.strength, 0.8);
+        assert_eq!(
+            replacement
+                .tokens
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            vec![10.0, 11.0, 14.0, 15.0]
+        );
+    }
+
+    /// IC-LoRA reference video is encoded at `1/df` of the generated grid, so
+    /// a tile covering generated cells `[a, b)` covers reference cells
+    /// `[a/df, b/df)` — and its positions have to be rebased onto the tile's
+    /// origin, or the reference lands somewhere the tile never looks.
+    #[test]
+    fn tile_conditioning_slices_reference_latents_by_the_downscale_factor() {
+        // Generated grid is 4x4; the reference grid is 2x2 at df = 2.
+        let tokens =
+            Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (1, 4, 1), &Device::Cpu).unwrap();
+        // Positions are already in full-resolution pixels: reference cell `r`
+        // sits at `r * 32 * df`.
+        let mut position_values = Vec::new();
+        for axis in 0..3 {
+            for row in 0..2 {
+                for column in 0..2 {
+                    let coordinate = match axis {
+                        0 => 0.0,
+                        1 => (row * 32 * 2) as f32,
+                        _ => (column * 32 * 2) as f32,
+                    };
+                    position_values.push(coordinate);
+                    position_values.push(coordinate);
+                }
+            }
+        }
+        let positions = Tensor::from_vec(position_values, (1, 3, 4, 2), &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![],
+            appended: vec![VideoTokenAppendCondition {
+                tokens,
+                positions,
+                strength: 1.0,
+                latent_grid: (1, 2, 2),
+                spatial_downscale_factor: 2,
+            }],
+        };
+        let shape = VideoLatentShape {
+            batch: 1,
+            channels: 1,
+            frames: 1,
+            height: 4,
+            width: 4,
+        };
+        let tiles = create_tiles(
+            1,
+            4,
+            4,
+            TileCountConfig {
+                frames: DimensionTiling::none(),
+                height: DimensionTiling::new(2, 0),
+                width: DimensionTiling::new(2, 0),
+            },
+        )
+        .unwrap();
+        // Bottom-right tile: generated rows 2..4, columns 2..4.
+        let tile = tiles.last().unwrap();
+        let sliced = super::conditioning_for_tile(&conditioning, shape, tile).unwrap();
+        let condition = &sliced.appended[0];
+
+        assert_eq!(condition.latent_grid, (1, 1, 1));
+        assert_eq!(
+            condition
+                .tokens
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            vec![3.0],
+            "reference cell (1, 1) is the one under generated rows 2..4"
+        );
+        // Reference cell 1 sat at pixel 64; the tile's origin is also pixel
+        // 64, so a correctly rebased position is zero.
+        assert_eq!(
+            condition
+                .positions
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            vec![0.0; 6]
+        );
+    }
+
+    /// Residency planning reads the stage shape to budget activations. If a
+    /// tiled pass still declared the whole frame, it would reserve for a
+    /// forward pass that never runs — and stream transformer blocks it had
+    /// room to keep resident, which is most of what tiling was for.
+    #[test]
+    fn a_tiled_stage_declares_its_largest_tile_not_the_whole_frame() {
+        let shape = tiled_shape();
+        let full = super::pixel_shape_for_video_latents(shape, 24);
+
+        let single = create_tiles(
+            shape.frames,
+            shape.height,
+            shape.width,
+            TileCountConfig::untiled(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::stage2_forward_pixel_shape(&single, full),
+            full,
+            "one full-cover tile must declare exactly the shape it always did"
+        );
+
+        let tiles =
+            create_tiles(shape.frames, shape.height, shape.width, asymmetric_layout()).unwrap();
+        let declared = super::stage2_forward_pixel_shape(&tiles, full);
+        assert!(declared.width < full.width && declared.height < full.height);
+        assert_eq!(declared.frames, full.frames, "time is never tiled");
+        for tile in &tiles {
+            let (width, height, _) = tile.pixel_shape();
+            assert!(width <= declared.width && height <= declared.height);
+        }
+    }
+
+    /// `Stage2AudioInputs` is now the only thing standing between a tiled
+    /// stage 2 (video-only) and an untiled one (audio refined as always), and
+    /// the untiled half cannot be reached from a unit test — it is built
+    /// inline in each renderer. So it is asserted against the source, the same
+    /// way the phase-probe and LoRA-stack contracts are.
+    #[test]
+    fn only_a_tiled_stage2_switches_the_audio_branch_off() {
+        for signature in [
+            "fn render_real_distilled_av(",
+            "fn render_real_two_stage_av(",
+        ] {
+            let body = runtime_function_source(signature);
+            assert!(
+                body.contains("Stage2AudioInputs::video_only(audio_shape.is_some())"),
+                "`{signature}` must make its tiled stage 2 video-only"
+            );
+            assert!(
+                body.contains("shape: audio_shape,"),
+                "`{signature}` must still hand the untiled stage 2 the real audio shape"
+            );
+            for fed in [
+                "start: stage2_audio_start.as_ref(),",
+                "noise: stage2_audio_noise.as_ref(),",
+                "positions: prompt_inputs.audio_positions.as_ref(),",
+                "context: prompt_inputs.audio_context.as_ref(),",
+            ] {
+                assert!(
+                    body.contains(fed),
+                    "`{signature}` drops `{fed}` from the untiled stage 2, which would \
+                     silently stop refining audio at every resolution"
+                );
+            }
+            assert!(
+                !body.contains("stage2_audio_shape"),
+                "`{signature}` must route audio through the bundle, not a loose shape — \
+                 half a branch is what the transformer rejects"
+            );
+        }
+    }
+
+    /// A spatial tile says nothing about the audio track, so upstream refines
+    /// video only when it tiles. Refining the same track once per tile and
+    /// keeping whichever came last would be worse than not refining it.
+    #[test]
+    fn a_tiled_stage2_carries_stage1_audio_through_unrefined() {
+        let shape = crate::ltx2::model::AudioLatentShape {
+            batch: 1,
+            channels: 2,
+            frames: 3,
+            mel_bins: 4,
+        };
+        let refined = super::Stage2AudioInputs {
+            shape: Some(shape),
+            ..super::Stage2AudioInputs::default()
+        };
+        assert_eq!(refined.shape, Some(shape));
+        // Video-only switches the whole branch off together. Half of it — an
+        // audio context with no audio latents — is what the transformer
+        // rejects with "must be provided together".
+        let video_only = super::Stage2AudioInputs::video_only(true);
+        assert!(video_only.shape.is_none());
+        assert!(video_only.start.is_none());
+        assert!(video_only.noise.is_none());
+        assert!(video_only.positions.is_none());
+        assert!(video_only.context.is_none());
+        assert!(video_only.uncond_context.is_none());
+        assert!(video_only.alt_context.is_none());
+        assert!(video_only.denoise_mask.is_none());
+
+        let stage1 = Tensor::zeros((1, 2, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let refined = Tensor::ones((1, 2, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let untiled = stage2_carried_audio(Some(refined.clone()), Some(&stage1), false).unwrap();
+        assert_eq!(
+            untiled.sum_all().unwrap().to_scalar::<f32>().unwrap(),
+            24.0,
+            "an untiled stage 2 keeps its own refinement"
+        );
+        let tiled = stage2_carried_audio(None, Some(&stage1), true).unwrap();
+        assert_eq!(
+            tiled.sum_all().unwrap().to_scalar::<f32>().unwrap(),
+            0.0,
+            "a tiled stage 2 keeps stage 1's track"
+        );
     }
 
     // ── Phase VRAM telemetry ────────────────────────────────────────────
