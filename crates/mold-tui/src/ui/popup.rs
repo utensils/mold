@@ -11,6 +11,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::MachineConnect { .. }) => render_machine_connect(frame, app),
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
+        Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
@@ -419,6 +420,66 @@ fn render_size_input(frame: &mut Frame, app: &mut App) {
             },
         );
 
+        let actions = Line::from(vec![
+            Span::styled("Enter", theme.status_key()),
+            Span::styled(" Confirm  ", Style::default().fg(theme.text)),
+            Span::styled("Esc", theme.status_key()),
+            Span::styled(" Cancel", Style::default().fg(theme.text)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(actions),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(1),
+                height: 1,
+                ..inner
+            },
+        );
+    }
+}
+
+fn render_stg_blocks_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 55, 20);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::StgBlocksInput { input, error }) = &app.popup {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(" STG Blocks ")
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height < 4 {
+            return;
+        }
+
+        frame.render_widget(
+            Paragraph::new("Comma-separated transformer blocks (for example 28, 29)")
+                .style(theme.dim()),
+            Rect { height: 1, ..inner },
+        );
+        frame.render_widget(
+            Paragraph::new(format!("{input}\u{2588}")).style(Style::default().fg(theme.text)),
+            Rect {
+                y: inner.y + 2,
+                height: 1,
+                ..inner
+            },
+        );
+        if let Some(error) = error {
+            frame.render_widget(
+                Paragraph::new(error.as_str()).style(theme.error()),
+                Rect {
+                    y: inner.y + 3,
+                    height: 1,
+                    ..inner
+                },
+            );
+        }
         let actions = Line::from(vec![
             Span::styled("Enter", theme.status_key()),
             Span::styled(" Confirm  ", Style::default().fg(theme.text)),

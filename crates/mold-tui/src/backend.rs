@@ -284,6 +284,7 @@ async fn try_server_generate(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
+                guidance_overrides: req.guidance_overrides.clone(),
             });
             ServerResult::Done
         }
@@ -327,6 +328,7 @@ async fn try_server_generate(
                         let _ = tx.send(BackgroundEvent::GenerationComplete {
                             response: Box::new(response),
                             from_local: false,
+                            guidance_overrides: req.guidance_overrides.clone(),
                         });
                         ServerResult::Done
                     }
@@ -401,6 +403,7 @@ async fn run_local_generation(
 
     let offload = params.offload;
     let req = build_request(&params, &prompt, &negative_prompt);
+    let guidance_overrides = req.guidance_overrides.clone();
 
     let tx_clone = tx.clone();
 
@@ -436,6 +439,7 @@ async fn run_local_generation(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: true,
+                guidance_overrides,
             });
         }
         Ok(Err(e)) => {
@@ -500,7 +504,7 @@ fn build_request(
     GenerateRequest {
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
-        guidance_overrides: None,
+        guidance_overrides: params.guidance_overrides.clone().into_option(),
         prompt: prompt.to_string(),
         negative_prompt: negative_prompt.clone(),
         model: params.model.clone(),
@@ -832,6 +836,29 @@ mod tests {
         assert_eq!(
             request.temporal_upscale,
             Some(mold_core::Ltx2TemporalUpscale::X2)
+        );
+    }
+
+    #[test]
+    fn build_request_preserves_only_explicit_ltx2_guidance_overrides() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(
+            build_request(&params, "p", &None).guidance_overrides,
+            None,
+            "untouched TUI state must preserve pipeline guidance defaults"
+        );
+
+        params.guidance_overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(1.5),
+            stg_blocks: Some(vec![28, 29]),
+            rescale_scale: None,
+            modality_scale: Some(3.0),
+            skip_step: Some(2),
+        };
+        assert_eq!(
+            build_request(&params, "p", &None).guidance_overrides,
+            Some(params.guidance_overrides.clone())
         );
     }
 }

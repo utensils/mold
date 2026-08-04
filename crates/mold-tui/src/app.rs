@@ -1,8 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
-    Config, GenerateResponse, Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelInfoExtended,
-    OutputFormat, Scheduler, ServerStatus, SseProgressEvent,
+    validation::{MAX_STG_BLOCKS, MAX_STG_BLOCK_INDEX},
+    Config, GenerateResponse, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
+    ModelInfoExtended, OutputFormat, Scheduler, ServerStatus, SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -26,10 +27,12 @@ pub enum BackgroundEvent {
     /// response produced by the in-process inference engine — including
     /// Auto-mode fallbacks after the remote server goes unreachable —
     /// so the completion handler can still write the file locally even
-    /// when `server_url` remains set.
+    /// when `server_url` remains set. `guidance_overrides` is the exact
+    /// request snapshot so later form edits cannot corrupt provenance.
     GenerationComplete {
         response: Box<GenerateResponse>,
         from_local: bool,
+        guidance_overrides: Option<Ltx2GuidanceOverrides>,
     },
     /// Generation or background task failed.
     Error(String),
@@ -416,6 +419,11 @@ pub enum ParamField {
     Audio,
     SpatialUpscale,
     TemporalUpscale,
+    StgScale,
+    StgBlocks,
+    RescaleScale,
+    ModalityScale,
+    GuidanceSkip,
 }
 
 impl ParamField {
@@ -444,6 +452,11 @@ impl ParamField {
             Self::Audio => "Audio",
             Self::SpatialUpscale => "Spatial",
             Self::TemporalUpscale => "Temporal",
+            Self::StgScale => "STG scale",
+            Self::StgBlocks => "STG blocks",
+            Self::RescaleScale => "CFG rescale",
+            Self::ModalityScale => "Modality",
+            Self::GuidanceSkip => "Guide skip",
             Self::ControlScale => "Scale",
         }
     }
@@ -569,6 +582,9 @@ pub struct GenerateParams {
     pub spatial_upscale: Option<Ltx2SpatialUpscale>,
     /// `None` keeps the checkpoint's native frame rate.
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Optional LTX-2 guider tuning. An empty value must stay absent from the
+    /// request so the selected pipeline retains its own constants.
+    pub guidance_overrides: Ltx2GuidanceOverrides,
     // ControlNet
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
@@ -652,6 +668,7 @@ impl GenerateParams {
             enable_audio: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            guidance_overrides: Ltx2GuidanceOverrides::default(),
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
@@ -757,9 +774,105 @@ impl GenerateParams {
                 None => "native".to_string(),
                 Some(Ltx2TemporalUpscale::X2) => "2×".to_string(),
             },
+            ParamField::StgScale => optional_guidance_value(self.guidance_overrides.stg_scale),
+            ParamField::StgBlocks => self
+                .guidance_overrides
+                .stg_blocks
+                .as_ref()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "default".to_string()),
+            ParamField::RescaleScale => {
+                optional_guidance_value(self.guidance_overrides.rescale_scale)
+            }
+            ParamField::ModalityScale => {
+                optional_guidance_value(self.guidance_overrides.modality_scale)
+            }
+            ParamField::GuidanceSkip => self
+                .guidance_overrides
+                .skip_step
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_string()),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
         }
     }
+}
+
+fn optional_guidance_value(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn adjust_optional_scale(current: Option<f64>, delta: i32, step: f64, max: f64) -> Option<f64> {
+    if delta >= 0 {
+        match current {
+            None => Some(0.0),
+            Some(value) if value + step <= max + f64::EPSILON => Some(value + step),
+            Some(_) => None,
+        }
+    } else {
+        match current {
+            None => Some(max),
+            Some(value) if value - step >= -f64::EPSILON => Some((value - step).max(0.0)),
+            Some(_) => None,
+        }
+    }
+}
+
+fn adjust_optional_u32(current: Option<u32>, delta: i32, max: u32) -> Option<u32> {
+    if delta >= 0 {
+        match current {
+            None => Some(0),
+            Some(value) if value < max => Some(value + 1),
+            Some(_) => None,
+        }
+    } else {
+        match current {
+            None => Some(max),
+            Some(value) if value > 0 => Some(value - 1),
+            Some(_) => None,
+        }
+    }
+}
+
+fn parse_stg_blocks_input(input: &str) -> std::result::Result<Option<Vec<u32>>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let entries = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err("List at least one transformer block.".to_string());
+    }
+    if entries.len() > MAX_STG_BLOCKS {
+        return Err(format!("At most {MAX_STG_BLOCKS} blocks."));
+    }
+    let mut blocks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let block = entry
+            .parse::<u32>()
+            .map_err(|_| format!("“{entry}” is not a block index."))?;
+        if block >= MAX_STG_BLOCK_INDEX {
+            return Err(format!(
+                "Block {block} is deeper than any LTX-2 checkpoint."
+            ));
+        }
+        if blocks.contains(&block) {
+            return Err(format!("Block {block} is listed twice."));
+        }
+        blocks.push(block);
+    }
+    Ok(Some(blocks))
 }
 
 /// Mirror `/api/models`' requestable video grid for the TUI's keyboard sliders.
@@ -1248,6 +1361,12 @@ pub enum Popup {
     /// Free-text `WxH` entry for the Size essentials row.
     SizeInput {
         input: String,
+    },
+    /// Comma-separated LTX-2 transformer block indices. Invalid input stays
+    /// visible and never reaches a generation request.
+    StgBlocksInput {
+        input: String,
+        error: Option<String>,
     },
     HistorySearch {
         filter: String,
@@ -1879,6 +1998,7 @@ impl App {
         if !self.generate.capabilities.supports_video_upscale {
             self.generate.params.spatial_upscale = None;
             self.generate.params.temporal_upscale = None;
+            self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
         }
         self.refresh_create_rows();
     }
@@ -2727,6 +2847,25 @@ impl App {
                     }
                     KeyCode::Backspace => {
                         input.pop();
+                    }
+                    _ => {}
+                },
+                Some(Popup::StgBlocksInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => match parse_stg_blocks_input(input) {
+                        Ok(blocks) => {
+                            self.generate.params.guidance_overrides.stg_blocks = blocks;
+                            self.close_popup();
+                        }
+                        Err(message) => *error = Some(message),
+                    },
+                    KeyCode::Char(c) if c.is_ascii_digit() || matches!(c, ',' | ' ') => {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
                     }
                     _ => {}
                 },
@@ -3992,6 +4131,33 @@ impl App {
                     Some(Ltx2TemporalUpscale::X2) => None,
                 };
             }
+            ParamField::StgScale => {
+                p.guidance_overrides.stg_scale = adjust_optional_scale(
+                    p.guidance_overrides.stg_scale,
+                    delta,
+                    0.5,
+                    Ltx2GuidanceOverrides::MAX_SCALE,
+                );
+            }
+            ParamField::RescaleScale => {
+                p.guidance_overrides.rescale_scale =
+                    adjust_optional_scale(p.guidance_overrides.rescale_scale, delta, 0.1, 1.0);
+            }
+            ParamField::ModalityScale => {
+                p.guidance_overrides.modality_scale = adjust_optional_scale(
+                    p.guidance_overrides.modality_scale,
+                    delta,
+                    0.5,
+                    Ltx2GuidanceOverrides::MAX_SCALE,
+                );
+            }
+            ParamField::GuidanceSkip => {
+                p.guidance_overrides.skip_step = adjust_optional_u32(
+                    p.guidance_overrides.skip_step,
+                    delta,
+                    Ltx2GuidanceOverrides::MAX_SKIP_STEP,
+                );
+            }
             ParamField::ControlScale => {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
@@ -4021,6 +4187,7 @@ impl App {
             ParamField::Model
             | ParamField::Scheduler
             | ParamField::Lora
+            | ParamField::StgBlocks
             | ParamField::SourceImage
             | ParamField::MaskImage
             | ParamField::ControlImage
@@ -4574,6 +4741,23 @@ impl App {
             ParamField::Audio => self.adjust_field(ParamField::Audio, 1),
             ParamField::SpatialUpscale => self.adjust_field(ParamField::SpatialUpscale, 1),
             ParamField::TemporalUpscale => self.adjust_field(ParamField::TemporalUpscale, 1),
+            ParamField::StgBlocks => {
+                let input = self
+                    .generate
+                    .params
+                    .guidance_overrides
+                    .stg_blocks
+                    .as_ref()
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                self.popup = Some(Popup::StgBlocksInput { input, error: None });
+            }
             // Cycle format
             ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
@@ -4662,6 +4846,7 @@ impl App {
         self.generate.params.enable_audio = None;
         self.generate.params.spatial_upscale = None;
         self.generate.params.temporal_upscale = None;
+        self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
         self.generate.params.mask_image_path = None;
@@ -5633,6 +5818,7 @@ impl App {
                 BackgroundEvent::GenerationComplete {
                     response,
                     from_local,
+                    guidance_overrides,
                 } => {
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
@@ -5864,7 +6050,7 @@ impl App {
                         && !saved_path.as_os_str().is_empty()
                     {
                         let meta = mold_core::OutputMetadata {
-                            guidance_overrides: None,
+                            guidance_overrides,
                             prompt: prompt_text,
                             negative_prompt: if neg_text.is_empty() {
                                 None
@@ -9488,6 +9674,7 @@ mod tests {
             .send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
+                guidance_overrides: None,
             })
             .unwrap();
 
@@ -9513,6 +9700,60 @@ mod tests {
                 "gallery metadata should record response model, not UI model"
             );
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn local_generation_complete_preserves_guidance_overrides_in_gallery_metadata() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.generating = true;
+            app.generate.batch_remaining = 1;
+            app.generate.prompt = TextArea::from(["a guidance provenance test"]);
+            let submitted_guidance = Ltx2GuidanceOverrides {
+                stg_scale: Some(1.5),
+                stg_blocks: Some(vec![1, 3, 5]),
+                rescale_scale: Some(0.7),
+                modality_scale: Some(3.0),
+                skip_step: Some(1),
+            };
+
+            let response = GenerateResponse {
+                images: vec![mold_core::ImageData {
+                    data: vec![0u8; 4],
+                    format: OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                }],
+                generation_time_ms: 100,
+                model: "ltx-2.3:22b-distilled".to_string(),
+                seed_used: 42,
+                video: None,
+                gpu: None,
+            };
+            app.bg_tx
+                .send(BackgroundEvent::GenerationComplete {
+                    response: Box::new(response),
+                    from_local: true,
+                    guidance_overrides: Some(submitted_guidance.clone()),
+                })
+                .unwrap();
+
+            // The user may edit the form while inference is still running.
+            // Completion metadata must use the submitted request snapshot.
+            app.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
+
+            app.process_background_events();
+
+            assert_eq!(app.gallery.entries.len(), 1);
+            assert_eq!(
+                app.gallery.entries[0].metadata.guidance_overrides,
+                Some(submitted_guidance),
+                "local gallery metadata must record submitted LTX-2 guidance overrides"
+            );
+        });
     }
 
     // ── Create redesign: layout, accordion behavior, timeline contract ──
@@ -9547,6 +9788,7 @@ mod tests {
                 .send(BackgroundEvent::GenerationComplete {
                     response: Box::new(response),
                     from_local: false,
+                    guidance_overrides: None,
                 })
                 .unwrap();
             app.process_background_events();
@@ -9903,6 +10145,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ltx2_guidance_rows_cycle_optional_bounded_values() {
+        let mut app = make_settings_test_app();
+
+        app.adjust_field(ParamField::StgScale, 1);
+        assert_eq!(app.generate.params.guidance_overrides.stg_scale, Some(0.0));
+        app.adjust_field(ParamField::StgScale, 1);
+        assert_eq!(app.generate.params.guidance_overrides.stg_scale, Some(0.5));
+
+        app.adjust_field(ParamField::RescaleScale, -1);
+        assert_eq!(
+            app.generate.params.guidance_overrides.rescale_scale,
+            Some(1.0)
+        );
+        app.adjust_field(ParamField::RescaleScale, 1);
+        assert_eq!(app.generate.params.guidance_overrides.rescale_scale, None);
+
+        app.adjust_field(ParamField::ModalityScale, -1);
+        assert_eq!(
+            app.generate.params.guidance_overrides.modality_scale,
+            Some(mold_core::Ltx2GuidanceOverrides::MAX_SCALE)
+        );
+        app.adjust_field(ParamField::GuidanceSkip, -1);
+        assert_eq!(
+            app.generate.params.guidance_overrides.skip_step,
+            Some(mold_core::Ltx2GuidanceOverrides::MAX_SKIP_STEP)
+        );
+    }
+
+    #[test]
+    fn stg_block_input_rejects_invalid_lists_before_request_building() {
+        assert_eq!(parse_stg_blocks_input(""), Ok(None));
+        assert_eq!(parse_stg_blocks_input("28, 29"), Ok(Some(vec![28, 29])));
+        assert!(parse_stg_blocks_input(" , ").is_err());
+        assert!(parse_stg_blocks_input("28, nope").is_err());
+        assert!(parse_stg_blocks_input("28, 28").is_err());
+        assert!(parse_stg_blocks_input("64").is_err());
+        assert!(parse_stg_blocks_input("0,1,2,3,4,5,6,7,8").is_err());
+    }
+
+    #[tokio::test]
+    async fn stg_block_popup_keeps_invalid_input_and_applies_valid_input() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.popup = Some(Popup::StgBlocksInput {
+            input: "28, 28".into(),
+            error: None,
+        });
+
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let Some(Popup::StgBlocksInput { input, error }) = &mut app.popup else {
+            panic!("invalid input must keep the block editor open");
+        };
+        assert_eq!(input, "28, 28");
+        assert!(error
+            .as_deref()
+            .is_some_and(|message| message.contains("twice")));
+        input.clear();
+        input.push_str("28, 29");
+
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.params.guidance_overrides.stg_blocks,
+            Some(vec![28, 29])
+        );
+    }
+
+    #[tokio::test]
     async fn switching_to_an_incompatible_model_clears_ltx2_video_authority() {
         use crate::ui::create_form::{AdvSection, CreateRow};
         let mut app = make_settings_test_app();
@@ -9910,6 +10226,8 @@ mod tests {
         app.generate.params.enable_audio = Some(true);
         app.generate.params.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
         app.generate.params.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
+        app.generate.params.guidance_overrides.modality_scale = Some(3.0);
+        app.generate.params.guidance_overrides.stg_scale = Some(1.5);
 
         app.sync_generate_capabilities();
 
@@ -9918,6 +10236,7 @@ mod tests {
         assert_eq!(app.generate.params.enable_audio, None);
         assert_eq!(app.generate.params.spatial_upscale, None);
         assert_eq!(app.generate.params.temporal_upscale, None);
+        assert!(app.generate.params.guidance_overrides.is_empty());
         assert!(!app
             .generate
             .rows
@@ -9929,6 +10248,19 @@ mod tests {
                 CreateRow::SectionField(
                     AdvSection::Video,
                     ParamField::SpatialUpscale | ParamField::TemporalUpscale
+                )
+            )
+        }));
+        assert!(!app.generate.rows.iter().any(|row| {
+            matches!(
+                row,
+                CreateRow::SectionField(
+                    AdvSection::Video,
+                    ParamField::StgScale
+                        | ParamField::StgBlocks
+                        | ParamField::RescaleScale
+                        | ParamField::ModalityScale
+                        | ParamField::GuidanceSkip
                 )
             )
         }));
@@ -11866,6 +12198,7 @@ mod tests {
         app.generate.params.format = OutputFormat::Jpeg;
         app.generate.params.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
         app.generate.params.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
+        app.generate.params.guidance_overrides.modality_scale = Some(3.0);
 
         // Focus on parameters, select ResetDefaults, and trigger it
         app.active_view = View::Create;
@@ -11889,6 +12222,7 @@ mod tests {
         assert_eq!(app.generate.params.format, OutputFormat::Png);
         assert_eq!(app.generate.params.spatial_upscale, None);
         assert_eq!(app.generate.params.temporal_upscale, None);
+        assert!(app.generate.params.guidance_overrides.is_empty());
     }
 
     #[tokio::test]
