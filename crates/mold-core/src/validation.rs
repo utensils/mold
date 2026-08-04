@@ -34,12 +34,14 @@ pub const LTX2_MAX_AXIS_PIXELS: u32 = 2_048;
 /// of distribution and no amount of tiling downstream repairs it.
 pub const LTX2_COMPOSED_MAX_AXIS_PIXELS: u32 = 2 * LTX2_MAX_AXIS_PIXELS;
 
-/// Total-pixel ceiling for a composed LTX-2 render: 4K DCI on the 64 px grid
-/// the two-stage composition needs (`4096 x 2176`, 8.9 MP).
+/// Total-pixel ceiling for a composed LTX-2 render (`4096 x 2176`, 8.9 MP).
 ///
 /// Like the single-pass budget this is a resource guard rather than a model
-/// limit; it is set at the largest rung [`LTX2_OUTPUT_RUNGS`] names so the
-/// advertised ladder and admission cannot disagree.
+/// limit: it is the widest axis the composition can hold paired with a
+/// 4K-class height. It is deliberately *above* the top of
+/// [`LTX2_OUTPUT_RUNGS`], which stops at what the bundled H.264 encoder can
+/// write — generation and delivery have different ceilings, and conflating
+/// them would refuse shapes that render correctly to a non-MP4 target.
 pub const LTX2_COMPOSED_MAX_PIXELS: u64 = 4_096 * 2_176;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
@@ -690,7 +692,10 @@ pub fn validate_ltx2_stage1_span(
     };
     let ceiling = ltx2_composed_axis_ceiling(upscale);
     Err(format!(
-        "{width}x{height} with {rung} spatial upscale renders stage 1 at {}x{}, whose {longest}px          axis is past the {}px span these checkpoints were trained on. The rung sets the ceiling:          it reaches {ceiling}px on the long edge. Use a x2 upscale, or render at or below          {ceiling}px.",
+        "{width}x{height} with {rung} spatial upscale renders stage 1 at {}x{}, whose {longest}px \
+         axis is past the {}px span these checkpoints were trained on. The rung sets the ceiling: \
+         it reaches {ceiling}px on the long edge. Use a x2 upscale, or render at or below \
+         {ceiling}px.",
         stage1.0, stage1.1, LTX2_MAX_AXIS_PIXELS,
     ))
 }
@@ -715,9 +720,18 @@ pub const LTX2_SPATIAL_LATENT_STRIDE: u32 = 32;
 ///
 /// Every rung above 1080p is reached by composition, not by a bigger denoise:
 /// stage 1 renders the halved shape, one x2 spatial rung upsamples it, and
-/// stage 2 refines the result over tiles. The ladder stops at 4K DCI because
-/// `LTX2_COMPOSED_MAX_AXIS_PIXELS` is where a single halving stops landing
-/// stage 1 inside the trained span.
+/// stage 2 refines the result over tiles.
+///
+/// **The ladder stops at 4K UHD because of the encoder, not the model.**
+/// `LTX2_COMPOSED_MAX_AXIS_PIXELS` (4096) is where a single halving stops
+/// landing stage 1 inside the trained span, and generation is admitted that
+/// far — but the bundled OpenH264 encoder refuses anything past 3840x2160
+/// ("Encoder max resolution 3840x2160 horizontal or 2160x3840 vertical"), and
+/// MP4 is this family's default container. A rung wider than 3840, or the
+/// 3840x2176 that rounding 2160 *up* onto the /64 grid would give, generates
+/// fine and then fails at save time — after the whole render. So the rung is
+/// 3840x2112, rounding 2160 *down*, which is upstream's own CENTER_CROP
+/// alignment and the largest UHD-class shape mold can actually deliver.
 ///
 /// VRAM: see `website/models/ltx2.md`. The numbers live in prose because the
 /// only published figures are upstream's, they are for a different pipeline
@@ -746,13 +760,7 @@ pub const LTX2_OUTPUT_RUNGS: &[Ltx2OutputRung] = &[
         id: "4k-uhd",
         label: "4K UHD",
         width: 3_840,
-        height: 2_176,
-    },
-    Ltx2OutputRung {
-        id: "4k-dci",
-        label: "4K DCI",
-        width: 4_096,
-        height: 2_176,
+        height: 2_112,
     },
 ];
 
@@ -2288,13 +2296,7 @@ mod tests {
             },
             ExpectedRung {
                 id: "4k-uhd",
-                stage1: (1_920, 1_088),
-                tiles: (2, 2),
-                tiled: true,
-            },
-            ExpectedRung {
-                id: "4k-dci",
-                stage1: (2_048, 1_088),
+                stage1: (1_920, 1_056),
                 tiles: (2, 2),
                 tiled: true,
             },
@@ -2447,8 +2449,8 @@ mod tests {
     /// cost are identical under transposition.
     #[test]
     fn rungs_resolve_in_either_orientation() {
-        assert_eq!(ltx2_output_rung(3_840, 2_176).map(|r| r.id), Some("4k-uhd"));
-        assert_eq!(ltx2_output_rung(2_176, 3_840).map(|r| r.id), Some("4k-uhd"));
+        assert_eq!(ltx2_output_rung(3_840, 2_112).map(|r| r.id), Some("4k-uhd"));
+        assert_eq!(ltx2_output_rung(2_112, 3_840).map(|r| r.id), Some("4k-uhd"));
         assert_eq!(ltx2_output_rung(1_920, 1_088).map(|r| r.id), Some("1080p"));
         assert_eq!(ltx2_output_rung(1_234, 567), None);
     }
@@ -2463,11 +2465,11 @@ mod tests {
         );
         assert_eq!(
             largest_ltx2_rung_within(LTX2_COMPOSED_MAX_AXIS_PIXELS).map(|rung| rung.id),
-            Some("4k-dci"),
+            Some("4k-uhd"),
         );
         assert_eq!(largest_ltx2_rung_within(64), None);
 
-        let err = validate_generation_dimensions(3_840, 2_176, Some("ltx2"))
+        let err = validate_generation_dimensions(3_840, 2_112, Some("ltx2"))
             .expect_err("a single-pass render cannot reach 4K");
         assert!(err.contains("spatial upsampler"), "got: {err}");
         assert!(err.contains("1080p Full HD (1920x1088)"), "got: {err}");
@@ -2483,7 +2485,7 @@ mod tests {
             !err.contains("spatial upsampler"),
             "a composing render is already using it, got: {err}"
         );
-        assert!(err.contains("4K DCI (4096x2176)"), "got: {err}");
+        assert!(err.contains("4K UHD (3840x2112)"), "got: {err}");
     }
 
     /// The issue's named 9:16 shape.

@@ -216,29 +216,61 @@ rule.
 | 720p HD       | 1280x704  | 640x352   | 1             |
 | 1080p Full HD | 1920x1088 | 960x544   | 1             |
 | 1440p QHD     | 2560x1408 | 1280x704  | 2 (2x1)       |
-| 4K UHD        | 3840x2176 | 1920x1088 | 4 (2x2)       |
-| 4K DCI        | 4096x2176 | 2048x1088 | 4 (2x2)       |
+| 4K UHD        | 3840x2112 | 1920x1056 | 4 (2x2)       |
 
-4K UHD is 3840x**2176**, not 3840x2160: 2160 is not a multiple of 64, and mold
-rejects an unrenderable shape rather than quietly resizing it. Upstream hits
-the same constraint and resolves it the other way, aligning 2160 down to 2112
-or up to 2176 inside its own pipeline.
+4K UHD is 3840x**2112**, not 3840x2160, because 2160 is not a multiple of 64
+and mold rejects an unrenderable shape rather than quietly resizing it. Of the
+two 64-aligned neighbours, 2112 is the one that works: **3840x2176 generates
+correctly and then fails at save time**, because the bundled OpenH264 encoder
+refuses anything past 3840x2160 and MP4 is this family's default container.
+Rounding down is also what upstream's own `align_resolution` does in
+`CENTER_CROP` mode.
 
-Portrait is the same rung transposed — 2176x3840 composes and costs exactly
-what 3840x2176 does.
+The _generation_ ceiling is higher than the ladder: an axis is admitted up to
+4096px, which is where the halved stage 1 leaves the trained span. Between
+3840 and 4096 the render succeeds and only the H.264 export fails, so those
+shapes are admitted rather than blocked — but no preset offers one, because
+the default output would not be writable.
 
-#### What this costs, and what has actually been tested
+Portrait is the same rung transposed — 2112x3840 composes and costs exactly
+what 3840x2112 does.
 
-::: warning Above 1080p is unqualified on a 24 GB card.
+#### What this costs, measured
 
-The rungs above 1080p are **not verified on consumer hardware**, and this
-section is deliberately specific about which claim is which.
+Measured on a single **RTX 4090 (24 GB)**, `ltx-2-19b-distilled:fp8`, 25 frames
+at 24 fps, silent, seed 424303:
 
-Each stage-2 tile is a full denoise pass, so a 4K render does four of them
-where 1080p does one, on top of a stage 1 that is itself a 1080p render. The
-only published VRAM figures for these output shapes are upstream's, and they
-are for a **different pipeline** — HDR IC-LoRA, 161 frames, the 22B checkpoint
-— so they are a reference point, not mold's requirement
+| Output                              | Result                            | Wall time | Peak VRAM |
+| ----------------------------------- | --------------------------------- | --------- | --------- |
+| 1920x1088 (1080p)                   | rendered                          | 372 s     | 18.4 GB   |
+| 2560x1408 (1440p)                   | rendered                          | 299 s     | 18.1 GB   |
+| 3840x2176 (4K-class)                | OOM in VAE decode                 | 478 s     | 22.8 GB   |
+| 3840x2176 with `--spatial-tile 768` | generated, failed at H.264 export | 488 s     | 18.2 GB   |
+| 3840x2112 with `--spatial-tile 768` | **rendered** (4K UHD rung)        | 474 s     | 18.2 GB   |
+
+Two things are worth reading off that table. Peak VRAM barely moves between
+1080p and 1440p — the composition is what bounds it, since every stage-2 tile
+is denoised at a shape inside the trained span and the residency planner
+simply streams one more transformer block (38/10 resident/streamed at 1080p,
+37/11 at 1440p, 36/12 at 4K). And the default 1280px tile is the thing that
+does not fit at 4K: the diffusion completes either way, but the VAE decode
+needs the smaller tile.
+
+::: warning 4K needs `--spatial-tile 768` on a 24 GB card.
+
+With the default `auto` tiling, 4K reaches the VAE decode and fails there with
+an out-of-memory error naming the phase and the numbers. It does not silently
+render something smaller. Pass `--spatial-tile 768` — upstream's own advice for
+lower-VRAM GPUs — and the whole render completes at 18.2 GB.
+
+These are single-configuration measurements at **25 frames**, not a support
+matrix. Activation cost scales with frame count, and upstream's own table (for
+a different pipeline — HDR IC-LoRA, 161 frames, 22B) puts 4K at 48–80 GB, so
+do not read the numbers above as a promise for a long clip.
+
+:::
+
+For reference, upstream's published figures
 ([`hdr_ic_lora.py:780-786`](https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/hdr_ic_lora.py)):
 
 | Output    | 80 GB (H100) | 48 GB (A6000) |
@@ -250,17 +282,9 @@ are for a **different pipeline** — HDR IC-LoRA, 161 frames, the 22B checkpoint
 | 3840x2160 | 121 frames   | 49 frames     |
 | 4096x2160 | 105 frames   | 49 frames     |
 
-Upstream's own smallest column for 4K is 48 GB. Note also that the module its
-`--help` points at for per-configuration estimates,
+Note that the module its `--help` points at for per-configuration estimates,
 `ltx_pipelines.utils.vram_budget`, is not published in the repository — the
-table is the only figure available.
-
-mold admits these shapes because the composition that reaches them is correct
-and testable, not because it has rendered them on a 24 GB card. If a rung does
-not fit, the render fails with an out-of-memory error; mold will not silently
-drop to a smaller shape.
-
-:::
+table is the only figure upstream provides.
 
 ### Spatial tiling (`--spatial-tile`)
 

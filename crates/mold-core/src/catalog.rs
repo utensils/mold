@@ -335,7 +335,7 @@ mod tests {
             ltx2.defaults
                 .recommended_dimensions
                 .iter()
-                .any(|size| size.width == 3840 && size.height == 2176),
+                .any(|size| size.width == 3840 && size.height == 2112),
             "a composing checkpoint must advertise the 4K UHD rung",
         );
         // Every advertised bucket has to be admissible for this exact model,

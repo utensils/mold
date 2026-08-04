@@ -24,23 +24,29 @@ outside the trained range even when the frame's area is small. A checkpoint
 that ships the spatial upsampler reaches past it by **composing**: stage 1
 renders at half the requested size, the learned upsampler doubles it, and
 stage 2 refines the result over tiles each brought back inside the span. That
-puts the ceiling at 4096px on the long edge — exactly where a single halving
-stops landing stage 1 inside the span — and gives an output ladder of
-1280x704, 1920x1088, 2560x1408, 3840x2176 and 4096x2176. A checkpoint that
+puts the generation ceiling at 4096px on the long edge — exactly where a
+single halving stops landing stage 1 inside the span — and gives an output
+ladder of 1280x704, 1920x1088, 2560x1408 and 3840x2112. A checkpoint that
 renders in one pass stays capped at 2048px and 1920x1088.
+
+The ladder stops at 3840x2112 because of the **encoder**, not the model: the
+bundled OpenH264 encoder refuses anything past 3840x2160, so 3840x2176 (what
+rounding 2160 up onto the /64 grid would give) generates correctly and then
+fails at save time.
 
 There is nothing to assemble by hand: choose the output size and mold runs the
 composition. `/api/models` advertises the per-model `max_pixels`,
 `max_axis_pixels` and `recommended_dimensions`, so a picker never offers a rung
 the selected checkpoint would reject.
 
-**Above 1080p is unqualified on consumer hardware.** Each stage-2 tile is a
-full denoise pass, so 4K runs four of them on top of a stage 1 that is itself a
-1080p render. Upstream's own table puts 4K at 48–80 GB — for a different
-pipeline, so it is a reference point rather than mold's requirement. A rung
-that does not fit fails with an out-of-memory error; mold does not silently
-render something smaller. See
-[LTX-2 → Resolution](/models/ltx2#resolution) for the full table and caveats.
+**4K needs `--spatial-tile 768` on a 24 GB card.** Measured on an RTX 4090 with
+`ltx-2-19b-distilled:fp8` at 25 frames: 1080p peaks at 18.4 GB, 1440p at
+18.1 GB, and 4K completes at 18.2 GB with the smaller tile. With the default
+1280px tile, 4K reaches the VAE decode and fails there with an out-of-memory
+error naming the phase — it does not silently render something smaller. Those
+are single-configuration measurements at 25 frames, not a support matrix; see
+[LTX-2 → Resolution](/models/ltx2#resolution) for the full numbers and
+caveats.
 
 `--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` reads) takes
 `auto` — the default, which tiles only where it buys something — `off`, or an
