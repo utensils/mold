@@ -9385,4 +9385,122 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    /// The non-streaming `/api/generate` route returns one body. Audio prints
+    /// carry a waveform PNG in `JobResult.image` so the queue and SSE pipeline
+    /// have a raster to work with — a branch that only special-cases video
+    /// therefore hands a direct HTTP caller `image/png` and silently drops the
+    /// WAV the render actually produced.
+    #[test]
+    fn generate_media_headers_return_the_wav_for_an_audio_response() {
+        let waveform = vec![0x89, 0x50, 0x4E, 0x47];
+        let wav = b"RIFF....WAVEfmt ".to_vec();
+        let response = GenerateResponse {
+            audio: Some(mold_core::AudioData {
+                data: wav.clone(),
+                format: OutputFormat::Wav,
+                sample_rate: 24_000,
+                channels: 2,
+                duration_ms: 5_010,
+                thumbnail: waveform.clone(),
+                thumbnail_width: 640,
+                thumbnail_height: 360,
+            }),
+            images: Vec::new(),
+            video: None,
+            generation_time_ms: 1,
+            model: "ltx-2-19b-dev:fp8".into(),
+            seed_used: 7,
+            gpu: None,
+        };
+        let img = ImageData {
+            data: waveform,
+            format: OutputFormat::Png,
+            width: 640,
+            height: 360,
+            index: 0,
+        };
+
+        let mut headers = axum::http::HeaderMap::new();
+        let body = crate::routes::apply_media_headers(&response, img, &mut headers);
+
+        assert_eq!(body, wav, "the caller must receive the encoded audio");
+        assert_eq!(
+            headers[axum::http::header::CONTENT_TYPE],
+            "audio/wav",
+            "an audio print must not be labelled as its waveform thumbnail",
+        );
+        assert_eq!(
+            headers["x-mold-audio-format"], "wav",
+            "the server states the container; the request may have omitted it",
+        );
+        assert_eq!(headers["x-mold-audio-sample-rate"], "24000");
+        assert_eq!(headers["x-mold-audio-channels"], "2");
+        assert_eq!(headers["x-mold-audio-duration-ms"], "5010");
+        assert_eq!(headers["x-mold-audio-thumbnail-width"], "640");
+        assert_eq!(headers["x-mold-audio-thumbnail-height"], "360");
+        assert!(
+            !headers.contains_key("x-mold-video-frames"),
+            "audio has no frames; the video probe must not fire",
+        );
+    }
+
+    /// The image and video branches must keep behaving exactly as they did.
+    #[test]
+    fn generate_media_headers_keep_the_video_and_image_shapes() {
+        let img = || ImageData {
+            data: b"raster".to_vec(),
+            format: OutputFormat::Png,
+            width: 64,
+            height: 48,
+            index: 0,
+        };
+        let still = GenerateResponse {
+            audio: None,
+            images: vec![img()],
+            video: None,
+            generation_time_ms: 1,
+            model: "flux-dev:q8".into(),
+            seed_used: 1,
+            gpu: None,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("image/png"),
+        );
+        let body = crate::routes::apply_media_headers(&still, img(), &mut headers);
+        assert_eq!(body, b"raster".to_vec());
+        assert_eq!(headers[axum::http::header::CONTENT_TYPE], "image/png");
+
+        let clip = GenerateResponse {
+            audio: None,
+            images: Vec::new(),
+            video: Some(mold_core::VideoData {
+                data: b"mp4-bytes".to_vec(),
+                format: OutputFormat::Mp4,
+                width: 960,
+                height: 576,
+                frames: 97,
+                fps: 24,
+                thumbnail: Vec::new(),
+                gif_preview: Vec::new(),
+                has_audio: true,
+                duration_ms: Some(4_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            }),
+            generation_time_ms: 1,
+            model: "ltx-2-19b-dev:fp8".into(),
+            seed_used: 1,
+            gpu: None,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        let body = crate::routes::apply_media_headers(&clip, img(), &mut headers);
+        assert_eq!(body, b"mp4-bytes".to_vec());
+        assert_eq!(headers[axum::http::header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(headers["x-mold-video-frames"], "97");
+        assert_eq!(headers["x-mold-video-fps"], "24");
+        assert_eq!(headers["x-mold-video-has-audio"], "1");
+        assert_eq!(headers["x-mold-video-audio-sample-rate"], "48000");
+    }
 }
