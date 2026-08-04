@@ -194,8 +194,10 @@ with prompt, model, seed, and generation metadata.
   re-renders only the changed clips, explicit remote-machine routing, and a
   web/desktop/iPhone preflight that shows the server-normalized plan before
   anything is queued
-- Quantized model variants, encoder fallback, smart VRAM placement, and FLUX
-  block offloading
+- Quantized model variants, encoder fallback, smart VRAM placement, FLUX
+  block offloading, and LTX-2 spatial tiling (`--spatial-tile`) for stage-2
+  refinement and VAE decode past the resolutions the checkpoints were
+  trained on
 - Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated
   REST/SSE clients
 

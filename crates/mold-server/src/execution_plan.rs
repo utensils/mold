@@ -267,6 +267,7 @@ pub enum RuntimeSemanticVariable {
     Ltx2Fp8WeightScaleMode,
     Ltx2GemmaDevice,
     Ltx2GemmaVariant,
+    Ltx2SpatialTile,
     Ltx2VaeDecodeChunkFrames,
     Ltx2VaeDecodeContextFrames,
     Ltx2VaeForceFramewise,
@@ -564,6 +565,7 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticS
         "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8WeightScaleMode,
         "MOLD_LTX2_GEMMA_DEVICE" => RuntimeSemanticVariable::Ltx2GemmaDevice,
         "MOLD_LTX2_GEMMA_VARIANT" => RuntimeSemanticVariable::Ltx2GemmaVariant,
+        "MOLD_LTX2_SPATIAL_TILE" => RuntimeSemanticVariable::Ltx2SpatialTile,
         "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
         "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES" => {
             RuntimeSemanticVariable::Ltx2VaeDecodeContextFrames

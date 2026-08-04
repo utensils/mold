@@ -1,13 +1,3 @@
-// `plan_stage2_tiling` is live — stage-2 telemetry reports when a shape
-// exceeds the span the checkpoints were trained on. The tile *execution*
-// arithmetic (interval splitting, blend windows, tile enumeration) is verified
-// against upstream but has no production caller until the per-tile denoise
-// lands in https://github.com/utensils/mold/issues/673. It is staged here
-// rather than written later because it is the part that fails silently when
-// it is wrong: a desynced blend window produces a plausible-looking seam, not
-// an error.
-#![allow(dead_code)]
-
 //! Latent-space tiling for LTX-2 stage-2 refinement.
 //!
 //! Upstream reaches resolutions the transformer never saw in training by
@@ -88,10 +78,6 @@ impl TileCountConfig {
             height: DimensionTiling::none(),
             width: DimensionTiling::none(),
         }
-    }
-
-    pub fn is_untiled(self) -> bool {
-        self.frames.num_tiles <= 1 && self.height.num_tiles <= 1 && self.width.num_tiles <= 1
     }
 }
 
@@ -185,7 +171,7 @@ pub(crate) fn trapezoidal_mask(length: usize, left_ramp: usize, right_ramp: usiz
 
 /// Split an axis into `size`-long intervals overlapping by `overlap`
 /// (`tiling.py:133-170`).
-fn split_by_size(
+pub(crate) fn split_by_size(
     dimension_size: usize,
     size: usize,
     overlap: usize,
@@ -385,6 +371,189 @@ pub(crate) fn plan_stage2_tiling(
     planned
 }
 
+// ── Policy: when does tiling engage at all? ──────────────────────────────────
+//
+// Tiling costs a full denoise pass per tile and blends across seams, so it must
+// never touch a shape that renders correctly today. Both consumers — stage-2
+// refinement and the VAE decode — resolve one `SpatialTilePolicy`, and `Auto`
+// is deliberately conservative enough that it cannot fire on any shape
+// `mold_core::validation::LTX2_MAX_AXIS_PIXELS` currently admits.
+
+/// Default VAE spatial decode tile, in pixels. Upstream ships 768/64
+/// (`video_vae/tiling.py:67`); mold decodes larger tiles because its
+/// consumer-GPU target has already paid for a spatially tiled *denoise* by the
+/// time it gets here, and a wider tile means fewer decoder passes.
+pub(crate) const DEFAULT_VAE_SPATIAL_TILE_PIXELS: usize = 1_280;
+
+/// Default overlap between VAE decode tiles, in pixels. The decoder pads at
+/// tile edges instead of seeing real neighbours, so upstream discards a latent
+/// cell per edge and requires at least 64 px of overlap
+/// (`video_vae.py:437-446`). 256 px is 8 latent cells per side — enough that
+/// the trapezoid's ramp, not the padded edge, is what reaches the seam.
+pub(crate) const DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS: usize = 256;
+
+/// The pixel stride of one latent cell, re-exported for callers that reason in
+/// pixels (the knob's unit) rather than latent cells (the tiler's unit).
+pub(crate) const LATENT_PIXEL_STRIDE: usize = LATENT_SPATIAL_STRIDE;
+
+/// How spatial work may be split, resolved from `MOLD_LTX2_SPATIAL_TILE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpatialTilePolicy {
+    /// Never tile. Exactly today's behaviour at every resolution, including
+    /// the out-of-distribution ones.
+    Off,
+    /// Tile only where it buys something: stage 2 past the trained span, and
+    /// a VAE decode that both exceeds that span and does not fit.
+    Auto,
+    /// Always tile at this size, whatever the shape. This is the only way to
+    /// exercise tiling at a resolution that does not need it, which is what
+    /// makes tiled-vs-untiled equivalence testable on one consumer GPU.
+    Forced {
+        tile_pixels: usize,
+        overlap_pixels: usize,
+    },
+}
+
+impl SpatialTilePolicy {
+    /// Parse the `MOLD_LTX2_SPATIAL_TILE` / `--spatial-tile` value:
+    /// `off`, `auto`, `<pixels>`, or `<pixels>:<overlap>`.
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        match value.to_ascii_lowercase().as_str() {
+            "" | "auto" => return Ok(Self::Auto),
+            "off" | "none" | "0" | "false" => return Ok(Self::Off),
+            _ => {}
+        }
+        let (size, overlap) = match value.split_once(':') {
+            Some((size, overlap)) => (size, Some(overlap)),
+            None => (value, None),
+        };
+        let tile_pixels: usize = size.trim().parse().map_err(|_| {
+            anyhow::anyhow!(
+                "invalid spatial tile size '{size}'; expected off, auto, <pixels>, or <pixels>:<overlap>"
+            )
+        })?;
+        let overlap_pixels = match overlap {
+            Some(overlap) => overlap.trim().parse().map_err(|_| {
+                anyhow::anyhow!("invalid spatial tile overlap '{overlap}'; expected a pixel count")
+            })?,
+            None => DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS,
+        };
+        // Upstream's own validation (`video_vae/tiling.py:15-25`): a tile has
+        // to be a whole number of latent cells, and an overlap that reaches
+        // the tile size leaves no stride at all.
+        if tile_pixels < 2 * LATENT_PIXEL_STRIDE {
+            bail!(
+                "spatial tile size must be at least {} px",
+                2 * LATENT_PIXEL_STRIDE
+            );
+        }
+        if !tile_pixels.is_multiple_of(LATENT_PIXEL_STRIDE) {
+            bail!("spatial tile size must be a multiple of {LATENT_PIXEL_STRIDE} px, got {tile_pixels}");
+        }
+        if !overlap_pixels.is_multiple_of(LATENT_PIXEL_STRIDE) {
+            bail!("spatial tile overlap must be a multiple of {LATENT_PIXEL_STRIDE} px, got {overlap_pixels}");
+        }
+        if overlap_pixels >= tile_pixels {
+            bail!("spatial tile overlap ({overlap_pixels} px) must be smaller than the tile ({tile_pixels} px)");
+        }
+        Ok(Self::Forced {
+            tile_pixels,
+            overlap_pixels,
+        })
+    }
+}
+
+/// Split one axis into the fewest tiles whose every tile fits `span` cells.
+fn axis_tiling(size: usize, span: usize, overlap: usize) -> DimensionTiling {
+    if span == 0 || size <= span {
+        return DimensionTiling::none();
+    }
+    let tiles = size.div_ceil(span).max(2);
+    clamp_dimension_tiling(DimensionTiling::new(tiles, overlap), size)
+}
+
+/// Choose a stage-2 tile layout under `policy`.
+///
+/// `Auto` reproduces [`plan_stage2_tiling`]: split only what the checkpoints
+/// were never trained to see. `Forced` splits to the requested tile size even
+/// when the shape does not need it.
+pub(crate) fn plan_stage2_tiling_with_policy(
+    latent_frames: usize,
+    latent_height: usize,
+    latent_width: usize,
+    policy: SpatialTilePolicy,
+) -> TileCountConfig {
+    match policy {
+        SpatialTilePolicy::Off => TileCountConfig::untiled(),
+        SpatialTilePolicy::Auto => plan_stage2_tiling(latent_frames, latent_height, latent_width),
+        SpatialTilePolicy::Forced {
+            tile_pixels,
+            overlap_pixels,
+        } => {
+            let span = tile_pixels / LATENT_PIXEL_STRIDE;
+            let overlap = overlap_pixels / LATENT_PIXEL_STRIDE;
+            TileCountConfig {
+                // Time is never split: the duration budget already caps it,
+                // and a temporal seam is far more visible than a spatial one.
+                frames: DimensionTiling::none(),
+                height: axis_tiling(latent_height, span, overlap),
+                width: axis_tiling(latent_width, span, overlap),
+            }
+        }
+    }
+}
+
+/// Pixel-space tile geometry for the VAE decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpatialDecodeTiling {
+    /// Latent cells per tile along each spatial axis.
+    pub tile_cells: usize,
+    /// Latent cells shared with each neighbour.
+    pub overlap_cells: usize,
+}
+
+/// Choose a VAE spatial decode layout.
+///
+/// `needed` is the caller's memory verdict — the same projected-workspace
+/// check that already selects temporal chunking. `Auto` requires *both* that
+/// verdict and a frame past the trained span, so a 1080p or 2K decode that
+/// chunks temporally today keeps decoding exactly as it does today.
+pub(crate) fn plan_spatial_decode_tiling(
+    latent_height: usize,
+    latent_width: usize,
+    policy: SpatialTilePolicy,
+    needed: bool,
+) -> Option<SpatialDecodeTiling> {
+    let (tile_cells, overlap_cells) = match policy {
+        SpatialTilePolicy::Off => return None,
+        SpatialTilePolicy::Auto => {
+            let past_trained_span = latent_height.max(latent_width) > TRAINED_SPATIAL_LATENT_SPAN;
+            if !needed || !past_trained_span {
+                return None;
+            }
+            (
+                DEFAULT_VAE_SPATIAL_TILE_PIXELS / LATENT_PIXEL_STRIDE,
+                DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS / LATENT_PIXEL_STRIDE,
+            )
+        }
+        SpatialTilePolicy::Forced {
+            tile_pixels,
+            overlap_pixels,
+        } => (
+            tile_pixels / LATENT_PIXEL_STRIDE,
+            overlap_pixels / LATENT_PIXEL_STRIDE,
+        ),
+    };
+    if latent_height <= tile_cells && latent_width <= tile_cells {
+        return None;
+    }
+    Some(SpatialDecodeTiling {
+        tile_cells,
+        overlap_cells: overlap_cells.min(tile_cells.saturating_sub(1)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,12 +745,12 @@ mod tests {
     #[test]
     fn shapes_inside_the_trained_span_are_not_tiled() {
         // 1216x704 -> 38x22 latent cells: the LTX-2 default, comfortably inside.
-        assert!(plan_stage2_tiling(13, 22, 38).is_untiled());
+        assert_eq!(plan_stage2_tiling(13, 22, 38), TileCountConfig::untiled());
         // 1920x1088 -> 60x34: still inside, which is why #668 could ship it
         // without tiling.
-        assert!(plan_stage2_tiling(13, 34, 60).is_untiled());
+        assert_eq!(plan_stage2_tiling(13, 34, 60), TileCountConfig::untiled());
         // Exactly at the span.
-        assert!(plan_stage2_tiling(13, 64, 64).is_untiled());
+        assert_eq!(plan_stage2_tiling(13, 64, 64), TileCountConfig::untiled());
     }
 
     /// Every tile of a 4K plan must land back inside the trained span, or
@@ -590,7 +759,7 @@ mod tests {
     fn oversized_axes_are_split_until_every_tile_fits_the_trained_span() {
         // 3840x2160 -> 120x68 latent cells.
         let cfg = plan_stage2_tiling(13, 68, 120);
-        assert!(!cfg.is_untiled());
+        assert_ne!(cfg, TileCountConfig::untiled());
         assert_eq!(cfg.frames, DimensionTiling::none(), "time stays whole");
 
         let tiles = create_tiles(13, 68, 120, cfg).unwrap();
@@ -623,5 +792,120 @@ mod tests {
         assert_eq!(tiles.len(), 1);
         assert_eq!(tiles[0].token_count(), 9 * 8 * 10);
         assert!(tiles[0].blend_window().iter().all(|w| *w == 1.0));
+    }
+
+    // ── Policy ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn policy_parses_off_auto_and_explicit_sizes() {
+        assert_eq!(
+            SpatialTilePolicy::parse("").unwrap(),
+            SpatialTilePolicy::Auto
+        );
+        assert_eq!(
+            SpatialTilePolicy::parse(" AUTO ").unwrap(),
+            SpatialTilePolicy::Auto
+        );
+        for off in ["off", "none", "0", "false", "Off"] {
+            assert_eq!(
+                SpatialTilePolicy::parse(off).unwrap(),
+                SpatialTilePolicy::Off
+            );
+        }
+        assert_eq!(
+            SpatialTilePolicy::parse("1280").unwrap(),
+            SpatialTilePolicy::Forced {
+                tile_pixels: 1_280,
+                overlap_pixels: DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS,
+            }
+        );
+        assert_eq!(
+            SpatialTilePolicy::parse("256:64").unwrap(),
+            SpatialTilePolicy::Forced {
+                tile_pixels: 256,
+                overlap_pixels: 64,
+            }
+        );
+    }
+
+    #[test]
+    fn policy_rejects_geometry_the_tiler_cannot_honour() {
+        // Not a whole number of latent cells.
+        assert!(SpatialTilePolicy::parse("1000").is_err());
+        assert!(SpatialTilePolicy::parse("1280:100").is_err());
+        // Smaller than two latent cells, so it can never have a ramp.
+        assert!(SpatialTilePolicy::parse("32").is_err());
+        // Overlap swallows the stride.
+        assert!(SpatialTilePolicy::parse("256:256").is_err());
+        assert!(SpatialTilePolicy::parse("garbage").is_err());
+    }
+
+    /// The compatibility constraint that matters more than anything else here:
+    /// no shape that renders today may start tiling because this landed.
+    #[test]
+    fn auto_never_tiles_a_shape_the_validator_admits_today() {
+        // `LTX2_MAX_AXIS_PIXELS` is 2048, so 64 latent cells is the largest
+        // axis that can reach the engine. Walk every 32-px rung up to it.
+        for cells in 1..=TRAINED_SPATIAL_LATENT_SPAN {
+            assert_eq!(
+                plan_stage2_tiling_with_policy(13, cells, cells, SpatialTilePolicy::Auto),
+                TileCountConfig::untiled(),
+                "{cells} latent cells is inside the trained span and must not tile"
+            );
+            assert_eq!(
+                plan_spatial_decode_tiling(cells, cells, SpatialTilePolicy::Auto, true),
+                None,
+                "{cells} latent cells must decode exactly as it does today"
+            );
+        }
+    }
+
+    #[test]
+    fn off_disables_tiling_even_past_the_trained_span() {
+        // 3840x2160.
+        assert_eq!(
+            plan_stage2_tiling_with_policy(13, 68, 120, SpatialTilePolicy::Off),
+            TileCountConfig::untiled()
+        );
+        assert_eq!(
+            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Off, true),
+            None
+        );
+    }
+
+    #[test]
+    fn forced_tiling_splits_a_shape_that_would_not_need_it() {
+        // 512x512 -> 16x16 latent cells, forced into 256-px (8-cell) tiles.
+        let cfg =
+            plan_stage2_tiling_with_policy(4, 16, 16, SpatialTilePolicy::parse("256:64").unwrap());
+        assert_eq!(cfg.frames, DimensionTiling::none(), "time is never split");
+        assert_eq!(cfg.height.num_tiles, 2);
+        assert_eq!(cfg.width.num_tiles, 2);
+
+        let tiles = create_tiles(4, 16, 16, cfg).unwrap();
+        assert_eq!(tiles.len(), 4);
+        let mut acc = vec![0.0f32; 4 * 16 * 16];
+        for tile in &tiles {
+            for (token, weight) in tile.token_indices(16, 16).iter().zip(tile.blend_window()) {
+                acc[*token] += weight;
+            }
+        }
+        assert!(acc.iter().all(|total| (total - 1.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn a_decode_that_fits_is_not_tiled_even_at_4k() {
+        // 3840x2160 latent cells, but the caller says the workspace fits.
+        assert_eq!(
+            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Auto, false),
+            None
+        );
+        assert_eq!(
+            plan_spatial_decode_tiling(68, 120, SpatialTilePolicy::Auto, true),
+            Some(SpatialDecodeTiling {
+                tile_cells: DEFAULT_VAE_SPATIAL_TILE_PIXELS / LATENT_PIXEL_STRIDE,
+                overlap_cells: DEFAULT_VAE_SPATIAL_OVERLAP_PIXELS / LATENT_PIXEL_STRIDE,
+            })
+        );
     }
 }

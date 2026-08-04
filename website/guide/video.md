@@ -17,6 +17,21 @@ forward passes.
 mold run ltx-2-19b-distilled:fp8 "a cat walks through autumn leaves" --frames 97
 ```
 
+## Resolution and spatial tiling
+
+Both axes must stay at or below 2048px: LTX-2 normalizes RoPE pixel positions
+by that span, so a longer edge is outside the trained range even when the
+frame's area is small. Past that span, stage-2 refinement and the VAE decode
+run over overlapping spatial tiles instead of the whole frame, each tile
+denoised as a sequence starting at zero and recombined with a trapezoidal
+blend.
+
+`--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` reads) takes
+`auto` — the default, which tiles only where it buys something — `off`, or an
+explicit `<px>` / `<px>:<overlap>` in multiples of 32. Because `auto` cannot
+engage inside the trained span, no resolution that renders today is affected.
+See [LTX-2 → Spatial tiling](/models/ltx2#spatial-tiling-spatial-tile).
+
 ## Multi-prompt scripts (v2)
 
 Direct any-length video scene-by-scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
