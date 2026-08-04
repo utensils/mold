@@ -10,8 +10,8 @@ LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the supported
 backend for real local generation, CPU is a correctness-oriented fallback, and
 Metal is explicitly unsupported for this family. The native CUDA workflow
 matrix is validated across 19B/22B text+audio-video, image-to-video,
-audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` /
-`x2` where published), and temporal upscale (`x2`).
+audio-to-video, keyframe, retake, lip dub, public IC-LoRA, spatial upscale
+(`x1.5` / `x2` where published), and temporal upscale (`x2`).
 :::
 
 ## Supported Models
@@ -43,6 +43,7 @@ disk requirements.
 - Audio-to-video via `--audio-file`
 - Keyframe interpolation via repeatable `--keyframe`
 - Retake / partial regeneration via `--video` + `--retake`
+- Lip dub / re-voicing via `--pipeline lip-dub` + `--ic-lora-control lipdub`
 - IC-LoRA and stacked LoRAs via repeatable `--lora`
 - Official IC-LoRA reference controls via `--ic-lora-control`
 - Camera-control preset names for the published LTX-2 19B camera LoRAs
@@ -88,6 +89,13 @@ should compare generated contact sheets or clips from that fixed seed.
   rejects dev or architecture-unknown catalog checkpoints before starting a
   download. Raw custom IC-LoRAs remain available through
   `--pipeline ic-lora --lora /path/custom.safetensors`.
+- Lip dub takes its length and frame rate from the reference clip — `--frames`
+  and `--fps` are overridden, and mold says so when it does. The reference must
+  carry an audio track, because its speech is what the dub imitates; a silent
+  reference is rejected up front rather than after the checkpoint has loaded.
+  Both axes must be multiples of 64 because the pipeline always renders in two
+  stages. The frame count is rounded **down** onto the `8k+1` grid, so a
+  100-frame reference renders 97 frames.
 - Guide video formats are adapter-specific: Union consumes an already
   preprocessed Canny, depth, or pose video; Motion Track consumes colored
   trajectory overlays; Pose consumes a rendered pose video; Detailer consumes
@@ -296,6 +304,16 @@ mold run ltx-2-19b-distilled:fp8 \
   --pipeline retake \
   --video ./source.mp4 \
   --retake 1.5:3.5 \
+  --format mp4
+
+# Lip dub: re-voice a clip of someone speaking. The reference video supplies
+# the frame count, the frame rate, and the voice; the prompt supplies the new
+# line. Width and height must be multiples of 64.
+mold run ltx-2.3-22b-distilled:fp8 \
+  "she says: the harbour freezes over every winter" \
+  --ic-lora-control lipdub \
+  --video ./speaker.mp4 \
+  --width 704 --height 448 \
   --format mp4
 
 # Spatial upscale on a published LTX-2.3 asset

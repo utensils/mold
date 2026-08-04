@@ -142,6 +142,25 @@ describe("buildRequest — LTX-2 advanced video", () => {
     });
   });
 
+  it("routes the lip-dub adapter to its own pipeline, not ic-lora", () => {
+    // The lip-dub adapter keeps its LoRA loaded for both stages and
+    // conditions on the reference clip's speech. Sending `ic-lora` with it
+    // would load the right weights and run the wrong graph — the server 422s
+    // that pairing rather than honouring it.
+    const form = ltx2Form();
+    form.prompt = "she says something else entirely";
+    form.sourceVideo = { filename: "speaker.mp4", base64: "SPEAKER" };
+    form.icLoraControl = "lipdub";
+
+    const req = buildRequest(form);
+
+    expect(req).toMatchObject({
+      pipeline: "lip-dub",
+      ic_lora_control: "lipdub",
+      source_video: "SPEAKER",
+    });
+  });
+
   it("maps advanced fields to their kebab-case wire values", () => {
     const form = ltx2Form();
     form.prompt = "a river";

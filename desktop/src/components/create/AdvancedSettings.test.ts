@@ -281,6 +281,47 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.get("[data-test='ltx2-reference-guide']").text()).toContain("pose guide video");
   });
 
+  it("selects the lip-dub pipeline for the lip-dub adapter and says where timing comes from", async () => {
+    const form = formFor("ltx2");
+    const controlAdapters: Ltx2ControlAdapterInfo[] = [
+      {
+        id: "lipdub",
+        label: "Lip dub",
+        guide: "A reference video with speech; the mouth is re-timed to new audio.",
+        size_bytes: 2_466_665_072,
+        installed: true,
+        download_model: "ltx2-control-lipdub-23",
+        download_repo: "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+        download_filename: "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+        download_sha256: "a".repeat(64),
+      },
+    ];
+    const wrapper = mountSettings(form, { controlAdapters });
+    await openSection(wrapper, "Video");
+    expect(wrapper.find("[data-test='ltx2-lip-dub-hint']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='ltx2-reference-control']").setValue("lipdub");
+
+    expect(form.icLoraControl).toBe("lipdub");
+    expect(form.pipeline).toBe("lip-dub");
+    // The frames/fps fields above are not in charge here, so say so.
+    expect(wrapper.get("[data-test='ltx2-lip-dub-hint']").text()).toContain("reference video");
+  });
+
+  it("keeps the reference control when switching between the two adapter pipelines", async () => {
+    const form = formFor("ltx2");
+    form.icLoraControl = "lipdub";
+    form.pipeline = "lip-dub";
+    const wrapper = mountSettings(form);
+    await openSection(wrapper, "Video");
+
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("ic-lora");
+    expect(form.icLoraControl).toBe("lipdub");
+
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("two-stage");
+    expect(form.icLoraControl).toBeNull();
+  });
+
   it("shows the a2vid conditioning-audio input only for that pipeline", async () => {
     const form = formFor("ltx2");
     const wrapper = mountSettings(form);

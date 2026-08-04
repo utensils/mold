@@ -1190,6 +1190,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-sample-rate"),
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-channels"),
                     axum::http::header::HeaderName::from_static("x-mold-dimension-warning"),
+                    axum::http::header::HeaderName::from_static("x-mold-request-warning"),
                 ])
         }
         _ => CorsLayer::permissive(),

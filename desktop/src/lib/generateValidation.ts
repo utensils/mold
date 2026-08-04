@@ -206,6 +206,16 @@ export function advancedVideoValidationError(form: GenerateForm): string | null 
       return form.loras.length > 0 || form.icLoraControl
         ? null
         : "IC-LoRA requires at least one LoRA.";
+    case "lip-dub":
+      // Frames and fps come from the reference clip, so there is nothing to
+      // check about duration here — only that a clip and the adapter exist.
+      if (!form.sourceVideo) return "Lip dub requires a reference video to re-voice.";
+      if (!form.icLoraControl && form.loras.length === 0) {
+        return "Lip dub requires the lip-dub reference control.";
+      }
+      return form.width % 64 === 0 && form.height % 64 === 0
+        ? null
+        : "Lip dub renders in two stages, so width and height must be multiples of 64.";
     default:
       return null;
   }

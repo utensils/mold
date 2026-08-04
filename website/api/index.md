@@ -285,10 +285,19 @@ HTTP/1.1 200 OK
 content-type: image/png
 x-mold-seed-used: 42
 x-mold-dimension-warning: dimensions adjusted from 1000x1000 to 1024x1024
+x-mold-request-warning: dimensions adjusted from 1000x1000 to 1024x1024
 ```
 
 The `x-mold-dimension-warning` header is present when the requested dimensions
-were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
+were adjusted to fit model constraints (e.g. multiples of 16, pixel cap). It
+carries dimension adjustments only.
+
+The `x-mold-request-warning` header carries **every** advisory about a request
+that was still accepted, `;`-separated — dimension adjustments plus anything
+else, such as a lip-dub render taking its frame count and frame rate from the
+reference clip instead of the values you sent. Prefer it over the dimension
+header if you want to surface all of them; the streaming endpoints deliver the
+same list as `info` progress events.
 
 ## Generate Request Shape
 
@@ -384,7 +393,7 @@ Important fields:
 | `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                                            |
 | `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                        |
 | `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                                   |
-| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`)                       |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`)            |
 | `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`.       |
 | `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                                    |
 | `guidance_overrides`                                | Additive LTX-2 multimodal-guider overrides: `stg_scale`, `stg_blocks[]`, `rescale_scale`, `modality_scale`, `skip_step`. Each omitted field keeps the pipeline default. |

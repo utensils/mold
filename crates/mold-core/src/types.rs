@@ -538,6 +538,7 @@ pub enum Ltx2PipelineMode {
     Keyframe,
     A2Vid,
     Retake,
+    LipDub,
 }
 
 impl Ltx2PipelineMode {
@@ -545,7 +546,7 @@ impl Ltx2PipelineMode {
     /// TypeScript string union, and
     /// `ltx2_pipeline_typescript_unions_match_the_wire_contract` pins them to
     /// it — a member that does not deserialize 422s the whole request.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::OneStage,
         Self::TwoStage,
         Self::TwoStageHq,
@@ -554,6 +555,7 @@ impl Ltx2PipelineMode {
         Self::Keyframe,
         Self::A2Vid,
         Self::Retake,
+        Self::LipDub,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -566,6 +568,7 @@ impl Ltx2PipelineMode {
             Self::Keyframe => "keyframe",
             Self::A2Vid => "a2-vid",
             Self::Retake => "retake",
+            Self::LipDub => "lip-dub",
         }
     }
 }
@@ -3436,6 +3439,7 @@ mod tests {
                 Ltx2PipelineMode::Keyframe => "keyframe",
                 Ltx2PipelineMode::A2Vid => "a2-vid",
                 Ltx2PipelineMode::Retake => "retake",
+                Ltx2PipelineMode::LipDub => "lip-dub",
             }
         }
 
@@ -3457,6 +3461,22 @@ mod tests {
     /// union. A member that does not deserialize is not a cosmetic drift — the
     /// request 422s on `Option<Ltx2PipelineMode>` — so pin the unions to the
     /// Rust wire strings here, next to the authority.
+    #[test]
+    fn lip_dub_pipeline_mode_round_trips_its_kebab_case_wire_string() {
+        // Easy to get wrong in both directions: the adapter id is `lipdub`,
+        // the pipeline is `lip-dub`. Mixing them 422s the whole request.
+        assert_eq!(Ltx2PipelineMode::LipDub.as_str(), "lip-dub");
+        assert_eq!(
+            serde_json::to_value(Ltx2PipelineMode::LipDub).unwrap(),
+            "lip-dub"
+        );
+        assert_eq!(
+            serde_json::from_str::<Ltx2PipelineMode>("\"lip-dub\"").unwrap(),
+            Ltx2PipelineMode::LipDub
+        );
+        assert!(serde_json::from_str::<Ltx2PipelineMode>("\"lipdub\"").is_err());
+    }
+
     #[test]
     fn ltx2_pipeline_typescript_unions_match_the_wire_contract() {
         let workspace = env!("CARGO_MANIFEST_DIR")

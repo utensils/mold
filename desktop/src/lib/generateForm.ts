@@ -38,6 +38,7 @@ import {
   guidanceOverridesToWire,
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import { pipelineForControlId } from "@studio/lib/ltx2Control";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -473,7 +474,8 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     }
     if (form.icLoraControl) {
       req.ic_lora_control = form.icLoraControl;
-      req.pipeline = "ic-lora";
+      // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
+      req.pipeline = pipelineForControlId(form.icLoraControl);
     } else if (form.pipeline) req.pipeline = form.pipeline;
     if (form.retakeRange) req.retake_range = form.retakeRange;
     if (form.spatialUpscale) req.spatial_upscale = form.spatialUpscale;

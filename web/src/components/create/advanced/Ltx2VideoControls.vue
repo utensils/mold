@@ -34,6 +34,11 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import {
+  LIP_DUB_TIMING_HINT,
+  isControlAdapterPipeline,
+  pipelineForControlId,
+} from "@studio/lib/ltx2Control";
+import {
   DEFAULT_EXTEND_OVERLAP_FRAMES,
   extendNewFrames,
   extendOverlapOptions,
@@ -190,22 +195,28 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
   "keyframe",
   "a2-vid",
   "retake",
+  "lip-dub",
 ];
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
 function setPipeline(raw: string) {
   const pipeline = (raw || null) as Ltx2PipelineMode | null;
   patch({
     pipeline,
-    icLoraControl:
-      pipeline === "ic-lora" ? props.modelValue.icLoraControl : null,
+    icLoraControl: isControlAdapterPipeline(pipeline)
+      ? props.modelValue.icLoraControl
+      : null,
   });
 }
 function setControlAdapter(raw: string) {
   patch({
     icLoraControl: raw || null,
-    pipeline: raw ? "ic-lora" : props.modelValue.pipeline,
+    // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
+    pipeline: raw ? pipelineForControlId(raw) : props.modelValue.pipeline,
   });
 }
+const showLipDubTimingHint = computed(
+  () => props.modelValue.pipeline === "lip-dub",
+);
 
 const cameraMode = ref(cameraMotionMode(props.modelValue.cameraControl));
 watch(
@@ -461,6 +472,13 @@ function removeKeyframe(index: number) {
           {{ p }}
         </option>
       </select>
+      <p
+        v-if="showLipDubTimingHint"
+        class="ltx2__hint"
+        data-test="ltx2-lip-dub-hint"
+      >
+        {{ LIP_DUB_TIMING_HINT }}
+      </p>
     </div>
 
     <div class="ltx2__field">

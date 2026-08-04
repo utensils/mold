@@ -51,6 +51,11 @@ import {
   MAX_GUIDANCE_SKIP_STEP,
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import {
+  LIP_DUB_TIMING_HINT,
+  isControlAdapterPipeline,
+  pipelineForControlId,
+} from "@studio/lib/ltx2Control";
 
 const props = withDefaults(
   defineProps<{
@@ -264,18 +269,20 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "keyframe",
   "a2-vid",
   "retake",
+  "lip-dub",
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 
 function setPipeline(value: string): void {
   props.form.pipeline = (value || null) as Ltx2PipelineMode | null;
-  if (props.form.pipeline !== "ic-lora") props.form.icLoraControl = null;
+  if (!isControlAdapterPipeline(props.form.pipeline)) props.form.icLoraControl = null;
   if (props.form.pipeline !== "retake") props.form.retakeRange = null;
 }
 function setControlAdapter(value: string): void {
   props.form.icLoraControl = value || null;
-  if (value) props.form.pipeline = "ic-lora";
+  // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
+  if (value) props.form.pipeline = pipelineForControlId(value);
 }
 
 function setSpatial(value: string): void {
@@ -793,6 +800,13 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             </option>
           </select>
         </label>
+        <p
+          v-if="form.pipeline === 'lip-dub'"
+          class="mobile-generate-note"
+          data-test="mobile-ltx2-lip-dub-hint"
+        >
+          {{ LIP_DUB_TIMING_HINT }}
+        </p>
 
         <div class="mobile-generate-field-grid">
           <label class="field mobile-generate-field">

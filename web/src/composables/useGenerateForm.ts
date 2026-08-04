@@ -30,6 +30,7 @@ import {
   normalizeCameraMotionLoraState,
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
+import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
@@ -736,7 +737,9 @@ export function useGenerateForm(): UseGenerateForm {
                     image: k.image.base64,
                   }))
                 : undefined,
-              pipeline: s.icLoraControl ? "ic-lora" : (s.pipeline ?? undefined),
+              pipeline: s.icLoraControl
+                ? pipelineForControlId(s.icLoraControl)
+                : (s.pipeline ?? undefined),
               ic_lora_control: s.icLoraControl ?? undefined,
               retake_range: s.retakeRange ?? undefined,
               spatial_upscale: s.spatialUpscale ?? undefined,

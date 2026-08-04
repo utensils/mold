@@ -62,17 +62,18 @@ features today?
 
 ## Video Generation
 
-| Family     | txt2vid | img2vid | audio2vid | keyframe | retake | IC-LoRA | audio track |
-| ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ----------- |
-| LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No          |
-| LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes         |
-| All others | No      | No      | No        | No       | No     | No      | No          |
+| Family     | txt2vid | img2vid | audio2vid | keyframe | retake | lip dub | IC-LoRA | audio track |
+| ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ------- | ----------- |
+| LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
+| LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes     | Yes         |
+| All others | No      | No      | No        | No       | No     | No      | No      | No          |
 
 LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 defaults to MP4 so
 it can preserve synchronized audio when requested. Both families also support
 GIF, and feature-gated WebP/MP4 outputs where applicable. Use
 `--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
-Dimensions must be multiples of 32.
+Dimensions must be multiples of 32 — 64 for LTX-2 lip dub, which always renders
+in two stages and takes its frame count and rate from the reference clip.
 
 The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
@@ -138,8 +139,8 @@ complete workflows.
 - LTX-2 now wires `x2` spatial upscaling across the family, `x1.5` spatial
   upscaling for `ltx-2.3-*`, and `x2` temporal upscaling in the native runtime.
 - LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
-  audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
-  temporal upscale workflows.
+  audio-to-video, keyframe, retake, lip dub, public IC-LoRA, spatial upscale,
+  and temporal upscale workflows.
 - LTX-2's multimodal guider exposes optional per-request overrides for STG
   scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
   stride on the CLI and in web, desktop, and iPhone Advanced video controls. They apply to the

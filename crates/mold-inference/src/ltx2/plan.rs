@@ -17,11 +17,28 @@ pub(crate) enum PipelineKind {
     Keyframe,
     A2Vid,
     Retake,
+    LipDub,
 }
 
 impl PipelineKind {
     pub(crate) fn requires_distilled_checkpoint(self) -> bool {
-        matches!(self, Self::Distilled | Self::IcLora | Self::Retake)
+        matches!(
+            self,
+            Self::Distilled | Self::IcLora | Self::Retake | Self::LipDub
+        )
+    }
+
+    /// Whether the lip-dub IC-LoRA's in-context reference video has to be
+    /// re-encoded for every denoise stage.
+    ///
+    /// Generic IC-LoRA drops both the adapter and its reference before stage 2
+    /// (upstream `ic_lora.py:99-103` builds `stage_2` with `loras=()` and
+    /// `ic_lora.py:279-288` conditions it on images only). Lip dub keeps one
+    /// `DiffusionStage` for both passes and rebuilds the full conditioning set
+    /// each time (`lipdub.py:96-106`, `:236`, `:265`), so the mouth stays
+    /// locked to the reference through the refinement.
+    pub(crate) fn keeps_reference_video_in_stage_two(self) -> bool {
+        matches!(self, Self::LipDub)
     }
 }
 

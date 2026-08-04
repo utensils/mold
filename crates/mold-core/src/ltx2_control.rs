@@ -179,6 +179,23 @@ pub const LTX2_CONTROL_ADAPTERS: &[Ltx2ControlAdapter] = &[
     },
 ];
 
+/// The one adapter whose pipeline is not the generic in-context one.
+///
+/// Lip dub is a whole pipeline, not just a LoRA: the adapter stays loaded for
+/// both denoise stages, the reference clip's audio is appended as negatively
+/// positioned reference tokens, and stage 2's audio is frozen. Routing it
+/// through `ic-lora` would load the weights and then run the wrong graph.
+pub const LIP_DUB_CONTROL_ID: &str = "lipdub";
+
+/// Which LTX-2 pipeline a first-party control adapter id implies.
+pub fn pipeline_for_control_id(id: &str) -> crate::Ltx2PipelineMode {
+    if normalize_control_id(id) == LIP_DUB_CONTROL_ID {
+        crate::Ltx2PipelineMode::LipDub
+    } else {
+        crate::Ltx2PipelineMode::IcLora
+    }
+}
+
 pub fn normalize_control_id(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('_', "-")
 }
@@ -296,6 +313,67 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// Only lip dub gets its own pipeline, and only under its exact id.
+    ///
+    /// The whole registry defaults to `ic-lora`; if a future adapter needs its
+    /// own graph this is the one place that has to learn about it, on every
+    /// surface at once.
+    #[test]
+    fn only_the_lip_dub_adapter_selects_a_pipeline_other_than_ic_lora() {
+        for adapter in LTX2_CONTROL_ADAPTERS {
+            let expected = if adapter.id == LIP_DUB_CONTROL_ID {
+                crate::Ltx2PipelineMode::LipDub
+            } else {
+                crate::Ltx2PipelineMode::IcLora
+            };
+            assert_eq!(
+                pipeline_for_control_id(adapter.id),
+                expected,
+                "adapter '{}' routes to the wrong pipeline",
+                adapter.id
+            );
+        }
+        assert!(LTX2_CONTROL_ADAPTERS
+            .iter()
+            .any(|adapter| adapter.id == LIP_DUB_CONTROL_ID));
+    }
+
+    /// The Studio surfaces reimplement this routing in TypeScript because they
+    /// have to pick the pipeline before any request is made. A mirror that
+    /// drifts sends `ic-lora` with the lip-dub adapter, which the server 422s.
+    #[test]
+    fn ltx2_control_pipeline_ts_mirror_matches_the_rust_registry() {
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{workspace}/studio/lib/ltx2Control.ts");
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+
+        assert!(
+            source.contains(&format!(
+                "export const LIP_DUB_CONTROL_ID = \"{LIP_DUB_CONTROL_ID}\";"
+            )),
+            "studio/lib/ltx2Control.ts must pin LIP_DUB_CONTROL_ID to `{LIP_DUB_CONTROL_ID}`"
+        );
+        assert!(
+            source.contains(&format!(
+                "? \"{}\"\n    : \"{}\";",
+                crate::Ltx2PipelineMode::LipDub,
+                crate::Ltx2PipelineMode::IcLora
+            )) || source.contains(&format!(
+                "? \"{}\" : \"{}\";",
+                crate::Ltx2PipelineMode::LipDub,
+                crate::Ltx2PipelineMode::IcLora
+            )),
+            "studio/lib/ltx2Control.ts must return the wire pipeline strings \
+             `{}` / `{}`",
+            crate::Ltx2PipelineMode::LipDub,
+            crate::Ltx2PipelineMode::IcLora
+        );
+    }
 
     #[test]
     fn registry_has_unique_profile_and_id_pairs() {

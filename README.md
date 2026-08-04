@@ -185,9 +185,10 @@ with prompt, model, seed, and generation metadata.
 - Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
   LoRA, prompt expansion, and Real-ESRGAN upscaling
 - Text/image-to-video, multi-prompt video chains, one-request continuation of
-  an existing clip (`--extend`), native MP4 output, checkpoint-dependent
-  generated audio, and LTX-2 guidance overrides across CLI, web, desktop, and
-  iPhone — LTX-2 / LTX-Video image-to-video can even run without a prompt
+  an existing clip (`--extend`), lip dub / re-voicing of an existing clip
+  (`--pipeline lip-dub`), native MP4 output, checkpoint-dependent generated
+  audio, and LTX-2 guidance overrides across CLI, web, desktop, and iPhone —
+  LTX-2 / LTX-Video image-to-video can even run without a prompt
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
   re-renders only the changed clips, explicit remote-machine routing, and a

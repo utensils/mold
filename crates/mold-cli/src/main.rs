@@ -65,6 +65,8 @@ pub(crate) enum Ltx2PipelineArg {
     A2Vid,
     #[value(name = "retake")]
     Retake,
+    #[value(name = "lip-dub", alias = "lipdub")]
+    LipDub,
 }
 
 /// Sentinel error: the command already printed diagnostics to stderr.

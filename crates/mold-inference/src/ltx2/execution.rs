@@ -69,7 +69,11 @@ pub(crate) fn build_execution_graph(
     stacked_lora_count: usize,
 ) -> Ltx2ExecutionGraph {
     let wants_audio_output = wants_audio_output(req);
-    let uses_audio_conditioning = conditioning.audio_path.is_some();
+    // Lip dub conditions on audio without ever being handed an audio file:
+    // the reference clip's own speech is decoded out of the source video and
+    // appended as reference tokens (`lipdub.py:166-171`, `:238`).
+    let uses_audio_conditioning = conditioning.audio_path.is_some()
+        || (matches!(pipeline, PipelineKind::LipDub) && conditioning.video_path.is_some());
     let uses_reference_video_conditioning = conditioning.video_path.is_some();
     let uses_keyframe_conditioning = conditioning.images.len() > 1;
     let uses_retake_masking = req.retake_range.is_some();
@@ -98,7 +102,10 @@ pub(crate) fn build_execution_graph(
         },
         uses_distilled_checkpoint: matches!(
             pipeline,
-            PipelineKind::Distilled | PipelineKind::IcLora | PipelineKind::Retake
+            PipelineKind::Distilled
+                | PipelineKind::IcLora
+                | PipelineKind::Retake
+                | PipelineKind::LipDub
         ),
         apply_distilled_lora: false,
     };
@@ -117,7 +124,10 @@ pub(crate) fn build_execution_graph(
             guidance: GuidanceMode::Multimodal,
             uses_distilled_checkpoint: matches!(
                 pipeline,
-                PipelineKind::Distilled | PipelineKind::IcLora | PipelineKind::Retake
+                PipelineKind::Distilled
+                    | PipelineKind::IcLora
+                    | PipelineKind::Retake
+                    | PipelineKind::LipDub
             ),
             apply_distilled_lora: matches!(
                 pipeline,

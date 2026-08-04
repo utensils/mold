@@ -112,11 +112,133 @@ pub fn ltx2_max_frames_at_fps(fps: u32) -> u32 {
 /// 422. At 48 fps the absolute guard bites first — 964 clamps to 604, which is
 /// equally off-grid — so this matters at every rate, not just the default.
 pub fn ltx2_max_frames_on_grid_at_fps(fps: u32) -> u32 {
-    let cap = ltx2_max_frames_at_fps(fps);
-    if cap <= 1 {
+    snap_frames_to_8k1(ltx2_max_frames_at_fps(fps))
+}
+
+/// Spatial alignment a two-stage LTX-2 render needs. Stage 1 renders at half
+/// the requested size, so both axes must survive the halving and still land on
+/// the VAE's 32-pixel latent grid. Mirrors upstream `assert_resolution`'s
+/// `divisor = 64 if is_two_stage else 32`
+/// (`packages/ltx-pipelines/src/ltx_pipelines/utils/helpers.py:326`).
+pub const LTX2_TWO_STAGE_ALIGNMENT: u32 = 64;
+
+/// The VAE's causal temporal compression factor: latent frame 0 covers one
+/// pixel frame and every later latent frame covers eight, so a renderable
+/// pixel-frame count is always `8k + 1`.
+pub const LTX2_TEMPORAL_SCALE: u32 = 8;
+
+/// Round `frames` **down** onto the `8k + 1` grid LTX-2 can actually render.
+///
+/// Mirrors upstream `_snap_frames_to_8k1`
+/// (`packages/ltx-pipelines/src/ltx_pipelines/lipdub.py:46-49`). Rounding down
+/// matters for lip-dub: the reference clip's frame count is whatever the
+/// camera produced, and rounding *up* would ask for frames the reference does
+/// not have.
+pub fn snap_frames_to_8k1(frames: u32) -> u32 {
+    if frames <= 1 {
         return 1;
     }
-    cap - ((cap - 1) % 8)
+    frames - ((frames - 1) % LTX2_TEMPORAL_SCALE)
+}
+
+/// The frame count and rate a lip-dub render must use, plus anything the
+/// caller asked for that the reference video overrode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LipDubTiming {
+    /// Reference frame count snapped down onto the `8k + 1` grid.
+    pub frames: u32,
+    /// The reference clip's own frame rate.
+    pub fps: u32,
+    /// Human-readable notes about requested values that were replaced.
+    /// Empty when the caller asked for exactly what the reference provides.
+    pub warnings: Vec<String>,
+}
+
+/// What a probe of the lip-dub reference clip reports.
+///
+/// A struct rather than positional arguments so every property the pipeline
+/// depends on is supplied by name, and so adding one is a compile error at
+/// every call site — which is what stops the server and forced-local paths
+/// validating different things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LipDubReference {
+    pub frames: u32,
+    pub fps: u32,
+    /// Whether the clip carries a decodable audio stream. Lip dub imitates the
+    /// reference speaker's voice, so a silent reference cannot drive one.
+    pub has_audio: bool,
+}
+
+/// Resolve a lip-dub render's parameters from its reference video, rejecting a
+/// reference that cannot drive one.
+///
+/// Lip-dub re-voices an existing clip, so the output must land on the
+/// reference's own timeline: upstream reads both the frame count and the frame
+/// rate straight off the reference stream
+/// (`packages/ltx-pipelines/src/ltx_pipelines/lipdub.py:190-192`) rather than
+/// taking them from the caller. mold keeps the same rule, but says so out loud
+/// when a client asked for something else — a silently retimed dub looks fine
+/// and is out of sync.
+/// Every precondition lives here rather than at the call sites, so a request
+/// that cannot succeed is refused before it is validated, scheduled, and
+/// granted VRAM — not several minutes later when the audio VAE has nothing to
+/// encode.
+pub fn resolve_lip_dub_timing(
+    reference: LipDubReference,
+    requested_frames: Option<u32>,
+    requested_fps: Option<u32>,
+) -> Result<LipDubTiming, String> {
+    let LipDubReference {
+        frames: reference_frames,
+        fps: reference_fps,
+        has_audio,
+    } = reference;
+    if reference_fps == 0 {
+        return Err("lip-dub reference video reports a frame rate of 0".to_string());
+    }
+    // Upstream raises on a reference with no audio stream
+    // (`lipdub.py:166-170`). Catching it at the request boundary rather than at
+    // decode time is the difference between a 422 and a queued job that dies
+    // after loading a 22B checkpoint.
+    if !has_audio {
+        return Err(
+            "lip-dub reference video has no audio track; the pipeline re-voices existing \
+             speech, so the reference must contain some"
+                .to_string(),
+        );
+    }
+    let frames = snap_frames_to_8k1(reference_frames);
+    if frames < 9 {
+        return Err(format!(
+            "lip-dub reference video is too short: {reference_frames} frames snap down to \
+             {frames}, and the pipeline needs at least 9"
+        ));
+    }
+    let mut warnings = Vec::new();
+    if requested_frames.is_some_and(|requested| requested != frames) {
+        warnings.push(format!(
+            "lip-dub takes its length from the reference video: rendering {frames} frames \
+             instead of the requested {}",
+            requested_frames.unwrap_or_default()
+        ));
+    } else if requested_frames.is_none() && frames != reference_frames {
+        warnings.push(format!(
+            "lip-dub snapped the reference video's {reference_frames} frames down to {frames} \
+             (LTX-2 renders 8k+1 frames)"
+        ));
+    }
+    if requested_fps.is_some_and(|requested| requested != reference_fps) {
+        warnings.push(format!(
+            "lip-dub takes its frame rate from the reference video: rendering at \
+             {reference_fps} fps instead of the requested {}",
+            requested_fps.unwrap_or_default()
+        ));
+    }
+    Ok(LipDubTiming {
+        frames,
+        fps: reference_fps,
+        warnings,
+    })
 }
 
 /// Per-family single-request frame ceiling at `fps` — the value `/api/models`
@@ -1015,8 +1137,16 @@ pub fn validate_generate_request_with_family(
         if control.trim().is_empty() {
             return Err("ic_lora_control must not be empty".to_string());
         }
-        if req.pipeline != Some(Ltx2PipelineMode::IcLora) {
-            return Err("ic_lora_control requires pipeline=ic-lora".to_string());
+        // Most control adapters drive the generic in-context pipeline. The
+        // lip-dub adapter has its own pipeline (frozen stage-2 audio, an
+        // appended audio reference, the LoRA on both stages), so it is the one
+        // control whose required pipeline is not `ic-lora`.
+        let required_pipeline = crate::ltx2_control::pipeline_for_control_id(control);
+        if req.pipeline != Some(required_pipeline) {
+            return Err(format!(
+                "ic_lora_control '{}' requires pipeline={required_pipeline}",
+                crate::ltx2_control::normalize_control_id(control)
+            ));
         }
         if req.source_video.is_none() && req.source_video_path.is_none() {
             return Err("ic_lora_control requires source_video or source_video_path".to_string());
@@ -1099,6 +1229,61 @@ pub fn validate_generate_request_with_family(
                         && req.loras.as_ref().is_none_or(Vec::is_empty)
                     {
                         return Err("pipeline=ic-lora requires at least one LoRA".to_string());
+                    }
+                }
+                Ltx2PipelineMode::LipDub => {
+                    if req.source_video.is_none() && req.source_video_path.is_none() {
+                        return Err(
+                            "pipeline=lip-dub requires source_video or source_video_path (the \
+                             clip being re-voiced)"
+                                .to_string(),
+                        );
+                    }
+                    if req.ic_lora_control.is_none()
+                        && req.lora.is_none()
+                        && req.loras.as_ref().is_none_or(Vec::is_empty)
+                    {
+                        return Err("pipeline=lip-dub requires the lip-dub IC-LoRA; pass \
+                             ic_lora_control=lipdub"
+                            .to_string());
+                    }
+                    // Upstream asserts a two-stage resolution before doing any
+                    // work (`assert_resolution(..., is_two_stage=True)` in
+                    // `utils/helpers.py:321-332`). Lip dub is always two-stage
+                    // — stage 1 renders at half size — so an odd multiple of 32
+                    // would leave stage 1 off the latent grid.
+                    if !req.width.is_multiple_of(LTX2_TWO_STAGE_ALIGNMENT)
+                        || !req.height.is_multiple_of(LTX2_TWO_STAGE_ALIGNMENT)
+                    {
+                        return Err(format!(
+                            "pipeline=lip-dub renders in two stages, so width and height must be \
+                             multiples of {LTX2_TWO_STAGE_ALIGNMENT}; got {}x{}",
+                            req.width, req.height
+                        ));
+                    }
+                    if req.retake_range.is_some() {
+                        return Err(
+                            "pipeline=lip-dub cannot be combined with retake_range".to_string()
+                        );
+                    }
+                    if req
+                        .keyframes
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                    {
+                        return Err(
+                            "pipeline=lip-dub cannot be combined with keyframes".to_string()
+                        );
+                    }
+                    // Both would change the output shape out from under the
+                    // reference clip, whose resolution and length the dub has
+                    // to match. Upstream's pipeline composes with neither.
+                    if req.spatial_upscale.is_some() || req.temporal_upscale.is_some() {
+                        return Err(
+                            "pipeline=lip-dub cannot be combined with spatial_upscale or \
+                             temporal_upscale; the render must match the reference video"
+                                .to_string(),
+                        );
                     }
                 }
                 Ltx2PipelineMode::OneStage
@@ -3837,5 +4022,185 @@ mod tests {
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("four-LoRA"));
+    }
+
+    // ── lip-dub ─────────────────────────────────────────────────────────────
+
+    fn lip_dub_req() -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.width = 1216;
+        req.height = 704;
+        req.pipeline = Some(Ltx2PipelineMode::LipDub);
+        req.ic_lora_control = Some("lipdub".to_string());
+        req.source_video_path = Some("/clips/speaker.mp4".to_string());
+        req
+    }
+
+    #[test]
+    fn snap_frames_to_8k1_rounds_down_never_up() {
+        // Exactly on the grid stays put.
+        for on_grid in [1, 9, 17, 97, 121, 481] {
+            assert_eq!(super::snap_frames_to_8k1(on_grid), on_grid);
+        }
+        // Everything between two grid points falls back to the lower one, so a
+        // dub never asks for frames the reference video does not have.
+        assert_eq!(super::snap_frames_to_8k1(2), 1);
+        assert_eq!(super::snap_frames_to_8k1(8), 1);
+        assert_eq!(super::snap_frames_to_8k1(16), 9);
+        assert_eq!(super::snap_frames_to_8k1(96), 89);
+        assert_eq!(super::snap_frames_to_8k1(100), 97);
+        assert_eq!(super::snap_frames_to_8k1(0), 1);
+        // The advertised LTX-2 ceiling is derived from the same snap.
+        assert_eq!(super::ltx2_max_frames_on_grid_at_fps(24), 481);
+    }
+
+    /// A reference clip that could drive a dub, unless a test says otherwise.
+    fn lip_dub_reference(frames: u32, fps: u32) -> super::LipDubReference {
+        super::LipDubReference {
+            frames,
+            fps,
+            has_audio: true,
+        }
+    }
+
+    #[test]
+    fn lip_dub_timing_comes_from_the_reference_video() {
+        let timing = super::resolve_lip_dub_timing(lip_dub_reference(120, 25), None, None).unwrap();
+        assert_eq!(timing.frames, 113);
+        assert_eq!(timing.fps, 25);
+        assert_eq!(timing.warnings.len(), 1, "{:?}", timing.warnings);
+        assert!(timing.warnings[0].contains("113"));
+
+        // Already on the grid at the requested values: nothing to say.
+        let timing =
+            super::resolve_lip_dub_timing(lip_dub_reference(97, 24), Some(97), Some(24)).unwrap();
+        assert_eq!((timing.frames, timing.fps), (97, 24));
+        assert!(timing.warnings.is_empty());
+    }
+
+    #[test]
+    fn lip_dub_timing_overrides_and_reports_conflicting_requests() {
+        let timing =
+            super::resolve_lip_dub_timing(lip_dub_reference(97, 24), Some(241), Some(30)).unwrap();
+        assert_eq!((timing.frames, timing.fps), (97, 24));
+        assert_eq!(timing.warnings.len(), 2, "{:?}", timing.warnings);
+        assert!(timing.warnings[0].contains("241") && timing.warnings[0].contains("97"));
+        assert!(timing.warnings[1].contains("30") && timing.warnings[1].contains("24"));
+    }
+
+    #[test]
+    fn lip_dub_timing_rejects_unusable_references() {
+        assert!(
+            super::resolve_lip_dub_timing(lip_dub_reference(97, 0), None, None)
+                .unwrap_err()
+                .contains("frame rate")
+        );
+        assert!(
+            super::resolve_lip_dub_timing(lip_dub_reference(8, 24), None, None)
+                .unwrap_err()
+                .contains("too short")
+        );
+        // A silent reference is refused here, at the request boundary, rather
+        // than minutes later when the audio VAE has nothing to encode.
+        let silent = super::LipDubReference {
+            has_audio: false,
+            ..lip_dub_reference(97, 24)
+        };
+        assert!(super::resolve_lip_dub_timing(silent, None, None)
+            .unwrap_err()
+            .contains("no audio track"));
+    }
+
+    #[test]
+    fn lip_dub_requires_a_reference_video_and_the_adapter() {
+        let mut req = lip_dub_req();
+        req.source_video_path = None;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("source_video"));
+
+        let mut req = lip_dub_req();
+        req.ic_lora_control = None;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("ic_lora_control=lipdub"));
+
+        assert!(validate_generate_request(&lip_dub_req()).is_ok());
+    }
+
+    #[test]
+    fn lip_dub_rejects_dimensions_that_are_not_multiples_of_64() {
+        // 1216x704 is fine; 1216x736 is a multiple of 32 but not of 64, which
+        // is exactly the case a one-stage-only check would let through.
+        let mut req = lip_dub_req();
+        req.height = 736;
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("multiples of 64"), "{err}");
+
+        let mut req = lip_dub_req();
+        req.width = 1184;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("multiples of 64"));
+    }
+
+    #[test]
+    fn lip_dub_control_id_routes_to_the_lip_dub_pipeline_not_ic_lora() {
+        use crate::ltx2_control::pipeline_for_control_id;
+        assert_eq!(pipeline_for_control_id("lipdub"), Ltx2PipelineMode::LipDub);
+        assert_eq!(pipeline_for_control_id("LipDub"), Ltx2PipelineMode::LipDub);
+        assert_eq!(pipeline_for_control_id("union"), Ltx2PipelineMode::IcLora);
+
+        // Asking for the lip-dub adapter on the generic in-context pipeline is
+        // a mistake worth naming: the weights would load and the wrong graph
+        // would run.
+        let mut req = lip_dub_req();
+        req.pipeline = Some(Ltx2PipelineMode::IcLora);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("requires pipeline=lip-dub"));
+
+        let mut req = lip_dub_req();
+        req.ic_lora_control = Some("union".to_string());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("requires pipeline=ic-lora"));
+    }
+
+    #[test]
+    fn lip_dub_rejects_conflicting_conditioning_modes() {
+        let mut req = lip_dub_req();
+        req.retake_range = Some(crate::TimeRange {
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+        });
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("retake_range"));
+
+        let mut req = lip_dub_req();
+        req.keyframes = Some(vec![KeyframeCondition {
+            frame: 0,
+            image: png_bytes(),
+        }]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("keyframes"));
+
+        // Upscaling would change the output shape out from under the clip the
+        // dub has to line up with.
+        let mut req = lip_dub_req();
+        req.spatial_upscale = Some(crate::Ltx2SpatialUpscale::X2);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("spatial_upscale"));
+
+        let mut req = lip_dub_req();
+        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("temporal_upscale"));
     }
 }

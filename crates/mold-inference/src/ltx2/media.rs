@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::{GenericImage, Rgb, RgbImage};
 use mold_core::OutputFormat;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 #[cfg(feature = "mp4")]
@@ -73,7 +73,12 @@ fn read_mp4(input_video: &Path) -> Result<Mp4Reader<Cursor<Vec<u8>>>> {
     )
 }
 
-fn find_video_track(reader: &Mp4Reader<Cursor<Vec<u8>>>) -> Result<VideoTrackInfo> {
+fn read_mp4_slice(bytes: &[u8]) -> Result<Mp4Reader<Cursor<&[u8]>>> {
+    Mp4Reader::read_header(Cursor::new(bytes), bytes.len() as u64)
+        .context("failed to parse MP4 container from the request body")
+}
+
+fn find_video_track<R: Read + Seek>(reader: &Mp4Reader<R>) -> Result<VideoTrackInfo> {
     let (track_id, track) = reader
         .tracks()
         .iter()
@@ -111,7 +116,9 @@ fn find_video_track(reader: &Mp4Reader<Cursor<Vec<u8>>>) -> Result<VideoTrackInf
     })
 }
 
-fn audio_metadata(reader: &Mp4Reader<Cursor<Vec<u8>>>) -> Result<(bool, Option<u32>, Option<u32>)> {
+fn audio_metadata<R: Read + Seek>(
+    reader: &Mp4Reader<R>,
+) -> Result<(bool, Option<u32>, Option<u32>)> {
     if let Some(track) = reader
         .tracks()
         .values()
@@ -579,7 +586,20 @@ pub fn write_contact_sheet(input_video: &Path, output_png: &Path) -> Result<()> 
 }
 
 pub fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
-    let reader = read_mp4(input_video)?;
+    probe_reader(read_mp4(input_video)?)
+}
+
+/// [`probe_video`] for a clip that has not been written to disk yet — the
+/// server needs a lip-dub reference's frame count and rate before it stages
+/// the inline `source_video` body anywhere.
+///
+/// Borrows the body rather than copying it: an inline `source_video` can be
+/// 64 MiB, and the header parse only ever seeks around it.
+pub fn probe_video_bytes(bytes: &[u8]) -> Result<ProbeMetadata> {
+    probe_reader(read_mp4_slice(bytes)?)
+}
+
+fn probe_reader<R: Read + Seek>(reader: Mp4Reader<R>) -> Result<ProbeMetadata> {
     let video = find_video_track(&reader)?;
     let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
     Ok(ProbeMetadata {
