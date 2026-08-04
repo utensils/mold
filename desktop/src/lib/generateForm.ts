@@ -39,6 +39,7 @@ import {
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -453,7 +454,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (caps.supportsVideo) {
     req.frames = form.frames;
     req.fps = form.fps;
-    if (caps.supportsAudio) req.enable_audio = form.enableAudio;
+    // An audio-only pipeline renders audio by definition, so the flag has
+    // nothing left to say — and a fresh form's `false` would contradict the
+    // mode and be rejected outright. Leave it absent and let the pipeline
+    // constant stay authoritative.
+    if (caps.supportsAudio && !isAudioOnlyPipeline(form.pipeline)) {
+      req.enable_audio = form.enableAudio;
+    }
   }
 
   if (caps.supportsAdvancedVideo) {

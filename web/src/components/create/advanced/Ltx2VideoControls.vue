@@ -39,6 +39,10 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import {
+  AUDIO_ONLY_PIPELINE,
+  isAudioOnlyPipeline,
+} from "@studio/lib/ltx2Pipeline";
+import {
   DEFAULT_EXTEND_OVERLAP_FRAMES,
   extendNewFrames,
   extendOverlapOptions,
@@ -196,20 +200,20 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
   "a2-vid",
   "retake",
   "lip-dub",
-  "t2a",
+  AUDIO_ONLY_PIPELINE,
 ];
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
-const audioOnlyPipeline = computed(() => props.modelValue.pipeline === "t2a");
+const audioOnlyPipeline = computed(() =>
+  isAudioOnlyPipeline(props.modelValue.pipeline),
+);
 function setPipeline(raw: string) {
   const pipeline = (raw || null) as Ltx2PipelineMode | null;
-  const audioOnly = pipeline === "t2a";
+  const audioOnly = isAudioOnlyPipeline(pipeline);
   patch({
     pipeline,
     icLoraControl: isControlAdapterPipeline(pipeline)
       ? props.modelValue.icLoraControl
       : null,
-    icLoraControl:
-      pipeline === "ic-lora" ? props.modelValue.icLoraControl : null,
     // `t2a` renders no frames, so the server rejects every video container.
     // Move the format with the mode rather than leaving the user to discover
     // the mismatch as a 422; leaving `t2a` restores the family default.
@@ -492,14 +496,10 @@ function removeKeyframe(index: number) {
       >
         {{ LIP_DUB_TIMING_HINT }}
       </p>
-      <p
-        v-if="audioOnlyPipeline"
-        class="ltx2__hint"
-        data-test="ltx2-t2a-hint"
-      >
-        Text-to-audio renders sound only — no video. Duration comes from
-        frames &divide; fps, and the output is a WAV. Source media, keyframes,
-        retake, and the upscalers do not apply.
+      <p v-if="audioOnlyPipeline" class="ltx2__hint" data-test="ltx2-t2a-hint">
+        Text-to-audio renders sound only — no video. Duration comes from frames
+        &divide; fps, and the output is a WAV. Source media, keyframes, retake,
+        and the upscalers do not apply.
       </p>
     </div>
 

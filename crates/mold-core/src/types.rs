@@ -3642,6 +3642,43 @@ mod tests {
         }
     }
 
+    /// Every Studio surface has to know which pipeline renders audio only
+    /// *before* it builds a request — it decides the output format, whether
+    /// conditioning controls are offered at all, and whether `enable_audio`
+    /// may travel. Spelling it inline let desktop send `pipeline=t2a` with a
+    /// fresh form's `enable_audio: false`, which the server refuses. The
+    /// shared predicate is the one mirror; pin it here, next to the authority.
+    #[test]
+    fn ltx2_audio_only_pipeline_ts_mirror_matches_the_rust_authority() {
+        let audio_only: Vec<&str> = Ltx2PipelineMode::ALL
+            .iter()
+            .filter(|mode| mode.is_audio_only())
+            .map(|mode| mode.as_str())
+            .collect();
+        assert_eq!(
+            audio_only,
+            vec!["t2a"],
+            "the TS mirror is a single constant; a second audio-only pipeline \
+             needs it widened to a set first"
+        );
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{workspace}/studio/lib/ltx2Pipeline.ts");
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        assert!(
+            source.contains(&format!(
+                "export const AUDIO_ONLY_PIPELINE = \"{}\";",
+                audio_only[0]
+            )),
+            "studio/lib/ltx2Pipeline.ts must pin AUDIO_ONLY_PIPELINE to `{}`",
+            audio_only[0]
+        );
+    }
+
     // ── SSE type tests ──────────────────────────────────────────────────────
 
     #[test]

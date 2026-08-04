@@ -69,6 +69,7 @@ import {
   isControlAdapterPipeline,
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
+import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
@@ -222,7 +223,7 @@ const pipelineOptions: Ltx2PipelineMode[] = [
   "a2-vid",
   "retake",
   "lip-dub",
-  "t2a",
+  AUDIO_ONLY_PIPELINE,
 ];
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
@@ -233,13 +234,13 @@ function setPipeline(v: string) {
   // `t2a` renders no frames, so the server rejects every video container.
   // Move the format with the mode rather than letting the user discover the
   // mismatch as a 422; leaving `t2a` restores the family default.
-  if (props.form.pipeline === "t2a") {
+  if (isAudioOnlyPipeline(props.form.pipeline)) {
     props.form.outputFormat = "wav";
   } else if (props.form.outputFormat === "wav") {
     props.form.outputFormat = defaultOutputFormat(props.form.family);
   }
 }
-const audioOnlyPipeline = computed(() => props.form.pipeline === "t2a");
+const audioOnlyPipeline = computed(() => isAudioOnlyPipeline(props.form.pipeline));
 function setControlAdapter(value: string) {
   props.form.icLoraControl = value || null;
   // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
@@ -678,9 +679,8 @@ function reset() {
               {{ LIP_DUB_TIMING_HINT }}
             </p>
             <p v-if="audioOnlyPipeline" class="ms-hint" data-test="ltx2-t2a-hint">
-              Text-to-audio renders sound only — no video. Duration comes from frames ÷ fps and
-              the output is a WAV. Source media, keyframes, retake, and the upscalers do not
-              apply.
+              Text-to-audio renders sound only — no video. Duration comes from frames ÷ fps and the
+              output is a WAV. Source media, keyframes, retake, and the upscalers do not apply.
             </p>
 
             <label class="ms-label ms-label--mt">Reference control</label>

@@ -196,6 +196,32 @@ describe("buildRequest — LTX-2 advanced video", () => {
     expect(buildRequest(form).audio_file).toBe("AUDIOB64");
   });
 
+  it("never sends enable_audio=false for the audio-only t2a pipeline", () => {
+    // A fresh form has `enableAudio = false`, and picking `t2a` only moves the
+    // output format — so every first-time desktop text-to-audio request used
+    // to arrive as `pipeline=t2a` + `enable_audio=false`, which the server
+    // rejects outright ("pipeline=t2a cannot be combined with
+    // enable_audio=false"). Audio is what t2a renders; the flag cannot
+    // contradict it.
+    const form = ltx2Form();
+    expect(form.enableAudio).toBe(false);
+    form.pipeline = "t2a";
+    form.outputFormat = "wav";
+    expect(buildRequest(form).enable_audio).not.toBe(false);
+
+    // An explicit opt-in stays exactly what the user asked for.
+    form.enableAudio = true;
+    expect(buildRequest(form).enable_audio).not.toBe(false);
+  });
+
+  it("still ships an explicit enable_audio for ordinary video pipelines", () => {
+    const form = ltx2Form();
+    form.pipeline = "two-stage";
+    expect(buildRequest(form).enable_audio).toBe(false);
+    form.enableAudio = true;
+    expect(buildRequest(form).enable_audio).toBe(true);
+  });
+
   it("omits audio_file for a2vid when no audio was picked", () => {
     const form = ltx2Form();
     form.pipeline = "a2-vid";
