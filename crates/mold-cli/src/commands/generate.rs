@@ -731,11 +731,14 @@ pub async fn run(
         )
         .await?
     } else {
-        let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-        let mut last_video: Option<mold_core::VideoData> = None;
-        let mut total_time_ms: u64 = 0;
-        let mut last_seed_used: u64 = base_seed;
-        let mut last_model = String::new();
+        let save_ctx = BatchSaveContext {
+            output: &output,
+            model,
+            output_format,
+            preview,
+            batch,
+        };
+        let mut collected = BatchOutputs::new(batch, base_seed);
 
         for i in 0..batch {
             let mut iter_req = req.clone();
@@ -782,70 +785,26 @@ pub async fn run(
             )
             .await?;
 
-            total_time_ms += response.generation_time_ms;
-            last_seed_used = response.seed_used;
-            last_model = response.model.clone();
-
-            // Persist every successful clip before the next batch item can
-            // fail. The aggregate retains the last clip only for the common
-            // response shape; it is not the durability boundary.
-            if let Some(video) = response.video.as_ref() {
-                if batch > 1 {
-                    save_and_preview_video(
-                        video,
-                        &output,
-                        model,
-                        batch,
-                        i,
-                        preview,
-                        Some(PersistArgs {
-                            request: &iter_req,
-                            seed_used: response.seed_used,
-                            generation_time_ms: response.generation_time_ms,
-                        }),
-                    )?;
-                }
-                last_video = response.video;
-            }
-
-            for mut img in response.images {
-                img.index = i;
-                // Save and preview each image immediately during batch generation
-                // (single-image mode is handled in the post-loop section)
-                if batch > 1 {
-                    save_and_preview_image(
-                        &img,
-                        &output,
-                        model,
-                        batch,
-                        output_format,
-                        preview,
-                        Some(PersistArgs {
-                            request: &iter_req,
-                            seed_used: response.seed_used,
-                            generation_time_ms: response.generation_time_ms,
-                        }),
-                    )?;
-                }
-                all_images.push(img);
-            }
+            // Persist every successful artifact before the next batch item can
+            // fail. The aggregate retains the last clip or track only for the
+            // common response shape; it is not the durability boundary.
+            let persist = PersistArgs {
+                request: &iter_req,
+                seed_used: response.seed_used,
+                generation_time_ms: response.generation_time_ms,
+            };
+            collected.absorb(i, response, &save_ctx, Some(persist))?;
         }
 
-        GenerateResponse {
-            audio: None,
-            images: all_images,
-            video: last_video,
-            generation_time_ms: total_time_ms,
-            model: last_model,
-            seed_used: last_seed_used,
-            gpu: None,
-        }
+        collected.finish()
     };
 
     // Output: audio, video, or image.
     if let Some(ref audio) = response.audio {
         // --- Audio-only output (LTX-2 text-to-audio) ---
-        if piped && output.is_none() {
+        if batch > 1 {
+            // Batch tracks were persisted per item before aggregation.
+        } else if piped && output.is_none() {
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(&audio.data)?;
             stdout.flush()?;
@@ -854,6 +813,8 @@ pub async fn run(
                 audio,
                 &output,
                 model,
+                1,
+                0,
                 preview,
                 Some(PersistArgs {
                     request: &req,
@@ -1505,58 +1466,25 @@ fn finalize_local_batch_outputs(
         .map(|(index, _)| (index + 1).to_string())
         .collect::<Vec<_>>();
 
-    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-    let mut last_video: Option<mold_core::VideoData> = None;
-    let mut total_time_ms = 0;
-    let mut last_seed_used = base_seed;
-    let mut last_model = String::new();
+    let save_ctx = BatchSaveContext {
+        output,
+        model: &req.model,
+        output_format,
+        preview,
+        batch,
+    };
+    let mut collected = BatchOutputs::new(batch, base_seed);
 
-    for (i, mut response) in completed {
-        total_time_ms += response.generation_time_ms;
-        last_seed_used = response.seed_used;
-        last_model = response.model.clone();
+    for (i, response) in completed {
         let item_request = batch_requests.get(i as usize).ok_or_else(|| {
             anyhow::anyhow!("completed local batch item {} is out of range", i + 1)
         })?;
-
-        if let Some(video) = response.video.as_ref() {
-            if batch > 1 {
-                save_and_preview_video(
-                    video,
-                    output,
-                    &req.model,
-                    batch,
-                    i,
-                    preview,
-                    persist_metadata.then_some(PersistArgs {
-                        request: item_request,
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                    }),
-                )?;
-            }
-            last_video = response.video.take();
-        }
-
-        for mut img in response.images {
-            img.index = i;
-            if batch > 1 {
-                save_and_preview_image(
-                    &img,
-                    output,
-                    &req.model,
-                    batch,
-                    output_format,
-                    preview,
-                    persist_metadata.then_some(PersistArgs {
-                        request: item_request,
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                    }),
-                )?;
-            }
-            all_images.push(img);
-        }
+        let persist = persist_metadata.then_some(PersistArgs {
+            request: item_request,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+        });
+        collected.absorb(i, response, &save_ctx, persist)?;
     }
 
     if let Some(error) = first_error {
@@ -1571,15 +1499,7 @@ fn finalize_local_batch_outputs(
         )));
     }
 
-    Ok(GenerateResponse {
-        audio: None,
-        images: all_images,
-        video: last_video,
-        generation_time_ms: total_time_ms,
-        model: last_model,
-        seed_used: last_seed_used,
-        gpu: None,
-    })
+    Ok(collected.finish())
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -1929,10 +1849,165 @@ async fn generate_local_batch(
 /// Optional metadata used by [`save_and_preview_image`] to persist a row
 /// in the SQLite gallery DB after a successful save. Skipped silently when
 /// `None` (e.g. tests, stdout output, when the DB is disabled).
+#[derive(Clone, Copy)]
 struct PersistArgs<'a> {
     request: &'a GenerateRequest,
     seed_used: u64,
     generation_time_ms: u64,
+}
+
+/// How a batch names, previews, and formats the artifacts it persists.
+struct BatchSaveContext<'a> {
+    output: &'a Option<String>,
+    model: &'a str,
+    output_format: OutputFormat,
+    preview: bool,
+    batch: u32,
+}
+
+/// Outputs collected across one batch, in item order.
+///
+/// Both batch paths — remote HTTP and local multi-GPU — persist each item as
+/// it lands rather than at the end, because the aggregate keeps only the last
+/// video or audio artifact and is therefore never the durability boundary. An
+/// audio-only pipeline makes that concrete: its WAV is the item's *only*
+/// output, so leaving persistence to the aggregate threw away every earlier
+/// completed render the moment a later sibling failed.
+#[derive(Default)]
+struct BatchOutputs {
+    images: Vec<ImageData>,
+    video: Option<mold_core::VideoData>,
+    audio: Option<mold_core::AudioData>,
+    total_time_ms: u64,
+    last_seed_used: u64,
+    last_model: String,
+}
+
+impl BatchOutputs {
+    fn new(batch: u32, base_seed: u64) -> Self {
+        Self {
+            images: Vec::with_capacity(batch as usize),
+            last_seed_used: base_seed,
+            ..Default::default()
+        }
+    }
+
+    /// Take one completed item's outputs, writing them to disk first when the
+    /// batch has siblings that could still fail.
+    fn absorb(
+        &mut self,
+        index: u32,
+        mut response: GenerateResponse,
+        ctx: &BatchSaveContext<'_>,
+        persist: Option<PersistArgs<'_>>,
+    ) -> Result<()> {
+        self.total_time_ms += response.generation_time_ms;
+        self.last_seed_used = response.seed_used;
+        self.last_model = response.model.clone();
+
+        // Audio is probed first for the same reason every other surface probes
+        // it first: an audio print has no frames and no raster, so a
+        // video-shaped or image-shaped probe would miss it entirely.
+        if let Some(audio) = response.audio.as_ref() {
+            if ctx.batch > 1 {
+                save_and_preview_audio(
+                    audio,
+                    ctx.output,
+                    ctx.model,
+                    ctx.batch,
+                    index,
+                    ctx.preview,
+                    persist,
+                )?;
+            }
+            self.audio = response.audio.take();
+        }
+
+        if let Some(video) = response.video.as_ref() {
+            if ctx.batch > 1 {
+                save_and_preview_video(
+                    video,
+                    ctx.output,
+                    ctx.model,
+                    ctx.batch,
+                    index,
+                    ctx.preview,
+                    persist,
+                )?;
+            }
+            self.video = response.video.take();
+        }
+
+        for mut img in response.images {
+            img.index = index;
+            if ctx.batch > 1 {
+                save_and_preview_image(
+                    &img,
+                    ctx.output,
+                    ctx.model,
+                    ctx.batch,
+                    ctx.output_format,
+                    ctx.preview,
+                    persist,
+                )?;
+            }
+            self.images.push(img);
+        }
+
+        Ok(())
+    }
+
+    /// The aggregate handed to the single-output code path. Video and audio
+    /// carry the last item's artifact; every image is retained.
+    fn finish(self) -> GenerateResponse {
+        GenerateResponse {
+            audio: self.audio,
+            images: self.images,
+            video: self.video,
+            generation_time_ms: self.total_time_ms,
+            model: self.last_model,
+            seed_used: self.last_seed_used,
+            gpu: None,
+        }
+    }
+}
+
+/// Resolve the on-disk name for one media artifact in a batch.
+///
+/// `--output` names a single file, so anything past the first item has to be
+/// suffixed or the run ends with one file holding the last render. Shared by
+/// the video and audio savers, which name their outputs identically.
+fn batch_media_filename(
+    output: &Option<String>,
+    model: &str,
+    ext: &str,
+    batch: u32,
+    index: u32,
+) -> String {
+    match output {
+        Some(path) if batch == 1 => path.clone(),
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("output");
+            let leaf = format!("{stem}-{index}.{ext}");
+            path.parent()
+                .filter(|directory| !directory.as_os_str().is_empty())
+                .map(|directory| directory.join(&leaf))
+                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+                .to_string_lossy()
+                .into_owned()
+        }
+        None => default_filename(
+            model,
+            mold_core::time::now_epoch_ms_u64(),
+            ext,
+            batch,
+            index,
+        ),
+    }
 }
 
 fn save_and_preview_video(
@@ -1944,36 +2019,13 @@ fn save_and_preview_video(
     preview: bool,
     persist: Option<PersistArgs<'_>>,
 ) -> anyhow::Result<()> {
-    let filename = match output {
-        Some(path) if path == "-" => {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&video.data)?;
-            stdout.flush()?;
-            return Ok(());
-        }
-        Some(path) if batch == 1 => path.clone(),
-        Some(path) => {
-            let path = std::path::Path::new(path);
-            let stem = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("output");
-            let leaf = format!("{stem}-{index}.{}", video.format.extension());
-            path.parent()
-                .filter(|directory| !directory.as_os_str().is_empty())
-                .map(|directory| directory.join(&leaf))
-                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
-                .to_string_lossy()
-                .into_owned()
-        }
-        None => default_filename(
-            model,
-            mold_core::time::now_epoch_ms_u64(),
-            video.format.extension(),
-            batch,
-            index,
-        ),
-    };
+    if output.as_deref() == Some("-") {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&video.data)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    let filename = batch_media_filename(output, model, video.format.extension(), batch, index);
 
     if std::path::Path::new(&filename).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), filename);
@@ -2023,25 +2075,18 @@ fn save_and_preview_audio(
     audio: &mold_core::AudioData,
     output: &Option<String>,
     model: &str,
+    batch: u32,
+    index: u32,
     preview: bool,
     persist: Option<PersistArgs<'_>>,
 ) -> anyhow::Result<()> {
-    let filename = match output {
-        Some(path) if path == "-" => {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&audio.data)?;
-            stdout.flush()?;
-            return Ok(());
-        }
-        Some(path) => path.clone(),
-        None => default_filename(
-            model,
-            mold_core::time::now_epoch_ms_u64(),
-            audio.format.extension(),
-            1,
-            0,
-        ),
-    };
+    if output.as_deref() == Some("-") {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&audio.data)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    let filename = batch_media_filename(output, model, audio.format.extension(), batch, index);
 
     if std::path::Path::new(&filename).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), filename);
@@ -3242,5 +3287,119 @@ mod hdr_chain_guard_tests {
                  now carry it, the CLI guard is obsolete"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_batch_passthrough_tests {
+    use super::*;
+
+    fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
+        GenerateResponse {
+            audio: Some(mold_core::AudioData {
+                data: bytes.to_vec(),
+                format: OutputFormat::Wav,
+                sample_rate: 24_000,
+                channels: 2,
+                duration_ms: 5_010,
+                thumbnail: Vec::new(),
+                thumbnail_width: 640,
+                thumbnail_height: 360,
+            }),
+            images: Vec::new(),
+            video: None,
+            generation_time_ms: 1,
+            model: "ltx-2-19b-dev:fp8".to_string(),
+            seed_used: seed,
+            gpu: None,
+        }
+    }
+
+    fn ctx<'a>(output: &'a Option<String>, batch: u32) -> BatchSaveContext<'a> {
+        BatchSaveContext {
+            output,
+            model: "ltx-2-19b-dev:fp8",
+            output_format: OutputFormat::Wav,
+            preview: false,
+            batch,
+        }
+    }
+
+    /// The collector assembles the response the CLI's output branch reads.
+    /// It handled `images` and `video` and hard-coded `audio: None`, so an
+    /// audio-only pipeline denoised for ten minutes, produced a waveform, and
+    /// then reported `✓ Done` having written no file — the audio branch saw
+    /// `None` and never ran.
+    #[test]
+    fn a_single_item_batch_carries_its_audio_out_for_the_caller_to_save() {
+        let output = None;
+        let mut collected = BatchOutputs::new(1, 42);
+        collected
+            .absorb(0, audio_response(42, b"RIFF-one"), &ctx(&output, 1), None)
+            .unwrap();
+
+        let response = collected.finish();
+        let audio = response.audio.expect("the only output must survive");
+        assert_eq!(audio.data, b"RIFF-one".to_vec());
+        assert_eq!(audio.sample_rate, 24_000);
+        assert_eq!(response.seed_used, 42);
+    }
+
+    /// A WAV is its item's *only* artifact, so an aggregate that keeps just
+    /// the last one loses every earlier render as soon as a later sibling
+    /// fails. Each track has to land on disk before the batch moves on, under
+    /// its own index — exactly as video and images already do.
+    #[test]
+    fn every_item_in_a_batch_lands_on_disk_under_its_own_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Some(dir.path().join("take.wav").to_string_lossy().into_owned());
+        let save_ctx = ctx(&output, 3);
+        let mut collected = BatchOutputs::new(3, 7);
+
+        for index in 0..3u32 {
+            let bytes = format!("RIFF-{index}");
+            collected
+                .absorb(
+                    index,
+                    audio_response(7 + u64::from(index), bytes.as_bytes()),
+                    &save_ctx,
+                    None,
+                )
+                .unwrap();
+        }
+
+        for index in 0..3u32 {
+            let path = dir.path().join(format!("take-{index}.wav"));
+            assert_eq!(
+                std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                format!("RIFF-{index}").into_bytes(),
+                "item {index} must be persisted before a later sibling can fail",
+            );
+        }
+
+        let response = collected.finish();
+        assert_eq!(response.seed_used, 9, "the aggregate reports the last seed");
+        assert_eq!(
+            response.audio.expect("aggregate keeps the last track").data,
+            b"RIFF-2".to_vec(),
+        );
+    }
+
+    /// A single-item batch must NOT write inside the collector — the caller's
+    /// output branch owns that write, and it is the one that honours `-` /
+    /// piped stdout. Two writes would also mean two gallery rows.
+    #[test]
+    fn a_single_item_batch_defers_the_write_to_the_output_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Some(dir.path().join("take.wav").to_string_lossy().into_owned());
+        let mut collected = BatchOutputs::new(1, 1);
+        collected
+            .absorb(0, audio_response(1, b"RIFF-one"), &ctx(&output, 1), None)
+            .unwrap();
+
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "the collector must not write for a batch of one",
+        );
     }
 }

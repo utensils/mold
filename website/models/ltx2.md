@@ -396,6 +396,9 @@ Things worth knowing:
   ceiling, so a large `--frames` stays a single request.
 - **`--modality-scale` must stay `1.0`.** Cross-modal guidance steers the
   audio↔video attention, and there is no video branch here.
+- **`--batch N` renders N takes,** each written as it lands under its own
+  index (`take-0.wav`, `take-1.wav`, …) so a later take failing cannot
+  discard the ones already rendered.
 
 Audio prints land in the gallery like any other output, with a rendered
 waveform as the tile. Web, desktop, and the CLI all play or save them; the

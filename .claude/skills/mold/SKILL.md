@@ -296,7 +296,8 @@ and `--format` defaults to `wav` — which in turn requires `t2a`. It needs a
 checkpoint that ships the audio VAE and vocoder, rejects every conditioning
 input and upscaler rather than ignoring them, and rejects `--modality-scale`
 other than `1.0` (there is no video branch to guide against). Auto-chaining
-never applies: a large `--frames` is a longer take, not more clips. Steps default to
+never applies: a large `--frames` is a longer take, not more clips. `--batch N`
+renders N takes and writes each one as it lands under its own index. Steps default to
 the non-distilled schedule — 40 on 19B, 30 on 22B — and a smaller `--steps` is
 raised to that default with a message, because the family's 8-step video
 default renders hiss here. Only the `audio_*` half of the checkpoint is loaded,
