@@ -142,7 +142,10 @@ describe("GenerateView layout", () => {
   });
 
   it("disables Picture-in-Picture on the generated video preview", () => {
-    const previewVideo = viewSource.match(/<video\s+v-if="job\?\.resultUrl[^>]*>/s)?.[0] ?? "";
+    // `v-else-if` since the audio-only branch takes precedence: an audio
+    // print has no frames, so the video probe must not be the first one.
+    const previewVideo =
+      viewSource.match(/<video\s+v-(?:else-)?if="job\?\.resultUrl[^>]*>/s)?.[0] ?? "";
     expect(previewVideo).toContain("disablepictureinpicture");
   });
 });

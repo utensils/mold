@@ -166,6 +166,33 @@ describe("ResultCanvas", () => {
     );
   });
 
+  // A text-to-audio print has no raster of its own. Without a transport the
+  // canvas showed a waveform and no way to hear what was just rendered.
+  it("plays an audio-only print beneath its waveform", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: {
+        mode: "result",
+        resultSrc: "data:image/png;base64,WAVEFORM",
+        resultAudioSrc: "data:audio/wav;base64,RIFF",
+        resultCaption: "ltx-2-19b-dev:fp8 · seed 7 · 61s · this server",
+      },
+    });
+    const audio = wrapper.get("[data-test='canvas-audio']");
+    expect(audio.attributes("src")).toBe("data:audio/wav;base64,RIFF");
+    expect(audio.attributes("controls")).toBeDefined();
+    // The waveform stays as the visual, with alt text that says what it is.
+    expect(
+      wrapper.get("[data-test='canvas-result'] img").attributes("alt"),
+    ).toBe("Waveform of the generated audio");
+  });
+
+  it("leaves every other kind of print without an audio transport", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "result", resultSrc: "blob:x" },
+    });
+    expect(wrapper.find("[data-test='canvas-audio']").exists()).toBe(false);
+  });
+
   it("renders a generation error instead of silently returning to empty", () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "error", error: "CUDA out of memory" },

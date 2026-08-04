@@ -427,6 +427,14 @@ export interface CompleteEvent {
   video_duration_ms?: number | null;
   video_audio_sample_rate?: number | null;
   video_audio_channels?: number | null;
+  /** Audio-only completion (`pipeline: "t2a"`). `image` then carries the WAV
+   * itself, not a raster — probe these before the `video_*` fields, since an
+   * audio print has no frames and would otherwise read as a still. */
+  audio_sample_rate?: number | null;
+  audio_channels?: number | null;
+  audio_duration_ms?: number | null;
+  /** Rendered waveform PNG, base64. The only image an audio print has. */
+  audio_thumbnail?: string | null;
   gpu?: number | null;
   /** Gallery filename the server saved this payload under (additive; absent
    * on older servers). Mirrored saves keep it so the local copy and the

@@ -467,10 +467,17 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
   // Discriminated drop — leave every metadata field intact so the
   // The activity strip can still render dimensions/timing on rehydrate.
   // The intentionally-omitted ones are exactly the base64 payloads.
-  const { image: _i, video_thumbnail: _t, video_gif_preview: _g, ...rest } = r;
+  const {
+    image: _i,
+    video_thumbnail: _t,
+    video_gif_preview: _g,
+    audio_thumbnail: _a,
+    ...rest
+  } = r;
   void _i;
   void _t;
   void _g;
+  void _a;
   return rest;
 }
 

@@ -113,7 +113,7 @@ import {
 } from "../lib/generationTemplates";
 import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
 import { randomSeed } from "../stores/generation";
-import type { GenerateRequest, OutputMetadata } from "../lib/api/types";
+import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   metadataReferencesSource,
   restoreEditImages,
@@ -134,6 +134,7 @@ import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
+import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { useGalleryStore } from "../stores/gallery";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import {
@@ -1486,6 +1487,11 @@ function siblingDot(s: Job): string {
   return "text-ink-3"; // ◎ pending
 }
 
+/** Whether this job produced a WAV rather than a picture or a clip. */
+function isAudioResult(job: { result: CompleteEvent | null } | null): boolean {
+  return isAudioCompletion(job?.result);
+}
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
@@ -1509,7 +1515,7 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Copy image",
-      disabled: !j.result || !!j.result.video_frames,
+      disabled: !j.result || !!j.result.video_frames || isAudioResult(j),
       action: () => {
         if (!j.result) return;
         const mime = j.result.format === "jpeg" ? "image/jpeg" : `image/${j.result.format}`;
@@ -1522,7 +1528,7 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Save image…",
-      disabled: !j.result || !!j.result.video_frames || !j.result.image,
+      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || !j.result.image,
       action: () => {
         if (!j.result?.image) return;
         const filename =
@@ -2714,8 +2720,26 @@ onBeforeUnmount(() => {
                 :style="previewFrameStyle"
                 @contextmenu="contextMenu.open($event, canvasMenu())"
               >
+                <!-- Audio is checked first: an audio print has no frames, so
+                     the video probe falls through and the <img> below renders
+                     a WAV — a broken canvas at the end of a render that
+                     actually succeeded. The waveform is the visual; the
+                     transport sits over it. -->
+                <div
+                  v-if="job?.resultUrl && isAudioResult(job)"
+                  class="absolute inset-0 flex flex-col items-center justify-center gap-3 p-3"
+                  data-test="preview-audio"
+                >
+                  <img
+                    v-if="job.result?.audio_thumbnail"
+                    :src="`data:image/png;base64,${job.result.audio_thumbnail}`"
+                    alt="Waveform of the generated audio"
+                    class="min-h-0 w-full flex-1 object-contain"
+                  />
+                  <audio class="w-full shrink-0" controls :src="job.resultUrl" />
+                </div>
                 <video
-                  v-if="job?.resultUrl && job.result?.video_frames"
+                  v-else-if="job?.resultUrl && job.result?.video_frames"
                   :src="job.resultUrl"
                   class="absolute inset-0 h-full w-full object-contain"
                   autoplay

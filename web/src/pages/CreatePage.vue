@@ -36,6 +36,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   canvasMatchesSourceResolution,
@@ -1805,8 +1806,22 @@ const developPhase = computed<DevelopPhase>(() => {
 const resultSrc = computed(() => {
   const r = latestDone.value?.result;
   if (!r) return "";
+  // Audio first: an audio print's `image` is the WAV itself, so the still
+  // branch below would build `data:image/wav;…` and render a broken canvas
+  // at the end of a render that actually succeeded.
+  if (isAudioCompletion(r)) {
+    return r.audio_thumbnail
+      ? `data:image/png;base64,${r.audio_thumbnail}`
+      : "";
+  }
   if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
   return `data:image/${r.format};base64,${r.image}`;
+});
+/** The playable artifact for an audio-only print; empty for every other kind. */
+const resultAudioSrc = computed(() => {
+  const r = latestDone.value?.result;
+  if (!r || !isAudioCompletion(r) || !r.image) return "";
+  return `data:audio/wav;base64,${r.image}`;
 });
 const resultCaption = computed(() => {
   const job = latestDone.value;
@@ -3316,6 +3331,7 @@ onBeforeUnmount(() => {
             :print-width="runningJob?.request.width"
             :print-height="runningJob?.request.height"
             :result-src="resultSrc"
+            :result-audio-src="resultAudioSrc"
             :result-caption="resultCaption"
             :error="latestErrorMessage"
             :error-copy="latestErrorCopy"
