@@ -145,9 +145,11 @@ complete workflows.
   stride on the CLI and in web, desktop, and iPhone Advanced video controls. They apply to the
   `two-stage`, `two-stage-hq`, `keyframe`, and `a2-vid` pipelines; unset fields
   keep each pipeline's own constants. The TUI still keeps those guidance and
-  pipeline controls at their defaults, but its Video accordion now exposes the
-  shared `enable_audio` contract as checkpoint-aware default/on/off choices.
-  The remaining advanced-video controls remain a separate tracked gap.
+  pipeline controls at their defaults, but its Video accordion exposes the
+  shared `enable_audio` contract as a checkpoint-aware default/on/off choice
+  and family-gated `spatial_upscale` / `temporal_upscale` native modes. The
+  remaining pipeline, guidance, conditioning-file, and chain-job controls
+  remain a separate tracked gap.
 - LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
   not supported in this release.
 

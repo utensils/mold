@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
-    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, ServerStatus,
-    SseProgressEvent,
+    Config, GenerateResponse, Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelInfoExtended,
+    OutputFormat, Scheduler, ServerStatus, SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -414,6 +414,8 @@ pub enum ParamField {
     Frames,
     Fps,
     Audio,
+    SpatialUpscale,
+    TemporalUpscale,
 }
 
 impl ParamField {
@@ -440,6 +442,8 @@ impl ParamField {
             Self::Frames => "Frames",
             Self::Fps => "FPS",
             Self::Audio => "Audio",
+            Self::SpatialUpscale => "Spatial",
+            Self::TemporalUpscale => "Temporal",
             Self::ControlScale => "Scale",
         }
     }
@@ -561,6 +565,10 @@ pub struct GenerateParams {
     /// `None` preserves the pipeline default; explicit values mirror the
     /// CLI's `--audio` and `--no-audio` controls.
     pub enable_audio: Option<bool>,
+    /// `None` keeps the checkpoint's native spatial resolution.
+    pub spatial_upscale: Option<Ltx2SpatialUpscale>,
+    /// `None` keeps the checkpoint's native frame rate.
+    pub temporal_upscale: Option<Ltx2TemporalUpscale>,
     // ControlNet
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
@@ -642,6 +650,8 @@ impl GenerateParams {
             frames: 25,
             fps: 24,
             enable_audio: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
@@ -738,6 +748,15 @@ impl GenerateParams {
                 .map(|enabled| if enabled { "on" } else { "off" })
                 .unwrap_or("default")
                 .to_string(),
+            ParamField::SpatialUpscale => match self.spatial_upscale {
+                None => "native".to_string(),
+                Some(Ltx2SpatialUpscale::X1_5) => "1.5×".to_string(),
+                Some(Ltx2SpatialUpscale::X2) => "2×".to_string(),
+            },
+            ParamField::TemporalUpscale => match self.temporal_upscale {
+                None => "native".to_string(),
+                Some(Ltx2TemporalUpscale::X2) => "2×".to_string(),
+            },
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
         }
     }
@@ -1840,9 +1859,10 @@ impl App {
         self.sync_generate_capabilities();
     }
 
-    /// Recompute Create rows from the selected model and the current catalog's
-    /// checkpoint-specific audio fact. An incompatible model clears a stale
-    /// audio override before it can leak into another family.
+    /// Recompute Create rows from the selected model's family and the current
+    /// catalog's checkpoint-specific audio fact. An incompatible model clears
+    /// stale audio and LTX-2 latent-upscale overrides before they can leak into
+    /// another family.
     fn sync_generate_capabilities(&mut self) {
         let model = &self.generate.params.model;
         let family = family_for_model(model, &self.config);
@@ -1855,6 +1875,10 @@ impl App {
         self.generate.capabilities = capabilities_for_model(&family, advertised_audio_support);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
+        }
+        if !self.generate.capabilities.supports_video_upscale {
+            self.generate.params.spatial_upscale = None;
+            self.generate.params.temporal_upscale = None;
         }
         self.refresh_create_rows();
     }
@@ -3950,6 +3974,24 @@ impl App {
                     p.format = OutputFormat::Mp4;
                 }
             }
+            ParamField::SpatialUpscale => {
+                p.spatial_upscale = match (p.spatial_upscale, delta >= 0) {
+                    (None, true) | (Some(Ltx2SpatialUpscale::X2), false) => {
+                        Some(Ltx2SpatialUpscale::X1_5)
+                    }
+                    (Some(Ltx2SpatialUpscale::X1_5), true) | (None, false) => {
+                        Some(Ltx2SpatialUpscale::X2)
+                    }
+                    (Some(Ltx2SpatialUpscale::X2), true)
+                    | (Some(Ltx2SpatialUpscale::X1_5), false) => None,
+                };
+            }
+            ParamField::TemporalUpscale => {
+                p.temporal_upscale = match p.temporal_upscale {
+                    None => Some(Ltx2TemporalUpscale::X2),
+                    Some(Ltx2TemporalUpscale::X2) => None,
+                };
+            }
             ParamField::ControlScale => {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
@@ -4530,6 +4572,8 @@ impl App {
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
             ParamField::Audio => self.adjust_field(ParamField::Audio, 1),
+            ParamField::SpatialUpscale => self.adjust_field(ParamField::SpatialUpscale, 1),
+            ParamField::TemporalUpscale => self.adjust_field(ParamField::TemporalUpscale, 1),
             // Cycle format
             ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
@@ -4616,6 +4660,8 @@ impl App {
         self.generate.params.frames = default_frames;
         self.generate.params.fps = default_fps;
         self.generate.params.enable_audio = None;
+        self.generate.params.spatial_upscale = None;
+        self.generate.params.temporal_upscale = None;
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
         self.generate.params.mask_image_path = None;
@@ -5881,8 +5927,8 @@ impl App {
                             hdr_exr_dir: None,
                             hdr_exr_full_float: false,
                             retake_range: None,
-                            spatial_upscale: None,
-                            temporal_upscale: None,
+                            spatial_upscale: self.generate.params.spatial_upscale,
+                            temporal_upscale: self.generate.params.temporal_upscale,
                             chain_job_id: None,
                             chain: None,
                             version: mold_core::build_info::VERSION.to_string(),
@@ -9806,21 +9852,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_to_an_incompatible_model_clears_audio_authority() {
+    async fn ltx2_upscale_rows_cycle_native_modes() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.generate.capabilities = crate::model_info::capabilities_for_family("ltx2");
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Video);
+        app.refresh_create_rows();
+
+        let spatial_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|row| {
+                *row == CreateRow::SectionField(AdvSection::Video, ParamField::SpatialUpscale)
+            })
+            .expect("LTX-2 Video section must expose spatial upscale");
+        app.generate.param_index = spatial_idx;
+        app.increment_param(1);
+        assert_eq!(
+            app.generate.params.spatial_upscale,
+            Some(Ltx2SpatialUpscale::X1_5)
+        );
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(
+            app.generate.params.spatial_upscale,
+            Some(Ltx2SpatialUpscale::X2)
+        );
+        app.increment_param(1);
+        assert_eq!(app.generate.params.spatial_upscale, None);
+
+        let temporal_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|row| {
+                *row == CreateRow::SectionField(AdvSection::Video, ParamField::TemporalUpscale)
+            })
+            .expect("LTX-2 Video section must expose temporal upscale");
+        app.generate.param_index = temporal_idx;
+        app.increment_param(1);
+        assert_eq!(
+            app.generate.params.temporal_upscale,
+            Some(Ltx2TemporalUpscale::X2)
+        );
+        app.increment_param(-1);
+        assert_eq!(app.generate.params.temporal_upscale, None);
+    }
+
+    #[tokio::test]
+    async fn switching_to_an_incompatible_model_clears_ltx2_video_authority() {
         use crate::ui::create_form::{AdvSection, CreateRow};
         let mut app = make_settings_test_app();
         app.generate.params.model = "flux2-klein:q8".into();
         app.generate.params.enable_audio = Some(true);
+        app.generate.params.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        app.generate.params.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
 
         app.sync_generate_capabilities();
 
         assert!(!app.generate.capabilities.supports_audio);
+        assert!(!app.generate.capabilities.supports_video_upscale);
         assert_eq!(app.generate.params.enable_audio, None);
+        assert_eq!(app.generate.params.spatial_upscale, None);
+        assert_eq!(app.generate.params.temporal_upscale, None);
         assert!(!app
             .generate
             .rows
             .iter()
             .any(|row| { *row == CreateRow::SectionField(AdvSection::Video, ParamField::Audio) }));
+        assert!(!app.generate.rows.iter().any(|row| {
+            matches!(
+                row,
+                CreateRow::SectionField(
+                    AdvSection::Video,
+                    ParamField::SpatialUpscale | ParamField::TemporalUpscale
+                )
+            )
+        }));
     }
 
     #[tokio::test]
@@ -11753,6 +11864,8 @@ mod tests {
         app.generate.params.width = 9999;
         app.generate.params.batch = 5;
         app.generate.params.format = OutputFormat::Jpeg;
+        app.generate.params.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        app.generate.params.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
 
         // Focus on parameters, select ResetDefaults, and trigger it
         app.active_view = View::Create;
@@ -11774,6 +11887,8 @@ mod tests {
         // Non-default fields should be reset to generic defaults
         assert_eq!(app.generate.params.batch, 1);
         assert_eq!(app.generate.params.format, OutputFormat::Png);
+        assert_eq!(app.generate.params.spatial_upscale, None);
+        assert_eq!(app.generate.params.temporal_upscale, None);
     }
 
     #[tokio::test]

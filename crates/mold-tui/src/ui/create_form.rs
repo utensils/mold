@@ -200,6 +200,10 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             if caps.supports_audio {
                 fields.push(ParamField::Audio);
             }
+            if caps.supports_video_upscale {
+                fields.push(ParamField::SpatialUpscale);
+                fields.push(ParamField::TemporalUpscale);
+            }
             fields
         }
     }
@@ -299,6 +303,15 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
                     " \u{00b7} audio off"
                 });
             }
+            if let Some(upscale) = params.spatial_upscale {
+                summary.push_str(match upscale {
+                    mold_core::Ltx2SpatialUpscale::X1_5 => " \u{00b7} spatial 1.5×",
+                    mold_core::Ltx2SpatialUpscale::X2 => " \u{00b7} spatial 2×",
+                });
+            }
+            if params.temporal_upscale.is_some() {
+                summary.push_str(" \u{00b7} temporal 2×");
+            }
             summary
         }
     }
@@ -337,6 +350,12 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         count += 1;
     }
     if params.enable_audio.is_some() {
+        count += 1;
+    }
+    if params.spatial_upscale.is_some() {
+        count += 1;
+    }
+    if params.temporal_upscale.is_some() {
         count += 1;
     }
     count
@@ -502,12 +521,18 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_video_section_exposes_audio_without_leaking_to_legacy_video() {
+    fn ltx2_video_section_exposes_audio_and_upscalers_without_leaking_to_legacy_video() {
         let ltx2 = capabilities_for_family("ltx2");
-        assert!(section_fields(AdvSection::Video, &ltx2).contains(&ParamField::Audio));
+        let ltx2_fields = section_fields(AdvSection::Video, &ltx2);
+        assert!(ltx2_fields.contains(&ParamField::Audio));
+        assert!(ltx2_fields.contains(&ParamField::SpatialUpscale));
+        assert!(ltx2_fields.contains(&ParamField::TemporalUpscale));
 
         let legacy = capabilities_for_family("ltx-video");
-        assert!(!section_fields(AdvSection::Video, &legacy).contains(&ParamField::Audio));
+        let legacy_fields = section_fields(AdvSection::Video, &legacy);
+        assert!(!legacy_fields.contains(&ParamField::Audio));
+        assert!(!legacy_fields.contains(&ParamField::SpatialUpscale));
+        assert!(!legacy_fields.contains(&ParamField::TemporalUpscale));
     }
 
     #[test]
@@ -603,6 +628,12 @@ mod tests {
             section_summary(AdvSection::Video, &params, true),
             "25f \u{00b7} 24fps \u{00b7} audio off"
         );
+        params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
+        params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
+        assert_eq!(
+            section_summary(AdvSection::Video, &params, true),
+            "25f \u{00b7} 24fps \u{00b7} audio off \u{00b7} spatial 1.5× \u{00b7} temporal 2×"
+        );
     }
 
     #[test]
@@ -631,6 +662,14 @@ mod tests {
             advanced_active_count(&params, false),
             9,
             "an explicit audio override must count even when it disables audio"
+        );
+
+        params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
+        params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
+        assert_eq!(
+            advanced_active_count(&params, false),
+            11,
+            "each explicit latent upscale override must count"
         );
     }
 

@@ -23,6 +23,8 @@ pub struct ModelCapabilities {
     pub supports_video: bool,
     /// Whether the model can emit synchronized audio with video.
     pub supports_audio: bool,
+    /// Whether the model supports LTX-2 latent spatial/temporal upscaling.
+    pub supports_video_upscale: bool,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -41,6 +43,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -54,6 +57,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -67,6 +71,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -80,6 +85,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -93,6 +99,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -106,6 +113,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -119,6 +127,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -132,6 +141,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "qwen-image-edit" => ModelCapabilities {
@@ -145,6 +155,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "ltx-video" => ModelCapabilities {
@@ -158,6 +169,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: true,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
         "ltx2" => ModelCapabilities {
@@ -171,6 +183,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: true,
             supports_audio: true,
+            supports_video_upscale: true,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -184,6 +197,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: false,
             supports_audio: false,
+            supports_video_upscale: false,
             default_scheduler: None,
         },
     }
