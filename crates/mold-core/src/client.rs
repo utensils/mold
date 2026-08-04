@@ -537,10 +537,15 @@ impl MoldClient {
             .get(format!("{}/api/chain-jobs", self.base_url))
             .send()
             .await?;
-        Ok(error_for_status_with_body(resp)
+        let mut listing = error_for_status_with_body(resp)
             .await?
             .json::<ChainJobListing>()
-            .await?)
+            .await?;
+        // Older servers exposed the ephemeral runner records used by
+        // automatic long one-shot videos. They are not authored sequences and
+        // must stay out of `mold jobs list` even across a mixed-version pair.
+        listing.jobs.retain(|job| !job.ephemeral);
+        Ok(listing)
     }
 
     pub async fn get_chain_job(&self, id: &str) -> Result<ChainJobDetail> {

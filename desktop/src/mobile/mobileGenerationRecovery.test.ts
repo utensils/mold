@@ -402,23 +402,32 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(opts.refreshResultUrl).toHaveBeenCalledWith(7);
   });
 
-  it("finds an id-less durable chain created with the interrupted submission", async () => {
+  it("finds only the id-less one-shot shim created with the interrupted submission", async () => {
     const submittedAtUnixMs = 1_700_000_000_000;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/chain-jobs") {
+      if (path === "/api/chain-jobs?include_ephemeral=true") {
         return Promise.resolve({
           jobs: [
+            {
+              id: "authored-sequence",
+              state: "running",
+              model: "ltx2:q8",
+              created_at_unix_ms: submittedAtUnixMs + 50,
+              ephemeral: false,
+            },
             {
               id: "chain-later",
               state: "running",
               model: "ltx2:q8",
               created_at_unix_ms: submittedAtUnixMs + 200,
+              ephemeral: true,
             },
             {
               id: "chain-mine",
               state: "running",
               model: "ltx2:q8",
               created_at_unix_ms: submittedAtUnixMs + 100,
+              ephemeral: true,
             },
           ],
         });
@@ -440,6 +449,7 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.id).toBe("chain-mine");
     expect(job.status).toBe("complete");
     expect(job.result?.filename).toBe("recovered.mp4");
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs?include_ephemeral=true");
   });
 
   it("surfaces a chain failure with the host's own error copy", async () => {

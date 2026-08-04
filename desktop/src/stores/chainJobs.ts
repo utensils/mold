@@ -4,6 +4,7 @@ import {
   emptyChainJobLive,
   type ChainJobLive,
 } from "@studio/lib/chainJobEvents";
+import { isAuthoredSequenceJob } from "@studio/lib/api/chainTypes";
 import type {
   AmendRequest,
   AmendResponse,
@@ -81,7 +82,9 @@ export const useChainJobsStore = defineStore("chainJobs", {
         const listing = await apiJsonTo<ChainJobListing>(target, "/api/chain-jobs");
         if (version !== this.fetchVersions[hostId]) return;
         this.byHost[hostId] = {
-          jobs: listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms),
+          jobs: listing.jobs
+            .filter(isAuthoredSequenceJob)
+            .sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms),
           error: null,
         };
       } catch (err) {

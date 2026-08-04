@@ -215,13 +215,20 @@ function findQueueEntry(
 }
 
 async function findPreIdChain(job: Job, opts: GenerationRecoveryOptions): Promise<string | null> {
-  const listing = await apiJsonTo<ChainJobListing>(opts.target, "/api/chain-jobs");
+  // Public sequence lists intentionally hide the ephemeral chain-runner shim
+  // behind a one-shot long video. Recovery is the one consumer that needs to
+  // find that internal record when iOS suspended before receiving its id.
+  const listing = await apiJsonTo<ChainJobListing>(
+    opts.target,
+    "/api/chain-jobs?include_ephemeral=true",
+  );
   const earliest = job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS;
   const latest = job.submittedAtUnixMs + PRE_ID_JOIN_WINDOW_MS;
   return (
     listing.jobs
       .filter(
         (candidate) =>
+          candidate.ephemeral === true &&
           candidate.model === job.model &&
           (candidate.state === "queued" || candidate.state === "running") &&
           candidate.created_at_unix_ms >= earliest &&

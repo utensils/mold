@@ -6438,6 +6438,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chain_jobs_listing_hides_one_shot_shims_unless_recovery_requests_them() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(
+            &db,
+            home.path(),
+            "authored-sequence",
+            ChainJobState::Running,
+        );
+        let shim_dir = seed_chain_job(&db, home.path(), "one-shot-shim", ChainJobState::Running);
+        let mut shim = ChainJobManifest::read_from_dir(&shim_dir).unwrap();
+        shim.ephemeral = true;
+        shim.write_atomic(&shim_dir).unwrap();
+        let app = app_with_chain_db(db);
+
+        let public = app
+            .clone()
+            .oneshot(Request::get("/api/chain-jobs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(public.status(), StatusCode::OK);
+        let public_body = json_body(public).await;
+        let public_ids = public_body["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|job| job["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(public_ids, ["authored-sequence"]);
+
+        let recovery = app
+            .oneshot(
+                Request::get("/api/chain-jobs?include_ephemeral=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovery.status(), StatusCode::OK);
+        let recovery_body = json_body(recovery).await;
+        let recovery_ids = recovery_body["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|job| job["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_ids, ["authored-sequence", "one-shot-shim"]);
+    }
+
+    #[tokio::test]
     async fn chain_job_detail_returns_404_for_unknown_job() {
         let home = tempfile::tempdir().unwrap();
         let _home = MoldHomeGuard::set(home.path());

@@ -85,6 +85,19 @@ describe("per-host listing", () => {
     expect(store.byHost[REMOTE_ID]?.jobs.map((j) => j.id)).toEqual(["r-new", "r-old"]);
   });
 
+  it("keeps automatic long-video shim jobs out of sequence surfaces", async () => {
+    apiJsonTo.mockResolvedValue({
+      jobs: [
+        { id: "authored", state: "running", created_at_unix_ms: 1, ephemeral: false },
+        { id: "one-shot", state: "running", created_at_unix_ms: 2, ephemeral: true },
+      ],
+    });
+    const store = useChainJobsStore();
+    await store.fetchHost("local");
+
+    expect(store.byHost.local?.jobs.map((job) => job.id)).toEqual(["authored"]);
+  });
+
   it("a failed host keeps its last jobs and records the error", async () => {
     const store = useChainJobsStore();
     store.byHost[REMOTE_ID] = {
