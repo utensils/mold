@@ -28,8 +28,8 @@ import {
 } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import {
+  autoChainFieldList,
   decideGenerateRequestRouting,
-  unsupportedAutoChainFields,
   type ChainRoutingDecision,
 } from "../../lib/chainRouting";
 import { fileToBase64 } from "../../lib/image";
@@ -148,11 +148,10 @@ const chainDecision = computed<ChainRoutingDecision>(() =>
     ? decideGenerateRequestRouting(generationRequest.value, props.form.family)
     : { kind: "single" },
 );
-const chainCompatibilityError = computed(() => {
-  if (chainDecision.value.kind !== "chain") return null;
-  return unsupportedAutoChainFields(generationRequest.value).length > 0
-    ? "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer."
-    : null;
+const singleShotPreservationNote = computed(() => {
+  const decision = chainDecision.value;
+  if (decision.kind !== "single" || !decision.preservedAutoChainFields?.length) return null;
+  return `Will render as one ${props.form.frames}-frame clip to preserve ${autoChainFieldList(decision.preservedAutoChainFields)}. This may use more GPU memory than automatic chaining.`;
 });
 const fpsError = computed(() =>
   caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
@@ -550,16 +549,19 @@ function reset() {
         />
         <p v-if="framesError" class="ms-error">{{ framesError }}</p>
 
-        <div
-          v-if="chainDecision.kind === 'chain' && !chainCompatibilityError"
-          data-test="chain-cue"
-          class="ms-cue"
-        >
+        <div v-if="chainDecision.kind === 'chain'" data-test="chain-cue" class="ms-cue">
           Will render as
           <span class="data-mono font-semibold text-ink">{{ chainDecision.stageCount }}</span>
           chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
           {{ chainDecision.motionTail }}) — expect this to take substantially longer than a single
           clip.
+        </div>
+        <div
+          v-else-if="singleShotPreservationNote"
+          data-test="single-shot-preservation-cue"
+          class="ms-cue"
+        >
+          {{ singleShotPreservationNote }}
         </div>
         <p
           v-else-if="chainDecision.kind === 'reject'"
@@ -567,13 +569,6 @@ function reset() {
           class="ms-error ms-error--mt"
         >
           {{ chainDecision.reason }}
-        </p>
-        <p
-          v-else-if="chainCompatibilityError"
-          data-test="chain-compatibility-error"
-          class="ms-error ms-error--mt"
-        >
-          {{ chainCompatibilityError }}
         </p>
 
         <label class="ms-label ms-label--mt">FPS</label>

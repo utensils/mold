@@ -120,7 +120,10 @@ import {
   storeLastSeed,
 } from "../lib/lastSeed";
 import { useQueue } from "../composables/useQueue";
-import { decideGenerateRequestRouting } from "../lib/chainRouting";
+import {
+  autoChainFieldList,
+  decideGenerateRequestRouting,
+} from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
   coerceSourceFitForMaskless,
@@ -1099,14 +1102,16 @@ const gpuListForPlacement = computed(
 
 const chainDecision = computed(() =>
   decideGenerateRequestRouting(
-    {
-      frames: form.state.value.frames,
-      model: form.state.value.model,
-      temporal_upscale: form.state.value.temporalUpscale,
-    },
+    form.toRequest(currentModel.value),
     currentModel.value?.family ?? null,
   ),
 );
+const singleShotPreservationNote = computed(() => {
+  const decision = chainDecision.value;
+  if (decision.kind !== "single" || !decision.preservedAutoChainFields?.length)
+    return null;
+  return `Will render as one ${form.state.value.frames}-frame clip to preserve ${autoChainFieldList(decision.preservedAutoChainFields)}. This may use more GPU memory than automatic chaining.`;
+});
 
 // Keep the preflight small: source/control media do not change the model's
 // static peak estimate enough to justify serializing their base64 payloads on
@@ -3283,6 +3288,13 @@ onBeforeUnmount(() => {
             <span class="font-semibold">{{ chainDecision.stageCount }}</span>
             chained clips of {{ chainDecision.clipFrames }} frames — expect this
             to take substantially longer than a single clip.
+          </div>
+          <div
+            v-else-if="singleShotPreservationNote"
+            class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
+            data-test="single-shot-preservation-cue"
+          >
+            {{ singleShotPreservationNote }}
           </div>
 
           <div

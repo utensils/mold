@@ -12,9 +12,8 @@ import type {
 import { generationCapabilitiesForFamily, MAX_LORA_STACK } from "../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../lib/chain";
 import {
+  autoChainFieldList,
   decideGenerateRequestRouting,
-  unsupportedAutoChainFields,
-  type AutoChainUnsupportedField,
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
 import { buildRequest, type GenerateForm, type PickedImage } from "../lib/generateForm";
@@ -104,26 +103,10 @@ const chainDecision = computed<ChainRoutingDecision>(() =>
     : { kind: "single" },
 );
 
-const AUTO_CHAIN_FIELD_LABELS: Record<AutoChainUnsupportedField, string> = {
-  negative_prompt: "negative prompt",
-  loras: "LoRAs or camera motion",
-  audio_file: "conditioning audio",
-  source_video: "source video",
-  keyframes: "keyframes",
-  pipeline: "pipeline",
-  ic_lora_control: "reference control",
-  retake_range: "retake range",
-  spatial_upscale: "spatial upscale",
-  temporal_upscale: "temporal upscale",
-  guidance_overrides: "guidance overrides",
-};
-
-const chainCompatibilityError = computed(() => {
-  if (chainDecision.value.kind !== "chain") return null;
-  const unsupported = unsupportedAutoChainFields(generationRequest.value);
-  if (unsupported.length === 0) return null;
-  const labels = unsupported.map((field) => AUTO_CHAIN_FIELD_LABELS[field]);
-  return `Long-video chaining can’t preserve ${labels.join(", ")}. Remove those options or reduce Frames to 97 or fewer.`;
+const singleShotPreservationNote = computed(() => {
+  const decision = chainDecision.value;
+  if (decision.kind !== "single" || !decision.preservedAutoChainFields?.length) return null;
+  return `Rendering one ${props.form.frames}-frame clip to preserve ${autoChainFieldList(decision.preservedAutoChainFields)}. This may use more GPU memory than automatic chaining.`;
 });
 
 const audioFormatError = computed(() => audioOutputValidationError(props.form));
@@ -141,7 +124,6 @@ const valid = computed(
     !frameError.value &&
     !fpsError.value &&
     chainDecision.value.kind !== "reject" &&
-    !chainCompatibilityError.value &&
     !audioFormatError.value &&
     !advancedVideoError.value &&
     !cameraError.value,
@@ -658,7 +640,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         {{ fpsError }}
       </p>
       <p
-        v-if="chainDecision.kind === 'chain' && !chainCompatibilityError"
+        v-if="chainDecision.kind === 'chain'"
         class="mobile-generate-callout"
         data-test="mobile-chain-cue"
       >
@@ -667,20 +649,19 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         tail.
       </p>
       <p
+        v-else-if="singleShotPreservationNote"
+        class="mobile-generate-callout"
+        data-test="mobile-single-shot-preservation-cue"
+      >
+        {{ singleShotPreservationNote }}
+      </p>
+      <p
         v-else-if="chainDecision.kind === 'reject'"
         class="mobile-generate-validation"
         role="alert"
         data-test="mobile-chain-reject"
       >
         {{ chainDecision.reason }}
-      </p>
-      <p
-        v-else-if="chainCompatibilityError"
-        class="mobile-generate-validation"
-        role="alert"
-        data-test="mobile-chain-compatibility-error"
-      >
-        {{ chainCompatibilityError }}
       </p>
 
       <label v-if="caps.supportsAudio" class="mobile-generate-toggle-row">

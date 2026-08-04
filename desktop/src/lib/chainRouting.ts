@@ -7,57 +7,22 @@ import { decideGenerateRequestRouting, type ChainRoutingDecision } from "@studio
 import type { AutoChainRequest, GenerateRequest } from "./api/types";
 
 export {
+  AUTO_CHAIN_FIELD_LABELS,
   DEFAULT_MOTION_TAIL,
   LTX2_DEFAULT_CLIP_FRAMES,
   MAX_CHAIN_STAGES,
+  autoChainFieldList,
   decideChainRouting,
   decideGenerateRequestRouting,
+  unsupportedAutoChainFields,
 } from "@studio/lib/chainRouting";
-export type { ChainRoutingDecision } from "@studio/lib/chainRouting";
+export type { AutoChainUnsupportedField, ChainRoutingDecision } from "@studio/lib/chainRouting";
 
 export type AutoChainRoutingDecision = Extract<ChainRoutingDecision, { kind: "chain" }>;
 
-/** GenerateRequest features the server's auto-expand chain form cannot carry. */
-export type AutoChainUnsupportedField =
-  | "negative_prompt"
-  | "loras"
-  | "audio_file"
-  | "source_video"
-  | "keyframes"
-  | "pipeline"
-  | "ic_lora_control"
-  | "retake_range"
-  | "spatial_upscale"
-  | "temporal_upscale"
-  | "guidance_overrides";
-
-/** Report meaningful fields that would be lost when a normal generation is
- * routed through the auto-expand chain endpoint. Camera control rides the
- * LoRA wire fields, so it is intentionally reported as `loras` too. */
-export function unsupportedAutoChainFields(req: GenerateRequest): AutoChainUnsupportedField[] {
-  const unsupported: AutoChainUnsupportedField[] = [];
-  if (req.negative_prompt?.trim()) unsupported.push("negative_prompt");
-  if ((req.loras?.length ?? 0) > 0 || req.lora) unsupported.push("loras");
-  if (req.audio_file) unsupported.push("audio_file");
-  if (req.source_video) unsupported.push("source_video");
-  if ((req.keyframes?.length ?? 0) > 0) unsupported.push("keyframes");
-  if (req.pipeline) unsupported.push("pipeline");
-  if (req.ic_lora_control) unsupported.push("ic_lora_control");
-  if (req.retake_range) unsupported.push("retake_range");
-  if (req.spatial_upscale) unsupported.push("spatial_upscale");
-  if (req.temporal_upscale) unsupported.push("temporal_upscale");
-  const hasGuidanceOverride = Object.values(req.guidance_overrides ?? {}).some((value) =>
-    Array.isArray(value) ? value.length > 0 : value !== null && value !== undefined,
-  );
-  if (hasGuidanceOverride) {
-    unsupported.push("guidance_overrides");
-  }
-  return unsupported;
-}
-
 /** Project a normal GenerateRequest onto the chain endpoint's auto-expand
- * wire contract. Call `unsupportedAutoChainFields` first so the UI can reject
- * an incompatible request instead of silently dropping it. */
+ * wire contract. Only call this after `decideGenerateRequestRouting` returns a
+ * chain decision; incompatible requests stay single-shot or are rejected. */
 export function buildAutoChainRequest(
   req: GenerateRequest,
   decision: AutoChainRoutingDecision,
