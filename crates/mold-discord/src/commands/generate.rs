@@ -2,7 +2,10 @@ use crate::checks::{self, AuthResult};
 use crate::handler;
 use crate::state::Context;
 use anyhow::Result;
-use mold_core::{GenerateRequest, Ltx2PipelineMode, ModelInfoExtended, OutputFormat};
+use mold_core::{
+    GenerateRequest, KeyframeCondition, Ltx2PipelineMode, ModelInfoExtended, OutputFormat,
+    TimeRange,
+};
 use poise::serenity_prelude as serenity;
 use std::time::Duration;
 
@@ -103,12 +106,9 @@ impl VideoFormat {
     }
 }
 
-/// Slash-command facing LTX-2 pipeline selector. Only pipelines that are
-/// fully satisfiable from the Discord command surface are exposed — modes
-/// like `a2-vid` / `retake` / `ic-lora` / `keyframe` / `lip-dub` require extra
-/// inputs (`audio_file`, `source_video`, LoRA stacks, ≥2 keyframes) that the
-/// slash command doesn't collect, and server validation would reject them
-/// outright.
+/// Slash-command facing selector for the ordinary LTX-2 pipelines. Specialized
+/// attachment-driven modes (`a2-vid`, `retake`, and `keyframe`) are selected
+/// automatically from their required inputs instead of appearing here.
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
 pub enum PipelineChoice {
     #[name = "one-stage"]
@@ -171,6 +171,10 @@ pub struct BuildParams<'a> {
     pub video_format: Option<VideoFormat>,
     pub audio: Option<bool>,
     pub pipeline: Option<Ltx2PipelineMode>,
+    pub audio_file: Option<Vec<u8>>,
+    pub source_video: Option<Vec<u8>>,
+    pub keyframes: Option<Vec<KeyframeCondition>>,
+    pub retake_range: Option<TimeRange>,
 }
 
 /// Build a `GenerateRequest` from slash command parameters, honoring model
@@ -254,18 +258,18 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         // user still sees the generation.
         gif_preview: is_video_family,
         enable_audio,
-        audio_file: None,
+        audio_file: params.audio_file,
         audio_file_path: None,
-        source_video: None,
+        source_video: params.source_video,
         source_video_path: None,
         extend_video: None,
         extend_video_path: None,
         extend_overlap_frames: None,
-        keyframes: None,
+        keyframes: params.keyframes,
         pipeline: if is_ltx2 { params.pipeline } else { None },
         ic_lora_control: None,
         loras: None,
-        retake_range: None,
+        retake_range: params.retake_range,
         spatial_upscale: None,
         temporal_upscale: None,
         placement: None,
@@ -307,6 +311,35 @@ fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
 /// the server. Keep the bar well below Discord's hard limit to avoid obvious
 /// abuse.
 const MAX_SOURCE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+// GenerateRequest embeds every attachment as base64 in one JSON body. Keep the
+// aggregate raw payload below 47 MiB so its 4/3 expansion plus request metadata
+// remains below mold-server's 64 MiB body limit.
+const MAX_INLINE_MEDIA_BYTES: u64 = 47 * 1024 * 1024;
+
+fn validate_inline_media_size<'a>(
+    attachments: impl IntoIterator<Item = &'a serenity::Attachment>,
+) -> Result<(), String> {
+    validate_inline_media_lengths(
+        attachments
+            .into_iter()
+            .map(|attachment| attachment.size as u64),
+    )
+}
+
+fn validate_inline_media_lengths(sizes: impl IntoIterator<Item = u64>) -> Result<(), String> {
+    let total = sizes
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| "Combined attachment size is too large.".to_string())?;
+    if total > MAX_INLINE_MEDIA_BYTES {
+        return Err(format!(
+            "Combined attachments are too large ({:.1} MiB). Keep their total under {} MiB.",
+            total as f64 / (1024.0 * 1024.0),
+            MAX_INLINE_MEDIA_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
 
 /// Derive img2img dimensions from a Discord attachment's reported
 /// width/height when the user didn't supply explicit values — otherwise the
@@ -352,6 +385,96 @@ fn looks_like_png_or_jpeg(bytes: &[u8]) -> bool {
     is_png || is_jpeg
 }
 
+async fn fetch_conditioning_media(
+    att: &serenity::Attachment,
+    kind: &str,
+    expected_content_prefix: &str,
+) -> Result<Vec<u8>, String> {
+    if att.size as u64 > MAX_INLINE_MEDIA_BYTES {
+        return Err(format!(
+            "{kind} is too large ({:.1} MiB). Keep it under {} MiB.",
+            att.size as f64 / (1024.0 * 1024.0),
+            MAX_INLINE_MEDIA_BYTES / (1024 * 1024)
+        ));
+    }
+    if let Some(content_type) = &att.content_type {
+        if !content_type.starts_with(expected_content_prefix) {
+            return Err(format!(
+                "{kind} must be a {expected_content_prefix} attachment, got `{content_type}`."
+            ));
+        }
+    }
+    let bytes = att
+        .download()
+        .await
+        .map_err(|error| format!("Failed to download {kind}: {error}"))?;
+    if bytes.is_empty() {
+        return Err(format!("{kind} must not be empty."));
+    }
+    Ok(bytes)
+}
+
+fn specialized_pipeline(
+    has_source_image: bool,
+    has_audio: bool,
+    has_video: bool,
+    retake_start: Option<f64>,
+    retake_end: Option<f64>,
+    keyframe_count: usize,
+) -> Result<Option<Ltx2PipelineMode>, String> {
+    let has_retake_range = retake_start.is_some() || retake_end.is_some();
+    if has_source_image && (has_video || keyframe_count > 0) {
+        return Err(
+            "Source image cannot be combined with retake or keyframe attachments.".to_string(),
+        );
+    }
+    let groups = usize::from(has_audio)
+        + usize::from(has_video || has_retake_range)
+        + usize::from(keyframe_count > 0);
+    if groups > 1 {
+        return Err(
+            "Use only one specialized mode at a time: audio-to-video, retake, or keyframes."
+                .to_string(),
+        );
+    }
+    if has_video || has_retake_range {
+        if !has_video {
+            return Err("Retake times require a source video attachment.".to_string());
+        }
+        let (Some(start), Some(end)) = (retake_start, retake_end) else {
+            return Err("Retake requires both start and end times in seconds.".to_string());
+        };
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+            return Err(
+                "Retake end time must be greater than a non-negative start time.".to_string(),
+            );
+        }
+        return Ok(Some(Ltx2PipelineMode::Retake));
+    }
+    if keyframe_count > 0 {
+        if keyframe_count < 2 {
+            return Err("Keyframe mode requires at least two keyframe images.".to_string());
+        }
+        return Ok(Some(Ltx2PipelineMode::Keyframe));
+    }
+    Ok(has_audio.then_some(Ltx2PipelineMode::A2Vid))
+}
+
+fn build_keyframes(images: Vec<Vec<u8>>, frames: u32) -> Vec<KeyframeCondition> {
+    let last_frame = frames.saturating_sub(1);
+    let denominator = u32::try_from(images.len().saturating_sub(1))
+        .unwrap_or(1)
+        .max(1);
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| KeyframeCondition {
+            frame: u32::try_from(index).unwrap_or(0) * last_frame / denominator,
+            image,
+        })
+        .collect()
+}
+
 /// Whether `/generate` must reject the interaction up front for a missing prompt.
 ///
 /// The slash command runs this before deferring, so the model family isn't
@@ -359,8 +482,8 @@ fn looks_like_png_or_jpeg(bytes: &[u8]) -> bool {
 /// let the run through unprompted (LTX-2 image-to-video conditions on the
 /// frame); the server's family-aware validator is the backstop that still
 /// rejects an empty prompt for image families.
-fn prompt_missing_before_defer(prompt: Option<&str>, has_source_image: bool) -> bool {
-    !has_source_image && prompt.is_none_or(|p| p.trim().is_empty())
+fn prompt_missing_before_defer(prompt: Option<&str>, has_visual_conditioning: bool) -> bool {
+    !has_visual_conditioning && prompt.is_none_or(|p| p.trim().is_empty())
 }
 
 /// Generate an image (PNG) or video (MP4 by default, GIF on request).
@@ -394,14 +517,83 @@ pub async fn generate(
     #[description = "LTX-2 pipeline mode (advanced)"] pipeline: Option<PipelineChoice>,
     #[description = "Negative prompt — what to avoid (CFG models: SD1.5, SDXL, SD3)"]
     negative_prompt: Option<String>,
+    #[description = "Audio attachment for LTX-2 audio-to-video"] audio_file: Option<
+        serenity::Attachment,
+    >,
+    #[description = "MP4 source for LTX-2 retake"] source_video: Option<serenity::Attachment>,
+    #[description = "Retake start time in seconds"] retake_start: Option<f64>,
+    #[description = "Retake end time in seconds"] retake_end: Option<f64>,
+    #[description = "First image for LTX-2 keyframe interpolation"] keyframe_1: Option<
+        serenity::Attachment,
+    >,
+    #[description = "Second image for LTX-2 keyframe interpolation"] keyframe_2: Option<
+        serenity::Attachment,
+    >,
+    #[description = "Optional third image for LTX-2 keyframe interpolation"] keyframe_3: Option<
+        serenity::Attachment,
+    >,
 ) -> Result<()> {
+    let keyframe_attachments = [
+        keyframe_1.as_ref(),
+        keyframe_2.as_ref(),
+        keyframe_3.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let specialized = match specialized_pipeline(
+        source_image.is_some(),
+        audio_file.is_some(),
+        source_video.is_some(),
+        retake_start,
+        retake_end,
+        keyframe_attachments.len(),
+    ) {
+        Ok(mode) => mode,
+        Err(message) => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(message)
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    if specialized.is_some() && pipeline.is_some() {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("The attachment selects the LTX-2 pipeline; omit the pipeline option.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+    let inline_attachments = source_image
+        .iter()
+        .chain(audio_file.iter())
+        .chain(source_video.iter())
+        .chain(keyframe_attachments.iter().copied());
+    if let Err(message) = validate_inline_media_size(inline_attachments) {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(message)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
     // Validate prompt before deferring (avoids wasting the interaction)
-    if prompt_missing_before_defer(prompt.as_deref(), source_image.is_some()) {
+    if prompt_missing_before_defer(
+        prompt.as_deref(),
+        source_image.is_some() || source_video.is_some() || !keyframe_attachments.is_empty(),
+    ) {
         ctx.send(
             poise::CreateReply::default()
                 .content(
                     "Prompt cannot be empty. \
-                     (It's optional only for image-to-video — attach a source image.)",
+                     (It's optional only with visual conditioning: a source image, retake video, \
+                     or keyframes.)",
                 )
                 .ephemeral(true),
         )
@@ -445,6 +637,41 @@ pub async fn generate(
     } else {
         None
     };
+    let audio_bytes = if let Some(att) = audio_file.as_ref() {
+        match fetch_conditioning_media(att, "Audio attachment", "audio/").await {
+            Ok(bytes) => Some(bytes),
+            Err(message) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(ctx, &message).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let video_bytes = if let Some(att) = source_video.as_ref() {
+        match fetch_conditioning_media(att, "Source video", "video/").await {
+            Ok(bytes) => Some(bytes),
+            Err(message) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(ctx, &message).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let mut keyframe_images = Vec::with_capacity(keyframe_attachments.len());
+    for attachment in keyframe_attachments {
+        match fetch_source_image(attachment).await {
+            Ok(bytes) => keyframe_images.push(bytes),
+            Err(message) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(ctx, &message).await?;
+                return Ok(());
+            }
+        }
+    }
 
     // When a source image is attached and the user didn't pass explicit dims,
     // use the attachment's reported width/height (snapped to multiples of 16)
@@ -466,6 +693,16 @@ pub async fn generate(
             (width, height)
         };
 
+    let requested_frames = frames.unwrap_or(25);
+    let keyframes =
+        (!keyframe_images.is_empty()).then(|| build_keyframes(keyframe_images, requested_frames));
+    let retake_range = match (retake_start, retake_end) {
+        (Some(start_seconds), Some(end_seconds)) => Some(TimeRange {
+            start_seconds: start_seconds as f32,
+            end_seconds: end_seconds as f32,
+        }),
+        _ => None,
+    };
     let req = build_generate_request(BuildParams {
         prompt: &prompt,
         model: &model_name,
@@ -483,7 +720,11 @@ pub async fn generate(
         strength,
         video_format,
         audio,
-        pipeline: pipeline.map(PipelineChoice::to_mode),
+        pipeline: specialized.or_else(|| pipeline.map(PipelineChoice::to_mode)),
+        audio_file: audio_bytes,
+        source_video: video_bytes,
+        keyframes,
+        retake_range,
     });
 
     match handler::run_generation(ctx, req).await {
@@ -731,6 +972,90 @@ mod tests {
         assert_eq!(req.output_format, Some(OutputFormat::Mp4));
         assert_eq!(req.source_image.as_ref(), Some(&bytes));
         assert_eq!(req.frames, Some(25));
+    }
+
+    #[test]
+    fn specialized_inputs_are_plumbed_to_the_request() {
+        let audio = b"RIFFtestWAVE".to_vec();
+        let video = b"fake-mp4".to_vec();
+        let keyframes = vec![
+            KeyframeCondition {
+                frame: 0,
+                image: vec![0x89, b'P', b'N', b'G'],
+            },
+            KeyframeCondition {
+                frame: 24,
+                image: vec![0xFF, 0xD8],
+            },
+        ];
+        let range = TimeRange {
+            start_seconds: 1.0,
+            end_seconds: 2.0,
+        };
+        let req = build_generate_request(BuildParams {
+            family: Some("ltx2"),
+            pipeline: Some(Ltx2PipelineMode::Retake),
+            audio_file: Some(audio.clone()),
+            source_video: Some(video.clone()),
+            keyframes: Some(keyframes.clone()),
+            retake_range: Some(range.clone()),
+            ..base_params("replace this shot", "ltx-2-19b-distilled:fp8")
+        });
+        assert_eq!(req.audio_file, Some(audio));
+        assert_eq!(req.source_video, Some(video));
+        assert_eq!(req.keyframes.unwrap().len(), keyframes.len());
+        assert_eq!(req.retake_range, Some(range));
+        assert_eq!(req.pipeline, Some(Ltx2PipelineMode::Retake));
+    }
+
+    #[test]
+    fn attachment_modes_are_unambiguous() {
+        assert_eq!(
+            specialized_pipeline(false, true, false, None, None, 0).unwrap(),
+            Some(Ltx2PipelineMode::A2Vid)
+        );
+        assert_eq!(
+            specialized_pipeline(false, false, true, Some(0.5), Some(1.5), 0).unwrap(),
+            Some(Ltx2PipelineMode::Retake)
+        );
+        assert_eq!(
+            specialized_pipeline(false, false, false, None, None, 2).unwrap(),
+            Some(Ltx2PipelineMode::Keyframe)
+        );
+        assert!(specialized_pipeline(false, true, true, Some(0.0), Some(1.0), 0).is_err());
+        assert!(specialized_pipeline(false, false, true, Some(0.0), None, 0).is_err());
+        assert!(specialized_pipeline(false, false, false, None, None, 1).is_err());
+        assert!(specialized_pipeline(true, false, true, Some(0.0), Some(1.0), 0).is_err());
+        assert!(specialized_pipeline(true, false, false, None, None, 2).is_err());
+        assert_eq!(
+            specialized_pipeline(true, true, false, None, None, 0).unwrap(),
+            Some(Ltx2PipelineMode::A2Vid),
+            "upstream explicitly supports audio plus image conditioning"
+        );
+    }
+
+    #[test]
+    fn aggregate_media_cap_fits_the_server_json_limit_after_base64() {
+        let encoded = MAX_INLINE_MEDIA_BYTES.div_ceil(3) * 4;
+        assert!(encoded + 1024 * 1024 < 64 * 1024 * 1024);
+        assert!(validate_inline_media_lengths([37 * 1024 * 1024, MAX_SOURCE_IMAGE_BYTES]).is_ok());
+        assert!(validate_inline_media_lengths([47 * 1024 * 1024, MAX_SOURCE_IMAGE_BYTES]).is_err());
+    }
+
+    #[test]
+    fn keyframes_are_spaced_across_the_requested_timeline() {
+        let keyframes = build_keyframes(vec![vec![1], vec![2], vec![3]], 49);
+        assert_eq!(
+            keyframes.iter().map(|item| item.frame).collect::<Vec<_>>(),
+            [0, 24, 48]
+        );
+    }
+
+    #[test]
+    fn generate_stays_within_discords_option_limit() {
+        let command = generate();
+        assert_eq!(command.parameters.len(), 22);
+        assert!(command.parameters.len() <= 25);
     }
 
     #[test]

@@ -65,8 +65,8 @@ features:
       src: /icons/discord.svg
     title: Discord Bot
     details:
-      Built-in Discord bot with /generate, /expand, /models, and /status slash
-      commands. Run standalone or embedded in the server.
+      Built-in Discord bot with /generate, durable /sequence, /expand, /models,
+      and /status slash commands. Run standalone or embedded in the server.
   - icon:
       src: /icons/layers.svg
     title: img2img, Edit & ControlNet

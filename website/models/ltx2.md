@@ -358,8 +358,8 @@ then gets recorded in your metadata — and is not written to prompt history.
 Web, desktop, and iPhone Create all enable **Generate** once a source image is
 attached to a compatible model and say the same thing in the prompt
 placeholder; sequence clips may be left undescribed under the same rule. On
-Discord, `/generate`'s `prompt` option is optional when you attach a source
-image.
+Discord, `/generate`'s `prompt` option is optional when you attach visual
+conditioning: a source image, a retake source video, or keyframe images.
 
 ## Memory on 24 GB cards
 
