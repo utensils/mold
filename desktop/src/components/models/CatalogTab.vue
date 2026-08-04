@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import CatalogLayoutToggle, {
   type CatalogLayoutChoice,
 } from "@ui/components/CatalogLayoutToggle.vue";
@@ -22,6 +22,7 @@ import {
 } from "../../lib/catalogFilters";
 import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
+import { useInfiniteScrollSentinel } from "../../lib/useInfiniteScrollSentinel";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
@@ -378,48 +379,8 @@ function loadMore() {
   void runSearch(false);
 }
 
-/** End-of-list sentinel: scrolling near it fetches the next page — the
- *  old Load more button read as a dead end and (worse) looked broken
- *  whenever upstream paging returned duplicate rows the dedup swallowed. */
 const sentinel = ref<HTMLElement | null>(null);
-const sentinelVisible = ref(false);
-/** Fetches chained since the last real intersection event — bounded like
- *  the media-filter auto-fetch so a dedup-swallowed page can't loop. */
-let chainedFetches = 0;
-let observer: IntersectionObserver | null = null;
-
-watch(sentinel, (el) => {
-  observer?.disconnect();
-  observer = null;
-  sentinelVisible.value = false;
-  if (!el) return;
-  observer = new IntersectionObserver(
-    (hits) => {
-      for (const hit of hits) sentinelVisible.value = hit.isIntersecting;
-      if (sentinelVisible.value) {
-        chainedFetches = 0;
-        loadMore();
-      }
-    },
-    { rootMargin: "600px 0px" },
-  );
-  observer.observe(el);
-});
-
-// A page that lands without pushing the sentinel out of view (dedup or the
-// media filter swallowed its rows) emits no new intersection event, so the
-// observer alone would stall. Chain the next fetch while the sentinel is
-// still visible, up to the auto-fetch bound.
-watch(loading, (isLoading) => {
-  if (isLoading || !sentinelVisible.value || !hasMore.value) return;
-  if (chainedFetches >= MAX_AUTO_PAGES) return;
-  chainedFetches += 1;
-  loadMore();
-});
-
-onBeforeUnmount(() => {
-  observer?.disconnect();
-});
+useInfiniteScrollSentinel(sentinel, loading, hasMore, loadMore, MAX_AUTO_PAGES);
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
