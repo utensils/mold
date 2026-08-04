@@ -214,6 +214,32 @@ describe("buildRequest — LTX-2 advanced video", () => {
     expect(buildRequest(form).enable_audio).not.toBe(false);
   });
 
+  it("drops stale conditioning and upscalers when the form is switched to t2a", () => {
+    // The t2a controls stay on screen with a hint rather than vanishing, but
+    // nothing was clearing their values — so a form that had a source video
+    // sent it anyway and the server refused the request.
+    const form = ltx2Form();
+    form.sourceVideo = { filename: "clip.mp4", base64: "VIDEOB64" };
+    form.keyframes = [{ frame: 0, image: { filename: "k0.png", base64: "K0" } }];
+    form.spatialUpscale = "x2";
+    form.temporalUpscale = "x2";
+    form.pipeline = "t2a";
+    form.outputFormat = "wav";
+
+    const req = buildRequest(form);
+    expect("source_video" in req).toBe(false);
+    expect("keyframes" in req).toBe(false);
+    expect("spatial_upscale" in req).toBe(false);
+    expect("temporal_upscale" in req).toBe(false);
+    // Duration and the prompt are the whole input — those must survive.
+    expect(req.frames).toBe(form.frames);
+    expect(req.fps).toBe(form.fps);
+    expect(req.pipeline).toBe("t2a");
+
+    // And the form itself keeps the clip, so switching back restores it.
+    expect(form.sourceVideo?.base64).toBe("VIDEOB64");
+  });
+
   it("still ships an explicit enable_audio for ordinary video pipelines", () => {
     const form = ltx2Form();
     form.pipeline = "two-stage";

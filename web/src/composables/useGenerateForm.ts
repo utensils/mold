@@ -31,6 +31,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
@@ -667,7 +668,12 @@ export function useGenerateForm(): UseGenerateForm {
         supportsNegativePrompt: capabilities.supportsNegativePrompt,
         negative: s.negativePrompt,
       });
-      return {
+      // Stripped at the end: an audio-only pipeline renders no frames, so
+      // every conditioning input and upscaler still sitting in the form is
+      // something the server refuses. Doing it here rather than on the
+      // pipeline transition keeps a user's source media intact if they switch
+      // to `t2a` and back.
+      return stripAudioOnlyIncompatibleFields({
         prompt: styled.prompt,
         negative_prompt: capabilities.supportsNegativePrompt
           ? styled.negative || null
@@ -751,7 +757,7 @@ export function useGenerateForm(): UseGenerateForm {
               guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
             }
           : {}),
-      };
+      });
     },
     isVideoFamily,
     supportsNegativePrompt,

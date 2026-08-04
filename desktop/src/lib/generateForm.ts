@@ -39,7 +39,7 @@ import {
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
-import { isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
+import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -454,13 +454,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (caps.supportsVideo) {
     req.frames = form.frames;
     req.fps = form.fps;
-    // An audio-only pipeline renders audio by definition, so the flag has
-    // nothing left to say — and a fresh form's `false` would contradict the
-    // mode and be rejected outright. Leave it absent and let the pipeline
-    // constant stay authoritative.
-    if (caps.supportsAudio && !isAudioOnlyPipeline(form.pipeline)) {
-      req.enable_audio = form.enableAudio;
-    }
+    if (caps.supportsAudio) req.enable_audio = form.enableAudio;
   }
 
   if (caps.supportsAdvancedVideo) {
@@ -493,7 +487,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.pipeline === "a2-vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
-  return pruneRequestForFamily(req, form.family, form.model);
+  // Last, and after family pruning: an audio-only pipeline renders no frames,
+  // so every conditioning input, upscaler, and a `false` audio flag is
+  // something the server refuses. Stripping here rather than on the pipeline
+  // transition keeps the user's source media intact if they switch back.
+  return stripAudioOnlyIncompatibleFields(pruneRequestForFamily(req, form.family, form.model));
 }
 
 const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
