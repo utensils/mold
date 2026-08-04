@@ -430,7 +430,11 @@ describe("SequenceComposer — TOML import", () => {
       'prompt = "ending"',
       "frames = 25",
     ].join("\n");
-    await wrapper.vm.importTomlText(toml);
+    const { importTomlText } = wrapper.vm as unknown as {
+      importTomlText?: (text: string, filename?: string) => Promise<void>;
+    };
+    if (!importTomlText) throw new Error("SequenceComposer did not expose importTomlText");
+    await importTomlText(toml);
     await flushPromises();
 
     expect(liveForm.strength).toBe(0.4);
