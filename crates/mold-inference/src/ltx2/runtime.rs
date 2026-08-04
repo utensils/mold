@@ -3194,7 +3194,16 @@ fn spatial_tile_policy() -> Result<SpatialTilePolicy> {
 /// degraded structure rather than an error, so which of the two paths ran has
 /// to be correlatable with the output after the fact.
 fn plan_stage2_tiles(shape: VideoLatentShape) -> Result<Vec<Tile>> {
-    let policy = spatial_tile_policy()?;
+    plan_stage2_tiles_with_policy(shape, spatial_tile_policy()?)
+}
+
+/// [`plan_stage2_tiles`] with the policy supplied rather than read from the
+/// environment, so the refusal below is testable without mutating a process
+/// the rest of the suite shares.
+fn plan_stage2_tiles_with_policy(
+    shape: VideoLatentShape,
+    policy: SpatialTilePolicy,
+) -> Result<Vec<Tile>> {
     let config = plan_stage2_tiling_with_policy(shape.frames, shape.height, shape.width, policy);
     let tiles = create_tiles(shape.frames, shape.height, shape.width, config)?;
     let past_trained_span = shape.height.max(shape.width) > TRAINED_SPATIAL_LATENT_SPAN;
@@ -8058,12 +8067,12 @@ mod tests {
         clean_latents_for_conditioning, convert_velocity_to_x0, convert_x0_to_velocity,
         decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
         guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
-        reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
-        should_inspect_step_velocity, source_image_only_conditioning, stage2_carried_audio,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
-        Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning, TiledStage2Pass,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
+        plan_stage2_tiles_with_policy, reapply_stage_video_conditioning,
+        resize_tail_frames_to_pixel_shape, should_inspect_step_velocity,
+        source_image_only_conditioning, stage2_carried_audio, strip_appended_video_conditioning,
+        Ltx2RuntimeSession, Ltx2VaeLatentStats, Stage2AudioPolicy, StageAudioConditioning,
+        StageVideoConditioning, TiledStage2Pass, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoLatentShape;
@@ -8076,7 +8085,7 @@ mod tests {
     use crate::ltx2::text::prompt_encoder::{
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
-    use crate::ltx2::tiling::{create_tiles, DimensionTiling, TileCountConfig};
+    use crate::ltx2::tiling::{create_tiles, DimensionTiling, SpatialTilePolicy, TileCountConfig};
     use crate::progress::{
         InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase,
     };
@@ -8683,6 +8692,50 @@ mod tests {
         let conditioning = conditioning::stage_conditioning(&request, temp_dir.path()).unwrap();
         let preset = preset_for_model(&request.model).unwrap();
         build_plan(&request, preset, conditioning)
+    }
+
+    /// The engine's backstop for a resolution admission should already have
+    /// refused. A one-pass pipeline past the trained span has no tiled
+    /// refinement to renormalize positions, so it must error rather than
+    /// render something plausible-looking and wrong.
+    #[test]
+    fn a_one_pass_pipeline_refuses_an_axis_past_the_trained_span() {
+        let mut plan = ltx2_plan_at(3_840, 2_176, 25);
+        plan.pipeline = PipelineKind::OneStage;
+        let err = super::reject_oversized_axis_without_composition(&plan)
+            .expect_err("a single-pass render cannot hold a 3840px axis");
+        let message = err.to_string();
+        assert!(
+            message.contains("3840") && message.contains("spatial upsampler"),
+            "the refusal must name the axis and the way out, got: {message}"
+        );
+
+        // The refining pipelines compose, so the same shape is fine.
+        for pipeline in [
+            PipelineKind::Distilled,
+            PipelineKind::TwoStage,
+            PipelineKind::TwoStageHq,
+            PipelineKind::IcLora,
+            PipelineKind::Keyframe,
+            PipelineKind::A2Vid,
+        ] {
+            plan.pipeline = pipeline;
+            assert!(
+                super::reject_oversized_axis_without_composition(&plan).is_ok(),
+                "{pipeline:?} renders stage 1 halved and refines it over tiles"
+            );
+        }
+
+        // And nothing inside the span is touched, on any pipeline.
+        let mut small = ltx2_plan_at(1_920, 1_088, 25);
+        for pipeline in [
+            PipelineKind::OneStage,
+            PipelineKind::Retake,
+            PipelineKind::LipDub,
+        ] {
+            small.pipeline = pipeline;
+            assert!(super::reject_oversized_axis_without_composition(&small).is_ok());
+        }
     }
 
     fn stage_shape(
@@ -11498,6 +11551,69 @@ mod tests {
             fps: 24.0,
             conditioning,
             device: &Device::Cpu,
+        }
+    }
+
+    /// A 4K stage-2 latent: 3840x2176 is 120x68 cells, past the 64-cell
+    /// trained span on both axes.
+    fn uhd_stage2_shape() -> VideoLatentShape {
+        VideoLatentShape {
+            batch: 1,
+            channels: 128,
+            frames: 4,
+            height: 68,
+            width: 120,
+        }
+    }
+
+    /// Disabling tiling past the trained span must fail, not render.
+    ///
+    /// What it would otherwise produce is a finished video with degraded
+    /// large-scale structure and no error anywhere — the one failure mode a
+    /// user cannot detect from the output.
+    #[test]
+    fn tiling_off_past_the_trained_span_refuses_instead_of_degrading() {
+        let err = plan_stage2_tiles_with_policy(uhd_stage2_shape(), SpatialTilePolicy::Off)
+            .expect_err("a 4K stage 2 cannot run untiled");
+        let message = err.to_string();
+        assert!(
+            message.contains("spatial tiling is disabled") && message.contains("2048"),
+            "the refusal must name the cause and the way out, got: {message}"
+        );
+
+        // Auto handles the same shape, in the layout the ladder advertises.
+        let tiles = plan_stage2_tiles_with_policy(uhd_stage2_shape(), SpatialTilePolicy::Auto)
+            .expect("auto tiling covers a 4K stage 2");
+        assert_eq!(tiles.len(), 4, "3840x2176 refines as 2x2 tiles");
+        for tile in &tiles {
+            let (width, height, _) = tile.pixel_shape();
+            assert!(
+                width <= mold_core::validation::LTX2_MAX_AXIS_PIXELS as usize
+                    && height <= mold_core::validation::LTX2_MAX_AXIS_PIXELS as usize,
+                "every tile must be denoised inside the trained span, got {width}x{height}"
+            );
+        }
+    }
+
+    /// The refusal is scoped to shapes that need tiling. Every resolution that
+    /// rendered before the composed ceiling still runs untiled under `off`.
+    #[test]
+    fn tiling_off_inside_the_trained_span_is_unchanged() {
+        for (width, height) in [(24usize, 16usize), (60, 34), (64, 64)] {
+            let shape = VideoLatentShape {
+                batch: 1,
+                channels: 128,
+                frames: 4,
+                height,
+                width,
+            };
+            let tiles = plan_stage2_tiles_with_policy(shape, SpatialTilePolicy::Off)
+                .expect("a shape inside the span never needed tiling");
+            assert_eq!(
+                tiles.len(),
+                1,
+                "{width}x{height} latent cells must stay a single untiled pass"
+            );
         }
     }
 

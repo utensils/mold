@@ -588,9 +588,17 @@ pub async fn run(
     // Only warn locally — in remote mode the server sends the warning via SSE/header.
     if local && (width.is_some() || height.is_some()) {
         if let Some(ref family) = family {
-            if let Some(warning) =
-                mold_core::dimension_warning(effective_width, effective_height, family)
-            {
+            let composition = if family == "ltx2" {
+                mold_core::validation::ltx2_spatial_composition(&req.model, req.pipeline)
+            } else {
+                mold_core::validation::Ltx2SpatialComposition::SinglePass
+            };
+            if let Some(warning) = mold_core::dimension_warning_composed(
+                effective_width,
+                effective_height,
+                family,
+                composition,
+            ) {
                 status!("{} {}", theme::icon_warn(), warning);
             }
         }

@@ -56,12 +56,13 @@ pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
     clamp_to_megapixel_limit, dimension_alignment_for_family, dimension_warning,
-    family_supports_lora, fit_to_model_dimensions, fit_to_target_area, ltx2_output_rung,
-    ltx2_spatial_composition, prompt_required_for, prompt_required_with_conditioning,
-    recommended_dimensions, recommended_dimensions_composed, validate_generate_request,
-    validate_generate_request_with_family, validate_generation_dimensions,
-    validate_generation_dimensions_composed, validate_upscale_request, Ltx2OutputRung,
-    Ltx2SpatialComposition, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
+    dimension_warning_composed, family_supports_lora, fit_to_model_dimensions, fit_to_target_area,
+    largest_ltx2_rung_within, ltx2_output_rung, ltx2_spatial_composition, prompt_required_for,
+    prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
+    validate_generate_request, validate_generate_request_with_family,
+    validate_generation_dimensions, validate_generation_dimensions_composed,
+    validate_upscale_request, Ltx2OutputRung, Ltx2SpatialComposition, LORA_CAPABLE_FAMILIES,
+    LTX2_OUTPUT_RUNGS,
 };
 
 pub use expand::{

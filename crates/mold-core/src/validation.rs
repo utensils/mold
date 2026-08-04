@@ -472,19 +472,25 @@ pub fn validate_generation_dimensions_composed(
         if longest > axis_limit {
             // Two different failures wear the same shape here, and telling
             // them apart is the whole difference between an actionable error
-            // and a dead end. Past the composed ceiling nothing helps; past
-            // the trained span with a single-pass model, a checkpoint that
-            // ships the spatial upsampler does.
-            let remedy = match composition {
-                Ltx2SpatialComposition::SinglePass if longest <= LTX2_COMPOSED_MAX_AXIS_PIXELS => {
-                    format!(
-                        " This checkpoint renders in one pass; reaching {longest}px needs a \
-                         checkpoint that ships the spatial upsampler, which renders stage 1 at \
-                         half size and refines it over tiles."
-                    )
-                }
-                _ => String::new(),
-            };
+            // and a dead end. Past the composed ceiling nothing helps but a
+            // smaller output; past the trained span with a single-pass model,
+            // a checkpoint that ships the spatial upsampler does.
+            let mut remedy = String::new();
+            if composition == Ltx2SpatialComposition::SinglePass
+                && longest <= LTX2_COMPOSED_MAX_AXIS_PIXELS
+            {
+                remedy.push_str(
+                    " This checkpoint renders in one pass; reaching that size needs a checkpoint \
+                     that ships the spatial upsampler, which renders stage 1 at half size and \
+                     refines it over tiles.",
+                );
+            }
+            if let Some(rung) = largest_ltx2_rung_within(axis_limit) {
+                remedy.push_str(&format!(
+                    " The largest output this render reaches is {} ({}x{}).",
+                    rung.label, rung.width, rung.height
+                ));
+            }
             return Err(format!(
                 "{width}x{height} has a {longest}px axis, beyond the {axis_limit}px span this \
                  render can hold — positions past it are out of distribution. Render at or below \
@@ -637,6 +643,17 @@ pub fn ltx2_output_rung(width: u32, height: u32) -> Option<&'static Ltx2OutputRu
         (rung.width == width && rung.height == height)
             || (rung.width == height && rung.height == width)
     })
+}
+
+/// The largest rung whose long edge fits `axis_limit`.
+///
+/// This is what makes an over-size rejection actionable: naming the ceiling in
+/// pixels tells the user what they cannot have, naming the rung tells them
+/// what they can.
+pub fn largest_ltx2_rung_within(axis_limit: u32) -> Option<&'static Ltx2OutputRung> {
+    LTX2_OUTPUT_RUNGS
+        .iter()
+        .rfind(|rung| rung.width.max(rung.height) <= axis_limit)
 }
 
 fn mib_label(bytes: usize) -> String {
@@ -1763,19 +1780,6 @@ const LTX2_DIMS: &[(u32, u32)] = &[
     (1088, 1920), // 9:16 1080p
 ];
 
-/// The rungs only a composed render can reach, appended to [`LTX2_DIMS`] for
-/// checkpoints that ship the spatial upsampler.
-///
-/// Each has an axis past `LTX2_MAX_AXIS_PIXELS`, so advertising them to a
-/// one-stage checkpoint would offer a size that checkpoint cannot render.
-const LTX2_COMPOSED_DIMS: &[(u32, u32)] = &[
-    (2_560, 1_408), // 16:9 1440p QHD
-    (1_408, 2_560), // 9:16 1440p
-    (3_840, 2_176), // 16:9 4K UHD (2160 does not land on the /64 two-stage grid)
-    (2_176, 3_840), // 9:16 4K UHD
-    (4_096, 2_176), // ~17:9 4K DCI — the widest axis a single halving can hold
-];
-
 /// Return the list of recommended (width, height) pairs for a model family.
 ///
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
@@ -1810,10 +1814,18 @@ pub fn recommended_dimensions_composed(
     if family != "ltx2" || composition != Ltx2SpatialComposition::TiledTwoStage {
         return base.to_vec();
     }
-    base.iter()
-        .copied()
-        .chain(LTX2_COMPOSED_DIMS.iter().copied())
-        .collect()
+    // Derived from the ladder rather than restated beside it. A rung that
+    // needs tiling is exactly a rung a single-pass checkpoint cannot render,
+    // which is exactly the set to withhold from one.
+    let mut out = base.to_vec();
+    for rung in LTX2_OUTPUT_RUNGS
+        .iter()
+        .filter(|rung| rung.requires_tiled_stage2())
+    {
+        out.push((rung.width, rung.height));
+        out.push((rung.height, rung.width));
+    }
+    out
 }
 
 /// Check if the requested dimensions match any recommended resolution for the model family.
@@ -1821,7 +1833,21 @@ pub fn recommended_dimensions_composed(
 /// Returns `None` if the dimensions are recommended or the family has no recommendation list.
 /// Returns `Some(warning_message)` with suggested alternatives otherwise.
 pub fn dimension_warning(width: u32, height: u32, family: &str) -> Option<String> {
-    let dims = recommended_dimensions(family);
+    dimension_warning_composed(width, height, family, Ltx2SpatialComposition::SinglePass)
+}
+
+/// Composition-aware counterpart to [`dimension_warning`].
+///
+/// A composing LTX-2 checkpoint has more buckets than its family fallback, so
+/// the single-pass list would call 3840x2176 unrecommended on the very
+/// checkpoint the rung was added for.
+pub fn dimension_warning_composed(
+    width: u32,
+    height: u32,
+    family: &str,
+    composition: Ltx2SpatialComposition,
+) -> Option<String> {
+    let dims = recommended_dimensions_composed(family, composition);
     if dims.is_empty() {
         return None;
     }
@@ -2068,16 +2094,30 @@ mod tests {
                 "advertised composed preset {width}x{height} must be admissible"
             );
         }
-        for &(width, height) in LTX2_COMPOSED_DIMS {
+        for rung in LTX2_OUTPUT_RUNGS {
+            let (width, height) = (rung.width, rung.height);
             assert!(
                 width.is_multiple_of(LTX2_TWO_STAGE_ALIGNMENT)
                     && height.is_multiple_of(LTX2_TWO_STAGE_ALIGNMENT),
                 "{width}x{height} must survive halving onto the 32px latent grid"
             );
-            assert!(
-                validate_generation_dimensions(width, height, Some("ltx2")).is_err(),
-                "{width}x{height} must not be offered to a single-pass checkpoint"
-            );
+            if !rung.requires_tiled_stage2() {
+                continue;
+            }
+            for shape in [(width, height), (height, width)] {
+                assert!(
+                    validate_generation_dimensions(shape.0, shape.1, Some("ltx2")).is_err(),
+                    "{}x{} must not be offered to a single-pass checkpoint",
+                    shape.0,
+                    shape.1
+                );
+                assert!(
+                    recommended_dimensions_composed("ltx2", two_stage).contains(&shape),
+                    "{}x{} must be advertised to a composing checkpoint",
+                    shape.0,
+                    shape.1
+                );
+            }
         }
         // A single-pass model's advertised list is exactly the old one.
         assert_eq!(
@@ -2091,16 +2131,57 @@ mod tests {
     /// bring every axis back inside the trained span.
     #[test]
     fn rung_composition_arithmetic_is_exact() {
-        let expected: &[(&str, (u32, u32), (u32, u32), bool)] = &[
-            // id, stage-1 shape, (tile columns, tile rows), needs tiling
-            ("720p", (640, 352), (1, 1), false),
-            ("1080p", (960, 544), (1, 1), false),
-            ("1440p", (1_280, 704), (2, 1), true),
-            ("4k-uhd", (1_920, 1_088), (2, 2), true),
-            ("4k-dci", (2_048, 1_088), (2, 2), true),
+        struct ExpectedRung {
+            id: &'static str,
+            stage1: (u32, u32),
+            /// `(columns, rows)`.
+            tiles: (u32, u32),
+            tiled: bool,
+        }
+        let expected = [
+            ExpectedRung {
+                id: "720p",
+                stage1: (640, 352),
+                tiles: (1, 1),
+                tiled: false,
+            },
+            ExpectedRung {
+                id: "1080p",
+                stage1: (960, 544),
+                tiles: (1, 1),
+                tiled: false,
+            },
+            ExpectedRung {
+                id: "1440p",
+                stage1: (1_280, 704),
+                tiles: (2, 1),
+                tiled: true,
+            },
+            ExpectedRung {
+                id: "4k-uhd",
+                stage1: (1_920, 1_088),
+                tiles: (2, 2),
+                tiled: true,
+            },
+            ExpectedRung {
+                id: "4k-dci",
+                stage1: (2_048, 1_088),
+                tiles: (2, 2),
+                tiled: true,
+            },
         ];
         assert_eq!(LTX2_OUTPUT_RUNGS.len(), expected.len());
-        for (rung, &(id, stage1, tiles, tiled)) in LTX2_OUTPUT_RUNGS.iter().zip(expected) {
+        for (
+            rung,
+            ExpectedRung {
+                id,
+                stage1,
+                tiles,
+                tiled,
+            },
+        ) in LTX2_OUTPUT_RUNGS.iter().zip(&expected)
+        {
+            let (id, stage1, tiles, tiled) = (*id, *stage1, *tiles, *tiled);
             assert_eq!(rung.id, id);
             assert_eq!(rung.stage1_shape(), stage1, "{id} stage-1 shape");
             assert_eq!(rung.stage2_tiles(), tiles, "{id} stage-2 tile counts");
@@ -2125,6 +2206,39 @@ mod tests {
         assert_eq!(ltx2_output_rung(2_176, 3_840).map(|r| r.id), Some("4k-uhd"));
         assert_eq!(ltx2_output_rung(1_920, 1_088).map(|r| r.id), Some("1080p"));
         assert_eq!(ltx2_output_rung(1_234, 567), None);
+    }
+
+    /// An over-size rejection has to say what the user *can* have. The pixel
+    /// ceiling alone says only what they cannot.
+    #[test]
+    fn an_oversize_rejection_names_the_largest_reachable_rung() {
+        assert_eq!(
+            largest_ltx2_rung_within(LTX2_MAX_AXIS_PIXELS).map(|rung| rung.id),
+            Some("1080p"),
+        );
+        assert_eq!(
+            largest_ltx2_rung_within(LTX2_COMPOSED_MAX_AXIS_PIXELS).map(|rung| rung.id),
+            Some("4k-dci"),
+        );
+        assert_eq!(largest_ltx2_rung_within(64), None);
+
+        let err = validate_generation_dimensions(3_840, 2_176, Some("ltx2"))
+            .expect_err("a single-pass render cannot reach 4K");
+        assert!(err.contains("spatial upsampler"), "got: {err}");
+        assert!(err.contains("1080p Full HD (1920x1088)"), "got: {err}");
+
+        let err = validate_generation_dimensions_composed(
+            4_160,
+            2_176,
+            Some("ltx2"),
+            Ltx2SpatialComposition::TiledTwoStage,
+        )
+        .expect_err("past the composed ceiling");
+        assert!(
+            !err.contains("spatial upsampler"),
+            "a composing render is already using it, got: {err}"
+        );
+        assert!(err.contains("4K DCI (4096x2176)"), "got: {err}");
     }
 
     /// The issue's named 9:16 shape.
