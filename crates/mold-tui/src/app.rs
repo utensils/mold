@@ -27,10 +27,12 @@ pub enum BackgroundEvent {
     /// response produced by the in-process inference engine — including
     /// Auto-mode fallbacks after the remote server goes unreachable —
     /// so the completion handler can still write the file locally even
-    /// when `server_url` remains set.
+    /// when `server_url` remains set. `guidance_overrides` is the exact
+    /// request snapshot so later form edits cannot corrupt provenance.
     GenerationComplete {
         response: Box<GenerateResponse>,
         from_local: bool,
+        guidance_overrides: Option<Ltx2GuidanceOverrides>,
     },
     /// Generation or background task failed.
     Error(String),
@@ -5816,6 +5818,7 @@ impl App {
                 BackgroundEvent::GenerationComplete {
                     response,
                     from_local,
+                    guidance_overrides,
                 } => {
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
@@ -6047,7 +6050,7 @@ impl App {
                         && !saved_path.as_os_str().is_empty()
                     {
                         let meta = mold_core::OutputMetadata {
-                            guidance_overrides: None,
+                            guidance_overrides,
                             prompt: prompt_text,
                             negative_prompt: if neg_text.is_empty() {
                                 None
@@ -9671,6 +9674,7 @@ mod tests {
             .send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
+                guidance_overrides: None,
             })
             .unwrap();
 
@@ -9696,6 +9700,60 @@ mod tests {
                 "gallery metadata should record response model, not UI model"
             );
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn local_generation_complete_preserves_guidance_overrides_in_gallery_metadata() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.generating = true;
+            app.generate.batch_remaining = 1;
+            app.generate.prompt = TextArea::from(["a guidance provenance test"]);
+            let submitted_guidance = Ltx2GuidanceOverrides {
+                stg_scale: Some(1.5),
+                stg_blocks: Some(vec![1, 3, 5]),
+                rescale_scale: Some(0.7),
+                modality_scale: Some(3.0),
+                skip_step: Some(1),
+            };
+
+            let response = GenerateResponse {
+                images: vec![mold_core::ImageData {
+                    data: vec![0u8; 4],
+                    format: OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                }],
+                generation_time_ms: 100,
+                model: "ltx-2.3:22b-distilled".to_string(),
+                seed_used: 42,
+                video: None,
+                gpu: None,
+            };
+            app.bg_tx
+                .send(BackgroundEvent::GenerationComplete {
+                    response: Box::new(response),
+                    from_local: true,
+                    guidance_overrides: Some(submitted_guidance.clone()),
+                })
+                .unwrap();
+
+            // The user may edit the form while inference is still running.
+            // Completion metadata must use the submitted request snapshot.
+            app.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
+
+            app.process_background_events();
+
+            assert_eq!(app.gallery.entries.len(), 1);
+            assert_eq!(
+                app.gallery.entries[0].metadata.guidance_overrides,
+                Some(submitted_guidance),
+                "local gallery metadata must record submitted LTX-2 guidance overrides"
+            );
+        });
     }
 
     // ── Create redesign: layout, accordion behavior, timeline contract ──
@@ -9730,6 +9788,7 @@ mod tests {
                 .send(BackgroundEvent::GenerationComplete {
                     response: Box::new(response),
                     from_local: false,
+                    guidance_overrides: None,
                 })
                 .unwrap();
             app.process_background_events();

@@ -284,6 +284,7 @@ async fn try_server_generate(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
+                guidance_overrides: req.guidance_overrides.clone(),
             });
             ServerResult::Done
         }
@@ -327,6 +328,7 @@ async fn try_server_generate(
                         let _ = tx.send(BackgroundEvent::GenerationComplete {
                             response: Box::new(response),
                             from_local: false,
+                            guidance_overrides: req.guidance_overrides.clone(),
                         });
                         ServerResult::Done
                     }
@@ -401,6 +403,7 @@ async fn run_local_generation(
 
     let offload = params.offload;
     let req = build_request(&params, &prompt, &negative_prompt);
+    let guidance_overrides = req.guidance_overrides.clone();
 
     let tx_clone = tx.clone();
 
@@ -436,6 +439,7 @@ async fn run_local_generation(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: true,
+                guidance_overrides,
             });
         }
         Ok(Err(e)) => {
