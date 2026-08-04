@@ -3,7 +3,7 @@ use std::path::Path as FsPath;
 use std::pin::Pin;
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{sse, IntoResponse, Response, Sse},
     Json,
@@ -47,6 +47,16 @@ fn default_preview_copies() -> u32 {
 pub enum ChainPlacementPreviewBody {
     Wrapped(ChainPlacementPreviewRequest),
     Legacy(ChainRequest),
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListChainJobsQuery {
+    /// Include internal one-shot long-video shim records. This exists only so
+    /// an iPhone can recover an id lost during suspension; sequence surfaces
+    /// use the default durable-only listing.
+    #[serde(default)]
+    include_ephemeral: bool,
 }
 
 impl ChainPlacementPreviewBody {
@@ -195,10 +205,12 @@ pub async fn preview_chain_job_placement(
     get,
     path = "/api/chain-jobs",
     tag = "chain-jobs",
+    params(ListChainJobsQuery),
     responses((status = 200, description = "Chain jobs", body = mold_core::chain_job::ChainJobListing))
 )]
 pub async fn list_chain_jobs(
     State(state): State<AppState>,
+    Query(query): Query<ListChainJobsQuery>,
 ) -> Result<Json<ChainJobListing>, ApiError> {
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
@@ -207,11 +219,17 @@ pub async fn list_chain_jobs(
         .map_err(|e| ApiError::internal(format!("failed to list chain jobs: {e:#}")))?;
     let jobs = rows
         .into_iter()
-        .map(|row| {
-            let mut summary = summary_for_row(&row, read_manifest_optional(&row, &root).as_ref());
+        .filter_map(|row| {
+            let manifest = read_manifest_optional(&row, &root);
+            if manifest.as_ref().is_some_and(|manifest| manifest.ephemeral)
+                && !query.include_ephemeral
+            {
+                return None;
+            }
+            let mut summary = summary_for_row(&row, manifest.as_ref());
             summary.cancelling =
                 row.state == ChainJobState::Running && handle.is_cancelling(&row.id);
-            summary
+            Some(summary)
         })
         .collect();
     Ok(Json(ChainJobListing { jobs }))

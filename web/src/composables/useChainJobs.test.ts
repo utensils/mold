@@ -155,6 +155,22 @@ describe("useChainJobs", () => {
     expect(jobs.state.byHost[host.id]?.error).toBeNull();
   });
 
+  it("keeps automatic long-video shim jobs out of sequence surfaces", async () => {
+    const host = addHost({ url: "http://plato:7680", name: "plato" });
+    listChainJobsMock.mockResolvedValue({
+      jobs: [
+        summary({ id: "authored", ephemeral: false }),
+        summary({ id: "one-shot", ephemeral: true }),
+      ],
+    });
+    const jobs = useChainJobs();
+    await jobs.fetchHost(host.id);
+
+    expect(jobs.state.byHost[host.id]?.jobs.map((job) => job.id)).toEqual([
+      "authored",
+    ]);
+  });
+
   it("keeps the last good list and records the error when a host fetch fails", async () => {
     const host = addHost({ url: "http://plato:7680", name: "plato" });
     listChainJobsMock.mockResolvedValue({ jobs: [summary({ id: "kept" })] });

@@ -89,6 +89,40 @@ fn minimal_chain_response_json() -> serde_json::Value {
     })
 }
 
+#[tokio::test]
+async fn list_chain_jobs_hides_legacy_server_one_shot_shims() {
+    let server = MockServer::start().await;
+    let summary = |id: &str, ephemeral: bool| {
+        serde_json::json!({
+            "id": id,
+            "state": "running",
+            "model": "ltx-2-19b-distilled:fp8",
+            "stage_count": 3,
+            "current_stage": 1,
+            "created_at_unix_ms": 100,
+            "updated_at_unix_ms": 101,
+            "error": null,
+            "ephemeral": ephemeral
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/chain-jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jobs": [summary("authored", false), summary("one-shot", true)]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let jobs = MoldClient::new(&server.uri())
+        .list_chain_jobs()
+        .await
+        .expect("chain-job listing should parse");
+
+    assert_eq!(jobs.jobs.len(), 1);
+    assert_eq!(jobs.jobs[0].id, "authored");
+}
+
 // ── /api/generate/chain (non-streaming) ────────────────────────────────
 
 #[tokio::test]

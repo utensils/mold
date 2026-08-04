@@ -31,6 +31,7 @@ import {
   emptyChainJobLive,
   type ChainJobLive,
 } from "@studio/lib/chainJobEvents";
+import { isAuthoredSequenceJob } from "@studio/lib/api/chainTypes";
 import type {
   AmendRequest,
   AmendResponse,
@@ -180,9 +181,9 @@ async function fetchHost(hostId: string): Promise<void> {
   }
   try {
     const listing = await listChainJobs(target);
-    const jobs = [...listing.jobs].sort(
-      (a, b) => b.created_at_unix_ms - a.created_at_unix_ms,
-    );
+    const jobs = listing.jobs
+      .filter(isAuthoredSequenceJob)
+      .sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms);
     state.byHost[hostId] = { jobs, error: null };
     // Server-side deletions release our tracked interest.
     const known = new Set(jobs.map((j) => j.id));
