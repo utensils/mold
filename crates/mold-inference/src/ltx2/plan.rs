@@ -24,6 +24,28 @@ pub(crate) enum PipelineKind {
 }
 
 impl PipelineKind {
+    /// The wire mode this runtime kind corresponds to.
+    ///
+    /// The two enums are deliberately separate — one is the request contract,
+    /// the other the resolved runtime choice — but properties that admission
+    /// and execution must agree on live on the wire type, and this is the
+    /// bridge. `select_pipeline` is the inverse mapping.
+    pub(crate) fn wire_mode(self) -> mold_core::Ltx2PipelineMode {
+        use mold_core::Ltx2PipelineMode as Mode;
+        match self {
+            Self::OneStage => Mode::OneStage,
+            Self::TwoStage => Mode::TwoStage,
+            Self::TwoStageHq => Mode::TwoStageHq,
+            Self::Distilled => Mode::Distilled,
+            Self::IcLora => Mode::IcLora,
+            Self::Keyframe => Mode::Keyframe,
+            Self::A2Vid => Mode::A2Vid,
+            Self::Retake => Mode::Retake,
+            Self::LipDub => Mode::LipDub,
+            Self::T2a => Mode::T2a,
+        }
+    }
+
     pub(crate) fn requires_distilled_checkpoint(self) -> bool {
         matches!(
             self,

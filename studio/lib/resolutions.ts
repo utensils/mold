@@ -17,6 +17,7 @@ export interface ModelResolutionContract {
   default_width?: number;
   default_height?: number;
   max_pixels?: number | null;
+  max_axis_pixels?: number | null;
   recommended_dimensions?: RecommendedDimensions[] | null;
   dimension_alignment?: number | null;
 }
@@ -35,6 +36,19 @@ export const LTX2_MAX_GENERATION_PIXELS = 1_920 * 1_088;
  * when the frame is small.
  */
 export const LTX2_MAX_AXIS_PIXELS = 2_048;
+/**
+ * Ceiling for an LTX-2 checkpoint that *composes* its output: stage 1 at half
+ * the target, one x2 spatial rung, then a stage-2 refinement over tiles each
+ * brought back inside the trained span.
+ *
+ * Deliberately NOT part of any family fallback. Whether a checkpoint composes
+ * is a per-model fact the server resolves and advertises as `max_axis_pixels` /
+ * `max_pixels`; a host that predates those fields cannot render these shapes,
+ * so guessing the composed ceiling for it would offer sizes it rejects.
+ */
+export const LTX2_COMPOSED_MAX_AXIS_PIXELS = 2 * LTX2_MAX_AXIS_PIXELS;
+/** Composed total-pixel ceiling: 4K DCI on the two-stage /64 grid. */
+export const LTX2_COMPOSED_MAX_GENERATION_PIXELS = 4_096 * 2_176;
 
 /**
  * Normalize a family string before matching. `ltx-2` is a live alias — the
@@ -56,6 +70,72 @@ export function maxAxisPixelsForFamily(
   family: string | null | undefined,
 ): number | null {
   return canonicalFamily(family) === "ltx2" ? LTX2_MAX_AXIS_PIXELS : null;
+}
+
+/**
+ * LTX-2 pipelines that render stage 1 reduced and refine the upsampled result.
+ *
+ * Mirrors `Ltx2PipelineMode::refines_spatially` in `mold-core`. Only these
+ * reach past the trained RoPE span; `one-stage`, `retake` and `lip-dub`
+ * denoise the requested shape once, so picking one of them narrows the
+ * ceiling back to the span whatever the checkpoint can do.
+ */
+const SPATIALLY_REFINING_PIPELINES = new Set([
+  "distilled",
+  "two-stage",
+  "two-stage-hq",
+  "ic-lora",
+  "keyframe",
+  "a2-vid",
+]);
+
+export function pipelineRefinesSpatially(
+  pipeline: string | null | undefined,
+): boolean {
+  // An unset pipeline lets the server choose, and its default for a composing
+  // checkpoint refines.
+  return !pipeline || SPATIALLY_REFINING_PIPELINES.has(pipeline);
+}
+
+/**
+ * The per-axis ceiling for a specific model, under the selected pipeline.
+ *
+ * Prefers the server's advertised `max_axis_pixels`, which is per model and
+ * knows whether that checkpoint composes; falls back to the family span for a
+ * host that predates the field. A plain family string gets the conservative
+ * single-pass answer, because a family cannot compose — a checkpoint can.
+ *
+ * `pipeline` is the user's explicit choice. The advertised ceiling assumes the
+ * server's default, so without this a user who picks One shot / Retake / Lip
+ * dub would be offered 4K and then have it rejected by the server.
+ */
+export function maxAxisPixelsForModel(
+  model: ModelResolutionContract | string | null | undefined,
+  pipeline?: string | null,
+): number | null {
+  if (typeof model === "string" || !model) {
+    return maxAxisPixelsForFamily(typeof model === "string" ? model : null);
+  }
+  const advertised =
+    model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
+  if (advertised === null) return null;
+  if (pipelineRefinesSpatially(pipeline)) return advertised;
+  return Math.min(advertised, LTX2_MAX_AXIS_PIXELS);
+}
+
+/** The total-pixel ceiling for a specific model, under the selected pipeline. */
+export function maxPixelsForModel(
+  model: ModelResolutionContract | string | null | undefined,
+  pipeline?: string | null,
+): number {
+  if (typeof model === "string" || !model) {
+    return maxPixelsForFamily(typeof model === "string" ? model : null);
+  }
+  const advertised = model.max_pixels ?? maxPixelsForFamily(model.family);
+  if (pipelineRefinesSpatially(pipeline)) return advertised;
+  return canonicalFamily(model.family) === "ltx2"
+    ? Math.min(advertised, LTX2_MAX_GENERATION_PIXELS)
+    : advertised;
 }
 
 export function dimensionAlignmentForFamily(
@@ -134,7 +214,13 @@ const VIDEO = [
   p(768, 768),
   p(512, 768),
 ];
-/** LTX-2 adds upstream's 1080p HQ pair and a 9:16 transpose of the default. */
+/**
+ * LTX-2 adds upstream's 1080p HQ pair and a 9:16 transpose of the default.
+ *
+ * Single-pass shapes only. The composed rungs (1440p, 4K) reach a client
+ * exclusively through the server's per-model `recommended_dimensions`, because
+ * whether a checkpoint can render them is a property of that checkpoint.
+ */
 const LTX2_VIDEO = [
   p(704, 480, "22:15"),
   p(768, 512),
@@ -176,7 +262,8 @@ export function presetsForModel(
   if (advertised.length === 0) return presetsForFamily(model.family);
   // The server's advertised values win; the family fallbacks only cover a
   // host that predates them.
-  const maxPixels = model.max_pixels ?? maxPixelsForFamily(model.family);
+  const maxPixels = maxPixelsForModel(model);
+  const maxAxis = maxAxisPixelsForModel(model);
   const alignment =
     model.dimension_alignment ?? dimensionAlignmentForFamily(model.family);
   return advertised
@@ -186,7 +273,11 @@ export function presetsForModel(
         height > 0 &&
         width % alignment === 0 &&
         height % alignment === 0 &&
-        width * height <= maxPixels,
+        width * height <= maxPixels &&
+        // The axis span is independent of the pixel budget: 3840x2176 is
+        // inside a composed model's 8.9 MP budget and outside a single-pass
+        // model's 2048 px span at the same time.
+        (maxAxis === null || Math.max(width, height) <= maxAxis),
     )
     .map(({ width, height }) => p(width, height));
 }

@@ -162,16 +162,129 @@ written verbatim, so a compositor sees the same values upstream produces.
 
 ### Resolution
 
-LTX-2 renders up to **1920x1088** — upstream's own shipped LTX-2.3 HQ shape —
-on a 32-pixel grid. Both axes must stay at or below **2048px**: the checkpoints
-normalize RoPE pixel positions by that span, so a longer edge is outside the
-trained range even when the frame's total area is small. `/api/models` carries
-the per-model `max_pixels`, `dimension_alignment`, and `recommended_dimensions`
-so clients do not hardcode any of it.
+LTX-2 renders on a 32-pixel grid, under two independent limits: a total-pixel
+budget and a **per-axis span**. The span is the one that decides how far the
+resolution ladder goes. The checkpoints normalize RoPE pixel positions by
+**2048px**, so a longer edge is outside the trained range even when the frame's
+total area is small — 3200x512 is 1.64 MP and still out of distribution.
 
-Note that a single-pass render at 1080p on the 19B checkpoint can show edge
-artifacts, since that is well above the resolution it was trained at;
-1216x704 remains the quality sweet spot.
+Both limits are **per model**, because they depend on how the checkpoint
+renders:
+
+| Checkpoint                                             | Long edge | Total pixels       |
+| ------------------------------------------------------ | --------- | ------------------ |
+| Renders in one pass (single-file `cv:` / `hf:` builds) | 2048px    | 1920x1088 (2.1 MP) |
+| Ships the spatial upsampler (every manifest LTX-2)     | 4096px    | 4096x2176 (8.9 MP) |
+
+A checkpoint that ships the spatial upsampler does not denoise the requested
+shape. It renders **stage 1 at half the target**, upsamples that latent x2 with
+the learned upsampler, then refines the result with a stage-2 pass over
+[latent tiles](#spatial-tiling-spatial-tile) each brought back inside the
+trained span. That composition is what lets the output exceed a span the
+transformer never saw — and it is also where the ladder stops. 4096px is
+exactly the widest target whose halved stage 1 still lands at 2048px; mold
+applies one spatial rung, so there is no second halving to rescue anything
+wider.
+
+Nothing is composed by hand: pick the output size and mold runs the
+composition. `/api/models` carries the per-model `max_pixels`,
+`max_axis_pixels`, `dimension_alignment`, and `recommended_dimensions` so
+clients do not hardcode any of it, and a checkpoint that cannot compose is
+never offered a rung it would reject.
+
+Bigger is not automatically better. A single-pass render at 1080p on the 19B
+checkpoint can show edge artifacts, since that is well above the resolution it
+was trained at; 1216x704 remains the quality sweet spot.
+
+The 4096px figure belongs to the **x2 rung**, which is what the pipeline
+applies by default. `--spatial-upscale x1.5` only divides by 1.5, so its
+stage 1 is larger for the same output: a 3840px frame would render stage 1 at
+2560px, past the span. x1.5 therefore reaches **3072px** on the long edge, and
+mold refuses the combination rather than rendering it — stage 2 tiles the
+refinement, never stage 1. Choosing a single-pass pipeline explicitly
+(`--pipeline one-stage`, retake, lip dub) drops the ceiling back to 2048px for
+the same reason.
+
+#### The output ladder
+
+Every rung is a multiple of 64, so the halved stage-1 shape still lands on the
+VAE's 32-pixel latent grid — upstream's own `divisor = 64 if is_two_stage`
+rule.
+
+| Rung          | Output    | Stage 1   | Stage-2 tiles |
+| ------------- | --------- | --------- | ------------- |
+| 720p HD       | 1280x704  | 640x352   | 1             |
+| 1080p Full HD | 1920x1088 | 960x544   | 1             |
+| 1440p QHD     | 2560x1408 | 1280x704  | 2 (2x1)       |
+| 4K UHD        | 3840x2112 | 1920x1056 | 4 (2x2)       |
+
+4K UHD is 3840x**2112**, not 3840x2160, because 2160 is not a multiple of 64
+and mold rejects an unrenderable shape rather than quietly resizing it. Of the
+two 64-aligned neighbours, 2112 is the one that works: **3840x2176 generates
+correctly and then fails at save time**, because the bundled OpenH264 encoder
+refuses anything past 3840x2160 and MP4 is this family's default container.
+Rounding down is also what upstream's own `align_resolution` does in
+`CENTER_CROP` mode.
+
+The _generation_ ceiling is higher than the ladder: an axis is admitted up to
+4096px, which is where the halved stage 1 leaves the trained span. Between
+3840 and 4096 the render succeeds and only the H.264 export fails, so those
+shapes are admitted rather than blocked — but no preset offers one, because
+the default output would not be writable.
+
+Portrait is the same rung transposed — 2112x3840 composes and costs exactly
+what 3840x2112 does.
+
+#### What this costs, measured
+
+Measured on a single **RTX 4090 (24 GB)**, `ltx-2-19b-distilled:fp8`, 25 frames
+at 24 fps, silent, seed 424303:
+
+| Output                              | Result                            | Wall time | Peak VRAM |
+| ----------------------------------- | --------------------------------- | --------- | --------- |
+| 1920x1088 (1080p)                   | rendered                          | 372 s     | 18.4 GB   |
+| 2560x1408 (1440p)                   | rendered                          | 299 s     | 18.1 GB   |
+| 3840x2176 (4K-class)                | OOM in VAE decode                 | 478 s     | 22.8 GB   |
+| 3840x2176 with `--spatial-tile 768` | generated, failed at H.264 export | 488 s     | 18.2 GB   |
+| 3840x2112 with `--spatial-tile 768` | **rendered** (4K UHD rung)        | 474 s     | 18.2 GB   |
+
+Two things are worth reading off that table. Peak VRAM barely moves between
+1080p and 1440p — the composition is what bounds it, since every stage-2 tile
+is denoised at a shape inside the trained span and the residency planner
+simply streams one more transformer block (38/10 resident/streamed at 1080p,
+37/11 at 1440p, 36/12 at 4K). And the default 1280px tile is the thing that
+does not fit at 4K: the diffusion completes either way, but the VAE decode
+needs the smaller tile.
+
+::: warning 4K needs `--spatial-tile 768` on a 24 GB card.
+
+With the default `auto` tiling, 4K reaches the VAE decode and fails there with
+an out-of-memory error naming the phase and the numbers. It does not silently
+render something smaller. Pass `--spatial-tile 768` — upstream's own advice for
+lower-VRAM GPUs — and the whole render completes at 18.2 GB.
+
+These are single-configuration measurements at **25 frames**, not a support
+matrix. Activation cost scales with frame count, and upstream's own table (for
+a different pipeline — HDR IC-LoRA, 161 frames, 22B) puts 4K at 48–80 GB, so
+do not read the numbers above as a promise for a long clip.
+
+:::
+
+For reference, upstream's published figures
+([`hdr_ic_lora.py:780-786`](https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/hdr_ic_lora.py)):
+
+| Output    | 80 GB (H100) | 48 GB (A6000) |
+| --------- | ------------ | ------------- |
+| 1280x720  | 161+ frames  | 161+ frames   |
+| 1920x1080 | 161+ frames  | 161+ frames   |
+| 2048x1080 | 161+ frames  | 161+ frames   |
+| 2560x1440 | 161+ frames  | 137 frames    |
+| 3840x2160 | 121 frames   | 49 frames     |
+| 4096x2160 | 105 frames   | 49 frames     |
+
+Note that the module its `--help` points at for per-configuration estimates,
+`ltx_pipelines.utils.vram_budget`, is not published in the repository — the
+table is the only figure upstream provides.
 
 ### Spatial tiling (`--spatial-tile`)
 
@@ -190,14 +303,16 @@ controls it:
 | Value              | Effect                                                                                                  |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | `auto` _(default)_ | Tile only past the 2048px trained span, and only decode-tile when the decode would not otherwise fit.   |
-| `off`              | Never tile. A shape past the trained span still renders, with degraded structure, and logs a warning.   |
+| `off`              | Never tile. A render past the trained span is **refused** rather than quietly degraded.                 |
 | `<px>`             | Force tiles of at most `<px>` on each spatial axis, with a 256px overlap. Multiples of 32, at least 64. |
 | `<px>:<overlap>`   | As above with an explicit overlap, also a multiple of 32 and smaller than the tile.                     |
 
-Because `auto` only engages past a span mold does not currently accept, no
-resolution that renders today changes. Forcing a tile size is mainly a way to
-compare a tiled render against an untiled one at a resolution that does not
-need it.
+`auto` engages exactly at the 2048px span and not one pixel earlier, so every
+resolution up to and including 1080p renders as it always has. `off` past the
+span is an error, not a warning: the failure mode there is a finished video
+with degraded large-scale structure, which nobody would notice was wrong.
+Forcing a tile size is mainly a way to compare a tiled render against an
+untiled one at a resolution that needs neither.
 
 Two things a tiled refinement gives up. Tiles are refined independently, so a
 structure crossing a seam is resolved by two passes that cannot see each other

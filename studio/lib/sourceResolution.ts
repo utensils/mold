@@ -1,5 +1,6 @@
 import {
   dimensionAlignmentForFamily,
+  maxAxisPixelsForModel,
   maxPixelsForFamily,
   type ModelResolutionContract,
 } from "./resolutions";
@@ -88,7 +89,17 @@ export function resolveSourceResolution(
   );
   const maxPixels = advertisedMaxPixels;
   const sourcePixels = sourceWidth * sourceHeight;
-  const scale = Math.min(1, Math.sqrt(maxPixels / sourcePixels));
+  // The per-axis span is a second, independent bound. It matters most for an
+  // extreme aspect ratio: an 8000x600 source is under any pixel budget once
+  // scaled, and its long edge would still land far outside the span LTX-2
+  // normalizes RoPE positions by.
+  const maxAxis = maxAxisPixelsForModel(model);
+  const longestSourceAxis = Math.max(sourceWidth, sourceHeight);
+  const scale = Math.min(
+    1,
+    Math.sqrt(maxPixels / sourcePixels),
+    maxAxis === null ? 1 : maxAxis / longestSourceAxis,
+  );
 
   let width = Math.max(
     minimumDimension,
@@ -102,10 +113,22 @@ export function resolveSourceResolution(
   // Flooring both axes normally guarantees the cap. The minimum can make an
   // extremely thin source exceed it, so reduce whichever non-minimum axis
   // least harms the original aspect until no further valid reduction exists.
-  while (width * height > maxPixels) {
+  while (
+    width * height > maxPixels ||
+    (maxAxis !== null && Math.max(width, height) > maxAxis)
+  ) {
     const canReduceWidth = width > minimumDimension;
     const canReduceHeight = height > minimumDimension;
     if (!canReduceWidth && !canReduceHeight) break;
+    // An axis violation has one cure: shorten that axis. The aspect-preserving
+    // heuristic below would otherwise shave the *other* one, distorting the
+    // frame without ever satisfying the bound.
+    if (maxAxis !== null && Math.max(width, height) > maxAxis) {
+      if (width >= height && canReduceWidth) width -= alignment;
+      else if (canReduceHeight) height -= alignment;
+      else width -= alignment;
+      continue;
+    }
     if (!canReduceHeight) {
       width -= alignment;
       continue;
@@ -144,7 +167,9 @@ export function resolveSourceResolution(
     alignment,
     minimumDimension,
     reason,
-    fitsModel: width * height <= maxPixels,
+    fitsModel:
+      width * height <= maxPixels &&
+      (maxAxis === null || Math.max(width, height) <= maxAxis),
   };
 }
 

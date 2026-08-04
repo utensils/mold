@@ -726,9 +726,17 @@ async fn prepare_generation(
             Some(config.effective_output_dir())
         };
         let family = config.resolved_model_config(&request.model).family;
-        let dim_warning = family
-            .as_deref()
-            .and_then(|f| mold_core::dimension_warning(request.width, request.height, f));
+        let dim_warning = family.as_deref().and_then(|f| {
+            // Per model: a composing LTX-2 checkpoint advertises the
+            // composed rungs, so judging it against the single-pass list
+            // would flag the very shapes it exists to render.
+            let composition = if f == "ltx2" {
+                mold_core::validation::ltx2_spatial_composition(&request.model, request.pipeline)
+            } else {
+                mold_core::validation::Ltx2SpatialComposition::SinglePass
+            };
+            mold_core::dimension_warning_composed(request.width, request.height, f, composition)
+        });
         (output_dir, dim_warning)
     };
 

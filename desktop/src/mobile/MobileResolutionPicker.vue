@@ -31,10 +31,12 @@ const props = withDefaults(
   defineProps<{
     family: string;
     model?: ModelEntry | null;
+    /** The user's explicit LTX-2 pipeline; a non-refining one lowers the ceiling. */
+    pipeline?: string | null;
     sourceDimensions?: SourceDimensions | null;
     disabled?: boolean;
   }>(),
-  { disabled: false, model: null, sourceDimensions: null },
+  { disabled: false, model: null, pipeline: null, sourceDimensions: null },
 );
 
 const width = defineModel<number>("width", { required: true });
@@ -52,7 +54,7 @@ const currentAspect = computed(() =>
 );
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
 const resolutionError = computed(() =>
-  resolutionValidationError(width.value, height.value, props.model),
+  resolutionValidationError(width.value, height.value, props.model, props.pipeline),
 );
 const sourceResolution = computed(() =>
   props.sourceDimensions

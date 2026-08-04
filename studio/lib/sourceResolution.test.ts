@@ -154,4 +154,47 @@ describe("source resolution", () => {
     expect(result.maxPixels).toBe(1_800_000);
     expect(result.output).toEqual({ width: 1888, height: 944 });
   });
+
+  it("clamps an extreme aspect ratio to the model's axis span, not just its pixel budget", () => {
+    // 8000x640 is 5.1 MP — comfortably inside a composing LTX-2 checkpoint's
+    // 8.9 MP budget once scaled, and its long edge would still be far outside
+    // the 4096 px span the composition can hold. The pixel budget alone
+    // produced a canvas the server then rejected.
+    const result = resolveSourceResolution(
+      { width: 8000, height: 640 },
+      {
+        family: "ltx2",
+        max_pixels: 4_096 * 2_176,
+        max_axis_pixels: 4_096,
+        recommended_dimensions: [],
+        dimension_alignment: 32,
+      },
+    );
+
+    expect(
+      Math.max(result.output.width, result.output.height),
+    ).toBeLessThanOrEqual(4_096);
+    expect(result.output.width * result.output.height).toBeLessThanOrEqual(
+      4_096 * 2_176,
+    );
+    expect(result.fitsModel).toBe(true);
+  });
+
+  it("keeps a single-pass LTX-2 source inside the trained span", () => {
+    const result = resolveSourceResolution(
+      { width: 4000, height: 1000 },
+      {
+        family: "ltx2",
+        max_pixels: 1_920 * 1_088,
+        max_axis_pixels: 2_048,
+        recommended_dimensions: [],
+        dimension_alignment: 32,
+      },
+    );
+
+    expect(
+      Math.max(result.output.width, result.output.height),
+    ).toBeLessThanOrEqual(2_048);
+    expect(result.fitsModel).toBe(true);
+  });
 });

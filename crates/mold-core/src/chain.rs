@@ -746,10 +746,20 @@ impl ChainRequest {
         // LTX-2 VAE's /32 grid cannot render. `None` remains correct for an
         // opaque catalog ID with no manifest, exactly as before.
         let family = crate::manifest::find_manifest(&self.model).map(|m| m.family.clone());
-        crate::validation::validate_generation_dimensions(
+        // A sequence clip is one generation, so it is bound by exactly the
+        // same ceiling — including the composed one. Resolving the
+        // composition from the model keeps a 4K sequence admissible wherever a
+        // 4K single shot is, and refused wherever it is not.
+        let composition = if family.as_deref() == Some("ltx2") {
+            crate::validation::ltx2_spatial_composition(&self.model, None)
+        } else {
+            crate::validation::Ltx2SpatialComposition::SinglePass
+        };
+        crate::validation::validate_generation_dimensions_composed(
             self.width,
             self.height,
             family.as_deref(),
+            composition,
         )
         .map_err(MoldError::Validation)?;
 

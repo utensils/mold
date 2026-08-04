@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   dimensionAlignmentForFamily,
+  LTX2_COMPOSED_MAX_AXIS_PIXELS,
+  LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+  LTX2_MAX_AXIS_PIXELS,
   LTX2_MAX_GENERATION_PIXELS,
   MAX_GENERATION_PIXELS,
   maxAxisPixelsForFamily,
+  maxAxisPixelsForModel,
   maxPixelsForFamily,
+  maxPixelsForModel,
   megapixelLabel,
   presetsForFamily,
   presetsForModel,
@@ -124,5 +129,126 @@ describe("shared resolution contract", () => {
     expect(dimensionAlignmentForFamily("flux")).toBe(16);
     expect(maxAxisPixelsForFamily("ltx2")).toBe(2048);
     expect(maxAxisPixelsForFamily("flux")).toBeNull();
+  });
+
+  it("keeps the family fallback at the single-pass span", () => {
+    // A host that predates `max_axis_pixels` cannot render a composed shape,
+    // so the fallback must never guess the composed ceiling for it.
+    expect(maxAxisPixelsForFamily("ltx2")).toBe(LTX2_MAX_AXIS_PIXELS);
+    expect(maxPixelsForFamily("ltx2")).toBe(LTX2_MAX_GENERATION_PIXELS);
+    for (const preset of presetsForFamily("ltx2")) {
+      expect(
+        Math.max(preset.width, preset.height),
+        preset.label,
+      ).toBeLessThanOrEqual(LTX2_MAX_AXIS_PIXELS);
+    }
+  });
+
+  it("takes the per-model ceiling over the family fallback", () => {
+    const composing = {
+      family: "ltx2",
+      max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_COMPOSED_MAX_AXIS_PIXELS,
+    };
+    expect(maxAxisPixelsForModel(composing)).toBe(
+      LTX2_COMPOSED_MAX_AXIS_PIXELS,
+    );
+    expect(maxPixelsForModel(composing)).toBe(
+      LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+    );
+    // Same family, single-pass checkpoint.
+    const singlePass = {
+      family: "ltx2",
+      max_pixels: LTX2_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_MAX_AXIS_PIXELS,
+    };
+    expect(maxAxisPixelsForModel(singlePass)).toBe(LTX2_MAX_AXIS_PIXELS);
+    // A host that advertises neither falls back to the family span.
+    expect(maxAxisPixelsForModel({ family: "ltx2" })).toBe(
+      LTX2_MAX_AXIS_PIXELS,
+    );
+    expect(maxAxisPixelsForModel("ltx2")).toBe(LTX2_MAX_AXIS_PIXELS);
+    expect(maxAxisPixelsForModel(null)).toBeNull();
+  });
+
+  it("filters advertised presets on the axis span as well as the pixel budget", () => {
+    const advertised = [
+      { width: 1920, height: 1088 },
+      { width: 3840, height: 2176 },
+    ];
+    // 3840x2176 is 8.4 MP — inside the composed pixel budget and outside the
+    // single-pass span at the same time, so a pixel-only filter would offer
+    // it to a checkpoint that rejects it.
+    expect(
+      presetsForModel({
+        family: "ltx2",
+        dimension_alignment: 32,
+        max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+        max_axis_pixels: LTX2_MAX_AXIS_PIXELS,
+        recommended_dimensions: advertised,
+      }).map((preset) => [preset.width, preset.height]),
+    ).toEqual([[1920, 1088]]);
+    expect(
+      presetsForModel({
+        family: "ltx2",
+        dimension_alignment: 32,
+        max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+        max_axis_pixels: LTX2_COMPOSED_MAX_AXIS_PIXELS,
+        recommended_dimensions: advertised,
+      }).map((preset) => [preset.width, preset.height]),
+    ).toEqual([
+      [1920, 1088],
+      [3840, 2176],
+    ]);
+  });
+
+  it("narrows a composing model's ceiling when a single-pass pipeline is chosen", () => {
+    const composing = {
+      family: "ltx2",
+      max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_COMPOSED_MAX_AXIS_PIXELS,
+    };
+    // The advertised ceiling assumes the server's default pipeline, which
+    // refines. An explicit non-refining choice denoises the requested shape
+    // once, so the client must not offer what the server will reject.
+    for (const refining of [
+      undefined,
+      null,
+      "two-stage",
+      "two-stage-hq",
+      "distilled",
+      "ic-lora",
+      "keyframe",
+      "a2-vid",
+    ]) {
+      expect(maxAxisPixelsForModel(composing, refining), String(refining)).toBe(
+        LTX2_COMPOSED_MAX_AXIS_PIXELS,
+      );
+      expect(maxPixelsForModel(composing, refining), String(refining)).toBe(
+        LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+      );
+    }
+    for (const singlePass of ["one-stage", "retake", "lip-dub"]) {
+      expect(maxAxisPixelsForModel(composing, singlePass), singlePass).toBe(
+        LTX2_MAX_AXIS_PIXELS,
+      );
+      expect(maxPixelsForModel(composing, singlePass), singlePass).toBe(
+        LTX2_MAX_GENERATION_PIXELS,
+      );
+    }
+    // A single-pass checkpoint is never widened by a refining pipeline.
+    const singlePassModel = {
+      family: "ltx2",
+      max_pixels: LTX2_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_MAX_AXIS_PIXELS,
+    };
+    expect(maxAxisPixelsForModel(singlePassModel, "two-stage")).toBe(
+      LTX2_MAX_AXIS_PIXELS,
+    );
+    // Non-LTX-2 families have no axis limit either way.
+    expect(maxAxisPixelsForModel({ family: "flux" }, "one-stage")).toBeNull();
+    expect(maxPixelsForModel({ family: "flux" }, "one-stage")).toBe(
+      MAX_GENERATION_PIXELS,
+    );
   });
 });
