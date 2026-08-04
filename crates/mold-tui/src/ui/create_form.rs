@@ -203,6 +203,11 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             if caps.supports_video_upscale {
                 fields.push(ParamField::SpatialUpscale);
                 fields.push(ParamField::TemporalUpscale);
+                fields.push(ParamField::StgScale);
+                fields.push(ParamField::StgBlocks);
+                fields.push(ParamField::RescaleScale);
+                fields.push(ParamField::ModalityScale);
+                fields.push(ParamField::GuidanceSkip);
             }
             fields
         }
@@ -312,14 +317,27 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             if params.temporal_upscale.is_some() {
                 summary.push_str(" \u{00b7} temporal 2×");
             }
+            let guidance_count = guidance_override_count(params);
+            if guidance_count > 0 {
+                summary.push_str(&format!(" \u{00b7} guidance {guidance_count}"));
+            }
             summary
         }
     }
 }
 
+fn guidance_override_count(params: &GenerateParams) -> usize {
+    let overrides = &params.guidance_overrides;
+    usize::from(overrides.stg_scale.is_some())
+        + usize::from(overrides.stg_blocks.is_some())
+        + usize::from(overrides.rescale_scale.is_some())
+        + usize::from(overrides.modality_scale.is_some())
+        + usize::from(overrides.skip_step.is_some())
+}
+
 /// How many advanced values differ from their defaults — the accordion
 /// header badge. Counts scheduler, negative prompt, source image, LoRA,
-/// upscale, non-PNG format, offload, and expand individually.
+/// upscale, video guidance, non-PNG format, offload, and expand individually.
 pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> usize {
     let mut count = 0;
     if params.scheduler.is_some() {
@@ -358,6 +376,7 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
     if params.temporal_upscale.is_some() {
         count += 1;
     }
+    count += guidance_override_count(params);
     count
 }
 
@@ -527,12 +546,22 @@ mod tests {
         assert!(ltx2_fields.contains(&ParamField::Audio));
         assert!(ltx2_fields.contains(&ParamField::SpatialUpscale));
         assert!(ltx2_fields.contains(&ParamField::TemporalUpscale));
+        assert!(ltx2_fields.contains(&ParamField::StgScale));
+        assert!(ltx2_fields.contains(&ParamField::StgBlocks));
+        assert!(ltx2_fields.contains(&ParamField::RescaleScale));
+        assert!(ltx2_fields.contains(&ParamField::ModalityScale));
+        assert!(ltx2_fields.contains(&ParamField::GuidanceSkip));
 
         let legacy = capabilities_for_family("ltx-video");
         let legacy_fields = section_fields(AdvSection::Video, &legacy);
         assert!(!legacy_fields.contains(&ParamField::Audio));
         assert!(!legacy_fields.contains(&ParamField::SpatialUpscale));
         assert!(!legacy_fields.contains(&ParamField::TemporalUpscale));
+        assert!(!legacy_fields.contains(&ParamField::StgScale));
+        assert!(!legacy_fields.contains(&ParamField::StgBlocks));
+        assert!(!legacy_fields.contains(&ParamField::RescaleScale));
+        assert!(!legacy_fields.contains(&ParamField::ModalityScale));
+        assert!(!legacy_fields.contains(&ParamField::GuidanceSkip));
     }
 
     #[test]
@@ -630,9 +659,16 @@ mod tests {
         );
         params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
         params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
+        params.guidance_overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(1.5),
+            stg_blocks: Some(vec![28, 29]),
+            rescale_scale: Some(0.7),
+            modality_scale: Some(3.0),
+            skip_step: Some(2),
+        };
         assert_eq!(
             section_summary(AdvSection::Video, &params, true),
-            "25f \u{00b7} 24fps \u{00b7} audio off \u{00b7} spatial 1.5× \u{00b7} temporal 2×"
+            "25f \u{00b7} 24fps \u{00b7} audio off \u{00b7} spatial 1.5× \u{00b7} temporal 2× \u{00b7} guidance 5"
         );
     }
 
@@ -670,6 +706,18 @@ mod tests {
             advanced_active_count(&params, false),
             11,
             "each explicit latent upscale override must count"
+        );
+        params.guidance_overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(1.5),
+            stg_blocks: Some(vec![28, 29]),
+            rescale_scale: Some(0.7),
+            modality_scale: Some(3.0),
+            skip_step: Some(2),
+        };
+        assert_eq!(
+            advanced_active_count(&params, false),
+            16,
+            "each explicit guidance override must count"
         );
     }
 

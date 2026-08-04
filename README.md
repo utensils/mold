@@ -187,8 +187,8 @@ with prompt, model, seed, and generation metadata.
 - Text/image-to-video, multi-prompt video chains, one-request continuation of
   an existing clip (`--extend`), lip dub / re-voicing of an existing clip
   (`--pipeline lip-dub`), native MP4 output, checkpoint-dependent generated
-  audio, and LTX-2 guidance overrides across CLI, web, desktop, and iPhone —
-  LTX-2 / LTX-Video image-to-video can even run without a prompt
+  audio, and LTX-2 guidance overrides across CLI, web, desktop, iPhone, and TUI
+  — LTX-2 / LTX-Video image-to-video can even run without a prompt
 - Sequence authoring inside Create with per-clip prompts, duration, source
   images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
   re-renders only the changed clips, explicit remote-machine routing, and a
@@ -225,7 +225,8 @@ mold tui
 Its Advanced → Video section exposes Frames/FPS for video models, a
 checkpoint-aware `default` / `on` / `off` synchronized-audio control, and
 native/1.5×/2× spatial plus native/2× temporal upscale controls for LTX-2,
-using the same optional request contracts as the CLI and apps.
+plus optional STG scale/blocks, CFG rescale, modality scale, and guidance skip
+controls using the same absent-by-default request contract as the CLI and apps.
 
 <p align="center">
   <img src="website/public/gallery/tui-generate.png" alt="Mold TUI Create workspace with image preview" width="720" />

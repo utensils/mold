@@ -641,6 +641,7 @@ mod tests {
             enable_audio: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            guidance_overrides: mold_core::Ltx2GuidanceOverrides::default(),
             control_image_path: None,
             control_model: None,
             control_scale: 0.8,
