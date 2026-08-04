@@ -73,30 +73,68 @@ export function maxAxisPixelsForFamily(
 }
 
 /**
- * The per-axis ceiling for a specific model.
+ * LTX-2 pipelines that render stage 1 reduced and refine the upsampled result.
+ *
+ * Mirrors `Ltx2PipelineMode::refines_spatially` in `mold-core`. Only these
+ * reach past the trained RoPE span; `one-stage`, `retake` and `lip-dub`
+ * denoise the requested shape once, so picking one of them narrows the
+ * ceiling back to the span whatever the checkpoint can do.
+ */
+const SPATIALLY_REFINING_PIPELINES = new Set([
+  "distilled",
+  "two-stage",
+  "two-stage-hq",
+  "ic-lora",
+  "keyframe",
+  "a2-vid",
+]);
+
+export function pipelineRefinesSpatially(
+  pipeline: string | null | undefined,
+): boolean {
+  // An unset pipeline lets the server choose, and its default for a composing
+  // checkpoint refines.
+  return !pipeline || SPATIALLY_REFINING_PIPELINES.has(pipeline);
+}
+
+/**
+ * The per-axis ceiling for a specific model, under the selected pipeline.
  *
  * Prefers the server's advertised `max_axis_pixels`, which is per model and
  * knows whether that checkpoint composes; falls back to the family span for a
  * host that predates the field. A plain family string gets the conservative
  * single-pass answer, because a family cannot compose — a checkpoint can.
+ *
+ * `pipeline` is the user's explicit choice. The advertised ceiling assumes the
+ * server's default, so without this a user who picks One shot / Retake / Lip
+ * dub would be offered 4K and then have it rejected by the server.
  */
 export function maxAxisPixelsForModel(
   model: ModelResolutionContract | string | null | undefined,
+  pipeline?: string | null,
 ): number | null {
   if (typeof model === "string" || !model) {
     return maxAxisPixelsForFamily(typeof model === "string" ? model : null);
   }
-  return model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
+  const advertised = model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
+  if (advertised === null) return null;
+  if (pipelineRefinesSpatially(pipeline)) return advertised;
+  return Math.min(advertised, LTX2_MAX_AXIS_PIXELS);
 }
 
-/** The total-pixel ceiling for a specific model, advertised value first. */
+/** The total-pixel ceiling for a specific model, under the selected pipeline. */
 export function maxPixelsForModel(
   model: ModelResolutionContract | string | null | undefined,
+  pipeline?: string | null,
 ): number {
   if (typeof model === "string" || !model) {
     return maxPixelsForFamily(typeof model === "string" ? model : null);
   }
-  return model.max_pixels ?? maxPixelsForFamily(model.family);
+  const advertised = model.max_pixels ?? maxPixelsForFamily(model.family);
+  if (pipelineRefinesSpatially(pipeline)) return advertised;
+  return canonicalFamily(model.family) === "ltx2"
+    ? Math.min(advertised, LTX2_MAX_GENERATION_PIXELS)
+    : advertised;
 }
 
 export function dimensionAlignmentForFamily(

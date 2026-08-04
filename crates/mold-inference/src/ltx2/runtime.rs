@@ -1407,18 +1407,25 @@ const DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.909375, 0.725, 0.421875]
 fn reject_oversized_axis_without_composition(plan: &Ltx2GeneratePlan) -> Result<()> {
     let span = mold_core::validation::LTX2_MAX_AXIS_PIXELS;
     let longest = plan.width.max(plan.height);
-    if longest <= span || pipeline_uses_two_stage_spatial_refinement(plan.pipeline) {
+    if longest <= span {
         return Ok(());
     }
-    bail!(
-        "{}x{} has a {longest}px axis, past the {span}px span these checkpoints were trained on, \
-         and the {:?} pipeline denoises the requested shape in one pass — there is no tiled \
-         refinement to renormalize positions. Use a checkpoint that ships the spatial upsampler, \
-         or render at or below {span}px on the long edge.",
-        plan.width,
-        plan.height,
-        plan.pipeline,
-    );
+    if !pipeline_uses_two_stage_spatial_refinement(plan.pipeline) {
+        bail!(
+            "{}x{} has a {longest}px axis, past the {span}px span these checkpoints were trained \
+             on, and the {:?} pipeline denoises the requested shape in one pass — there is no \
+             tiled refinement to renormalize positions. Use a checkpoint that ships the spatial \
+             upsampler, or render at or below {span}px on the long edge.",
+            plan.width,
+            plan.height,
+            plan.pipeline,
+        );
+    }
+    // Composing is not enough on its own: the ceiling belongs to the *rung*.
+    // A x1.5 upscale only divides by 1.5, so a 4K output leaves stage 1 at
+    // 2560px — and stage 2 tiles the refinement, never stage 1.
+    mold_core::validation::validate_ltx2_stage1_span(plan.width, plan.height, plan.spatial_upscale)
+        .map_err(anyhow::Error::msg)
 }
 
 /// Whether this pipeline renders stage 1 reduced and refines the upsampled
@@ -8736,6 +8743,33 @@ mod tests {
             small.pipeline = pipeline;
             assert!(super::reject_oversized_axis_without_composition(&small).is_ok());
         }
+    }
+
+    /// Composing is not enough on its own — the ceiling belongs to the rung.
+    /// x1.5 divides by 1.5, so the same 4K output leaves stage 1 at 2560px,
+    /// and stage 2 tiles the refinement rather than stage 1.
+    #[test]
+    fn a_refining_pipeline_still_refuses_a_rung_that_cannot_halve_the_target() {
+        let mut plan = ltx2_plan_at(3_840, 2_176, 25);
+        plan.pipeline = PipelineKind::TwoStage;
+
+        plan.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+        let message = super::reject_oversized_axis_without_composition(&plan)
+            .expect_err("x1.5 cannot bring 3840 back inside the span")
+            .to_string();
+        assert!(message.contains("2560"), "got: {message}");
+
+        // x2 halves it, and an absent rung means the runtime's implicit x2.
+        plan.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        assert!(super::reject_oversized_axis_without_composition(&plan).is_ok());
+        plan.spatial_upscale = None;
+        assert!(super::reject_oversized_axis_without_composition(&plan).is_ok());
+
+        // x1.5 is fine at its own ceiling.
+        let mut within = ltx2_plan_at(3_072, 1_728, 25);
+        within.pipeline = PipelineKind::TwoStage;
+        within.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+        assert!(super::reject_oversized_axis_without_composition(&within).is_ok());
     }
 
     fn stage_shape(

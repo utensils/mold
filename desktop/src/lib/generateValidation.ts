@@ -90,6 +90,7 @@ export function resolutionValidationError(
   width: number,
   height: number,
   contract?: ModelResolutionContract | null,
+  pipeline?: string | null,
 ): string | null {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
     return "Width and height must each be at least 64 pixels.";
@@ -100,11 +101,11 @@ export function resolutionValidationError(
   }
   // Per model, not per family: a checkpoint that ships the spatial upsampler
   // composes past the trained span, one that does not cannot.
-  const axisLimit = maxAxisPixelsForModel(contract);
+  const axisLimit = maxAxisPixelsForModel(contract, pipeline);
   if (axisLimit && Math.max(width, height) > axisLimit) {
     return `${width} × ${height} exceeds the ${axisLimit}px span this model can hold. Keep the long edge at or below ${axisLimit}px.`;
   }
-  const maxPixels = maxPixelsForModel(contract);
+  const maxPixels = maxPixelsForModel(contract, pipeline);
   const megapixels = (width * height) / 1_000_000;
   return width * height <= maxPixels
     ? null

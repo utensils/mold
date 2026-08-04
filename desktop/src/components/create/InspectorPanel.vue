@@ -387,7 +387,12 @@ const resolutionMp = computed(() => {
   );
 });
 const resolutionError = computed(() =>
-  resolutionValidationError(props.form.width, props.form.height, selectedModel.value),
+  resolutionValidationError(
+    props.form.width,
+    props.form.height,
+    selectedModel.value,
+    props.form.pipeline,
+  ),
 );
 const stepsError = computed(() => stepsValidationError(props.form.steps));
 

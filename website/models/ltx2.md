@@ -196,6 +196,15 @@ Bigger is not automatically better. A single-pass render at 1080p on the 19B
 checkpoint can show edge artifacts, since that is well above the resolution it
 was trained at; 1216x704 remains the quality sweet spot.
 
+The 4096px figure belongs to the **x2 rung**, which is what the pipeline
+applies by default. `--spatial-upscale x1.5` only divides by 1.5, so its
+stage 1 is larger for the same output: a 3840px frame would render stage 1 at
+2560px, past the span. x1.5 therefore reaches **3072px** on the long edge, and
+mold refuses the combination rather than rendering it — stage 2 tiles the
+refinement, never stage 1. Choosing a single-pass pipeline explicitly
+(`--pipeline one-stage`, retake, lip dub) drops the ceiling back to 2048px for
+the same reason.
+
 #### The output ladder
 
 Every rung is a multiple of 64, so the halved stage-1 shape still lands on the

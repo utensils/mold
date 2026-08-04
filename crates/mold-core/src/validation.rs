@@ -1,6 +1,6 @@
 use crate::{
     GenerateRequest, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode,
-    OutputFormat, UpscaleRequest,
+    Ltx2SpatialUpscale, OutputFormat, UpscaleRequest,
 };
 
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
@@ -349,6 +349,10 @@ fn model_has_spatial_upsampler(model: &str) -> bool {
 /// engine choose. Either way the answer requires a spatial upsampler on disk,
 /// because that is what `select_pipeline` requires before it will pick a
 /// refining pipeline at all.
+///
+/// Prefer [`ltx2_spatial_composition_for_request`] when the request is in
+/// hand: with `pipeline: None` this assumes the engine's *default* choice, and
+/// several request fields override that default before it is reached.
 pub fn ltx2_spatial_composition(
     model: &str,
     pipeline: Option<Ltx2PipelineMode>,
@@ -367,6 +371,42 @@ pub fn ltx2_spatial_composition(
     } else {
         Ltx2SpatialComposition::SinglePass
     }
+}
+
+/// The pipeline `select_pipeline` will resolve for a request that names none.
+///
+/// Mirrors `Ltx2Pipeline::select_pipeline`'s implicit branch order
+/// (`ltx2/pipeline.rs:377-388`). Only the *conditioning* selectors are
+/// mirrored: the checkpoint-name fallback below them chooses between
+/// `Distilled` and `TwoStage`, which both refine, so it cannot change this
+/// answer. `retake_range` can and does — retake denoises once.
+fn ltx2_implicit_pipeline(req: &GenerateRequest) -> Option<Ltx2PipelineMode> {
+    if req.retake_range.is_some() {
+        return Some(Ltx2PipelineMode::Retake);
+    }
+    if req.audio_file.is_some() || req.audio_file_path.is_some() {
+        return Some(Ltx2PipelineMode::A2Vid);
+    }
+    if req.keyframes.as_ref().is_some_and(|items| items.len() > 1) {
+        return Some(Ltx2PipelineMode::Keyframe);
+    }
+    if req.source_video.is_some() || req.source_video_path.is_some() {
+        return Some(Ltx2PipelineMode::IcLora);
+    }
+    None
+}
+
+/// [`ltx2_spatial_composition`] resolved from the whole request.
+///
+/// An explicit `pipeline` wins; otherwise the request's own conditioning
+/// decides, exactly as the engine's `select_pipeline` does. Without this a
+/// retake — which denoises once — would be admitted at the composed ceiling
+/// and only refused by the engine's backstop, minutes later.
+pub fn ltx2_spatial_composition_for_request(req: &GenerateRequest) -> Ltx2SpatialComposition {
+    ltx2_spatial_composition(
+        &req.model,
+        req.pipeline.or_else(|| ltx2_implicit_pipeline(req)),
+    )
 }
 
 /// Total-pixel ceiling for a generation family, assuming no composition.
@@ -538,7 +578,10 @@ impl Ltx2OutputRung {
     /// cannot see it, and a rung that names a stage-1 shape the engine does not
     /// render is worse than naming none.
     pub const fn stage1_shape(&self) -> (u32, u32) {
-        (ltx2_stage1_axis(self.width), ltx2_stage1_axis(self.height))
+        (
+            ltx2_stage1_axis_for(self.width, Some(Ltx2SpatialUpscale::X2)),
+            ltx2_stage1_axis_for(self.height, Some(Ltx2SpatialUpscale::X2)),
+        )
     }
 
     /// Whether this rung needs the tiled stage-2 refinement, i.e. whether it
@@ -561,15 +604,95 @@ impl Ltx2OutputRung {
     }
 }
 
-/// Stage-1 extent for one axis under a x2 spatial rung.
-const fn ltx2_stage1_axis(target: u32) -> u32 {
+/// Stage-1 extent for one axis under a spatial rung.
+///
+/// Mirrors `latent_grid_downsample` in `ltx2/model/upsampler.rs`, including
+/// its x1.5 case: the rational upsampler emits `floor((3 * latent + 1) / 2)`
+/// cells, so stage 1 needs `ceil((2 * target_latent - 1) / 3)` to cover the
+/// requested lattice. An absent rung means stage 1 renders the target itself.
+pub const fn ltx2_stage1_axis_for(target: u32, upscale: Option<Ltx2SpatialUpscale>) -> u32 {
     let grid = LTX2_SPATIAL_LATENT_STRIDE;
+    let Some(upscale) = upscale else {
+        return if target < grid { grid } else { target };
+    };
     let target_latent = if target < grid {
         1
     } else {
         target.div_ceil(grid)
     };
-    target_latent.div_ceil(2) * grid
+    let stage1_latent = match upscale {
+        Ltx2SpatialUpscale::X2 => target_latent.div_ceil(2),
+        Ltx2SpatialUpscale::X1_5 => target_latent
+            .saturating_mul(2)
+            .saturating_sub(1)
+            .div_ceil(3),
+    };
+    if stage1_latent == 0 {
+        grid
+    } else {
+        stage1_latent * grid
+    }
+}
+
+/// Largest output axis whose stage 1 still lands inside the trained span
+/// under `upscale`.
+///
+/// x2 halves, so it reaches `2 * span`. x1.5 only divides by 1.5, so it stops
+/// at 3072px — asking for 4K with `--spatial-upscale x1.5` puts stage 1 at
+/// 2560px, exactly the out-of-distribution render the ceiling exists to
+/// prevent.
+pub fn ltx2_composed_axis_ceiling(upscale: Option<Ltx2SpatialUpscale>) -> u32 {
+    match upscale {
+        None | Some(Ltx2SpatialUpscale::X2) => LTX2_COMPOSED_MAX_AXIS_PIXELS,
+        Some(Ltx2SpatialUpscale::X1_5) => {
+            // Walk the 32px grid rather than inverting the rational
+            // downsample in closed form; the loop is bounded by the composed
+            // ceiling and runs once per admission.
+            let mut ceiling = LTX2_MAX_AXIS_PIXELS;
+            while ceiling < LTX2_COMPOSED_MAX_AXIS_PIXELS
+                && ltx2_stage1_axis_for(ceiling + LTX2_SPATIAL_LATENT_STRIDE, upscale)
+                    <= LTX2_MAX_AXIS_PIXELS
+            {
+                ceiling += LTX2_SPATIAL_LATENT_STRIDE;
+            }
+            ceiling
+        }
+    }
+}
+
+/// Refuse a composed render whose *stage 1* leaves the trained span.
+///
+/// [`LTX2_COMPOSED_MAX_AXIS_PIXELS`] is shorthand for this check under the
+/// default x2 rung. A request that names x1.5 instead needs the real one:
+/// a 3840px output renders stage 1 at 2560px, and nothing downstream repairs
+/// that — stage 2 tiles the *refinement*, never stage 1.
+pub fn validate_ltx2_stage1_span(
+    width: u32,
+    height: u32,
+    upscale: Option<Ltx2SpatialUpscale>,
+) -> Result<(), String> {
+    // An absent rung on a refining pipeline is not "no rung": the runtime
+    // applies an implicit x2 so stage 1 renders halved anyway
+    // (`ltx2/runtime.rs`'s `implicit_x2_shape`). Reading `None` literally here
+    // would refuse every composed render at once.
+    let effective = upscale.unwrap_or(Ltx2SpatialUpscale::X2);
+    let stage1 = (
+        ltx2_stage1_axis_for(width, Some(effective)),
+        ltx2_stage1_axis_for(height, Some(effective)),
+    );
+    let longest = stage1.0.max(stage1.1);
+    if longest <= LTX2_MAX_AXIS_PIXELS {
+        return Ok(());
+    }
+    let rung = match effective {
+        Ltx2SpatialUpscale::X1_5 => "x1.5",
+        Ltx2SpatialUpscale::X2 => "x2",
+    };
+    let ceiling = ltx2_composed_axis_ceiling(upscale);
+    Err(format!(
+        "{width}x{height} with {rung} spatial upscale renders stage 1 at {}x{}, whose {longest}px          axis is past the {}px span these checkpoints were trained on. The rung sets the ceiling:          it reaches {ceiling}px on the long edge. Use a x2 upscale, or render at or below          {ceiling}px.",
+        stage1.0, stage1.1, LTX2_MAX_AXIS_PIXELS,
+    ))
 }
 
 /// Number of stage-2 tiles one axis is split into.
@@ -1131,11 +1254,17 @@ pub fn validate_generate_request_with_family(
     // tiles, which is the only way an axis past the trained RoPE span is in
     // distribution; anything else keeps the single-pass ceiling.
     let composition = if family == Some("ltx2") {
-        ltx2_spatial_composition(&req.model, req.pipeline)
+        ltx2_spatial_composition_for_request(req)
     } else {
         Ltx2SpatialComposition::SinglePass
     };
     validate_generation_dimensions_composed(req.width, req.height, family, composition)?;
+    if composition == Ltx2SpatialComposition::TiledTwoStage {
+        // The composed ceiling above is the x2 rung's. A request that names a
+        // different rung reaches a different stage-1 shape, and only stage 1's
+        // own span decides whether it is in distribution.
+        validate_ltx2_stage1_span(req.width, req.height, req.spatial_upscale)?;
+    }
     if req.steps == 0 {
         return Err("steps must be >= 1".to_string());
     }
@@ -2196,6 +2325,122 @@ mod tests {
             )
             .is_ok());
         }
+    }
+
+    /// The composed ceiling is the **x2 rung's**. x1.5 divides by 1.5, so the
+    /// same 4K output leaves stage 1 at 2560px — out of distribution, with
+    /// nothing downstream to repair it, because stage 2 tiles the refinement
+    /// and never stage 1.
+    #[test]
+    fn a_smaller_spatial_rung_lowers_the_ceiling_it_can_reach() {
+        assert_eq!(
+            ltx2_composed_axis_ceiling(Some(Ltx2SpatialUpscale::X2)),
+            LTX2_COMPOSED_MAX_AXIS_PIXELS
+        );
+        assert_eq!(
+            ltx2_composed_axis_ceiling(None),
+            LTX2_COMPOSED_MAX_AXIS_PIXELS
+        );
+        assert_eq!(
+            ltx2_composed_axis_ceiling(Some(Ltx2SpatialUpscale::X1_5)),
+            3_072
+        );
+
+        // Every ceiling is exactly the largest target its rung can hold, and
+        // one grid step past it is not.
+        for upscale in [Some(Ltx2SpatialUpscale::X2), Some(Ltx2SpatialUpscale::X1_5)] {
+            let ceiling = ltx2_composed_axis_ceiling(upscale);
+            assert!(
+                ltx2_stage1_axis_for(ceiling, upscale) <= LTX2_MAX_AXIS_PIXELS,
+                "{upscale:?} must reach its own ceiling"
+            );
+            assert!(
+                ltx2_stage1_axis_for(ceiling + LTX2_SPATIAL_LATENT_STRIDE, upscale)
+                    > LTX2_MAX_AXIS_PIXELS,
+                "{upscale:?} must not reach one grid step past it"
+            );
+        }
+
+        // 4K on x1.5 is refused, and the refusal names the shape stage 1 would
+        // have rendered rather than restating the output size.
+        let err = validate_ltx2_stage1_span(3_840, 2_176, Some(Ltx2SpatialUpscale::X1_5))
+            .expect_err("x1.5 cannot halve 3840 back inside the span");
+        assert!(err.contains("2560") && err.contains("3072"), "got: {err}");
+        // The same output on x2 is fine.
+        assert!(validate_ltx2_stage1_span(3_840, 2_176, Some(Ltx2SpatialUpscale::X2)).is_ok());
+        // And x1.5 is fine at its own ceiling.
+        assert!(validate_ltx2_stage1_span(3_072, 1_728, Some(Ltx2SpatialUpscale::X1_5)).is_ok());
+    }
+
+    /// The whole request decides the pipeline, not just the `pipeline` field.
+    /// `select_pipeline` routes a retake before it ever considers the
+    /// checkpoint's upsampler, and a retake denoises once.
+    #[test]
+    fn an_implicit_retake_is_admitted_as_single_pass() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.width = 3_840;
+        req.height = 2_176;
+        req.frames = Some(25);
+        req.fps = Some(24);
+        req.output_format = Some(OutputFormat::Mp4);
+        // No explicit pipeline: the composing default admits 4K.
+        assert_eq!(
+            ltx2_spatial_composition_for_request(&req),
+            Ltx2SpatialComposition::TiledTwoStage
+        );
+        validate_generate_request_with_family(&req, Some("ltx2")).expect("4K composes");
+
+        // Adding a retake range changes what the engine will run, so it has to
+        // change what admission allows — otherwise this is refused minutes
+        // later by the engine backstop instead of at the request boundary.
+        req.retake_range = Some(crate::TimeRange {
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+        });
+        req.source_video_path = Some("/tmp/clip.mp4".to_string());
+        assert_eq!(
+            ltx2_spatial_composition_for_request(&req),
+            Ltx2SpatialComposition::SinglePass
+        );
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("a retake denoises once and cannot hold a 3840px axis");
+        assert!(err.contains("3840"), "got: {err}");
+    }
+
+    /// The other implicit selectors all resolve to refining pipelines, so they
+    /// must not narrow the ceiling.
+    #[test]
+    fn implicit_refining_pipelines_keep_the_composed_ceiling() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.width = 3_840;
+        req.height = 2_176;
+        req.frames = Some(25);
+        req.fps = Some(24);
+        req.output_format = Some(OutputFormat::Mp4);
+
+        let mut with_audio = req.clone();
+        with_audio.audio_file_path = Some("/tmp/voice.wav".to_string());
+        assert_eq!(
+            ltx2_spatial_composition_for_request(&with_audio),
+            Ltx2SpatialComposition::TiledTwoStage
+        );
+
+        let mut with_source = req.clone();
+        with_source.source_video_path = Some("/tmp/clip.mp4".to_string());
+        assert_eq!(
+            ltx2_spatial_composition_for_request(&with_source),
+            Ltx2SpatialComposition::TiledTwoStage
+        );
+
+        // An explicit pipeline still wins over every implicit selector.
+        let mut explicit = with_source.clone();
+        explicit.pipeline = Some(Ltx2PipelineMode::OneStage);
+        assert_eq!(
+            ltx2_spatial_composition_for_request(&explicit),
+            Ltx2SpatialComposition::SinglePass
+        );
     }
 
     /// A rung is the same rung in either orientation — the composition and its

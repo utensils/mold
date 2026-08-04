@@ -199,4 +199,54 @@ describe("shared resolution contract", () => {
       [3840, 2176],
     ]);
   });
+
+  it("narrows a composing model's ceiling when a single-pass pipeline is chosen", () => {
+    const composing = {
+      family: "ltx2",
+      max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_COMPOSED_MAX_AXIS_PIXELS,
+    };
+    // The advertised ceiling assumes the server's default pipeline, which
+    // refines. An explicit non-refining choice denoises the requested shape
+    // once, so the client must not offer what the server will reject.
+    for (const refining of [
+      undefined,
+      null,
+      "two-stage",
+      "two-stage-hq",
+      "distilled",
+      "ic-lora",
+      "keyframe",
+      "a2-vid",
+    ]) {
+      expect(maxAxisPixelsForModel(composing, refining), String(refining)).toBe(
+        LTX2_COMPOSED_MAX_AXIS_PIXELS,
+      );
+      expect(maxPixelsForModel(composing, refining), String(refining)).toBe(
+        LTX2_COMPOSED_MAX_GENERATION_PIXELS,
+      );
+    }
+    for (const singlePass of ["one-stage", "retake", "lip-dub"]) {
+      expect(maxAxisPixelsForModel(composing, singlePass), singlePass).toBe(
+        LTX2_MAX_AXIS_PIXELS,
+      );
+      expect(maxPixelsForModel(composing, singlePass), singlePass).toBe(
+        LTX2_MAX_GENERATION_PIXELS,
+      );
+    }
+    // A single-pass checkpoint is never widened by a refining pipeline.
+    const singlePassModel = {
+      family: "ltx2",
+      max_pixels: LTX2_MAX_GENERATION_PIXELS,
+      max_axis_pixels: LTX2_MAX_AXIS_PIXELS,
+    };
+    expect(maxAxisPixelsForModel(singlePassModel, "two-stage")).toBe(
+      LTX2_MAX_AXIS_PIXELS,
+    );
+    // Non-LTX-2 families have no axis limit either way.
+    expect(maxAxisPixelsForModel({ family: "flux" }, "one-stage")).toBeNull();
+    expect(maxPixelsForModel({ family: "flux" }, "one-stage")).toBe(
+      MAX_GENERATION_PIXELS,
+    );
+  });
 });
