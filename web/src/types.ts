@@ -9,13 +9,7 @@ export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
-  | "png"
-  | "jpeg"
-  | "gif"
-  | "apng"
-  | "webp"
-  | "mp4"
-  | "wav";
+  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
 
 export type SeedMode = "random" | "static" | "increment";
 

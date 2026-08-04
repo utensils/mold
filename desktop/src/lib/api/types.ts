@@ -166,14 +166,7 @@ export interface ModelEntry {
 
 // ── Generation ───────────────────────────────────────────────────────────
 
-export type OutputFormat =
-  | "png"
-  | "jpeg"
-  | "webp"
-  | "gif"
-  | "apng"
-  | "mp4"
-  | "wav";
+export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4" | "wav";
 
 /** Scheduler override for UNet families (SD1.5, SDXL). Mirrors mold-core's
  * kebab-case enum; only these string variants are surfaced in the desktop UI. */
