@@ -150,7 +150,9 @@ describe("shared resolution contract", () => {
       max_pixels: LTX2_COMPOSED_MAX_GENERATION_PIXELS,
       max_axis_pixels: LTX2_COMPOSED_MAX_AXIS_PIXELS,
     };
-    expect(maxAxisPixelsForModel(composing)).toBe(LTX2_COMPOSED_MAX_AXIS_PIXELS);
+    expect(maxAxisPixelsForModel(composing)).toBe(
+      LTX2_COMPOSED_MAX_AXIS_PIXELS,
+    );
     expect(maxPixelsForModel(composing)).toBe(
       LTX2_COMPOSED_MAX_GENERATION_PIXELS,
     );

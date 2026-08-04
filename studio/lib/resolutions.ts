@@ -116,7 +116,8 @@ export function maxAxisPixelsForModel(
   if (typeof model === "string" || !model) {
     return maxAxisPixelsForFamily(typeof model === "string" ? model : null);
   }
-  const advertised = model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
+  const advertised =
+    model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
   if (advertised === null) return null;
   if (pipelineRefinesSpatially(pipeline)) return advertised;
   return Math.min(advertised, LTX2_MAX_AXIS_PIXELS);

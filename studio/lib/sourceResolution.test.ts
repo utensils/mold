@@ -171,8 +171,12 @@ describe("source resolution", () => {
       },
     );
 
-    expect(Math.max(result.output.width, result.output.height)).toBeLessThanOrEqual(4_096);
-    expect(result.output.width * result.output.height).toBeLessThanOrEqual(4_096 * 2_176);
+    expect(
+      Math.max(result.output.width, result.output.height),
+    ).toBeLessThanOrEqual(4_096);
+    expect(result.output.width * result.output.height).toBeLessThanOrEqual(
+      4_096 * 2_176,
+    );
     expect(result.fitsModel).toBe(true);
   });
 
@@ -188,7 +192,9 @@ describe("source resolution", () => {
       },
     );
 
-    expect(Math.max(result.output.width, result.output.height)).toBeLessThanOrEqual(2_048);
+    expect(
+      Math.max(result.output.width, result.output.height),
+    ).toBeLessThanOrEqual(2_048);
     expect(result.fitsModel).toBe(true);
   });
 });
