@@ -5,6 +5,8 @@ use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::ltx2::tiling::{split_by_size, SpatialDecodeTiling};
+
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
     let refs = xs.iter().collect::<Vec<_>>();
     Tensor::cat(&refs, dim)
@@ -1017,6 +1019,62 @@ fn temporal_output_frames_for_latents(latent_frames: usize, temporal_scale: usiz
     }
 }
 
+/// Reassemble decoded strips along `dim`, crossfading their overlaps.
+///
+/// Each entry is `(strip, left_overlap, right_overlap)` in pixels; a strip's
+/// right overlap must equal the next strip's left overlap, which is what
+/// `split_by_size` guarantees. Ramp weights are `i / (overlap + 1)`, the same
+/// values `trapezoidal_mask` uses, so the pair sums to one everywhere and the
+/// blend needs no normalization pass.
+fn crossfade_strips(strips: &[(Tensor, usize, usize)], dim: usize) -> Result<Tensor> {
+    let mut segments: Vec<Tensor> = Vec::with_capacity(strips.len() * 2);
+    let mut pending_tail: Option<Tensor> = None;
+    for (index, (strip, left, right)) in strips.iter().enumerate() {
+        let length = strip.dim(dim)?;
+        if left + right > length {
+            bail!("spatial decode strip {index} is {length} px but ramps {left}+{right} px");
+        }
+        match pending_tail.take() {
+            Some(previous) => {
+                if previous.dim(dim)? != *left {
+                    bail!(
+                        "spatial decode strip {index} expects a {left} px overlap but the \
+                         previous strip left {} px",
+                        previous.dim(dim)?
+                    );
+                }
+                segments.push(crossfade(&previous, &strip.narrow(dim, 0, *left)?, dim)?);
+            }
+            None if *left != 0 => {
+                bail!("spatial decode strip {index} ramps in with nothing to ramp from")
+            }
+            None => {}
+        }
+        segments.push(strip.narrow(dim, *left, length - left - right)?);
+        if *right > 0 {
+            pending_tail = Some(strip.narrow(dim, length - right, *right)?);
+        }
+    }
+    if pending_tail.is_some() {
+        bail!("the last spatial decode strip ramps out with nothing to ramp into");
+    }
+    cat_dim(&segments, dim)
+}
+
+fn crossfade(previous: &Tensor, next: &Tensor, dim: usize) -> Result<Tensor> {
+    let length = previous.dim(dim)?;
+    let weights = (0..length)
+        .map(|index| (index + 1) as f32 / (length + 1) as f32)
+        .collect::<Vec<_>>();
+    let mut shape = vec![1usize; previous.rank()];
+    shape[dim] = length;
+    let ramp = Tensor::from_vec(weights, shape, previous.device())?.to_dtype(previous.dtype())?;
+    let inverse = ramp.affine(-1.0, 1.0)?;
+    previous
+        .broadcast_mul(&inverse)?
+        .add(&next.broadcast_mul(&ramp)?)
+}
+
 fn positive_env_usize(key: &str) -> Option<usize> {
     crate::runtime_env::value(key)
         .and_then(|value| crate::runtime_env::parse_u64(&value))
@@ -1222,6 +1280,13 @@ pub struct AutoencoderKLLtx2Video {
     config: AutoencoderKLLtx2VideoConfig,
     pub use_tiling: bool,
     pub use_framewise_decoding: bool,
+    /// Split each frame into overlapping spatial tiles before decoding.
+    ///
+    /// Temporal chunking alone stops helping once a *single* frame is large:
+    /// the decoder's activations scale with `H x W` too, so a 4K decode still
+    /// peaks far above what a consumer card has. `None` decodes exactly as
+    /// this VAE always has.
+    pub(crate) spatial_decode_tiling: Option<SpatialDecodeTiling>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1259,6 +1324,7 @@ impl AutoencoderKLLtx2Video {
             config,
             use_tiling: false,
             use_framewise_decoding: false,
+            spatial_decode_tiling: None,
         })
     }
 
@@ -1364,10 +1430,9 @@ impl AutoencoderKLLtx2Video {
         _train: bool,
     ) -> Result<(Option<DecoderOutput>, Tensor)> {
         let latents = self.denormalize_latents(latents)?;
-        let decoded = if self.use_framewise_decoding || self.use_tiling {
-            self.decode_temporal_chunks(&latents)?
-        } else {
-            self.decoder.forward(&latents)?
+        let decoded = match self.spatial_decode_tiling {
+            Some(tiling) => self.decode_spatial_tiles(&latents, tiling)?,
+            None => self.decode_frames(&latents)?,
         };
         if return_dict {
             Ok((
@@ -1379,6 +1444,60 @@ impl AutoencoderKLLtx2Video {
         } else {
             Ok((None, decoded))
         }
+    }
+
+    /// Decode a whole latent block, temporally chunked when configured.
+    fn decode_frames(&self, latents: &Tensor) -> Result<Tensor> {
+        if self.use_framewise_decoding || self.use_tiling {
+            self.decode_temporal_chunks(latents)
+        } else {
+            self.decoder.forward(latents)
+        }
+    }
+
+    /// Decode in overlapping spatial tiles and crossfade the seams.
+    ///
+    /// Tiles are cut with the same splitter stage-2 refinement uses, and the
+    /// overlap is crossfaded with the same `i / (overlap + 1)` ramp as
+    /// `trapezoidal_mask`, so the two sides sum to exactly one. The blend is
+    /// done strip by strip rather than into one full-size accumulator: at the
+    /// resolutions that need this at all, a padded full-frame buffer per tile
+    /// would cost more than the decode it is saving.
+    fn decode_spatial_tiles(
+        &self,
+        latents: &Tensor,
+        tiling: SpatialDecodeTiling,
+    ) -> Result<Tensor> {
+        let (_batch, _channels, _frames, latent_height, latent_width) = latents.dims5()?;
+        let scale = self.spatial_compression_ratio.max(1);
+        let rows = split_by_size(latent_height, tiling.tile_cells, tiling.overlap_cells)
+            .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
+        let columns = split_by_size(latent_width, tiling.tile_cells, tiling.overlap_cells)
+            .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
+        if rows.len() <= 1 && columns.len() <= 1 {
+            return self.decode_frames(latents);
+        }
+
+        let mut row_strips = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut column_strips = Vec::with_capacity(columns.len());
+            for column in &columns {
+                let tile = latents
+                    .i((.., .., .., row.start..row.end, column.start..column.end))?
+                    .contiguous()?;
+                column_strips.push((
+                    self.decode_frames(&tile)?,
+                    column.left_ramp * scale,
+                    column.right_ramp * scale,
+                ));
+            }
+            row_strips.push((
+                crossfade_strips(&column_strips, 4)?,
+                row.left_ramp * scale,
+                row.right_ramp * scale,
+            ));
+        }
+        crossfade_strips(&row_strips, 3)
     }
 
     fn temporal_decode_chunk_latent_frames(&self) -> usize {
@@ -1484,8 +1603,8 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialPaddingMode,
-        VaeBlockConfig,
+        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialDecodeTiling,
+        SpatialPaddingMode, VaeBlockConfig,
     };
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -2028,6 +2147,136 @@ mod tests {
             chunked.decode(&latents, None, false, false).unwrap();
 
         assert_tensors_close(&full_video, &chunked_video, 1e-4);
+    }
+
+    /// Temporal chunking bounds frames in flight; it does nothing about one
+    /// enormous frame. A spatially tiled decode has to reproduce the whole
+    /// decode, seams included — a crossfade that does not sum to one shows up
+    /// as a bright or dark band, never as an error.
+    ///
+    /// The residual is not zero and cannot be: at a tile edge the decoder's
+    /// convolutions pad instead of seeing the neighbouring pixels, which is
+    /// precisely what the overlap exists to hide. So the property asserted
+    /// here is convergence — widening the overlap must move the tiled decode
+    /// toward the full one — which a mis-weighted blend would not satisfy.
+    #[test]
+    fn autoencoder_spatial_tiled_decode_converges_on_the_full_decode() {
+        let config = AutoencoderKLLtx2VideoConfig {
+            in_channels: 3,
+            out_channels: 3,
+            latent_channels: 4,
+            encoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            decoder_blocks: vec![
+                VaeBlockConfig::res_x(1),
+                VaeBlockConfig::compress("compress_all", 2, true),
+                VaeBlockConfig::res_x(1),
+            ],
+            patch_size: 1,
+            resnet_eps: 1e-6,
+            scaling_factor: 1.0,
+            latent_log_var: super::LatentLogVar::Uniform,
+            encoder_base_channels: 4,
+            decoder_base_channels: 4,
+            encoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            decoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            spatial_compression_ratio: 2,
+            temporal_compression_ratio: 2,
+            timestep_conditioning: false,
+            decoder_causal: true,
+            latents_mean: vec![0.0; 4],
+            latents_std: vec![1.0; 4],
+        };
+        let values = (0..(4 * 3 * 10 * 14))
+            .map(|idx| ((idx % 23) as f32 - 11.0) / 13.0)
+            .collect::<Vec<_>>();
+        let latents = Tensor::from_vec(values, (1, 4, 3, 10, 14), &Device::Cpu).unwrap();
+
+        let full =
+            AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
+                .unwrap();
+        let (_full_output, full_video) = full.decode(&latents, None, false, false).unwrap();
+        let range = full_video
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+
+        let deviation = |tile_cells: usize, overlap_cells: usize| {
+            let mut tiled = AutoencoderKLLtx2Video::new(
+                config.clone(),
+                patterned_autoencoder_var_builder(&config),
+            )
+            .unwrap();
+            tiled.spatial_decode_tiling = Some(SpatialDecodeTiling {
+                tile_cells,
+                overlap_cells,
+            });
+            let (_output, video) = tiled.decode(&latents, None, false, false).unwrap();
+            assert_eq!(full_video.dims5().unwrap(), video.dims5().unwrap());
+            full_video
+                .sub(&video)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+
+        let narrow = deviation(6, 2);
+        let wide = deviation(12, 8);
+        // Quadrupling the overlap cut the seam by ~6.7x when this was written
+        // (0.674 -> 0.100 against a signal peaking at 0.446). The bounds are
+        // loose because this fixture is deliberately hostile — four random
+        // channels through a zero-padded decoder is a far worse neighbour
+        // approximation than a trained VAE — but a blend whose weights did not
+        // sum to one would not converge at all.
+        assert!(
+            wide < narrow * 0.25,
+            "a wider overlap must hide most of the seam, got {wide} against {narrow}"
+        );
+        assert!(
+            wide < range * 0.25,
+            "a {wide} deviation on a signal peaking at {range} is a seam, not a blend"
+        );
+    }
+
+    /// The property the crossfade rests on, isolated from any decoder: two
+    /// strips whose overlap is faded together reproduce the original.
+    #[test]
+    fn crossfading_strips_reassembles_the_original_signal() {
+        let width = 12usize;
+        let values = (0..width).map(|i| i as f32).collect::<Vec<_>>();
+        let whole = Tensor::from_vec(values.clone(), (1, 1, 1, 1, width), &Device::Cpu).unwrap();
+        let overlap = 4usize;
+        let left = whole.narrow(4, 0, 8).unwrap();
+        let right = whole.narrow(4, 4, 8).unwrap();
+
+        let joined =
+            super::crossfade_strips(&[(left, 0, overlap), (right, overlap, 0)], 4).unwrap();
+
+        assert_eq!(
+            joined.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn crossfading_rejects_strips_whose_overlaps_disagree() {
+        let strip = Tensor::zeros((1, 1, 1, 1, 8), DType::F32, &Device::Cpu).unwrap();
+        // A lone strip needs no ramps at all.
+        assert!(super::crossfade_strips(&[(strip.clone(), 0, 0)], 4).is_ok());
+        // Ramping in with no predecessor, out with no successor, or into an
+        // overlap of a different width all mean the split and the blend
+        // disagree — which is exactly the silent-seam case.
+        assert!(super::crossfade_strips(&[(strip.clone(), 2, 0)], 4).is_err());
+        assert!(super::crossfade_strips(&[(strip.clone(), 0, 4)], 4).is_err());
+        assert!(
+            super::crossfade_strips(&[(strip.clone(), 0, 4), (strip.clone(), 2, 0)], 4).is_err()
+        );
     }
 
     #[test]

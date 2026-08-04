@@ -167,11 +167,45 @@ trained range even when the frame's total area is small. `/api/models` carries
 the per-model `max_pixels`, `dimension_alignment`, and `recommended_dimensions`
 so clients do not hardcode any of it.
 
-Going beyond roughly 2K needs tiled stage-2 refinement with renormalized
-positions, which mold does not implement yet. Note also that a single-pass
-render at 1080p on the 19B checkpoint can show edge artifacts, since that is
-well above the resolution it was trained at; 1216x704 remains the quality
-sweet spot.
+Note that a single-pass render at 1080p on the 19B checkpoint can show edge
+artifacts, since that is well above the resolution it was trained at;
+1216x704 remains the quality sweet spot.
+
+### Spatial tiling (`--spatial-tile`)
+
+Past 2048px on an axis, stage-2 refinement runs over overlapping **latent
+tiles** instead of the whole frame. Each tile is denoised at a shape inside the
+trained span, with its RoPE positions renormalized so the tile looks like a
+sequence starting at zero and its own noise drawn from `seed + tile_index`, and
+the results are recombined with a separable trapezoidal window. The VAE decode
+is tiled the same way when a single frame is too large to decode in one pass.
+This is upstream's technique, from
+[`hdr_ic_lora.py`](https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/hdr_ic_lora.py).
+
+`--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` also reads)
+controls it:
+
+| Value              | Effect                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `auto` _(default)_ | Tile only past the 2048px trained span, and only decode-tile when the decode would not otherwise fit.   |
+| `off`              | Never tile. A shape past the trained span still renders, with degraded structure, and logs a warning.   |
+| `<px>`             | Force tiles of at most `<px>` on each spatial axis, with a 256px overlap. Multiples of 32, at least 64. |
+| `<px>:<overlap>`   | As above with an explicit overlap, also a multiple of 32 and smaller than the tile.                     |
+
+Because `auto` only engages past a span mold does not currently accept, no
+resolution that renders today changes. Forcing a tile size is mainly a way to
+compare a tiled render against an untiled one at a resolution that does not
+need it.
+
+Two things a tiled refinement gives up. Tiles are refined independently, so a
+structure crossing a seam is resolved by two passes that cannot see each other
+— wider overlaps hide more of this. And a tiled stage 2 refines **video only**,
+carrying stage 1's audio track through unrefined. This is upstream's own
+behaviour — each tile runs "a tile-sized `ModalitySpec` for video only (audio
+is omitted entirely for HDR)" — and the reason holds independently: a spatial
+tile carries no statement about an audio track, so refining one once per tile
+would denoise the same track once per tile with no defensible way to recombine
+the results.
 
 ## The prompt is optional for image-to-video
 

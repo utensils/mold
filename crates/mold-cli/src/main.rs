@@ -882,6 +882,19 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         offload: bool,
 
+        /// LTX-2 only: split spatial work into overlapping tiles.
+        /// `auto` (default) refines and decodes in tiles only past the
+        /// 2048-px span the checkpoints were trained on; `off` never tiles;
+        /// `<px>` or `<px>:<overlap>` (multiples of 32) forces that tile size.
+        /// Equivalent to MOLD_LTX2_SPATIAL_TILE, which `mold serve` reads.
+        #[arg(
+            long,
+            value_name = "off|auto|PX[:OVERLAP]",
+            env = "MOLD_LTX2_SPATIAL_TILE",
+            help_heading = "Advanced"
+        )]
+        spatial_tile: Option<String>,
+
         /// Place all text encoders (T5/CLIP/Qwen) on a specific device.
         /// Accepts `auto` (default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N`.
         /// Applied to every model family. CLI flag overrides
@@ -1427,6 +1440,25 @@ Examples:
     },
 }
 
+/// Republish `--spatial-tile` as `MOLD_LTX2_SPATIAL_TILE`.
+///
+/// Local inference reads spatial tiling through the frozen runtime
+/// environment, the same as every other memory knob, so a flag has to land
+/// there rather than travel down the generate call chain. Clap already reads
+/// the variable for the flag's default, so writing back is a no-op when the
+/// user set the variable instead of the flag.
+fn apply_spatial_tile_override(value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    if std::env::var("MOLD_LTX2_SPATIAL_TILE").as_deref() == Ok(value) {
+        return;
+    }
+    // SAFETY: called once from the command dispatch before any inference
+    // thread exists, matching how `serve` publishes `MOLD_HOST`.
+    unsafe { std::env::set_var("MOLD_LTX2_SPATIAL_TILE", value) };
+}
+
 #[tokio::main]
 async fn main() {
     // Install a panic hook that prints a friendly crash report with a link
@@ -1654,6 +1686,7 @@ async fn run() -> anyhow::Result<()> {
             cfg_plus,
             eager,
             offload,
+            spatial_tile,
             device_text_encoders,
             device_transformer,
             device_vae,
@@ -1677,6 +1710,8 @@ async fn run() -> anyhow::Result<()> {
             expand_model,
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
+            apply_spatial_tile_override(spatial_tile.as_deref());
+
             if let Some(ref path) = script {
                 return commands::chain::run_from_script(
                     path,
@@ -2542,6 +2577,24 @@ mod tests {
         match cli.command {
             Commands::Run { offload, .. } => assert!(offload),
             _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_spatial_tile_flag() {
+        // Absent means auto, which the engine treats as "only past the span
+        // the checkpoints were trained on".
+        match parse(&["run", "model", "test"]).command {
+            Commands::Run { spatial_tile, .. } => assert_eq!(spatial_tile, None),
+            _ => panic!("expected Run"),
+        }
+        for value in ["off", "auto", "1280", "1280:256"] {
+            match parse(&["run", "model", "test", "--spatial-tile", value]).command {
+                Commands::Run { spatial_tile, .. } => {
+                    assert_eq!(spatial_tile.as_deref(), Some(value))
+                }
+                _ => panic!("expected Run"),
+            }
         }
     }
 
