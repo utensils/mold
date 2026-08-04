@@ -331,7 +331,7 @@ Start the Discord bot, or run it in-process with `mold serve --discord`.
 mold discord
 ```
 
-The Discord bot exposes a smaller slash-command surface for generation,
+The Discord bot exposes slash commands for generation, durable LTX-2 sequences,
 expansion, model listing, and status. Advanced catalog, placement, and script
 authoring flows remain in the web UI/API. See [Discord Bot](/api/discord).
 

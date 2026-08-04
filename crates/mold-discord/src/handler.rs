@@ -1,7 +1,7 @@
 use crate::format::{self, EmbedData};
 use crate::state::Context;
 use anyhow::Result;
-use mold_core::{GenerateRequest, MoldClient, OutputFormat};
+use mold_core::{GenerateRequest, OutputFormat};
 use poise::serenity_prelude::{CreateAttachment, CreateEmbed};
 use std::time::Instant;
 
@@ -37,7 +37,10 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Spawn the streaming generation in a background task
-    let client_clone = MoldClient::new(client.host());
+    // Preserve the configured HTTP client (including its Authorization
+    // header). Reconstructing from only the host breaks every bot generation
+    // against an authenticated `mold serve`.
+    let client_clone = client.clone();
     let req_clone = req.clone();
     let gen_handle =
         tokio::spawn(async move { client_clone.generate_stream(&req_clone, progress_tx).await });
