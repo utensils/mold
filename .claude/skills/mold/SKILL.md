@@ -252,7 +252,7 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported. Legacy LTX-Video 13B BF16 still has no streaming transformer; CUDA runs preflight full-resident VRAM and fail before allocation when it cannot fit.
 
-**Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
+**Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature), `wav` (16-bit PCM, LTX-2 `--pipeline t2a` only).
 
 ### Joint Audio-Video Generation (LTX-2 / LTX-2.3)
 
@@ -280,9 +280,29 @@ mold run ltx-2.3-22b-distilled:fp8 "she says: the harbour freezes every winter" 
   --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448
 
 # Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid)
+# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid / t2a)
 mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
   --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
+
+# Text-to-audio: no video at all, WAV output
+mold run ltx-2.3-22b-dev:fp8 "heavy rain on a tin roof, distant thunder" \
+  --pipeline t2a --frames 121 --fps 24 --output rain.wav
 ```
+
+**Text-to-audio (`--pipeline t2a`)** renders audio only. Duration comes from
+`--frames` / `--fps` (121 @ 24 = 5.04 s), the output is a 16-bit PCM stereo WAV
+at the vocoder's rate (24 kHz, or 48 kHz with the bandwidth-extension stage),
+and `--format` defaults to `wav` — which in turn requires `t2a`. It needs a
+checkpoint that ships the audio VAE and vocoder, rejects every conditioning
+input and upscaler rather than ignoring them, and rejects `--modality-scale`
+other than `1.0` (there is no video branch to guide against). Auto-chaining
+never applies: a large `--frames` is a longer take, not more clips. `--batch N`
+renders N takes and writes each one as it lands under its own index. Steps default to
+the non-distilled schedule — 40 on 19B, 30 on 22B — and a smaller `--steps` is
+raised to that default with a message, because the family's 8-step video
+default renders hiss here. Only the `audio_*` half of the checkpoint is loaded,
+so it fits a 24 GB card without block streaming. Audio prints appear in the
+gallery with a rendered waveform tile and an **Audio** kind filter.
 
 **Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 
@@ -301,7 +321,7 @@ The five guidance flags (wire: an additive optional `guidance_overrides`
 object) each replace one per-(pipeline, stage) guider constant. Omitting a flag
 keeps its constant, so an unflagged request reproduces earlier outputs exactly.
 They are read only by pipelines that run the multimodal guider — `two-stage`,
-`two-stage-hq`, `keyframe`, `a2-vid` — never enable a guider a pipeline
+`two-stage-hq`, `keyframe`, `a2-vid`, `t2a` — never enable a guider a pipeline
 deliberately disables (`a2-vid` audio), and are ignored by chained/sequence
 renders, which say so instead of pretending the flag landed. Non-LTX-2
 families and out-of-range values are rejected with HTTP 422.

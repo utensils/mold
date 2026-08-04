@@ -38,6 +38,9 @@ const props = withDefaults(
     printHeight?: number;
     /** result — image URL and prebuilt mono caption. */
     resultSrc?: string;
+    /** result — playable WAV for an audio-only print; `resultSrc` is then the
+     * rendered waveform. Empty for every other kind of print. */
+    resultAudioSrc?: string;
     resultCaption?: string;
     /** error — server or transport failure copy. */
     error?: string;
@@ -193,7 +196,21 @@ watch(
       class="canvas__result ms-fade-up"
       data-test="canvas-result"
     >
-      <img class="canvas__img" :src="resultSrc" alt="Generated print" />
+      <img
+        v-if="resultSrc"
+        class="canvas__img"
+        :src="resultSrc"
+        :alt="
+          resultAudioSrc ? 'Waveform of the generated audio' : 'Generated print'
+        "
+      />
+      <audio
+        v-if="resultAudioSrc"
+        class="canvas__audio"
+        controls
+        :src="resultAudioSrc"
+        data-test="canvas-audio"
+      />
       <div class="canvas__caption" data-test="canvas-caption">
         {{ resultCaption }}
       </div>
@@ -404,6 +421,13 @@ watch(
   border-radius: 8px;
   border: 1px solid var(--edge);
   box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.6);
+  display: block;
+}
+
+.canvas__audio {
+  margin-top: 12px;
+  width: 100%;
+  max-width: 420px;
   display: block;
 }
 

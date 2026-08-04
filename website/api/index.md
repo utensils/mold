@@ -299,6 +299,39 @@ reference clip instead of the values you sent. Prefer it over the dimension
 header if you want to surface all of them; the streaming endpoints deliver the
 same list as `info` progress events.
 
+### Video and audio responses
+
+A video render returns the encoded clip itself, with `x-mold-video-frames`,
+`x-mold-video-fps`, `x-mold-video-width`, `x-mold-video-height`, and — when
+the container carries a soundtrack — `x-mold-video-has-audio`,
+`x-mold-video-duration-ms`, `x-mold-video-audio-sample-rate`, and
+`x-mold-video-audio-channels`.
+
+An audio-only render (`pipeline: "t2a"`) returns the WAV itself as
+`content-type: audio/wav`, never its waveform tile:
+
+```http
+HTTP/1.1 200 OK
+content-type: audio/wav
+x-mold-seed-used: 42
+x-mold-audio-format: wav
+x-mold-audio-sample-rate: 24000
+x-mold-audio-channels: 2
+x-mold-audio-duration-ms: 5010
+x-mold-audio-thumbnail-width: 640
+x-mold-audio-thumbnail-height: 360
+```
+
+`x-mold-audio-format` states the container the server actually produced — a
+request may omit `output_format` and let the server normalise an audio-only
+pipeline to `wav`, so the request is not evidence of what came back.
+
+The two `x-mold-audio-thumbnail-*` headers describe the waveform PNG the
+server rendered for gallery grids — audio has no dimensions of its own, and
+the tile's bytes cannot ride along in a body that is already the WAV. Probe
+`x-mold-audio-sample-rate` before the video headers: an audio print has no
+frames, so a video-shaped probe falls through and mislabels the response.
+
 ## Generate Request Shape
 
 ```json
@@ -394,6 +427,7 @@ Important fields:
 | `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`.                        |
 | `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.                                   |
 | `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`)            |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `t2a`)                |
 | `ic_lora_control`                                   | Canonical official control ID (`union`, `motion-track`, `pose`, or `detailer`). Implies `pipeline=ic-lora`, requires source video, and precedes custom `loras[]`.       |
 | `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                                                    |
 | `guidance_overrides`                                | Additive LTX-2 multimodal-guider overrides: `stg_scale`, `stg_blocks[]`, `rescale_scale`, `modality_scale`, `skip_step`. Each omitted field keeps the pipeline default. |

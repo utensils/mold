@@ -4169,6 +4169,11 @@ impl App {
                     OutputFormat::Apng => OutputFormat::Webp,
                     OutputFormat::Webp => OutputFormat::Mp4,
                     OutputFormat::Mp4 => OutputFormat::Png,
+                    // `wav` is not in the cycle: it is only valid for the
+                    // LTX-2 text-to-audio pipeline, which the Create form has
+                    // no control for. Cycling exits back to the raster start
+                    // rather than offering a format that would 422.
+                    OutputFormat::Wav => OutputFormat::Png,
                 };
                 if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
                     p.enable_audio = None;
@@ -9657,6 +9662,7 @@ mod tests {
 
         // Inject a GenerationComplete with model A (the model that actually ran)
         let response = GenerateResponse {
+            audio: None,
             images: vec![mold_core::ImageData {
                 data: vec![0u8; 4],
                 format: OutputFormat::Png,
@@ -9720,6 +9726,7 @@ mod tests {
             };
 
             let response = GenerateResponse {
+                audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],
                     format: OutputFormat::Png,
@@ -9771,6 +9778,7 @@ mod tests {
             app.generate.prompt = TextArea::from(["a timeline test"]);
 
             let response = GenerateResponse {
+                audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![0u8; 4],
                     format: OutputFormat::Png,

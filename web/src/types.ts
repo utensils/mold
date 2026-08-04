@@ -8,7 +8,8 @@ import type {
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
-export type OutputFormat = "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4";
+export type OutputFormat =
+  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
 
 export type SeedMode = "random" | "static" | "increment";
 
@@ -21,8 +22,8 @@ export type Ltx2PipelineMode =
   | "keyframe"
   | "a2-vid"
   | "retake"
-  | "lip-dub";
-
+  | "lip-dub"
+  | "t2a";
 export type Ltx2SpatialUpscale = "x1-5" | "x2";
 export type Ltx2TemporalUpscale = "x2";
 
@@ -103,9 +104,10 @@ export interface GalleryImage {
   metadata_synthetic?: boolean;
 }
 
-export type MediaKind = "image" | "animated" | "video";
+export type MediaKind = "image" | "animated" | "video" | "audio";
 
 export const VIDEO_FORMATS: ReadonlyArray<OutputFormat> = ["mp4"];
+export const AUDIO_FORMATS: ReadonlyArray<OutputFormat> = ["wav"];
 export const ANIMATED_FORMATS: ReadonlyArray<OutputFormat> = [
   "gif",
   "apng",
@@ -118,6 +120,7 @@ export function mediaKind(
 ): MediaKind {
   const resolved = fmt ?? inferFormatFromName(filename);
   if (resolved && VIDEO_FORMATS.includes(resolved)) return "video";
+  if (resolved && AUDIO_FORMATS.includes(resolved)) return "audio";
   if (resolved && ANIMATED_FORMATS.includes(resolved)) return "animated";
   return "image";
 }
@@ -162,6 +165,7 @@ export interface ServerCapabilities {
 export function inferFormatFromName(filename: string): OutputFormat | null {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".mp4")) return "mp4";
+  if (lower.endsWith(".wav")) return "wav";
   if (lower.endsWith(".gif")) return "gif";
   if (lower.endsWith(".apng")) return "apng";
   if (lower.endsWith(".webp")) return "webp";
@@ -440,6 +444,14 @@ export interface SseCompleteEvent {
   video_duration_ms?: number | null;
   video_audio_sample_rate?: number | null;
   video_audio_channels?: number | null;
+  /** Audio-only completion (`pipeline: "t2a"`). `image` then carries the WAV
+   * itself, not a raster — probe these before the `video_*` fields, since an
+   * audio print has no frames and would otherwise read as a still. */
+  audio_sample_rate?: number | null;
+  audio_channels?: number | null;
+  audio_duration_ms?: number | null;
+  /** Rendered waveform PNG, base64. The only image an audio print has. */
+  audio_thumbnail?: string | null;
   gpu?: number | null;
 }
 

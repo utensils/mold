@@ -564,6 +564,14 @@ fn child_metadata(template: &OutputMetadata, child_index: u32, seed: u64) -> Out
 }
 
 fn media_bytes(result: &GenerationJobResult) -> &[u8] {
+    // Audio is probed first because an audio print's `result.image` is the
+    // waveform tile the queue synthesizes so the SSE and gallery pipelines
+    // have a raster to lay out. `batch_records` already named this child
+    // `.wav` from the request's resolved format, so a video-or-image probe
+    // commits PNG bytes under a WAV filename.
+    if let Some(audio) = result.response.audio.as_ref() {
+        return audio.data.as_slice();
+    }
     result
         .response
         .video
@@ -592,7 +600,14 @@ fn completed_record(
     result: &GenerationJobResult,
 ) -> GenerationRecord {
     let mut metadata = child_metadata(metadata_template, child_index, result.response.seed_used);
-    let format = if let Some(video) = &result.response.video {
+    let format = if let Some(audio) = &result.response.audio {
+        // Audio has no dimensions of its own; record the waveform tile's, so
+        // the gallery grid lays the row out with a real aspect ratio instead
+        // of the request's (meaningless) video shape. Frames/fps stay unset —
+        // a WAV has neither, and `isVideoItem` keys off `video_frames`.
+        metadata.apply_output_dimensions(audio.thumbnail_width, audio.thumbnail_height);
+        audio.format
+    } else if let Some(video) = &result.response.video {
         metadata.width = video.width;
         metadata.height = video.height;
         metadata.frames = Some(video.frames);
@@ -683,6 +698,13 @@ fn stage_batch_result_auxiliaries(
     lease: &BatchChildLease,
     result: &GenerationJobResult,
 ) -> anyhow::Result<()> {
+    if let Some(audio) = result.response.audio.as_ref() {
+        // The waveform tile is the only raster an audio print has, and it
+        // commits to the same `cache/thumbnails/<final_name>.png` the single
+        // -job path writes. There is no animated preview for a WAV.
+        attempt.stage_video_auxiliaries(lease, &audio.thumbnail, &[])?;
+        return Ok(());
+    }
     if let Some(video) = result.response.video.as_ref() {
         attempt.stage_video_auxiliaries(lease, &video.thumbnail, &video.gif_preview)?;
     }
@@ -690,6 +712,13 @@ fn stage_batch_result_auxiliaries(
 }
 
 fn compact_batch_result(mut result: GenerationJobResult) -> CompactBatchResult {
+    if let Some(audio) = result.response.audio.as_mut() {
+        // Compaction exists so a wide batch does not hold every child's media
+        // in memory at once. A WAV is the largest thing an audio child owns,
+        // so leaving it resident would defeat the whole mechanism.
+        audio.data.clear();
+        audio.thumbnail.clear();
+    }
     if let Some(video) = result.response.video.as_mut() {
         video.data.clear();
         video.thumbnail.clear();
@@ -736,6 +765,18 @@ fn hydrate_batch_result(
     }
     let media = std::fs::read(output_dir.join(filename))
         .with_context(|| format!("reading committed batch output {filename}"))?;
+    if let Some(audio) = compact.response.audio.as_mut() {
+        audio.data = media;
+        audio.thumbnail = std::fs::read(video_thumbnail_path(filename)).unwrap_or_default();
+        // The raster slot keeps carrying the waveform tile, exactly as the
+        // single-job path leaves it: audio has no image of its own, and every
+        // consumer downstream reads `image` as "something to lay out".
+        compact.image.data = audio.thumbnail.clone();
+        return Ok(GenerationJobResult {
+            response: compact.response,
+            image: compact.image,
+        });
+    }
     if let Some(video) = compact.response.video.as_mut() {
         video.data = media;
         video.thumbnail = std::fs::read(video_thumbnail_path(filename)).unwrap_or_default();
@@ -1622,6 +1663,7 @@ mod tests {
     fn committed_video_batch_retains_preview_under_final_gallery_name() {
         let result = GenerationJobResult {
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: Some(mold_core::VideoData {
                     data: b"mp4".to_vec(),
@@ -1657,12 +1699,130 @@ mod tests {
         assert_eq!(bytes, b"GIF89a");
     }
 
+    fn audio_job_result(wav: &[u8], waveform: &[u8]) -> GenerationJobResult {
+        GenerationJobResult {
+            response: mold_core::GenerateResponse {
+                audio: Some(mold_core::AudioData {
+                    data: wav.to_vec(),
+                    format: mold_core::OutputFormat::Wav,
+                    sample_rate: 24_000,
+                    channels: 2,
+                    duration_ms: 5_010,
+                    thumbnail: waveform.to_vec(),
+                    thumbnail_width: 640,
+                    thumbnail_height: 360,
+                }),
+                images: Vec::new(),
+                video: None,
+                generation_time_ms: 1,
+                model: "ltx-2-19b-dev:fp8".to_string(),
+                seed_used: 7,
+                gpu: Some(0),
+            },
+            // What the queue synthesizes so the SSE and gallery pipelines have
+            // a raster: the waveform tile, never the artifact.
+            image: mold_core::ImageData {
+                data: waveform.to_vec(),
+                format: mold_core::OutputFormat::Png,
+                width: 640,
+                height: 360,
+                index: 0,
+            },
+        }
+    }
+
+    /// `batch_records` names an audio child `.wav` from the request's resolved
+    /// format. Staging `result.image` therefore committed the waveform PNG
+    /// under that name — a corrupt gallery artifact, recorded as an image.
+    #[test]
+    fn server_owned_audio_batch_commits_the_wav_not_its_waveform() {
+        let result = audio_job_result(b"RIFF....WAVEfmt ", b"\x89PNG");
+        assert_eq!(
+            media_bytes(&result),
+            b"RIFF....WAVEfmt ",
+            "the committed bytes must be the artifact the child rendered",
+        );
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "heavy rain on a tin roof",
+            "model": "ltx-2-19b-dev:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 40,
+            "batch_size": 2,
+            "seed": 7,
+            "frames": 121,
+            "fps": 24,
+            "pipeline": "t2a",
+            "output_format": "wav"
+        }))
+        .unwrap();
+        let template = batch_metadata_template("parent", &request, 7);
+        let record = completed_record(
+            Path::new("/gallery"),
+            "ltx-2-19b-dev-1700000000-0.wav",
+            &template,
+            0,
+            &result,
+        );
+        assert_eq!(
+            record.format,
+            mold_core::OutputFormat::Wav,
+            "the gallery row must agree with the filename and the bytes",
+        );
+        assert_eq!(
+            (record.metadata.width, record.metadata.height),
+            (640, 360),
+            "audio has no dimensions; the waveform tile's are what the grid lays out",
+        );
+        // `frames` stays: for t2a it is the duration the user asked for, not a
+        // render shape, and the single-job path records it too. Nothing reads
+        // it as "this is a video" — that is `video_frames`, a separate field.
+        assert_eq!(record.metadata.frames, Some(121));
+    }
+
+    /// Compaction exists so a wide batch does not hold every child's media
+    /// resident. A WAV is the largest thing an audio child owns.
+    #[test]
+    fn compacting_an_audio_batch_child_releases_its_wav() {
+        let compact = compact_batch_result(audio_job_result(b"RIFF-large", b"\x89PNG"));
+        let audio = compact
+            .response
+            .audio
+            .expect("the slot itself must survive");
+        assert!(audio.data.is_empty(), "the WAV must not stay resident");
+        assert!(audio.thumbnail.is_empty(), "nor its waveform tile");
+        assert_eq!(
+            audio.sample_rate, 24_000,
+            "the metadata is what compaction keeps"
+        );
+    }
+
+    #[test]
+    fn hydrating_an_audio_batch_child_reads_the_committed_wav_back() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("child.wav"), b"RIFF-committed").unwrap();
+        let compact = compact_batch_result(audio_job_result(b"RIFF-committed", b"\x89PNG"));
+
+        let hydrated = hydrate_batch_result(directory.path(), "child.wav", compact, true).unwrap();
+        let audio = hydrated
+            .response
+            .audio
+            .expect("audio must survive hydration");
+        assert_eq!(audio.data, b"RIFF-committed".to_vec());
+        assert!(
+            hydrated.response.images.is_empty(),
+            "an audio child must never be hydrated into the image list",
+        );
+    }
+
     #[test]
     fn json_batch_hydrates_primary_still_when_worker_response_images_are_empty() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("child.png"), b"committed-image").unwrap();
         let compact = CompactBatchResult {
             response: mold_core::GenerateResponse {
+                audio: None,
                 images: Vec::new(),
                 video: None,
                 generation_time_ms: 1,

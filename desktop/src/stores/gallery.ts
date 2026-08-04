@@ -4,6 +4,7 @@ import {
   evictHostMedia,
   evictMedia,
   galleryMediaPath,
+  isAudioItem,
   isVideoItem,
   type GallerySource,
 } from "../lib/gallery/media";
@@ -60,13 +61,14 @@ export interface GalleryChip {
 }
 
 /** Media-kind chip filter: everything, stills only, or video only. */
-export type GalleryKindFilter = "all" | "image" | "video";
+export type GalleryKindFilter = "all" | "image" | "video" | "audio";
 
 /** Per-kind counts over the host-chip-filtered set (kind chip labels). */
 export interface GalleryKindCounts {
   all: number;
   image: number;
   video: number;
+  audio: number;
 }
 
 const emptyBucket = (): GalleryBucket => ({
@@ -261,8 +263,14 @@ export const useGalleryStore = defineStore("gallery", {
     filtered(): MergedPrint[] {
       let entries = this.hostFiltered;
       if (this.mediaKind !== "all") {
-        const wantVideo = this.mediaKind === "video";
-        entries = entries.filter((e) => isVideoItem(e.item) === wantVideo);
+        // Three disjoint kinds, not a video/not-video split: an audio print
+        // has no frames and must not fall into the Images bucket.
+        const kind = this.mediaKind;
+        entries = entries.filter((e) => {
+          if (isAudioItem(e.item)) return kind === "audio";
+          if (isVideoItem(e.item)) return kind === "video";
+          return kind === "image";
+        });
       }
       const q = this.query.trim().toLowerCase();
       if (q) {
@@ -275,14 +283,23 @@ export const useGalleryStore = defineStore("gallery", {
       }
       return entries;
     },
-    /** Per-kind counts for the All/Images/Video chips. Computed over the
-     *  host-chip-filtered set only, so chip labels stay stable while the
+    /** Per-kind counts for the All/Images/Video/Audio chips. Computed over
+     *  the host-chip-filtered set only, so chip labels stay stable while the
      *  kind chip or search narrows the grid. */
     kindCounts(): GalleryKindCounts {
       const entries = this.hostFiltered;
       let video = 0;
-      for (const e of entries) if (isVideoItem(e.item)) video++;
-      return { all: entries.length, image: entries.length - video, video };
+      let audio = 0;
+      for (const e of entries) {
+        if (isAudioItem(e.item)) audio++;
+        else if (isVideoItem(e.item)) video++;
+      }
+      return {
+        all: entries.length,
+        image: entries.length - video - audio,
+        video,
+        audio,
+      };
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {

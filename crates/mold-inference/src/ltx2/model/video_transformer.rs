@@ -16,7 +16,7 @@ use crate::ltx2::lora::{LinearLoraAdapter, Ltx2LoraRegistry};
 
 use super::rope::LtxRopeType;
 
-fn ltx2_block_debug_enabled() -> bool {
+pub(crate) fn ltx2_block_debug_enabled() -> bool {
     std::env::var_os("MOLD_LTX2_DEBUG_BLOCKS").is_some()
 }
 
@@ -30,11 +30,11 @@ fn ltx2_block_detail_enabled(index: usize) -> bool {
     ltx2_block_detail_target() == Some(index)
 }
 
-fn ltx2_load_debug_enabled() -> bool {
+pub(crate) fn ltx2_load_debug_enabled() -> bool {
     crate::runtime_env::value("MOLD_LTX2_DEBUG_LOAD_BLOCKS").is_some()
 }
 
-fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
+pub(crate) fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
     let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
     let mean = flat.mean_all()?.to_scalar::<f32>()?;
     let abs_mean = flat.abs()?.mean_all()?.to_scalar::<f32>()?;
@@ -42,7 +42,7 @@ fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
     Ok((mean, abs_mean, abs_max))
 }
 
-fn log_detail_tensor(index: usize, label: &str, xs: &Tensor) -> Result<()> {
+pub(crate) fn log_detail_tensor(index: usize, label: &str, xs: &Tensor) -> Result<()> {
     if !ltx2_block_detail_enabled(index) {
         return Ok(());
     }
@@ -234,7 +234,7 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-enum LtxLinear {
+pub(crate) enum LtxLinear {
     Standard {
         linear: nn::Linear,
         adapters: Vec<LinearLoraAdapter>,
@@ -308,7 +308,7 @@ impl LtxLinear {
         Self::load_with_nvfp4_cache(in_dim, out_dim, has_bias, vb, adapters, None, None)
     }
 
-    fn load_with_nvfp4_cache(
+    pub(crate) fn load_with_nvfp4_cache(
         in_dim: usize,
         out_dim: usize,
         has_bias: bool,
@@ -469,7 +469,10 @@ fn apply_linear_loras(
     Ok(out)
 }
 
-fn lora_adapters_for(registry: Option<&Ltx2LoraRegistry>, key: &str) -> Vec<LinearLoraAdapter> {
+pub(crate) fn lora_adapters_for(
+    registry: Option<&Ltx2LoraRegistry>,
+    key: &str,
+) -> Vec<LinearLoraAdapter> {
     registry
         .map(|registry| registry.adapters_for(key))
         .unwrap_or_default()
@@ -2598,7 +2601,7 @@ impl Ltx2VideoTransformer3DModel {
     }
 }
 
-fn rms_norm_tensor(xs: &Tensor, eps: f64) -> Result<Tensor> {
+pub(crate) fn rms_norm_tensor(xs: &Tensor, eps: f64) -> Result<Tensor> {
     let dtype = xs.dtype();
     let xs_f32 = xs.to_dtype(DType::F32)?;
     let dim = xs_f32.dim(D::Minus1)? as f64;
@@ -2617,7 +2620,11 @@ fn rms_norm_tensor(xs: &Tensor, eps: f64) -> Result<Tensor> {
 /// narrow a few components out of it costs a full extra activation (~650 MB at
 /// LTX-2 stage-2 shapes, twice per block). Slicing the component first keeps each
 /// result at `[batch, tokens, dim]`.
-fn ada_component(scale_shift_table: &Tensor, timestep: &Tensor, index: usize) -> Result<Tensor> {
+pub(crate) fn ada_component(
+    scale_shift_table: &Tensor,
+    timestep: &Tensor,
+    index: usize,
+) -> Result<Tensor> {
     let dim = scale_shift_table.dim(1)?;
     let width = timestep.dim(D::Minus1)?;
     if !width.is_multiple_of(dim) || (index + 1) * dim > width {
@@ -2642,7 +2649,7 @@ fn broadcast_to_tokens(values: &Tensor, tokens: usize) -> Result<Tensor> {
     }
 }
 
-fn modulate_tokens(x: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor> {
+pub(crate) fn modulate_tokens(x: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor> {
     // Fold the identity into `scale` before broadcasting: `Tensor::ones_like` on
     // a token-broadcast view materializes a full-size activation for nothing.
     let scale = if scale.dtype() == x.dtype() {
@@ -2659,7 +2666,7 @@ fn modulate_tokens(x: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor>
         .broadcast_add(&shift)
 }
 
-fn gate_tokens(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+pub(crate) fn gate_tokens(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
     let gate = broadcast_to_tokens(gate, x.dim(1)?)?;
     let gate = if gate.dtype() == x.dtype() {
         gate
@@ -2670,27 +2677,27 @@ fn gate_tokens(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
 }
 
 #[derive(Clone, Debug)]
-struct LtxPreparedModality {
-    x: Tensor,
-    context: Tensor,
-    context_mask: Option<Tensor>,
-    self_attention_mask: Option<Tensor>,
-    timesteps: Tensor,
-    embedded_timestep: Tensor,
-    rope: (Tensor, Tensor),
-    cross_rope: Option<(Tensor, Tensor)>,
-    cross_scale_shift_timestep: Option<Tensor>,
-    cross_gate_timestep: Option<Tensor>,
-    prompt_timestep: Option<Tensor>,
+pub(crate) struct LtxPreparedModality {
+    pub(crate) x: Tensor,
+    pub(crate) context: Tensor,
+    pub(crate) context_mask: Option<Tensor>,
+    pub(crate) self_attention_mask: Option<Tensor>,
+    pub(crate) timesteps: Tensor,
+    pub(crate) embedded_timestep: Tensor,
+    pub(crate) rope: (Tensor, Tensor),
+    pub(crate) cross_rope: Option<(Tensor, Tensor)>,
+    pub(crate) cross_scale_shift_timestep: Option<Tensor>,
+    pub(crate) cross_gate_timestep: Option<Tensor>,
+    pub(crate) prompt_timestep: Option<Tensor>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct LtxPreparedModalityStatic {
-    context: Tensor,
-    context_mask: Option<Tensor>,
-    self_attention_mask: Option<Tensor>,
-    rope: (Tensor, Tensor),
-    cross_rope: Option<(Tensor, Tensor)>,
+    pub(crate) context: Tensor,
+    pub(crate) context_mask: Option<Tensor>,
+    pub(crate) self_attention_mask: Option<Tensor>,
+    pub(crate) rope: (Tensor, Tensor),
+    pub(crate) cross_rope: Option<(Tensor, Tensor)>,
 }
 
 #[derive(Clone, Debug)]
@@ -2700,7 +2707,7 @@ pub(crate) struct LtxPreparedStaticInputs {
 }
 
 #[derive(Clone, Debug)]
-struct LtxAvTransformerBlock {
+pub(crate) struct LtxAvTransformerBlock {
     video_attn1: LtxAttention,
     video_attn2: LtxAttention,
     video_ff: FeedForward,
@@ -2720,7 +2727,7 @@ struct LtxAvTransformerBlock {
 }
 
 impl LtxAvTransformerBlock {
-    fn new(
+    pub(crate) fn new(
         config: &Ltx2VideoTransformer3DModelConfig,
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
@@ -2973,7 +2980,7 @@ impl LtxAvTransformerBlock {
         )
     }
 
-    fn forward(
+    pub(crate) fn forward(
         &self,
         index: usize,
         video: Option<&LtxPreparedModality>,
@@ -3707,7 +3714,10 @@ impl Ltx2AvTransformer3DModel {
         )
     }
 
-    fn prepare_context_mask(mask: Option<&Tensor>, dtype: DType) -> Result<Option<Tensor>> {
+    pub(crate) fn prepare_context_mask(
+        mask: Option<&Tensor>,
+        dtype: DType,
+    ) -> Result<Option<Tensor>> {
         match mask {
             Some(mask) if mask.rank() == 2 => Ok(Some(
                 (mask.to_dtype(dtype)?.affine(-1.0, 1.0)? * (-10000.0))?.unsqueeze(1)?,
@@ -3717,7 +3727,10 @@ impl Ltx2AvTransformer3DModel {
         }
     }
 
-    fn prepare_self_attention_mask(mask: Option<&Tensor>, dtype: DType) -> Result<Option<Tensor>> {
+    pub(crate) fn prepare_self_attention_mask(
+        mask: Option<&Tensor>,
+        dtype: DType,
+    ) -> Result<Option<Tensor>> {
         match mask {
             Some(mask) => {
                 let mask_f32 = mask.to_dtype(DType::F32)?;
@@ -3746,7 +3759,7 @@ impl Ltx2AvTransformer3DModel {
         positions.i((.., 0..1, .., ..))
     }
 
-    fn reshape_adaln_output(output: &Tensor, batch: usize) -> Result<Tensor> {
+    pub(crate) fn reshape_adaln_output(output: &Tensor, batch: usize) -> Result<Tensor> {
         let (rows, dim) = output.dims2()?;
         if rows % batch != 0 {
             candle_core::bail!(
@@ -3890,7 +3903,7 @@ impl Ltx2AvTransformer3DModel {
         Self::reshape_adaln_output(&output, batch)
     }
 
-    fn process_output(
+    pub(crate) fn process_output(
         scale_shift_table: &Tensor,
         norm_out: &LayerNormNoParams,
         proj_out: &LtxLinear,
@@ -4206,7 +4219,7 @@ impl Ltx2AvTransformer3DModel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -4591,7 +4604,7 @@ mod tests {
         insert_linear(tensors, &format!("{prefix}.net.2"), dim, dim * 4, fp8);
     }
 
-    fn insert_av_block(
+    pub(crate) fn insert_av_block(
         tensors: &mut HashMap<String, Tensor>,
         prefix: &str,
         config: &Ltx2VideoTransformer3DModelConfig,
@@ -4624,10 +4637,19 @@ mod tests {
         insert_matrix(
             tensors,
             &format!("{prefix}.scale_shift_table"),
-            6,
+            if config.cross_attention_adaln { 9 } else { 6 },
             video_dim,
             prefix.len(),
         );
+        if config.cross_attention_adaln {
+            insert_matrix(
+                tensors,
+                &format!("{prefix}.prompt_scale_shift_table"),
+                2,
+                video_dim,
+                prefix.len() + 1,
+            );
+        }
 
         insert_attention(
             tensors,
@@ -4653,10 +4675,19 @@ mod tests {
         insert_matrix(
             tensors,
             &format!("{prefix}.audio_scale_shift_table"),
-            6,
+            if config.cross_attention_adaln { 9 } else { 6 },
             audio_dim,
             prefix.len() + 3,
         );
+        if config.cross_attention_adaln {
+            insert_matrix(
+                tensors,
+                &format!("{prefix}.audio_prompt_scale_shift_table"),
+                2,
+                audio_dim,
+                prefix.len() + 4,
+            );
+        }
 
         insert_attention(
             tensors,
@@ -4694,7 +4725,7 @@ mod tests {
         );
     }
 
-    fn tiny_av_config() -> Ltx2VideoTransformer3DModelConfig {
+    pub(crate) fn tiny_av_config() -> Ltx2VideoTransformer3DModelConfig {
         Ltx2VideoTransformer3DModelConfig {
             in_channels: 2,
             out_channels: 2,
@@ -4733,11 +4764,23 @@ mod tests {
         av_transformer_var_builder_with_options(tiny_av_config(), false)
     }
 
-    fn av_transformer_var_builder_with_options(
+    pub(crate) fn av_transformer_var_builder_with_options(
         config: Ltx2VideoTransformer3DModelConfig,
         nvfp4_outputs: bool,
     ) -> VarBuilder<'static> {
-        let device = Device::Cpu;
+        VarBuilder::from_tensors(
+            av_transformer_tensors(config, nvfp4_outputs),
+            DType::F32,
+            &Device::Cpu,
+        )
+    }
+
+    /// The raw weight map behind [`av_transformer_var_builder_with_options`].
+    /// Exposed so tests can assert which subset of keys a loader touches.
+    pub(crate) fn av_transformer_tensors(
+        config: Ltx2VideoTransformer3DModelConfig,
+        nvfp4_outputs: bool,
+    ) -> HashMap<String, Tensor> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
         let mut tensors = HashMap::new();
@@ -4821,10 +4864,10 @@ mod tests {
         insert_av_block(&mut tensors, "transformer_blocks.0", &config, false);
         insert_av_block(&mut tensors, "transformer_blocks.1", &config, true);
 
-        VarBuilder::from_tensors(tensors, DType::F32, &device)
+        tensors
     }
 
-    fn assert_tensors_close(lhs: &Tensor, rhs: &Tensor, tolerance: f32) {
+    pub(crate) fn assert_tensors_close(lhs: &Tensor, rhs: &Tensor, tolerance: f32) {
         let diff = lhs
             .to_dtype(DType::F32)
             .unwrap()

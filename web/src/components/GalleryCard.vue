@@ -126,7 +126,7 @@ const aspectStyle = computed(() => {
   const w = props.item.metadata.width;
   const h = props.item.metadata.height;
   if (w > 0 && h > 0) return { aspectRatio: `${w} / ${h}` };
-  return kind.value === "video"
+  return kind.value === "video" || kind.value === "audio"
     ? { aspectRatio: "16 / 9" }
     : { aspectRatio: "1 / 1" };
 });
@@ -345,6 +345,15 @@ function onRecreate(evt: Event) {
           <path d="M8 5v14l11-7z" />
         </svg>
         <svg
+          v-else-if="kind === 'audio'"
+          class="h-3 w-3"
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
+        </svg>
+        <svg
           v-else
           class="h-3 w-3"
           viewBox="0 0 24 24"
@@ -356,7 +365,7 @@ function onRecreate(evt: Event) {
         >
           <path d="M3 12a9 9 0 1 1 18 0" />
         </svg>
-        {{ kind === "video" ? "video" : "anim" }}
+        {{ kind === "video" ? "video" : kind === "audio" ? "audio" : "anim" }}
       </div>
 
       <!-- Format chip (top-right) -->

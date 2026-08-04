@@ -5,9 +5,9 @@ use crate::chain_job::{
 };
 use crate::error::MoldError;
 use crate::types::{
-    DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
-    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    AudioData, DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest,
+    GenerateResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
+    QueueListingWire, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -99,11 +99,45 @@ impl MoldClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<usize>().ok());
 
+        // Detect an audio-only response before the video probe: an audio print
+        // has no frames, so a video-shaped probe falls through to the image
+        // branch and hands the caller WAV bytes labelled as an image.
+        let audio_meta = parse_audio_headers(resp.headers());
         // Detect video response via x-mold-video-frames header
         let video_meta = parse_video_headers(resp.headers());
 
         let data = resp.bytes().await?.to_vec();
         let generation_time_ms = start.elapsed().as_millis() as u64;
+
+        if let Some(meta) = audio_meta {
+            return Ok(GenerateResponse {
+                audio: Some(AudioData {
+                    data,
+                    // The request's format only stands in for an older server
+                    // that predates the header; an audio-only response is
+                    // never the still-image default the request may carry.
+                    format: meta.format.unwrap_or(if format.is_audio() {
+                        format
+                    } else {
+                        OutputFormat::Wav
+                    }),
+                    sample_rate: meta.sample_rate,
+                    channels: meta.channels,
+                    duration_ms: meta.duration_ms,
+                    // The waveform tile cannot ride along in a body that is
+                    // already the WAV. Only its recorded size travels.
+                    thumbnail: Vec::new(),
+                    thumbnail_width: meta.thumbnail_width,
+                    thumbnail_height: meta.thumbnail_height,
+                }),
+                images: Vec::new(),
+                video: None,
+                generation_time_ms,
+                model,
+                seed_used,
+                gpu,
+            });
+        }
 
         let video = video_meta.map(|meta| VideoData {
             data: data.clone(),
@@ -134,6 +168,7 @@ impl MoldClient {
         };
 
         Ok(GenerateResponse {
+            audio: None,
             images,
             generation_time_ms,
             model,
@@ -324,6 +359,37 @@ impl MoldClient {
                             complete.model
                         };
 
+                        // Detect an audio-only response via `audio_sample_rate`.
+                        // Checked before video: an audio print has no frames,
+                        // so the video probe below would fall through to the
+                        // image branch and hand the caller WAV bytes labelled
+                        // as an image.
+                        if let Some(sample_rate) = complete.audio_sample_rate {
+                            let thumbnail = complete
+                                .audio_thumbnail
+                                .as_deref()
+                                .and_then(|s| b64.decode(s).ok())
+                                .unwrap_or_default();
+                            return Ok(Some(GenerateResponse {
+                                images: Vec::new(),
+                                video: None,
+                                audio: Some(AudioData {
+                                    data: payload,
+                                    format: complete.format,
+                                    sample_rate,
+                                    channels: complete.audio_channels.unwrap_or(1),
+                                    duration_ms: complete.audio_duration_ms.unwrap_or(0),
+                                    thumbnail,
+                                    thumbnail_width: complete.width,
+                                    thumbnail_height: complete.height,
+                                }),
+                                generation_time_ms: complete.generation_time_ms,
+                                model,
+                                seed_used: complete.seed_used,
+                                gpu: complete.gpu,
+                            }));
+                        }
+
                         // Detect video response via video_frames field
                         let (images, video) = if let (Some(frames), Some(fps)) =
                             (complete.video_frames, complete.video_fps)
@@ -365,6 +431,7 @@ impl MoldClient {
                         };
 
                         return Ok(Some(GenerateResponse {
+                            audio: None,
                             images,
                             generation_time_ms: complete.generation_time_ms,
                             model,
@@ -1189,6 +1256,46 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
     })
 }
 
+struct AudioMeta {
+    format: Option<OutputFormat>,
+    sample_rate: u32,
+    channels: u32,
+    duration_ms: u64,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
+}
+
+/// Parse audio metadata from HTTP response headers.
+///
+/// Returns `Some` when `x-mold-audio-sample-rate` is present, indicating an
+/// audio-only response. Probed before the video headers for the same reason
+/// the SSE branch probes `audio_sample_rate` first: an audio print has no
+/// frames, so a video-shaped probe would fall through to the image branch and
+/// hand the caller WAV bytes labelled as an image.
+fn parse_audio_headers(headers: &reqwest::header::HeaderMap) -> Option<AudioMeta> {
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+    let sample_rate = read("x-mold-audio-sample-rate")? as u32;
+    Some(AudioMeta {
+        // Stated by the server, because a request that omitted
+        // `output_format` was normalised server-side and is no evidence of
+        // what came back.
+        format: headers
+            .get("x-mold-audio-format")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<OutputFormat>().ok()),
+        sample_rate,
+        channels: read("x-mold-audio-channels").unwrap_or(1) as u32,
+        duration_ms: read("x-mold-audio-duration-ms").unwrap_or(0),
+        thumbnail_width: read("x-mold-audio-thumbnail-width").unwrap_or(0) as u32,
+        thumbnail_height: read("x-mold-audio-thumbnail-height").unwrap_or(0) as u32,
+    })
+}
+
 fn next_sse_event(buffer: &mut String) -> Option<String> {
     for separator in ["\r\n\r\n", "\n\n"] {
         if let Some(pos) = buffer.find(separator) {
@@ -1741,6 +1848,57 @@ mod tests {
         let event = next_sse_event(&mut buffer).expect("expected one event");
         assert!(event.contains("event: progress"));
         assert_eq!(buffer, "rest");
+    }
+
+    // ── Audio header parsing tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_audio_headers_returns_none_for_a_still_or_a_clip() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(parse_audio_headers(&headers).is_none());
+
+        // A clip that happens to carry an audio track is still a video: only
+        // the audio-only headers may promote a response to `AudioData`.
+        headers.insert("x-mold-video-frames", "97".parse().unwrap());
+        headers.insert("x-mold-video-audio-sample-rate", "48000".parse().unwrap());
+        assert!(parse_audio_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn parse_audio_headers_reads_the_audio_only_shape() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-audio-format", "wav".parse().unwrap());
+        headers.insert("x-mold-audio-sample-rate", "24000".parse().unwrap());
+        headers.insert("x-mold-audio-channels", "2".parse().unwrap());
+        headers.insert("x-mold-audio-duration-ms", "5010".parse().unwrap());
+        headers.insert("x-mold-audio-thumbnail-width", "640".parse().unwrap());
+        headers.insert("x-mold-audio-thumbnail-height", "360".parse().unwrap());
+
+        let meta = parse_audio_headers(&headers).expect("should detect audio");
+        assert_eq!(meta.format, Some(OutputFormat::Wav));
+        assert_eq!(meta.sample_rate, 24_000);
+        assert_eq!(meta.channels, 2);
+        assert_eq!(meta.duration_ms, 5_010);
+        assert_eq!(meta.thumbnail_width, 640);
+        assert_eq!(meta.thumbnail_height, 360);
+    }
+
+    /// An older server that grew the sample-rate header before the rest must
+    /// still produce a usable response rather than none at all.
+    #[test]
+    fn parse_audio_headers_defaults_the_optional_fields() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-audio-sample-rate", "48000".parse().unwrap());
+        let meta = parse_audio_headers(&headers).expect("should detect audio");
+        assert_eq!(
+            meta.format, None,
+            "the caller falls back to an audio format"
+        );
+        assert_eq!(meta.sample_rate, 48_000);
+        assert_eq!(meta.channels, 1);
+        assert_eq!(meta.duration_ms, 0);
+        assert_eq!(meta.thumbnail_width, 0);
+        assert_eq!(meta.thumbnail_height, 0);
     }
 
     // ── Video header parsing tests ───────────────────────────────────────

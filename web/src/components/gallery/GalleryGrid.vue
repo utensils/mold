@@ -117,6 +117,9 @@ function isMotion(entry: GalleryImage): boolean {
   const k = tileKind(entry);
   return k === "video" || k === "animated";
 }
+function isAudio(entry: GalleryImage): boolean {
+  return tileKind(entry) === "audio";
+}
 // The grid always shows the cached thumbnail (fast, poster-friendly for video).
 // A merged entry carries the host it came from: resolving every tile against
 // the origin 404s every remote print, because the file lives on that machine.
@@ -316,6 +319,21 @@ onBeforeUnmount(() => {
                   aria-hidden="true"
                 >
                   <path d="M8 5v14l11-7z" />
+                </svg>
+                <span v-if="durationLabel(entry)">{{
+                  durationLabel(entry)
+                }}</span>
+              </span>
+            </template>
+            <template v-else-if="isAudio(entry)" #overlay>
+              <span class="gg__vbadge">
+                <svg
+                  class="gg__vplay"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
                 </svg>
                 <span v-if="durationLabel(entry)">{{
                   durationLabel(entry)

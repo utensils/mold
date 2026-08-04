@@ -86,7 +86,9 @@ pushed screen opened from the header.
   progress under the shared thinning Develop grain, matching the print's
   aspect ratio; without previews the plain status line remains.
 - **Library** merges saved media from every configured host. Its full-screen
-  viewer shows uncropped images, streams videos with native controls, swipes
+  viewer shows uncropped images, streams videos with native controls, plays
+  audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
+  transport, swipes
   horizontally between prints, explicitly copies or saves full-resolution
   stills through UIKit, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target. On a print a sequence produced, **Use
@@ -134,7 +136,7 @@ pushed screen opened from the header.
   System; valid saved choices remain authoritative. Its default-on Photos
   preference automatically fetches each completed still from its authenticated
   host gallery and saves it through UIKit; post-generation upscales save both
-  images, while videos remain in Mold Library. Settings also links to host
+  images, while videos and audio-only prints remain in Mold Library. Settings also links to host
   management and shows the app version, remote-only processing policy, and
   TestFlight update channel. About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.

@@ -72,6 +72,9 @@ export function isVideoFamily(family: string): boolean {
 
 /** Output-format options for a family, most-preferred first (the UI default). */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
+  // `wav` is deliberately absent: it is valid only for LTX-2's audio-only
+  // `t2a` pipeline, which sets the format itself. Offering it as a free choice
+  // would let a video request pick a container the server rejects.
   return isVideoFamily(family) ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"];
 }
 

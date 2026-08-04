@@ -148,3 +148,12 @@ export const galleryMediaPath = (filename: string, source: GallerySource, thumbn
  */
 export const isVideoItem = (item: GalleryImage): boolean =>
   item.format === "mp4" || item.filename.endsWith(".mp4") || !!item.metadata.video_frames;
+
+/**
+ * Whether a gallery print is an audio-only artifact (LTX-2 text-to-audio).
+ * Deliberately separate from `isVideoItem`: audio has no frames, so every
+ * `<video>` element, ▶ badge and frame-seeking path must keep treating it as
+ * "not a video" while still getting its own transport.
+ */
+export const isAudioItem = (item: GalleryImage): boolean =>
+  item.format === "wav" || item.filename.toLowerCase().endsWith(".wav");

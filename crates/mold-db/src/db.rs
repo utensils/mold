@@ -677,7 +677,15 @@ pub(crate) fn delete_with_conn(
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> {
     let format_s: String = row.get(6)?;
-    let format = format_from_str(&format_s).unwrap_or(OutputFormat::Png);
+    let filename: String = row.get(1)?;
+    // A stored string this build's enum doesn't know must not become `Png` —
+    // that mislabels the row's media kind for every consumer (a `.wav` row
+    // rendered as an image, a `.mp4` row served as `image/png`). Fall back to
+    // the filename extension, which is the same evidence the reconcile walk
+    // uses, and only then to the historical default.
+    let format = format_from_str(&format_s)
+        .or_else(|| crate::metadata_io::format_from_path(std::path::Path::new(&filename)))
+        .unwrap_or(OutputFormat::Png);
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
     let legacy_metadata = OutputMetadata {
@@ -737,7 +745,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         .unwrap_or(legacy_metadata);
     Ok(GenerationRecord {
         id: Some(row.get(0)?),
-        filename: row.get(1)?,
+        filename,
         output_dir: row.get(2)?,
         created_at_ms: row.get(3)?,
         file_mtime_ms: row.get(4)?,
@@ -760,6 +768,7 @@ fn format_to_str(f: OutputFormat) -> &'static str {
         OutputFormat::Apng => "apng",
         OutputFormat::Webp => "webp",
         OutputFormat::Mp4 => "mp4",
+        OutputFormat::Wav => "wav",
     }
 }
 
@@ -771,6 +780,7 @@ fn format_from_str(s: &str) -> Option<OutputFormat> {
         "apng" => OutputFormat::Apng,
         "webp" => OutputFormat::Webp,
         "mp4" => OutputFormat::Mp4,
+        "wav" => OutputFormat::Wav,
         _ => return None,
     })
 }

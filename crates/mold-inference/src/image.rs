@@ -62,7 +62,11 @@ pub(crate) fn encode_rgb_image(
     match format {
         OutputFormat::Png => write_png(rgb_image, &mut buf, metadata)?,
         OutputFormat::Jpeg => write_jpeg(rgb_image, &mut buf, metadata)?,
-        OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {
+        OutputFormat::Gif
+        | OutputFormat::Apng
+        | OutputFormat::Webp
+        | OutputFormat::Mp4
+        | OutputFormat::Wav => {
             anyhow::bail!("{format} encoding is not supported for single images")
         }
     }

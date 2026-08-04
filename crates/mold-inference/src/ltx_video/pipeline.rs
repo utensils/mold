@@ -1741,6 +1741,7 @@ impl LtxVideoEngine {
         ));
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(VideoData {
                 data: video_bytes,

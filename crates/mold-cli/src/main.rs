@@ -67,6 +67,9 @@ pub(crate) enum Ltx2PipelineArg {
     Retake,
     #[value(name = "lip-dub", alias = "lipdub")]
     LipDub,
+    /// Text-to-audio: audio-only generation, no video.
+    #[value(name = "t2a")]
+    T2a,
 }
 
 /// Sentinel error: the command already printed diagnostics to stderr.
@@ -624,7 +627,7 @@ Examples:
 
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
-              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4"]))]
+              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
         format: OutputFormat,
 
         /// Disable embedded generation metadata in PNG output for this run

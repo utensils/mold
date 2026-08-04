@@ -1535,6 +1535,7 @@ impl SDXLEngine {
         );
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -1745,6 +1746,7 @@ impl SDXLEngine {
         tracing::info!(generation_time_ms, seed, "SDXL generation complete");
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),

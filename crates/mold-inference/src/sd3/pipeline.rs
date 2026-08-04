@@ -1118,6 +1118,7 @@ impl SD3Engine {
         );
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -1488,6 +1489,7 @@ impl SD3Engine {
             tracing::info!(generation_time_ms, seed, "SD3 generation complete");
 
             Ok(GenerateResponse {
+                audio: None,
                 images: vec![ImageData {
                     data: image_bytes,
                     format: req.resolved_output_format(),

@@ -12,6 +12,31 @@ pub fn preview_gif_filename(filename: &str) -> String {
     format!("{filename}{PREVIEW_GIF_SUFFIX}")
 }
 
+/// Suffix the TUI appends when caching a thumbnail. The server's cache in the
+/// same directory uses a plain `.png` instead — see
+/// [`audio_waveform_thumbnail_paths`], which writes both so an audio print has
+/// a tile wherever it is opened.
+pub const TUI_THUMBNAIL_SUFFIX: &str = ".thumb.png";
+
+/// Both thumbnail-cache paths an audio output needs, given the shared
+/// `<mold_dir>/cache/thumbnails` directory.
+///
+/// Audio has no raster frame, so neither the server's on-demand thumbnailer
+/// nor the TUI's `image::open` can produce one — the waveform PNG has to be
+/// written at save time. The two consumers name their cache entries
+/// differently (`<file>.png` for the server route, `<file>.thumb.png` for the
+/// TUI), so a saver writes both rather than guessing which surface will open
+/// the print.
+pub fn audio_waveform_thumbnail_paths(
+    thumbnail_dir: &std::path::Path,
+    filename: &str,
+) -> [PathBuf; 2] {
+    [
+        thumbnail_dir.join(format!("{filename}.png")),
+        thumbnail_dir.join(format!("{filename}{TUI_THUMBNAIL_SUFFIX}")),
+    ]
+}
+
 fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))

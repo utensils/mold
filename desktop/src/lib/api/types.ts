@@ -166,7 +166,7 @@ export interface ModelEntry {
 
 // ── Generation ───────────────────────────────────────────────────────────
 
-export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4";
+export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4" | "wav";
 
 /** Scheduler override for UNet families (SD1.5, SDXL). Mirrors mold-core's
  * kebab-case enum; only these string variants are surfaced in the desktop UI. */
@@ -184,8 +184,8 @@ export type Ltx2PipelineMode =
   | "keyframe"
   | "a2-vid"
   | "retake"
-  | "lip-dub";
-
+  | "lip-dub"
+  | "t2a";
 /** Spatial latent upscale factor. Mirrors mold-core `Ltx2SpatialUpscale`
  * (`X1_5` → `"x1-5"`, `X2` → `"x2"`). */
 export type Ltx2SpatialUpscale = "x1-5" | "x2";
@@ -427,6 +427,14 @@ export interface CompleteEvent {
   video_duration_ms?: number | null;
   video_audio_sample_rate?: number | null;
   video_audio_channels?: number | null;
+  /** Audio-only completion (`pipeline: "t2a"`). `image` then carries the WAV
+   * itself, not a raster — probe these before the `video_*` fields, since an
+   * audio print has no frames and would otherwise read as a still. */
+  audio_sample_rate?: number | null;
+  audio_channels?: number | null;
+  audio_duration_ms?: number | null;
+  /** Rendered waveform PNG, base64. The only image an audio print has. */
+  audio_thumbnail?: string | null;
   gpu?: number | null;
   /** Gallery filename the server saved this payload under (additive; absent
    * on older servers). Mirrored saves keep it so the local copy and the

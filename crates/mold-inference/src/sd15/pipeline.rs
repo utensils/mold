@@ -1464,6 +1464,7 @@ impl SD15Engine {
         );
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),
@@ -1673,6 +1674,7 @@ impl SD15Engine {
         tracing::info!(generation_time_ms, seed, "SD1.5 generation complete");
 
         Ok(GenerateResponse {
+            audio: None,
             images: vec![ImageData {
                 data: image_bytes,
                 format: req.resolved_output_format(),

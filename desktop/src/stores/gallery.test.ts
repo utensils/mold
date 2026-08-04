@@ -822,10 +822,10 @@ describe("kind + text filtering", () => {
       media("h3.mp4", 5),
     ]);
 
-    expect(gallery.kindCounts).toEqual({ all: 5, image: 3, video: 2 });
+    expect(gallery.kindCounts).toEqual({ all: 5, image: 3, video: 2, audio: 0 });
 
     gallery.filter = "hal9000-7680";
-    expect(gallery.kindCounts).toEqual({ all: 3, image: 2, video: 1 });
+    expect(gallery.kindCounts).toEqual({ all: 3, image: 2, video: 1, audio: 0 });
   });
 
   it("kindCounts ignores the kind and query narrowing (chip labels stay stable)", () => {
@@ -835,7 +835,7 @@ describe("kind + text filtering", () => {
 
     gallery.mediaKind = "video";
     gallery.query = "zzz-no-match";
-    expect(gallery.kindCounts).toEqual({ all: 2, image: 1, video: 1 });
+    expect(gallery.kindCounts).toEqual({ all: 2, image: 1, video: 1, audio: 0 });
   });
 
   it("hostFiltered exposes the chip-only set (History runs must not inherit gallery search)", () => {

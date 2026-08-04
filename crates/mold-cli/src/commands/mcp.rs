@@ -2292,6 +2292,7 @@ mod tests {
         jobs.finish(
             &id,
             Ok(GenerateResponse {
+                audio: None,
                 images: vec![mold_core::ImageData {
                     data: vec![1, 2, 3],
                     format: OutputFormat::Png,

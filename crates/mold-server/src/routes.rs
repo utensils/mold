@@ -1535,45 +1535,7 @@ async fn generate(
                     set("x-mold-dimension-warning", dimension);
                 }
             }
-            // For video responses, return the actual video data (not the thumbnail)
-            // and send video metadata in headers so the client can reconstruct VideoData.
-            let output_data = if let Some(ref video) = response.video {
-                let ct = HeaderValue::from_static(video.format.content_type());
-                headers.insert(header::CONTENT_TYPE, ct);
-                if let Ok(v) = HeaderValue::from_str(&video.frames.to_string()) {
-                    headers.insert("x-mold-video-frames", v);
-                }
-                if let Ok(v) = HeaderValue::from_str(&video.fps.to_string()) {
-                    headers.insert("x-mold-video-fps", v);
-                }
-                if let Ok(v) = HeaderValue::from_str(&video.width.to_string()) {
-                    headers.insert("x-mold-video-width", v);
-                }
-                if let Ok(v) = HeaderValue::from_str(&video.height.to_string()) {
-                    headers.insert("x-mold-video-height", v);
-                }
-                if video.has_audio {
-                    headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
-                }
-                if let Some(dur) = video.duration_ms {
-                    if let Ok(v) = HeaderValue::from_str(&dur.to_string()) {
-                        headers.insert("x-mold-video-duration-ms", v);
-                    }
-                }
-                if let Some(sr) = video.audio_sample_rate {
-                    if let Ok(v) = HeaderValue::from_str(&sr.to_string()) {
-                        headers.insert("x-mold-video-audio-sample-rate", v);
-                    }
-                }
-                if let Some(ch) = video.audio_channels {
-                    if let Ok(v) = HeaderValue::from_str(&ch.to_string()) {
-                        headers.insert("x-mold-video-audio-channels", v);
-                    }
-                }
-                video.data.clone()
-            } else {
-                img.data
-            };
+            let output_data = apply_media_headers(&response, img, &mut headers);
             Ok((headers, output_data).into_response())
         }
         Err(err_msg) => {
@@ -1587,6 +1549,97 @@ async fn generate(
             }
         }
     }
+}
+
+/// Pick the bytes the non-streaming `/api/generate` returns and stamp the
+/// media headers a client needs to rebuild the typed response.
+///
+/// The queue hands every completed job back with a raster in
+/// `GenerationJobResult.image`: a real still, a clip's thumbnail, or an audio
+/// print's waveform tile. That tile exists so the queue and SSE pipeline have
+/// something to lay out — it is never the artifact the caller asked for. A
+/// branch that special-cases only video therefore answers an audio render
+/// with `image/png` and drops the WAV entirely.
+pub(crate) fn apply_media_headers(
+    response: &mold_core::GenerateResponse,
+    img: mold_core::ImageData,
+    headers: &mut HeaderMap,
+) -> Vec<u8> {
+    // Audio is probed first for the same reason the SSE client probes it
+    // first: an audio print has no frames, so the video probe below would
+    // fall through and hand the caller a waveform PNG.
+    if let Some(audio) = response.audio.as_ref() {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(audio.format.content_type()),
+        );
+        let mut set = |name: &'static str, value: String| {
+            if let Ok(v) = HeaderValue::from_str(&value) {
+                headers.insert(name, v);
+            }
+        };
+        // Stated rather than inferred: a caller may omit `output_format` and
+        // let the server normalise an audio-only pipeline to wav, in which
+        // case the request is not evidence of what came back.
+        set("x-mold-audio-format", audio.format.extension().to_string());
+        set("x-mold-audio-sample-rate", audio.sample_rate.to_string());
+        set("x-mold-audio-channels", audio.channels.to_string());
+        set("x-mold-audio-duration-ms", audio.duration_ms.to_string());
+        // Audio has no raster of its own. These are the waveform tile's size,
+        // which is what a gallery row records so the grid has a real aspect
+        // ratio — the tile bytes themselves cannot ride along in the body.
+        set(
+            "x-mold-audio-thumbnail-width",
+            audio.thumbnail_width.to_string(),
+        );
+        set(
+            "x-mold-audio-thumbnail-height",
+            audio.thumbnail_height.to_string(),
+        );
+        return audio.data.clone();
+    }
+
+    // For video responses, return the actual video data (not the thumbnail)
+    // and send video metadata in headers so the client can reconstruct VideoData.
+    if let Some(video) = response.video.as_ref() {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(video.format.content_type()),
+        );
+        if let Ok(v) = HeaderValue::from_str(&video.frames.to_string()) {
+            headers.insert("x-mold-video-frames", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&video.fps.to_string()) {
+            headers.insert("x-mold-video-fps", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&video.width.to_string()) {
+            headers.insert("x-mold-video-width", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&video.height.to_string()) {
+            headers.insert("x-mold-video-height", v);
+        }
+        if video.has_audio {
+            headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
+        }
+        if let Some(dur) = video.duration_ms {
+            if let Ok(v) = HeaderValue::from_str(&dur.to_string()) {
+                headers.insert("x-mold-video-duration-ms", v);
+            }
+        }
+        if let Some(sr) = video.audio_sample_rate {
+            if let Ok(v) = HeaderValue::from_str(&sr.to_string()) {
+                headers.insert("x-mold-video-audio-sample-rate", v);
+            }
+        }
+        if let Some(ch) = video.audio_channels {
+            if let Ok(v) = HeaderValue::from_str(&ch.to_string()) {
+                headers.insert("x-mold-video-audio-channels", v);
+            }
+        }
+        return video.data.clone();
+    }
+
+    img.data
 }
 
 pub(crate) fn batch_generate_response(response: mold_core::BatchGenerateResponse) -> Response {
@@ -5636,6 +5689,8 @@ fn content_type_for_filename(name: &str) -> &'static str {
         "image/apng"
     } else if lower.ends_with(".mp4") {
         "video/mp4"
+    } else if lower.ends_with(".wav") {
+        "audio/wav"
     } else {
         "application/octet-stream"
     }
@@ -5803,6 +5858,22 @@ async fn get_gallery_thumbnail(
     let thumb_path = thumb_dir.join(format!("{clean_name}.png"));
     let lower = clean_name.to_ascii_lowercase();
     let is_video = lower.ends_with(".mp4");
+    // Audio outputs ship a waveform PNG written into the thumbnail cache at
+    // save time — there is nothing in a WAV for a raster decoder to read, so
+    // a missing cache entry goes straight to the placeholder.
+    let is_audio = lower.ends_with(".wav");
+    if is_audio && !thumb_path.is_file() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("image/svg+xml"),
+        );
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300"),
+        );
+        return Ok((headers, AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()));
+    }
 
     if !thumb_path.is_file() {
         // Generate thumbnail on-demand. Videos go through openh264 for a real
@@ -5873,6 +5944,8 @@ async fn get_gallery_thumbnail(
 
     Ok((headers, data))
 }
+
+const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
 
 const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 
@@ -6046,6 +6119,9 @@ fn warm_gallery_thumbnails(
                     Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
                 );
                 let is_video = matches!(ext.as_deref(), Some("mp4"));
+                // `.wav` is deliberately absent: its thumbnail is the waveform
+                // PNG written at save time, and there is nothing in the audio
+                // bytes for either decoder to render.
                 if is_raster || is_video {
                     let filename = path
                         .file_name()

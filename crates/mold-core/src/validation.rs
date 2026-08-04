@@ -1103,6 +1103,21 @@ pub fn validate_generate_request_with_family(
     if let Some(overrides) = &req.guidance_overrides {
         require_ltx2_family(family, "guidance_overrides")?;
         validate_guidance_overrides(overrides)?;
+        // Cross-modal guidance needs both modalities resident. An audio-only
+        // run has no video branch for `modality_scale` to act on, so a
+        // non-1.0 value cannot be honoured — reject it instead of accepting
+        // a number that would silently do nothing.
+        if req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only) {
+            if let Some(modality_scale) = overrides.modality_scale {
+                if (modality_scale - 1.0).abs() > f64::EPSILON {
+                    return Err(
+                        "guidance_overrides.modality_scale must be 1.0 for pipeline=t2a: \
+                         audio-only generation has no video modality to guide against"
+                            .to_string(),
+                    );
+                }
+            }
+        }
     }
     if let Some(dir) = req.hdr_exr_dir.as_deref() {
         require_ltx2_family(family, "hdr_exr_dir")?;
@@ -1160,13 +1175,30 @@ pub fn validate_generate_request_with_family(
     }
 
     if family == Some("ltx2") {
-        match req.resolved_output_format() {
-            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {}
-            _ => return Err("LTX-2 outputs must use mp4, gif, apng, or webp".to_string()),
+        let audio_only = req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only);
+        match (req.resolved_output_format(), audio_only) {
+            (OutputFormat::Wav, true) => {}
+            (OutputFormat::Wav, false) => {
+                return Err("wav output requires pipeline=t2a".to_string());
+            }
+            (_, true) => {
+                return Err("pipeline=t2a renders audio only; set output_format=wav".to_string());
+            }
+            (
+                OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4,
+                false,
+            ) => {}
+            (_, false) => return Err("LTX-2 outputs must use mp4, gif, apng, or webp".to_string()),
         }
 
-        if req.enable_audio == Some(true) && req.resolved_output_format() != OutputFormat::Mp4 {
+        if req.enable_audio == Some(true)
+            && !audio_only
+            && req.resolved_output_format() != OutputFormat::Mp4
+        {
             return Err("audio-enabled LTX-2 outputs must use mp4 format".to_string());
+        }
+        if req.enable_audio == Some(false) && audio_only {
+            return Err("pipeline=t2a cannot be combined with enable_audio=false".to_string());
         }
 
         if req.retake_range.is_some()
@@ -1284,6 +1316,34 @@ pub fn validate_generate_request_with_family(
                              temporal_upscale; the render must match the reference video"
                                 .to_string(),
                         );
+                    }
+                }
+                Ltx2PipelineMode::T2a => {
+                    // Text-to-audio has no video modality at all: there is no
+                    // frame to condition on and no cross-modal path for a
+                    // reference to reach. Reject conditioning outright rather
+                    // than silently ignoring inputs the caller paid to upload.
+                    for (present, field) in [
+                        (req.source_image.is_some(), "source_image"),
+                        (req.source_video.is_some(), "source_video"),
+                        (req.source_video_path.is_some(), "source_video_path"),
+                        (req.audio_file.is_some(), "audio_file"),
+                        (req.audio_file_path.is_some(), "audio_file_path"),
+                        (req.is_extend(), "extend_video"),
+                        (
+                            req.keyframes.as_ref().is_some_and(|k| !k.is_empty()),
+                            "keyframes",
+                        ),
+                        (req.retake_range.is_some(), "retake_range"),
+                        (req.spatial_upscale.is_some(), "spatial_upscale"),
+                        (req.temporal_upscale.is_some(), "temporal_upscale"),
+                        (req.upscale_model.is_some(), "upscale_model"),
+                    ] {
+                        if present {
+                            return Err(format!(
+                                "pipeline=t2a generates audio only and cannot be combined with {field}"
+                            ));
+                        }
                     }
                 }
                 Ltx2PipelineMode::OneStage
@@ -1891,6 +1951,124 @@ mod tests {
         req.output_format = Some(OutputFormat::Gif);
         req.enable_audio = Some(true);
         assert!(validate_generate_request(&req).unwrap_err().contains("mp4"));
+    }
+
+    /// A T2A request produces a WAV and only a WAV. Both directions of the
+    /// pairing are enforced: `t2a` without `wav` would encode frames that
+    /// don't exist, and `wav` without `t2a` would ask a video pipeline for a
+    /// container it never writes.
+    #[test]
+    fn ltx2_t2a_requires_wav_output_and_wav_requires_t2a() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.output_format = Some(OutputFormat::Mp4);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("audio only"), "got: {err}");
+
+        req.pipeline = None;
+        req.output_format = Some(OutputFormat::Wav);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("pipeline=t2a"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_t2a_rejects_every_conditioning_input() {
+        let base = || {
+            let mut req = valid_req();
+            req.model = "ltx-2.3-22b-dev:fp8".to_string();
+            req.pipeline = Some(Ltx2PipelineMode::T2a);
+            req.output_format = Some(OutputFormat::Wav);
+            req
+        };
+
+        let mut with_image = base();
+        with_image.source_image = Some(vec![1, 2, 3]);
+        assert!(validate_generate_request(&with_image)
+            .unwrap_err()
+            .contains("source_image"));
+
+        let mut with_audio = base();
+        with_audio.audio_file_path = Some("/srv/voice.wav".to_string());
+        assert!(validate_generate_request(&with_audio)
+            .unwrap_err()
+            .contains("audio_file_path"));
+
+        let mut with_upscale = base();
+        with_upscale.spatial_upscale = Some(crate::Ltx2SpatialUpscale::X2);
+        assert!(validate_generate_request(&with_upscale)
+            .unwrap_err()
+            .contains("spatial_upscale"));
+
+        let mut with_post_upscale = base();
+        with_post_upscale.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        assert!(validate_generate_request(&with_post_upscale)
+            .unwrap_err()
+            .contains("upscale_model"));
+    }
+
+    /// ControlNet is refused for `t2a` by the family gate, not by the
+    /// pipeline's own conditioning list. A ControlNet pair requires an SD1.5
+    /// family and `pipeline` requires `ltx2`, so the two can never both be
+    /// satisfied — the audio-only runtime cannot be reached with a control
+    /// model loaded. Pinned here because the t2a rejection list reads as
+    /// though it were the only guard, and a future refactor that relaxed
+    /// `require_controlnet_capable_family` would silently open that door.
+    #[test]
+    fn ltx2_t2a_cannot_carry_controlnet_inputs() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = 0.8;
+
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("ControlNet"), "got: {err}");
+
+        // And the mirror case: a control model without an image is refused on
+        // the same family grounds rather than reaching the audio pipeline.
+        req.control_image = None;
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("ControlNet"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_t2a_rejects_enable_audio_false() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.enable_audio = Some(false);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("enable_audio=false"), "got: {err}");
+    }
+
+    /// `modality_scale` steers the audio↔video cross-attention. Audio-only has
+    /// no video branch, so a non-1.0 value cannot be honoured — reject it
+    /// rather than accept a number that silently does nothing.
+    #[test]
+    fn ltx2_t2a_rejects_non_unit_modality_scale_override() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.guidance_overrides = Some(crate::Ltx2GuidanceOverrides {
+            modality_scale: Some(3.0),
+            ..Default::default()
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("modality_scale"), "got: {err}");
+
+        req.guidance_overrides = Some(crate::Ltx2GuidanceOverrides {
+            modality_scale: Some(1.0),
+            ..Default::default()
+        });
+        assert!(validate_generate_request(&req).is_ok());
     }
 
     #[test]

@@ -31,6 +31,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
@@ -50,7 +51,11 @@ export function promptWithStyle(state: GenerateFormState): string {
 
 /** Output-format options for a given model family, ordered by preference.
  * The first entry is the default the UI auto-selects when a model is
- * chosen. */
+ * chosen.
+ *
+ * `wav` is deliberately absent: it is valid only for LTX-2's audio-only `t2a`
+ * pipeline, which sets the format itself when selected. Offering it as a free
+ * choice would let a video request pick a container the server rejects. */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
   return isVideoFamily(family)
     ? ["mp4", "gif", "apng", "webp"]
@@ -663,7 +668,12 @@ export function useGenerateForm(): UseGenerateForm {
         supportsNegativePrompt: capabilities.supportsNegativePrompt,
         negative: s.negativePrompt,
       });
-      return {
+      // Stripped at the end: an audio-only pipeline renders no frames, so
+      // every conditioning input and upscaler still sitting in the form is
+      // something the server refuses. Doing it here rather than on the
+      // pipeline transition keeps a user's source media intact if they switch
+      // to `t2a` and back.
+      return stripAudioOnlyIncompatibleFields({
         prompt: styled.prompt,
         negative_prompt: capabilities.supportsNegativePrompt
           ? styled.negative || null
@@ -747,7 +757,7 @@ export function useGenerateForm(): UseGenerateForm {
               guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
             }
           : {}),
-      };
+      });
     },
     isVideoFamily,
     supportsNegativePrompt,

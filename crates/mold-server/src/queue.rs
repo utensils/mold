@@ -356,6 +356,71 @@ pub(crate) fn save_video_to_dir(
     Some(filename)
 }
 
+/// Save an audio-only output plus its waveform thumbnail.
+///
+/// The bytes go through the same gallery publication path as video, then the
+/// waveform PNG is written straight into the server thumbnail cache: nothing
+/// downstream can decode a raster frame out of a WAV, so the tile has to be
+/// persisted here or the gallery would only ever show a placeholder.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_audio_to_dir(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    thumbnail_png: &[u8],
+    format: OutputFormat,
+    model: &str,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> Option<String> {
+    let filename = save_video_to_dir(
+        dir,
+        bytes,
+        &[],
+        format,
+        model,
+        metadata,
+        generation_time_ms,
+        db,
+        events,
+        gallery_gate,
+    )?;
+    if !thumbnail_png.is_empty() {
+        save_audio_waveform_thumbnail(&filename, thumbnail_png);
+    }
+    Some(filename)
+}
+
+pub(crate) fn save_audio_waveform_thumbnail(filename: &str, png_bytes: &[u8]) {
+    let thumb_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails");
+    save_audio_waveform_thumbnail_to(&thumb_dir, filename, png_bytes);
+}
+
+/// Testable inner of [`save_audio_waveform_thumbnail`] with an explicit cache
+/// directory, so unit tests don't race on `MOLD_HOME`.
+fn save_audio_waveform_thumbnail_to(thumb_dir: &std::path::Path, filename: &str, png_bytes: &[u8]) {
+    if let Err(e) = std::fs::create_dir_all(thumb_dir) {
+        tracing::warn!(
+            "failed to create thumbnail cache dir {}: {e}",
+            thumb_dir.display()
+        );
+        return;
+    }
+    for thumb_path in mold_core::media_paths::audio_waveform_thumbnail_paths(thumb_dir, filename) {
+        if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
+            tracing::warn!(
+                "failed to write waveform thumbnail {}: {e}",
+                thumb_path.display()
+            );
+        }
+    }
+}
+
 /// Idempotently publish a video under one caller-owned gallery filename.
 ///
 /// Durable chain finalization uses an attempt-derived filename so replaying a
@@ -746,6 +811,7 @@ async fn upscale_generated_image_on_single_worker(
         .map_err(|e| format!("upscale failed: {e}"))?;
 
     let mut response = mold_core::GenerateResponse {
+        audio: None,
         images: vec![],
         video: None,
         generation_time_ms: 0,
@@ -828,8 +894,48 @@ pub(crate) fn build_sse_complete_event(
         }
         Box::new(meta)
     });
+    if let Some(ref audio) = response.audio {
+        return SseCompleteEvent {
+            image: if include_media {
+                b64.encode(&audio.data)
+            } else {
+                String::new()
+            },
+            format: audio.format,
+            // The raster dimensions clients lay the tile out with are the
+            // waveform thumbnail's, not the audio's — audio has none.
+            width: img.width,
+            height: img.height,
+            original_image: None,
+            original_width: None,
+            original_height: None,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+            model: response.model.clone(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            audio_sample_rate: Some(audio.sample_rate),
+            audio_channels: Some(audio.channels),
+            audio_duration_ms: Some(audio.duration_ms),
+            audio_thumbnail: include_media.then(|| b64.encode(&audio.thumbnail)),
+            gpu: response.gpu,
+            filename: saved.output.clone(),
+            original_filename: None,
+            metadata: event_metadata,
+        };
+    }
     if let Some(ref video) = response.video {
         SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: if include_media {
                 b64.encode(&video.data)
             } else {
@@ -863,6 +969,10 @@ pub(crate) fn build_sse_complete_event(
         }
     } else {
         SseCompleteEvent {
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
             image: if include_media {
                 b64.encode(&img.data)
             } else {
@@ -1460,8 +1570,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             #[cfg(feature = "metrics")]
             crate::metrics::record_generation(&job.request.model, inference_duration);
 
-            if response.images.is_empty() && response.video.is_none() {
-                let err_msg = "generation error: engine returned no images or video".to_string();
+            if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
+                let err_msg =
+                    "generation error: engine returned no images, video, or audio".to_string();
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent {
                         message: err_msg.clone(),
@@ -1482,11 +1593,25 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                     height: video.height,
                     index: 0,
                 }
+            } else if let Some(ref audio) = response.audio {
+                // The waveform PNG stands in for the raster payload the queue
+                // and SSE pipeline expect. Its dimensions are the tile's, and
+                // `build_sse_complete_event` re-reads the real audio bytes.
+                ImageData {
+                    data: audio.thumbnail.clone(),
+                    format: OutputFormat::Png,
+                    width: audio.thumbnail_width,
+                    height: audio.thumbnail_height,
+                    index: 0,
+                }
             } else {
                 unreachable!("checked above");
             };
             let mut original_img = None;
-            if response.video.is_none() && requested_post_upscale_model(&job.request).is_some() {
+            if response.video.is_none()
+                && response.audio.is_none()
+                && requested_post_upscale_model(&job.request).is_some()
+            {
                 let upscale_result = upscale_generated_image_on_single_worker(
                     state,
                     &job.request,
@@ -1525,7 +1650,32 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
-                let save_task = if let Some(ref video) = response.video {
+                let save_task = if let Some(ref audio) = response.audio {
+                    let audio_data = audio.data.clone();
+                    let audio_thumbnail = audio.thumbnail.clone();
+                    let audio_format = audio.format;
+                    // Audio has no raster of its own; record the waveform
+                    // tile's size so the gallery grid has a real aspect ratio
+                    // instead of the request's (meaningless) video dimensions.
+                    let mut audio_metadata = metadata.clone();
+                    audio_metadata
+                        .apply_output_dimensions(audio.thumbnail_width, audio.thumbnail_height);
+                    tokio::task::spawn_blocking(move || SavedOutputNames {
+                        output: save_audio_to_dir(
+                            &dir,
+                            &audio_data,
+                            &audio_thumbnail,
+                            audio_format,
+                            &model,
+                            &audio_metadata,
+                            Some(generation_time_ms),
+                            db.as_ref().as_ref(),
+                            Some(&events),
+                            &gallery_gate,
+                        ),
+                        original: None,
+                    })
+                } else if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
                     let video_gif_preview = video.gif_preview.clone();
                     let video_format = video.format;
@@ -3347,6 +3497,7 @@ mod tests {
             batch_child: None,
         };
         let response = mold_core::GenerateResponse {
+            audio: None,
             images: Vec::new(),
             video: None,
             generation_time_ms: 1,
@@ -4001,6 +4152,125 @@ mod tests {
         assert_eq!(std::fs::read(&expected).unwrap(), GIF);
     }
 
+    fn fake_audio(sample_rate: u32) -> mold_core::AudioData {
+        mold_core::AudioData {
+            data: b"RIFF\x00\x00\x00\x00WAVEfmt ".to_vec(),
+            format: OutputFormat::Wav,
+            sample_rate,
+            channels: 2,
+            duration_ms: 5_040,
+            thumbnail: vec![0x89, 0x50, 0x4E, 0x47],
+            thumbnail_width: 640,
+            thumbnail_height: 360,
+        }
+    }
+
+    /// An audio-only response must arrive as audio, not as a degraded image:
+    /// the payload is the WAV bytes, the format says `wav`, the waveform is a
+    /// separate field, and every `video_*` field stays empty so no client
+    /// tries to seek frames in it.
+    #[test]
+    fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
+        let audio = fake_audio(48_000);
+        let resp = mold_core::GenerateResponse {
+            audio: Some(audio.clone()),
+            images: vec![],
+            video: None,
+            generation_time_ms: 4321,
+            model: "ltx-2.3-22b-dev:fp8".to_string(),
+            seed_used: 11,
+            gpu: Some(1),
+        };
+        let waveform_img = ImageData {
+            data: audio.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: audio.thumbnail_width,
+            height: audio.thumbnail_height,
+            index: 0,
+        };
+
+        let event = build_sse_complete_event(
+            &resp,
+            &waveform_img,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
+        );
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(event.image, b64.encode(&audio.data));
+        assert_eq!(event.format, OutputFormat::Wav);
+        assert_eq!(event.audio_sample_rate, Some(48_000));
+        assert_eq!(event.audio_channels, Some(2));
+        assert_eq!(event.audio_duration_ms, Some(5_040));
+        assert_eq!(event.audio_thumbnail, Some(b64.encode(&audio.thumbnail)));
+        assert_eq!(event.width, 640);
+        assert_eq!(event.height, 360);
+        assert_eq!(event.video_frames, None);
+        assert_eq!(event.video_fps, None);
+        assert_eq!(event.video_thumbnail, None);
+        assert!(!event.video_has_audio);
+        assert_eq!(event.video_duration_ms, None);
+        assert_eq!(event.gpu, Some(1));
+    }
+
+    #[test]
+    fn build_sse_complete_event_audio_omits_media_for_metadata_only_payloads() {
+        let resp = mold_core::GenerateResponse {
+            audio: Some(fake_audio(24_000)),
+            images: vec![],
+            video: None,
+            generation_time_ms: 1,
+            model: "ltx-2-19b-dev:fp8".to_string(),
+            seed_used: 2,
+            gpu: None,
+        };
+        let waveform_img = ImageData {
+            data: vec![],
+            format: OutputFormat::Png,
+            width: 640,
+            height: 360,
+            index: 0,
+        };
+        let event = build_sse_complete_event(
+            &resp,
+            &waveform_img,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::MetadataOnly,
+        );
+        assert!(event.image.is_empty());
+        assert_eq!(event.audio_thumbnail, None);
+        // Shape metadata still travels — only the bytes are withheld.
+        assert_eq!(event.audio_sample_rate, Some(24_000));
+    }
+
+    /// `.wav` has no raster frame, so neither the server's on-demand
+    /// thumbnailer nor the TUI's `image::open` can build a tile. The waveform
+    /// PNG has to land in the cache at save time or the gallery shows a
+    /// placeholder forever.
+    #[test]
+    fn save_audio_waveform_thumbnail_writes_both_cache_names() {
+        let td = TempDir::new().unwrap();
+        let thumb_dir = td.path().join("cache").join("thumbnails");
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+        save_audio_waveform_thumbnail_to(&thumb_dir, "mold-ltx2-42.wav", PNG);
+
+        // Server route naming.
+        assert_eq!(
+            std::fs::read(thumb_dir.join("mold-ltx2-42.wav.png")).unwrap(),
+            PNG
+        );
+        // TUI cache naming.
+        assert_eq!(
+            std::fs::read(thumb_dir.join("mold-ltx2-42.wav.thumb.png")).unwrap(),
+            PNG
+        );
+    }
+
     #[test]
     fn build_sse_complete_event_video_carries_mp4_payload_and_metadata() {
         // Regression guard for the multi-GPU bug: if `response.video` is set,
@@ -4024,6 +4294,7 @@ mod tests {
             audio_channels: Some(2),
         };
         let resp = mold_core::GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(video.clone()),
             generation_time_ms: 1234,
@@ -4103,6 +4374,7 @@ mod tests {
             audio_channels: None,
         };
         let resp = mold_core::GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(video),
             generation_time_ms: 0,
@@ -4125,6 +4397,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_image_clears_all_video_fields() {
         let resp = mold_core::GenerateResponse {
+            audio: None,
             images: vec![fake_image()],
             video: None,
             generation_time_ms: 100,
@@ -4156,6 +4429,7 @@ mod tests {
         req.batch_index = Some(2);
         req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
+            audio: None,
             images: vec![fake_image()],
             video: None,
             generation_time_ms: 100,
@@ -4212,6 +4486,7 @@ mod tests {
     #[test]
     fn metadata_only_completion_fails_when_the_output_was_not_saved() {
         let response = mold_core::GenerateResponse {
+            audio: None,
             images: vec![fake_image()],
             video: None,
             generation_time_ms: 100,
@@ -4238,6 +4513,7 @@ mod tests {
         let mut req = fake_request("flux-dev:q4");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let mut response = mold_core::GenerateResponse {
+            audio: None,
             images: vec![],
             video: None,
             generation_time_ms: 100,
@@ -4324,6 +4600,7 @@ mod tests {
             audio_channels: None,
         };
         let mut response = mold_core::GenerateResponse {
+            audio: None,
             images: vec![],
             video: Some(video),
             generation_time_ms: 100,

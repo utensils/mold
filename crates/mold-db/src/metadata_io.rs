@@ -23,6 +23,7 @@ pub fn format_from_path(path: &Path) -> Option<OutputFormat> {
         Some("apng") => Some(OutputFormat::Apng),
         Some("webp") => Some(OutputFormat::Webp),
         Some("mp4") => Some(OutputFormat::Mp4),
+        Some("wav") => Some(OutputFormat::Wav),
         _ => None,
     }
 }
@@ -35,7 +36,7 @@ pub fn read_embedded(path: &Path, format: OutputFormat) -> Option<OutputMetadata
         OutputFormat::Png | OutputFormat::Apng => read_png_metadata(path),
         OutputFormat::Jpeg => read_jpeg_metadata(path),
         OutputFormat::Gif => read_gif_metadata(path),
-        OutputFormat::Webp | OutputFormat::Mp4 => None,
+        OutputFormat::Webp | OutputFormat::Mp4 | OutputFormat::Wav => None,
     }
 }
 
@@ -57,7 +58,7 @@ pub fn read_or_synthesize(
         Some(m) => (m, false),
         None => {
             let mut meta = synthesize_from_filename(filename, timestamp_secs);
-            if !matches!(format, OutputFormat::Mp4) {
+            if !matches!(format, OutputFormat::Mp4 | OutputFormat::Wav) {
                 if let Some((w, h)) = image_header_dims(path) {
                     meta.width = w;
                     meta.height = h;
@@ -153,6 +154,9 @@ pub fn min_valid_size(format: OutputFormat) -> u64 {
         OutputFormat::Png | OutputFormat::Apng | OutputFormat::Jpeg | OutputFormat::Webp => 256,
         OutputFormat::Gif => 128,
         OutputFormat::Mp4 => 4096,
+        // 44-byte canonical RIFF/WAVE header plus a token amount of PCM. A
+        // header-only file decodes as a zero-length track everywhere.
+        OutputFormat::Wav => 1024,
     }
 }
 
@@ -182,6 +186,20 @@ pub fn has_ftyp_box(path: &Path) -> bool {
     &buf[4..8] == b"ftyp"
 }
 
+/// `RIFF....WAVE` sniff — the audio counterpart of [`has_ftyp_box`], so a
+/// truncated or mislabelled `.wav` never reaches the gallery.
+pub fn has_riff_wave_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 12];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    &buf[0..4] == b"RIFF" && &buf[8..12] == b"WAVE"
+}
+
 /// Heuristic "this is a solid black image" detector — the same NaN/aborted
 /// generation guard the server already uses. Only inspects raster files
 /// below a per-format suspect-size ceiling so we never decode real outputs.
@@ -193,7 +211,7 @@ pub fn is_probably_solid_black(path: &Path, format: OutputFormat, size_bytes: u6
         OutputFormat::Png | OutputFormat::Apng => 8 * 1024,
         OutputFormat::Jpeg => 4 * 1024,
         OutputFormat::Gif | OutputFormat::Webp => 4 * 1024,
-        OutputFormat::Mp4 => return false,
+        OutputFormat::Mp4 | OutputFormat::Wav => return false,
     };
     if size_bytes > suspect_threshold {
         return false;
@@ -225,12 +243,15 @@ pub fn is_valid_gallery_file(path: &Path, format: OutputFormat, size_bytes: u64)
     }
     let header_ok = match format {
         OutputFormat::Mp4 => has_ftyp_box(path),
+        OutputFormat::Wav => has_riff_wave_header(path),
         _ => image_header_dims(path).is_some(),
     };
     if !header_ok {
         return false;
     }
-    if !matches!(format, OutputFormat::Mp4) && is_probably_solid_black(path, format, size_bytes) {
+    if !matches!(format, OutputFormat::Mp4 | OutputFormat::Wav)
+        && is_probably_solid_black(path, format, size_bytes)
+    {
         return false;
     }
     true
@@ -553,6 +574,63 @@ mod tests {
         let text = td.path().join("text.png");
         std::fs::write(&text, b"hello world, not a png").unwrap();
         assert!(image_header_dims(&text).is_none());
+    }
+
+    /// A `.wav` that never reaches [`format_from_path`] is dropped before the
+    /// gallery, the DB, or reconcile ever sees it — the whole audio artifact
+    /// would silently vanish. Pin the admission chain end to end.
+    #[test]
+    fn wav_outputs_are_admitted_to_the_gallery() {
+        assert_eq!(
+            format_from_path(Path::new("mold-ltx2-1.wav")),
+            Some(OutputFormat::Wav)
+        );
+        assert_eq!(
+            format_from_path(Path::new("mold-ltx2-1.WAV")),
+            Some(OutputFormat::Wav)
+        );
+
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("take.wav");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&2048u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.resize(2048, 0);
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(has_riff_wave_header(&path));
+        assert!(is_valid_gallery_file(
+            &path,
+            OutputFormat::Wav,
+            bytes.len() as u64
+        ));
+        // Audio never goes through the solid-black raster guard: there is no
+        // raster, and `image::open` would just fail.
+        assert!(!is_probably_solid_black(
+            &path,
+            OutputFormat::Wav,
+            bytes.len() as u64
+        ));
+        // No embedded-metadata format for WAV — reconcile synthesizes instead.
+        assert!(read_embedded(&path, OutputFormat::Wav).is_none());
+    }
+
+    #[test]
+    fn truncated_or_mislabelled_wav_is_rejected() {
+        let td = tempfile::tempdir().unwrap();
+
+        let short = td.path().join("short.wav");
+        std::fs::write(&short, b"RIFF\x00\x00\x00\x00WAVE").unwrap();
+        assert!(
+            !is_valid_gallery_file(&short, OutputFormat::Wav, 12),
+            "a header-only wav decodes as a zero-length track"
+        );
+
+        let wrong = td.path().join("wrong.wav");
+        std::fs::write(&wrong, vec![0u8; 4096]).unwrap();
+        assert!(!has_riff_wave_header(&wrong));
+        assert!(!is_valid_gallery_file(&wrong, OutputFormat::Wav, 4096));
     }
 
     #[test]
