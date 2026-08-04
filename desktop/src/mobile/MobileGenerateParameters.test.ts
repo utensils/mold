@@ -232,7 +232,7 @@ describe("MobileGenerateParameters", () => {
     );
   });
 
-  it("blocks long-video chaining when selected settings cannot survive the chain wire", async () => {
+  it("keeps a long request single-shot when chaining would lose selected settings", async () => {
     const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
     form.frames = 177;
     form.negativePrompt = "flicker";
@@ -240,10 +240,10 @@ describe("MobileGenerateParameters", () => {
     const child = chain.wrapper.getComponent(MobileGenerateParameters);
 
     expect(chain.wrapper.find("[data-test='mobile-chain-cue']").exists()).toBe(false);
-    expect(chain.wrapper.get("[data-test='mobile-chain-compatibility-error']").text()).toContain(
-      "negative prompt",
+    expect(chain.wrapper.get("[data-test='mobile-single-shot-preservation-cue']").text()).toContain(
+      "one 177-frame clip to preserve negative prompt",
     );
-    expect(child.emitted("validity-change")?.at(-1)).toEqual([false]);
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
 
     chain.form.negativePrompt = "";
     await flushPromises();

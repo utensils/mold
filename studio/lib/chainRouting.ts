@@ -20,7 +20,12 @@ export const MAX_CHAIN_STAGES = 16;
 export const DEFAULT_MOTION_TAIL = 17;
 
 export type ChainRoutingDecision =
-  | { kind: "single" }
+  | {
+      kind: "single";
+      /** Options that forced an otherwise automatic chain to remain one
+       * render so their request semantics are preserved. */
+      preservedAutoChainFields?: AutoChainUnsupportedField[];
+    }
   | {
       kind: "chain";
       clipFrames: number;
@@ -33,8 +38,98 @@ type GenerateRoutingRequest = {
   frames?: number | null;
   fps?: number | null;
   model: string;
+  negative_prompt?: string | null;
+  loras?: readonly unknown[] | null;
+  lora?: unknown;
+  audio_file?: string | null;
+  audio_file_path?: string | null;
+  source_video?: string | null;
+  source_video_path?: string | null;
+  extend_video?: string | null;
+  extend_video_path?: string | null;
+  extend_overlap_frames?: number | null;
+  keyframes?: readonly unknown[] | null;
+  pipeline?: unknown;
+  ic_lora_control?: string | null;
+  retake_range?: unknown;
+  spatial_upscale?: unknown;
   temporal_upscale?: string | null;
+  guidance_overrides?: object | null;
 };
+
+export type AutoChainUnsupportedField =
+  | "negative_prompt"
+  | "loras"
+  | "audio_file"
+  | "source_video"
+  | "extend_video"
+  | "keyframes"
+  | "pipeline"
+  | "ic_lora_control"
+  | "retake_range"
+  | "spatial_upscale"
+  | "temporal_upscale"
+  | "guidance_overrides";
+
+export const AUTO_CHAIN_FIELD_LABELS: Readonly<
+  Record<AutoChainUnsupportedField, string>
+> = {
+  negative_prompt: "negative prompt",
+  loras: "LoRAs or camera motion",
+  audio_file: "conditioning audio",
+  source_video: "source video",
+  extend_video: "video continuation",
+  keyframes: "keyframes",
+  pipeline: "pipeline selection",
+  ic_lora_control: "reference control",
+  retake_range: "retake range",
+  spatial_upscale: "spatial upscale",
+  temporal_upscale: "temporal upscale",
+  guidance_overrides: "guidance overrides",
+};
+
+/** Fields the auto-expand chain form cannot carry without silently changing
+ * the request. Canonical authored Sequences support a wider per-clip schema. */
+export function unsupportedAutoChainFields(
+  req: GenerateRoutingRequest,
+): AutoChainUnsupportedField[] {
+  const unsupported: AutoChainUnsupportedField[] = [];
+  if (req.negative_prompt?.trim()) unsupported.push("negative_prompt");
+  if ((req.loras?.length ?? 0) > 0 || req.lora) unsupported.push("loras");
+  if (req.audio_file || req.audio_file_path) unsupported.push("audio_file");
+  if (req.source_video || req.source_video_path)
+    unsupported.push("source_video");
+  if (
+    req.extend_video ||
+    req.extend_video_path ||
+    req.extend_overlap_frames != null
+  ) {
+    unsupported.push("extend_video");
+  }
+  if ((req.keyframes?.length ?? 0) > 0) unsupported.push("keyframes");
+  if (req.pipeline) unsupported.push("pipeline");
+  if (req.ic_lora_control) unsupported.push("ic_lora_control");
+  if (req.retake_range) unsupported.push("retake_range");
+  if (req.spatial_upscale) unsupported.push("spatial_upscale");
+  if (req.temporal_upscale) unsupported.push("temporal_upscale");
+  const hasGuidanceOverride = Object.values(req.guidance_overrides ?? {}).some(
+    (value) =>
+      Array.isArray(value)
+        ? value.length > 0
+        : value !== null && value !== undefined,
+  );
+  if (hasGuidanceOverride) unsupported.push("guidance_overrides");
+  return unsupported;
+}
+
+export function autoChainFieldList(
+  fields: readonly AutoChainUnsupportedField[],
+): string {
+  const labels = fields.map((field) => AUTO_CHAIN_FIELD_LABELS[field]);
+  if (labels.length <= 1) return labels[0] ?? "selected options";
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
+}
 
 /** Families accepted by the server's `chain_limits::family_cap` whitelist. */
 const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
@@ -74,7 +169,34 @@ export function decideGenerateRequestRouting(
           reason: `Temporal x2 renders the same duration as a plain request, so it is still capped at ${cap} frames at ${req.fps ?? 24} fps. Reduce the frame count or raise fps.`,
         };
   }
-  return decideChainRouting(frames, family, req.model, motionTail, req.fps);
+  const decision = decideChainRouting(
+    frames,
+    family,
+    req.model,
+    motionTail,
+    req.fps,
+  );
+  if (decision.kind !== "chain") return decision;
+
+  const unsupported = unsupportedAutoChainFields(req);
+  if (unsupported.length === 0) return decision;
+
+  const singleShotCap = maxFramesForFamilyAtFps(
+    canonicalizeFamily(family),
+    req.fps,
+  );
+  const frameCount = frames ?? 0;
+  if (singleShotCap !== null && frameCount <= singleShotCap) {
+    return { kind: "single", preservedAutoChainFields: unsupported };
+  }
+
+  const fps = Math.max(1, Math.floor(req.fps ?? 24));
+  const options = autoChainFieldList(unsupported);
+  const determiner = unsupported.length === 1 ? "that option" : "those options";
+  return {
+    kind: "reject",
+    reason: `${frameCount} frames exceeds the ${singleShotCap ?? 97}-frame single-shot limit at ${fps} fps, and automatic chaining can’t preserve ${options}. Reduce Frames, remove ${determiner}, or author a Sequence with compatible per-clip settings.`,
+  };
 }
 
 export function decideChainRouting(

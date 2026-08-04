@@ -179,6 +179,42 @@ describe("decideChainRouting", () => {
     });
   });
 
+  it("preserves advanced LTX-2 inputs by staying single-shot inside the model budget", () => {
+    expect(
+      decideGenerateRequestRouting(
+        {
+          frames: 153,
+          fps: 24,
+          model: "ltx-2.3-22b-distilled:fp8",
+          negative_prompt: "blurry",
+          guidance_overrides: { stg_scale: 1.5 },
+        },
+        "ltx2",
+      ),
+    ).toEqual({
+      kind: "single",
+      preservedAutoChainFields: ["negative_prompt", "guidance_overrides"],
+    });
+  });
+
+  it("treats video continuation as single-shot instead of dropping it during chaining", () => {
+    expect(
+      decideGenerateRequestRouting(
+        {
+          frames: 153,
+          fps: 24,
+          model: "ltx-2.3-22b-distilled:fp8",
+          extend_video: "base64-video",
+          extend_overlap_frames: 17,
+        },
+        "ltx2",
+      ),
+    ).toEqual({
+      kind: "single",
+      preservedAutoChainFields: ["extend_video"],
+    });
+  });
+
   it("returns single when family is missing", () => {
     expect(decideChainRouting(50, null, "anything")).toEqual({
       kind: "single",

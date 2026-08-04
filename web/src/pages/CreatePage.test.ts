@@ -811,6 +811,36 @@ describe("CreatePage layout and behavior", () => {
     expect(req.source_image).toBeUndefined();
   });
 
+  it("keeps a long advanced video request single-shot and preserves its settings", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.frames = 153;
+    form.state.value.fps = 24;
+    form.state.value.negativePrompt = "flicker";
+    await nextTick();
+
+    expect(
+      wrapper.get("[data-test='single-shot-preservation-cue']").text(),
+    ).toContain("one 153-frame clip to preserve negative prompt");
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      frames: 153,
+      negative_prompt: "flicker",
+    });
+    expect(submitMock.mock.calls[0]?.[1]).toEqual({
+      kind: "single",
+      preservedAutoChainFields: ["negative_prompt"],
+    });
+  });
+
   it("reuses source preprocessing without replacing the editable source", async () => {
     upscaleStreamMock.mockImplementation(async (_request, handlers) => {
       handlers.onComplete({ image: "UPSCALED" });

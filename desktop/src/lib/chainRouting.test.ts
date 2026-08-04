@@ -231,8 +231,8 @@ describe("request-aware generation routing", () => {
     });
   });
 
-  it("estimates one concrete batch sibling and one chain clip", () => {
-    const chained = {
+  it("estimates one sibling using the concrete render selected by safe routing", () => {
+    const advancedSingle = {
       ...request,
       model: "ltx-2-19b-distilled:fp8",
       frames: 241,
@@ -243,18 +243,26 @@ describe("request-aware generation routing", () => {
       control_model: "controlnet-canny-sd15",
       control_scale: 0.8,
     };
-    delete chained.temporal_upscale;
-    expect(buildGenerationEstimateRequest(chained, "ltx2")).toMatchObject({
+    delete advancedSingle.temporal_upscale;
+    expect(buildGenerationEstimateRequest(advancedSingle, "ltx2")).toMatchObject({
       batch_size: 1,
-      frames: 97,
+      frames: 241,
     });
-    const estimate = buildGenerationEstimateRequest(chained, "ltx2");
+    const estimate = buildGenerationEstimateRequest(advancedSingle, "ltx2");
     expect(estimate).not.toHaveProperty("source_video");
     expect(estimate).not.toHaveProperty("keyframes");
     expect(estimate).not.toHaveProperty("audio_file");
     expect(estimate).not.toHaveProperty("control_image");
     expect(estimate).not.toHaveProperty("control_model");
     expect(estimate).not.toHaveProperty("control_scale");
+    const compatibleChain: GenerateRequest = { ...advancedSingle };
+    delete compatibleChain.source_video;
+    delete compatibleChain.keyframes;
+    delete compatibleChain.audio_file;
+    expect(buildGenerationEstimateRequest(compatibleChain, "ltx2")).toMatchObject({
+      batch_size: 1,
+      frames: 97,
+    });
     expect(buildGenerationEstimateRequest(request, "ltx2")).toMatchObject({
       batch_size: 1,
       frames: 257,
@@ -346,6 +354,33 @@ describe("automatic chain request projection", () => {
       "temporal_upscale",
       "guidance_overrides",
     ]);
+  });
+
+  it("keeps an in-budget long request single-shot when chaining would lose settings", () => {
+    const decision = decideGenerateRequestRouting(
+      {
+        ...request,
+        frames: 153,
+        negative_prompt: "text",
+        loras: [{ path: "/models/style.safetensors", scale: 0.8 }],
+      },
+      "ltx2",
+    );
+
+    expect(decision).toEqual({
+      kind: "single",
+      preservedAutoChainFields: ["negative_prompt", "loras"],
+    });
+  });
+
+  it("rejects incompatible chaining only past the single-shot cap", () => {
+    expect(
+      decideGenerateRequestRouting({ ...request, frames: 489, negative_prompt: "text" }, "ltx2"),
+    ).toEqual({
+      kind: "reject",
+      reason:
+        "489 frames exceeds the 481-frame single-shot limit at 24 fps, and automatic chaining can’t preserve negative prompt. Reduce Frames, remove that option, or author a Sequence with compatible per-clip settings.",
+    });
   });
 
   it("ignores empty optional values and reports singular LoRA compatibility", () => {

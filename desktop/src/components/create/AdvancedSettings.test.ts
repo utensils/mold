@@ -355,6 +355,20 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.get("[data-test='chain-cue']").text()).toContain("chained clips of 97 frames");
   });
 
+  it("explains when advanced settings keep a long request single-shot", async () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    form.frames = 153;
+    form.negativePrompt = "flicker";
+    const wrapper = mountSettings(form);
+    await openSection(wrapper, "Video");
+
+    expect(wrapper.get("[data-test='single-shot-preservation-cue']").text()).toContain(
+      "one 153-frame clip to preserve negative prompt",
+    );
+    expect(wrapper.find("[data-test='chain-compatibility-error']").exists()).toBe(false);
+  });
+
   it("shows the reject message when a chain would exceed the stage ceiling", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
