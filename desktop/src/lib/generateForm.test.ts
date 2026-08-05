@@ -984,6 +984,7 @@ describe("applyPrefillToForm", () => {
       outputFormat: "mp4",
       sourceImage: "SOURCE",
       sourceImageName: "frame.png",
+      sourceFit: { mode: "crop-fill", alignX: "center", alignY: "center" },
       controlModel: "",
       frames: 97,
       fps: 25,
