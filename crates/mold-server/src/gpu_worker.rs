@@ -1386,6 +1386,9 @@ fn process_scheduled_chain_stage(
                         &request,
                         carry.as_ref(),
                         motion_tail_frames,
+                        // Server chains never carry the client-local HDR EXR
+                        // sidecar (#688).
+                        None,
                         Some(&mut stage_progress),
                     )
                 });
@@ -4877,6 +4880,7 @@ mod tests {
                 tail_rgb_frames: Vec::new(),
             },
             audio: None,
+            hdr_frames_written: None,
             generation_time_ms: 1,
         };
         assert!(matches!(

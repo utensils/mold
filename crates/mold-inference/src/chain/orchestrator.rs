@@ -13,11 +13,58 @@
 //! family, in `crate::ltx2`.
 
 use crate::audio::NativeAudioTrack;
+use crate::chain::stitch::{plan_exr_stage_windows, ExrStageWindow};
 use anyhow::{bail, Result};
 use image::RgbImage;
 use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
 use mold_core::chain_job::effective_stage_seed;
 use mold_core::{GenerateRequest, OutputFormat};
+use std::path::PathBuf;
+
+/// Chain-level HDR EXR sidecar configuration, supplied by the CLI's
+/// forced-local path. `None` everywhere else keeps ordinary chains untouched.
+///
+/// An HDR chain is a chained v2v regrade: validation pins `hdr_exr_dir` to
+/// `ic_lora_control=hdr`, which needs the IC-LoRA pipeline and an SDR
+/// reference video. Carrying only the sidecar directory would LogC3-decode
+/// ungraded SDR stages — the "wrongly-graded EXR that looks deliberate"
+/// refusal #681 existed to prevent — so this config carries the whole
+/// authority: the control id, the resolved adapter LoRA stack, and the
+/// reference video every stage slices its own temporal window from.
+#[derive(Debug, Clone)]
+pub struct ChainHdrConfig {
+    /// Directory receiving `frame_%05d.exr`, globally numbered across the
+    /// stitched timeline.
+    pub exr_dir: PathBuf,
+    /// 32-bit float samples instead of the half-float default.
+    pub full_float: bool,
+    /// Normalized built-in control id (`"hdr"`).
+    pub ic_lora_control: String,
+    /// Reference video container bytes; each stage conditions on its own
+    /// temporal window of this clip via `reference_frame_offset`.
+    pub reference_video: Vec<u8>,
+    /// Resolved control-adapter LoRA stack, prepended to each stage's own
+    /// LoRAs (adapter first, matching the single-clip path).
+    pub control_loras: Vec<mold_core::LoraWeight>,
+    /// Requested stitched length; EXR windows past it write nothing.
+    pub total_frames_cap: Option<u32>,
+}
+
+/// Per-stage sidecar view handed to [`ChainStageRenderer::render_stage`].
+/// Derived once per run from [`ChainHdrConfig`] by the orchestrator; the
+/// renderer stamps it onto its render plan and must not re-derive any of it.
+#[derive(Debug, Clone)]
+pub struct StageSidecar {
+    pub exr_dir: PathBuf,
+    pub full_float: bool,
+    /// This stage's EXR window on the stitched timeline (cap applied).
+    pub window: ExrStageWindow,
+    /// Stitched-timeline index of this stage's first *rendered* frame —
+    /// where the reference-video slice for this stage begins. Derived from
+    /// the uncapped timeline so a capped tail stage still conditions on the
+    /// right reference window.
+    pub reference_frame_offset: u32,
+}
 
 /// Opaque carryover payload handed from one chain stage to the next.
 ///
@@ -115,6 +162,8 @@ pub struct StageOutcome {
     /// chain (single model, single VAE), so the stitch layer can concatenate
     /// these directly without resampling.
     pub audio: Option<NativeAudioTrack>,
+    /// EXR frames this stage's decode wrote, when a sidecar was requested.
+    pub hdr_frames_written: Option<usize>,
     pub generation_time_ms: u64,
 }
 
@@ -128,6 +177,7 @@ pub trait ChainStageRenderer {
         stage_req: &GenerateRequest,
         carry: Option<&ChainTail>,
         motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&StageSidecar>,
         stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
     ) -> Result<StageOutcome>;
 }
@@ -149,6 +199,9 @@ pub struct ChainRunOutput {
     /// per-boundary Smooth/Cut/Fade audio concat semantics.
     pub stage_audio: Vec<Option<NativeAudioTrack>>,
     pub stage_count: u32,
+    /// Total EXR frames written across all stages when an HDR sidecar was
+    /// active; `0` for ordinary chains.
+    pub hdr_frames_written: usize,
     pub generation_time_ms: u64,
 }
 
@@ -178,7 +231,19 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
     pub fn run(
         &mut self,
         req: &ChainRequest,
+        chain_progress: Option<&mut dyn FnMut(ChainProgressEvent)>,
+    ) -> std::result::Result<ChainRunOutput, ChainOrchestratorError> {
+        self.run_with_hdr(req, chain_progress, None)
+    }
+
+    /// [`Self::run`] with an optional HDR EXR sidecar. Kept as a separate
+    /// entry point so the many ordinary-chain callers and tests never see
+    /// the extra parameter.
+    pub fn run_with_hdr(
+        &mut self,
+        req: &ChainRequest,
         mut chain_progress: Option<&mut dyn FnMut(ChainProgressEvent)>,
+        hdr: Option<&ChainHdrConfig>,
     ) -> std::result::Result<ChainRunOutput, ChainOrchestratorError> {
         if req.stages.is_empty() {
             return Err(ChainOrchestratorError::Invalid(anyhow::anyhow!(
@@ -186,6 +251,43 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             )));
         }
         validate_motion_tail(req).map_err(ChainOrchestratorError::Invalid)?;
+
+        // Plan every stage's EXR window up front so an invalid layout (a
+        // fade boundary, a clip shorter than its trim) fails before any
+        // render burns GPU time. The uncapped pass supplies each stage's
+        // stitched-timeline render position, which is where its reference
+        // slice begins — a capped tail stage still renders (and conditions)
+        // at its real timeline position even when it writes fewer EXRs.
+        let stage_sidecars: Option<Vec<StageSidecar>> = match hdr {
+            None => None,
+            Some(cfg) => {
+                let frames: Vec<u32> = req.stages.iter().map(|stage| stage.frames).collect();
+                let boundaries: Vec<TransitionMode> =
+                    req.stages.iter().skip(1).map(|s| s.transition).collect();
+                let capped = plan_exr_stage_windows(
+                    &frames,
+                    &boundaries,
+                    req.motion_tail_frames,
+                    cfg.total_frames_cap,
+                )
+                .map_err(|e| ChainOrchestratorError::Invalid(anyhow::anyhow!(e)))?;
+                let uncapped =
+                    plan_exr_stage_windows(&frames, &boundaries, req.motion_tail_frames, None)
+                        .map_err(|e| ChainOrchestratorError::Invalid(anyhow::anyhow!(e)))?;
+                Some(
+                    capped
+                        .into_iter()
+                        .zip(uncapped)
+                        .map(|(window, timeline)| StageSidecar {
+                            exr_dir: cfg.exr_dir.clone(),
+                            full_float: cfg.full_float,
+                            window,
+                            reference_frame_offset: timeline.start_index - timeline.skip_leading,
+                        })
+                        .collect(),
+                )
+            }
+        };
 
         let stage_count = req.stages.len() as u32;
         let estimated_total_frames = estimate_stitched_frames(req);
@@ -200,6 +302,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
         let mut stage_frames: Vec<Vec<RgbImage>> = Vec::with_capacity(req.stages.len());
         let mut stage_audio: Vec<Option<NativeAudioTrack>> = Vec::with_capacity(req.stages.len());
         let mut total_generation_ms: u64 = 0;
+        let mut hdr_frames_written_total: usize = 0;
         let mut carry: Option<ChainTail> = None;
 
         for (idx, stage) in req.stages.iter().enumerate() {
@@ -209,7 +312,21 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             }
 
             let stage_seed = derive_stage_seed(base_seed, idx, stage);
-            let stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
+            let mut stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
+            // The HDR authority overlay: every stage renders as an IC-LoRA
+            // regrade of its own temporal window of the reference. The two
+            // stage-request builders deliberately keep pinning these fields
+            // to None — the orchestrator is the single carrier, so a stage
+            // request built anywhere else can never claim HDR by accident.
+            if let Some(cfg) = hdr {
+                stage_req.pipeline = Some(mold_core::Ltx2PipelineMode::IcLora);
+                stage_req.ic_lora_control = Some(cfg.ic_lora_control.clone());
+                stage_req.source_video = Some(cfg.reference_video.clone());
+                let mut loras = cfg.control_loras.clone();
+                loras.extend(stage_req.loras.take().unwrap_or_default());
+                stage_req.loras = Some(loras);
+            }
+            let stage_sidecar = stage_sidecars.as_ref().map(|sidecars| &sidecars[idx]);
 
             // Cut and Fade transitions produce a visual reset: the prior
             // stage's motion-tail latent is NOT threaded into this stage.
@@ -241,6 +358,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
                         &stage_req,
                         effective_carry,
                         req.motion_tail_frames,
+                        stage_sidecar,
                         Some(&mut wrapping),
                     )
                 }
@@ -248,6 +366,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
                     &stage_req,
                     effective_carry,
                     req.motion_tail_frames,
+                    stage_sidecar,
                     None,
                 ),
             };
@@ -261,6 +380,8 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             let frames_emitted = outcome.frames.len() as u32;
             stage_frames.push(outcome.frames);
             stage_audio.push(outcome.audio);
+            hdr_frames_written_total =
+                hdr_frames_written_total.saturating_add(outcome.hdr_frames_written.unwrap_or(0));
             total_generation_ms = total_generation_ms.saturating_add(outcome.generation_time_ms);
             carry = Some(outcome.tail);
 
@@ -283,6 +404,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> ChainOrchestrator<'a, R> {
             stage_frames,
             stage_audio,
             stage_count,
+            hdr_frames_written: hdr_frames_written_total,
             generation_time_ms: total_generation_ms,
         })
     }
@@ -442,6 +564,11 @@ mod tests {
         /// so chain-audio plumbing tests can assert the orchestrator captures
         /// per-stage audio without standing up a real LTX-2 vocoder.
         synthesize_audio: bool,
+        /// If true, write one marker file per sidecar-window frame via the
+        /// real `exr_frame_path` naming so tests can assert the on-disk
+        /// sequence tiles the stitched timeline (no holes, no double
+        /// writes) without a real VAE decode.
+        write_sidecar_markers: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -450,6 +577,11 @@ mod tests {
         has_source_image: bool,
         has_carry: bool,
         enable_audio: Option<bool>,
+        pipeline: Option<mold_core::Ltx2PipelineMode>,
+        ic_lora_control: Option<String>,
+        has_source_video: bool,
+        lora_paths: Vec<String>,
+        sidecar: Option<StageSidecar>,
     }
 
     impl FakeRenderer {
@@ -460,6 +592,7 @@ mod tests {
                 frame_count_override: None,
                 emit_progress: false,
                 synthesize_audio: false,
+                write_sidecar_markers: false,
             }
         }
     }
@@ -470,6 +603,7 @@ mod tests {
             stage_req: &GenerateRequest,
             carry: Option<&ChainTail>,
             _motion_tail_pixel_frames: u32,
+            hdr_sidecar: Option<&StageSidecar>,
             mut stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
         ) -> Result<StageOutcome> {
             let idx = self.calls.len();
@@ -478,10 +612,37 @@ mod tests {
                 has_source_image: stage_req.source_image.is_some(),
                 has_carry: carry.is_some(),
                 enable_audio: stage_req.enable_audio,
+                pipeline: stage_req.pipeline,
+                ic_lora_control: stage_req.ic_lora_control.clone(),
+                has_source_video: stage_req.source_video.is_some(),
+                lora_paths: stage_req
+                    .loras
+                    .as_ref()
+                    .map(|loras| loras.iter().map(|lora| lora.path.clone()).collect())
+                    .unwrap_or_default(),
+                sidecar: hdr_sidecar.cloned(),
             });
             if let Some((_, msg)) = self.fail_on.iter().find(|(stage_idx, _)| *stage_idx == idx) {
                 bail!("{msg}");
             }
+            let hdr_frames_written = match hdr_sidecar {
+                Some(sidecar) if self.write_sidecar_markers => {
+                    std::fs::create_dir_all(&sidecar.exr_dir)?;
+                    for offset in 0..sidecar.window.write_count {
+                        let path = crate::ltx2::exr::exr_frame_path(
+                            &sidecar.exr_dir,
+                            (sidecar.window.start_index + offset) as usize,
+                        );
+                        if path.exists() {
+                            bail!("sidecar index written twice: {}", path.display());
+                        }
+                        std::fs::write(&path, b"marker")?;
+                    }
+                    Some(sidecar.window.write_count as usize)
+                }
+                Some(sidecar) => Some(sidecar.window.write_count as usize),
+                None => None,
+            };
             if self.emit_progress {
                 if let Some(cb) = stage_progress.as_mut() {
                     cb(StageProgressEvent::DenoiseStep { step: 1, total: 1 });
@@ -536,6 +697,7 @@ mod tests {
                     tail_rgb_frames,
                 },
                 audio,
+                hdr_frames_written,
                 generation_time_ms: 100,
             })
         }
@@ -998,6 +1160,158 @@ mod tests {
         };
         let frames = plan.assemble().unwrap();
         assert_eq!(frames.len(), 355);
+    }
+
+    fn hdr_config(dir: &std::path::Path, cap: Option<u32>) -> ChainHdrConfig {
+        ChainHdrConfig {
+            exr_dir: dir.to_path_buf(),
+            full_float: false,
+            ic_lora_control: "hdr".to_string(),
+            reference_video: vec![0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p'],
+            control_loras: vec![mold_core::LoraWeight {
+                path: "/models/loras/ltx2-hdr-adapter.safetensors".to_string(),
+                scale: 1.0,
+            }],
+            total_frames_cap: cap,
+        }
+    }
+
+    /// The HDR authority overlay must land on every stage request: the
+    /// IC-LoRA pipeline, the control id, the shared reference video, and the
+    /// adapter LoRA ahead of any per-stage LoRAs. The two stage-request
+    /// builders keep pinning these to None — the orchestrator is the single
+    /// carrier.
+    #[test]
+    fn hdr_overlay_reaches_every_stage_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stages = vec![stage("a", 97), stage("a", 97)];
+        stages[1].loras = vec![mold_core::chain::LoraSpec {
+            path: "/models/style.safetensors".into(),
+            scale: 0.5,
+            name: None,
+        }];
+        let mut req = chain_req(stages, 17);
+        req.motion_tail_frames = 17;
+        let mut renderer = FakeRenderer::new();
+        let mut orch = ChainOrchestrator::new(&mut renderer);
+        orch.run_with_hdr(&req, None, Some(&hdr_config(dir.path(), Some(121))))
+            .expect("hdr chain runs");
+
+        for (idx, call) in renderer.calls.iter().enumerate() {
+            assert_eq!(
+                call.pipeline,
+                Some(mold_core::Ltx2PipelineMode::IcLora),
+                "stage {idx} must render as an IC-LoRA regrade",
+            );
+            assert_eq!(call.ic_lora_control.as_deref(), Some("hdr"));
+            assert!(
+                call.has_source_video,
+                "stage {idx} must carry the reference"
+            );
+            assert_eq!(
+                call.lora_paths.first().map(String::as_str),
+                Some("/models/loras/ltx2-hdr-adapter.safetensors"),
+                "adapter LoRA must lead stage {idx}'s stack",
+            );
+        }
+        // Stage 1 keeps its own LoRA behind the adapter.
+        assert_eq!(renderer.calls[1].lora_paths.len(), 2);
+        assert_eq!(renderer.calls[1].lora_paths[1], "/models/style.safetensors");
+
+        // Windows: [97 @ 0, skip 17 → 24 @ 97 (capped at 121)]. Reference
+        // offsets come from the *uncapped* timeline: stage 1 renders from
+        // stitched frame 80 even though it writes only 24 EXRs.
+        let sidecar0 = renderer.calls[0].sidecar.as_ref().unwrap();
+        assert_eq!(sidecar0.window.start_index, 0);
+        assert_eq!(sidecar0.window.skip_leading, 0);
+        assert_eq!(sidecar0.window.write_count, 97);
+        assert_eq!(sidecar0.reference_frame_offset, 0);
+        let sidecar1 = renderer.calls[1].sidecar.as_ref().unwrap();
+        assert_eq!(sidecar1.window.start_index, 97);
+        assert_eq!(sidecar1.window.skip_leading, 17);
+        assert_eq!(sidecar1.window.write_count, 24);
+        assert_eq!(sidecar1.reference_frame_offset, 80);
+    }
+
+    /// End-to-end file-level pin for issue #688's core requirement: the
+    /// per-stage sidecar files tile the stitched timeline with no holes and
+    /// no index written twice (the FakeRenderer bails on a double write).
+    #[test]
+    fn hdr_sidecar_files_tile_the_stitched_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let stages = vec![stage("a", 97), stage("a", 41), stage("a", 97)];
+        let mut req = chain_req(stages, 17);
+        req.motion_tail_frames = 17;
+        let mut renderer = FakeRenderer::new();
+        renderer.write_sidecar_markers = true;
+        let mut orch = ChainOrchestrator::new(&mut renderer);
+        let out = orch
+            .run_with_hdr(&req, None, Some(&hdr_config(dir.path(), None)))
+            .expect("hdr chain runs");
+
+        let boundaries = vec![TransitionMode::Smooth, TransitionMode::Smooth];
+        let stitched = crate::chain::stitch::StitchPlan {
+            clips: out.stage_frames,
+            boundaries,
+            fade_lens: vec![0, 0],
+            motion_tail_frames: req.motion_tail_frames,
+        }
+        .assemble()
+        .expect("stitch")
+        .len();
+
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names.len(),
+            stitched,
+            "sidecar file count must equal the stitched frame count",
+        );
+        let expected: Vec<String> = (0..stitched).map(|i| format!("frame_{i:05}.exr")).collect();
+        assert_eq!(names, expected, "sequence must be contiguous from zero");
+        assert_eq!(out.hdr_frames_written, stitched);
+    }
+
+    #[test]
+    fn hdr_with_fade_boundary_fails_before_any_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stages = vec![stage("a", 97), stage("a", 97)];
+        stages[1].transition = TransitionMode::Fade;
+        stages[1].fade_frames = Some(8);
+        let req = chain_req(stages, 17);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = ChainOrchestrator::new(&mut renderer);
+        let err = orch
+            .run_with_hdr(&req, None, Some(&hdr_config(dir.path(), None)))
+            .expect_err("fade + sidecar must fail");
+        assert!(
+            matches!(err, ChainOrchestratorError::Invalid(_)),
+            "expected Invalid, got {err:?}",
+        );
+        assert!(
+            format!("{err}").contains("fade"),
+            "error must name the fade boundary: {err}",
+        );
+        assert!(renderer.calls.is_empty(), "no stage may render");
+    }
+
+    #[test]
+    fn ordinary_chains_carry_no_sidecar_and_no_overlay() {
+        let stages = vec![stage("a", 97), stage("a", 97)];
+        let req = chain_req(stages, 17);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).expect("chain runs");
+        assert_eq!(out.hdr_frames_written, 0);
+        for call in &renderer.calls {
+            assert!(call.sidecar.is_none());
+            assert_eq!(call.pipeline, None);
+            assert_eq!(call.ic_lora_control, None);
+            assert!(!call.has_source_video);
+        }
     }
 
     fn sample_chain_request(count: usize, transition: TransitionMode) -> ChainRequest {

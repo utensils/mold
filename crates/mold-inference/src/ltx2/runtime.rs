@@ -2181,7 +2181,22 @@ fn maybe_load_stage_video_conditioning_inner(
         }
         let ref_width = pixel_shape.width / reference_downscale_factor;
         let ref_height = pixel_shape.height / reference_downscale_factor;
-        let (_metadata, mut frames) = media::decode_video_frames(Path::new(video_path))?;
+        let (_metadata, decoded_frames) = media::decode_video_frames(Path::new(video_path))?;
+        // A chain stage conditions on its own temporal window of the shared
+        // reference: skip everything before the stage's stitched-timeline
+        // start, then cap at the render length. Zero for single renders, so
+        // the existing behaviour is the identity case. Upstream slices
+        // reference conditioning per temporal tile the same way
+        // (hdr_ic_lora.py:521-541).
+        let offset = plan.reference_frame_offset as usize;
+        if offset > 0 && decoded_frames.len() <= offset {
+            anyhow::bail!(
+                "reference video '{video_path}' has {} frames but this chain stage begins at \
+                 stitched frame {offset}; the reference must cover the full requested duration",
+                decoded_frames.len(),
+            );
+        }
+        let mut frames: Vec<RgbImage> = decoded_frames.into_iter().skip(offset).collect();
         if frames.len() > pixel_shape.frames {
             frames.truncate(pixel_shape.frames);
         }
@@ -3056,9 +3071,7 @@ fn render_real_distilled_av(
         dtype,
         device,
         debug_enabled,
-        plan_hdr_exr_target(plan)
-            .as_ref()
-            .map(|(d, p)| (d.as_path(), *p)),
+        plan_hdr_exr_target(plan).as_ref(),
         progress,
     )?;
     let frames = decoded.frames;
@@ -4020,9 +4033,7 @@ fn render_real_two_stage_av(
         dtype,
         device,
         false,
-        plan_hdr_exr_target(plan)
-            .as_ref()
-            .map(|(d, p)| (d.as_path(), *p)),
+        plan_hdr_exr_target(plan).as_ref(),
         progress,
     )?;
     let frames = decoded.frames;
@@ -4243,9 +4254,7 @@ fn render_real_one_stage_av(
         dtype,
         device,
         debug_enabled,
-        plan_hdr_exr_target(plan)
-            .as_ref()
-            .map(|(d, p)| (d.as_path(), *p)),
+        plan_hdr_exr_target(plan).as_ref(),
         progress,
     )?;
     let frames = decoded.frames;
@@ -4440,9 +4449,7 @@ fn render_real_retake_av(
         dtype,
         device,
         debug_enabled,
-        plan_hdr_exr_target(plan)
-            .as_ref()
-            .map(|(d, p)| (d.as_path(), *p)),
+        plan_hdr_exr_target(plan).as_ref(),
         progress,
     )?;
     let frames = decoded.frames;
@@ -5625,16 +5632,29 @@ fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
 ///
 /// Resolved once per decode so the four render paths cannot disagree about
 /// where the sequence goes or at what precision.
-fn plan_hdr_exr_target(
-    plan: &Ltx2GeneratePlan,
-) -> Option<(std::path::PathBuf, crate::ltx2::exr::ExrPrecision)> {
+fn plan_hdr_exr_target(plan: &Ltx2GeneratePlan) -> Option<HdrExrTarget> {
     let dir = plan.hdr_exr_dir.as_deref()?;
     let precision = if plan.hdr_exr_full_float {
         crate::ltx2::exr::ExrPrecision::Full
     } else {
         crate::ltx2::exr::ExrPrecision::Half
     };
-    Some((std::path::PathBuf::from(dir), precision))
+    Some(HdrExrTarget {
+        dir: std::path::PathBuf::from(dir),
+        precision,
+        window: plan.hdr_exr_window,
+    })
+}
+
+/// Resolved EXR sidecar destination for one decode: where the frames go, at
+/// what precision, and — for chain stages — which window of the decoded clip
+/// lands at which global indices. `window: None` is the single-render
+/// identity (every decoded frame, numbered from zero).
+#[derive(Debug, Clone)]
+pub(crate) struct HdrExrTarget {
+    pub(crate) dir: std::path::PathBuf,
+    pub(crate) precision: crate::ltx2::exr::ExrPrecision,
+    pub(crate) window: Option<crate::chain::ExrStageWindow>,
 }
 
 /// Convert the decoded tensor to scene-referred linear HDR and write it out
@@ -5645,16 +5665,29 @@ fn plan_hdr_exr_target(
 /// its length: 25 MB per frame at 1920x1088, which is 3 GB for a 5-second
 /// render and 12 GB at LTX-2's 20-second ceiling — on a card that is already
 /// holding the model. Only one frame is live at a time here.
-fn write_hdr_frames_streaming(
-    video: &Tensor,
-    dir: &Path,
-    precision: crate::ltx2::exr::ExrPrecision,
-) -> Result<usize> {
+fn write_hdr_frames_streaming(video: &Tensor, target: &HdrExrTarget) -> Result<usize> {
+    let dir = target.dir.as_path();
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create HDR EXR directory '{}'", dir.display()))?;
     let video = video.to_dtype(DType::F32)?.i(0)?;
     let count = video.dim(1)?;
-    for index in 0..count {
+    // A chain stage writes only its window: local frames
+    // `[skip, skip + write_count)` land at global indices
+    // `[start, start + write_count)`. The identity (no window) keeps the
+    // single-render behaviour bit-for-bit: every frame, numbered from zero.
+    // Skipped frames are never materialized, so peak memory stays at one
+    // frame either way.
+    let (skip, start, limit) = match target.window {
+        Some(window) => (
+            window.skip_leading as usize,
+            window.start_index as usize,
+            window.write_count as usize,
+        ),
+        None => (0, 0, count),
+    };
+    let end = count.min(skip.saturating_add(limit));
+    let mut written = 0usize;
+    for index in skip..end {
         let frame = video
             .i((.., index, .., ..))?
             .permute((1, 2, 0))?
@@ -5670,12 +5703,13 @@ fn write_hdr_frames_streaming(
             .collect();
         let hdr_frame = crate::ltx2::exr::HdrFrame { width, height, rgb };
         crate::ltx2::exr::write_exr_frame(
-            &crate::ltx2::exr::exr_frame_path(dir, index),
+            &crate::ltx2::exr::exr_frame_path(dir, start + (index - skip)),
             &hdr_frame,
-            precision,
+            target.precision,
         )?;
+        written += 1;
     }
-    Ok(count)
+    Ok(written)
 }
 
 fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
@@ -7126,7 +7160,7 @@ fn decode_video_frames_with_telemetry(
     dtype: DType,
     device: &candle_core::Device,
     debug_enabled: bool,
-    hdr_exr: Option<(&Path, crate::ltx2::exr::ExrPrecision)>,
+    hdr_exr: Option<&HdrExrTarget>,
     progress: Option<&ProgressCallback>,
 ) -> Result<DecodedVideo> {
     let decode_start = Instant::now();
@@ -7144,7 +7178,7 @@ fn decode_video_frames_with_telemetry(
         // frames afterwards. Streaming it frame-by-frame keeps peak memory at
         // one frame instead of the whole clip.
         let hdr_frames_written = hdr_exr
-            .map(|(dir, precision)| write_hdr_frames_streaming(&video, dir, precision))
+            .map(|target| write_hdr_frames_streaming(&video, target))
             .transpose()?;
         let frames = decoded_video_to_frames(&video, pixel_shape)?;
         if device.is_cuda() {
@@ -8077,14 +8111,132 @@ mod tests {
         plan_stage2_tiles_with_policy, reapply_stage_video_conditioning,
         resize_tail_frames_to_pixel_shape, should_inspect_step_velocity,
         source_image_only_conditioning, stage2_carried_audio, strip_appended_video_conditioning,
-        Ltx2RuntimeSession, Ltx2VaeLatentStats, Stage2AudioPolicy, StageAudioConditioning,
-        StageVideoConditioning, TiledStage2Pass, VideoTokenAppendCondition, VideoTokenReplacement,
-        LTX2_AUDIO_LATENT_CHANNELS, LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
+        write_hdr_frames_streaming, HdrExrTarget, Ltx2RuntimeSession, Ltx2VaeLatentStats,
+        Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning, TiledStage2Pass,
+        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
+        LTX2_AUDIO_MEL_BINS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoLatentShape;
     use crate::ltx2::model::VideoPixelShape;
     use crate::ltx2::plan::{Ltx2GeneratePlan, PipelineKind};
+
+    /// `[1, 3, frames, 2, 2]` CPU tensor whose every sample in frame `f` is
+    /// `values[f]`, so a written EXR identifies which decoded frame it came
+    /// from by value alone.
+    fn per_frame_constant_video(values: &[f32]) -> Tensor {
+        let mut data = Vec::with_capacity(3 * values.len() * 4);
+        for _channel in 0..3 {
+            for &value in values {
+                data.extend_from_slice(&[value; 4]);
+            }
+        }
+        Tensor::from_vec(data, (1, 3, values.len(), 2, 2), &Device::Cpu).unwrap()
+    }
+
+    fn read_exr_first_sample(path: &std::path::Path) -> f32 {
+        let read = exr::prelude::read_first_rgba_layer_from_file(
+            path,
+            |resolution, _| {
+                vec![(0f32, 0f32, 0f32, 0f32); resolution.width() * resolution.height()]
+            },
+            |pixels: &mut Vec<(f32, f32, f32, f32)>,
+             position,
+             (r, g, b, a): (f32, f32, f32, f32)| {
+                pixels[position.y() * 2 + position.x()] = (r, g, b, a);
+            },
+        )
+        .unwrap();
+        read.layer_data.channel_data.pixels[0].0
+    }
+
+    /// A chain stage writes exactly its window — local frames
+    /// `[skip, skip + count)` at global indices `[start, start + count)` —
+    /// and nothing else. This is the per-stage half of issue #688's "EXR
+    /// count equals the stitched frame count and no index written twice".
+    #[test]
+    fn hdr_streaming_writer_honours_the_stage_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = [-0.8f32, -0.4, 0.0, 0.4, 0.8, 0.9, 1.0];
+        let video = per_frame_constant_video(&values);
+        let target = HdrExrTarget {
+            dir: dir.path().to_path_buf(),
+            precision: crate::ltx2::exr::ExrPrecision::Full,
+            window: Some(crate::chain::ExrStageWindow {
+                skip_leading: 2,
+                start_index: 5,
+                write_count: 3,
+            }),
+        };
+        let written = write_hdr_frames_streaming(&video, &target).unwrap();
+        assert_eq!(written, 3);
+
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["frame_00005.exr", "frame_00006.exr", "frame_00007.exr"],
+            "skipped local frames must produce no files and indices must be global",
+        );
+        // frame_00005 is local frame 2 (value 0.0) through the LogC3 inverse.
+        for (global, local) in [(5usize, 2usize), (6, 3), (7, 4)] {
+            let expected = crate::ltx2::hdr::vae_output_to_linear_hdr(values[local]);
+            let actual =
+                read_exr_first_sample(&crate::ltx2::exr::exr_frame_path(dir.path(), global));
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "frame_{global:05} should hold local frame {local}'s value \
+                 (expected {expected}, got {actual})",
+            );
+        }
+    }
+
+    /// No window is the single-render identity: every decoded frame, numbered
+    /// from zero — bit-for-bit the pre-#688 behaviour.
+    #[test]
+    fn hdr_streaming_writer_default_window_is_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = [-0.5f32, 0.0, 0.5];
+        let video = per_frame_constant_video(&values);
+        let target = HdrExrTarget {
+            dir: dir.path().to_path_buf(),
+            precision: crate::ltx2::exr::ExrPrecision::Full,
+            window: None,
+        };
+        let written = write_hdr_frames_streaming(&video, &target).unwrap();
+        assert_eq!(written, 3);
+        for (index, &value) in values.iter().enumerate() {
+            let expected = crate::ltx2::hdr::vae_output_to_linear_hdr(value);
+            let actual =
+                read_exr_first_sample(&crate::ltx2::exr::exr_frame_path(dir.path(), index));
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    /// A window reaching past the decoded clip writes only what exists —
+    /// the cap arithmetic upstream should prevent this, but the writer must
+    /// not index out of bounds if it ever regresses.
+    #[test]
+    fn hdr_streaming_writer_clamps_the_window_to_the_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = per_frame_constant_video(&[0.0, 0.1, 0.2]);
+        let target = HdrExrTarget {
+            dir: dir.path().to_path_buf(),
+            precision: crate::ltx2::exr::ExrPrecision::Half,
+            window: Some(crate::chain::ExrStageWindow {
+                skip_leading: 1,
+                start_index: 10,
+                write_count: 99,
+            }),
+        };
+        let written = write_hdr_frames_streaming(&video, &target).unwrap();
+        assert_eq!(written, 2, "only local frames 1..3 exist");
+        assert!(crate::ltx2::exr::exr_frame_path(dir.path(), 10).exists());
+        assert!(crate::ltx2::exr::exr_frame_path(dir.path(), 11).exists());
+    }
     use crate::ltx2::preset::preset_for_model;
     use crate::ltx2::text::connectors::PaddingSide;
     use crate::ltx2::text::encoder::{GemmaConfig, GemmaHiddenStateEncoder};
@@ -8370,6 +8522,8 @@ mod tests {
         Ltx2GeneratePlan {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
+            hdr_exr_window: None,
+            reference_frame_offset: 0,
             scene_embeddings_path: None,
             guidance_overrides: None,
             vram_grant_bytes: None,

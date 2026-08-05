@@ -148,11 +148,20 @@ noticeably faster — about 120 s instead of 180 s for a 25-frame 704x448 clip o
 a 4090. Your prompt text is ignored for this control; that is upstream's design,
 not a limitation of the port.
 
-EXR export covers **one render**, so it cannot be combined with auto-chaining.
-A frame count above the model's per-clip cap is split into stitched clips, and
-each clip would overwrite the previous one's frame numbering — so mold refuses
-the combination rather than leaving you an empty directory beside a video that
-reported success. Render within the per-clip cap, or drop `--hdr-exr-dir`.
+EXR export also works with **auto-chaining**: a frame count above the model's
+per-clip cap is split into stitched clips, and the sidecar's frame numbering is
+**global across the stitched timeline** — each stage writes only the frames it
+delivers, skipping the motion-tail overlap the stitch drops, so a 121-frame
+render yields exactly `frame_00000.exr` through `frame_00120.exr` with no
+duplicates or holes. Each stage regrades its own temporal window of the
+reference video, and the final stage is sized to the exact remainder so
+nothing renders past the reference's end. Three constraints come with this:
+chained EXR export runs **locally only** (`--local` — a remote server cannot
+write the sidecar to your machine), the reference video must cover the full
+requested duration at the render's frame rate, and only Smooth and Cut
+transitions are supported (a Fade's blended frames exist in no stage's linear
+tensor, so mold refuses rather than writing a sequence that disagrees with the
+video).
 
 The EXR sequence is a **sidecar**, not the gallery artifact: a sequence is many
 files and gigabytes, so the ordinary tonemapped video is still written and is

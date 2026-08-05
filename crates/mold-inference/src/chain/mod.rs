@@ -19,6 +19,7 @@ pub use capability::{
 };
 pub use encode::{encode_chain_frames, ChainEncodeWarning, EncodedChainVideo};
 pub use orchestrator::{
-    ChainOrchestrator, ChainOrchestratorError, ChainRunOutput, ChainStageRenderer, ChainTail,
-    StageOutcome, StageProgressEvent,
+    ChainHdrConfig, ChainOrchestrator, ChainOrchestratorError, ChainRunOutput, ChainStageRenderer,
+    ChainTail, StageOutcome, StageProgressEvent, StageSidecar,
 };
+pub use stitch::ExrStageWindow;

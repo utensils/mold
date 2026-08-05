@@ -189,6 +189,82 @@ pub struct ChainInputs {
     pub batch_count: Option<u32>,
 }
 
+/// Shrink an auto-expanded all-Smooth chain's LAST stage so the stitched
+/// output covers `total_frames` exactly — no overshoot to truncate, and, for
+/// the HDR sidecar path that requires this, no stage rendering past the end
+/// of the reference video.
+///
+/// The 8k+1 lattice closes by construction for canonical inputs: `total ≡ 1`,
+/// stage 0 delivers `clip ≡ 1`, each full continuation delivers
+/// `clip − tail ≡ 0`, and `tail ≡ 1 (mod 8)`, so the remainder-plus-tail last
+/// stage is `≡ 1 (mod 8)`. Inputs where the lattice does not close (a
+/// zero motion tail, an off-grid total) are refused with the arithmetic in
+/// the message rather than silently re-shaped.
+pub(crate) fn exact_fit_last_stage_for_sidecar(
+    req: &mut ChainRequest,
+    total_frames: u32,
+) -> Result<()> {
+    let tail = req.motion_tail_frames;
+    let stage_count = req.stages.len();
+    if stage_count <= 1 {
+        return Ok(());
+    }
+    let delivered_before_last: u32 = req
+        .stages
+        .iter()
+        .take(stage_count - 1)
+        .enumerate()
+        .map(|(idx, stage)| {
+            if idx == 0 {
+                stage.frames
+            } else {
+                stage.frames.saturating_sub(tail)
+            }
+        })
+        .sum();
+    if delivered_before_last >= total_frames {
+        anyhow::bail!(
+            "chained EXR export planned {stage_count} stages but the first {} already deliver \
+             {delivered_before_last} of {total_frames} frames; this is a stage-planning bug",
+            stage_count - 1,
+        );
+    }
+    let last_frames = tail + (total_frames - delivered_before_last);
+    if last_frames % 8 != 1 || last_frames <= tail {
+        anyhow::bail!(
+            "chained EXR export needs the final stage to land on the 8k+1 frame grid: \
+             {total_frames} total frames with a {tail}-frame motion tail leaves a \
+             {last_frames}-frame last stage. Use --frames on the 8k+1 grid (97, 105, 121, …) \
+             and a --motion-tail of 8k+1 (9, 17, 25, …).",
+        );
+    }
+    req.stages
+        .last_mut()
+        .expect("stage_count > 1 checked above")
+        .frames = last_frames;
+    Ok(())
+}
+
+/// CLI-side HDR EXR sidecar inputs for a forced-local chain. Converted into
+/// [`mold_inference::chain::ChainHdrConfig`] by `run_chain_local` after the
+/// reference video is probed against the requested timeline.
+// Non-GPU builds bail before ever reading past `exr_dir`/`full_float` (the
+// local render path is compiled out), so the carrier fields count as dead
+// there.
+#[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
+pub(crate) struct ChainHdrInputs {
+    pub exr_dir: String,
+    pub full_float: bool,
+    /// Normalized control id (`"hdr"`).
+    pub control: String,
+    /// Reference video container bytes (`--video`).
+    pub reference_video: Vec<u8>,
+    /// Resolved control-adapter LoRA stack (adapter first).
+    pub control_loras: Vec<mold_core::LoraWeight>,
+    /// The requested stitched length.
+    pub total_frames: u32,
+}
+
 impl ChainInputs {
     pub(crate) fn to_chain_request(&self) -> ChainRequest {
         ChainRequest {
@@ -230,6 +306,7 @@ impl ChainInputs {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_chain(
     req: ChainRequest,
+    hdr: Option<ChainHdrInputs>,
     host: Option<String>,
     output: Option<String>,
     no_metadata: bool,
@@ -247,6 +324,16 @@ pub async fn run_chain(
         !req.stages.is_empty(),
         "run_chain requires a normalised ChainRequest (callers must invoke .normalise())"
     );
+    // generate.rs refuses hdr+remote before building the inputs; this guard
+    // is the defence for any future caller. The ChainRequest wire carries no
+    // HDR fields, so a remote submission could only ever silently drop the
+    // sidecar.
+    if hdr.is_some() && !local {
+        anyhow::bail!(
+            "chained EXR export renders locally; re-run with --local — a remote server cannot \
+             write the sidecar to your machine"
+        );
+    }
 
     let stage_count = req.stages.len() as u32;
     let estimated_total = req.estimated_total_frames();
@@ -265,12 +352,16 @@ pub async fn run_chain(
     let _ = embed_metadata; // reserved for future metadata-embed work on chain output
 
     let t0 = std::time::Instant::now();
+    let hdr_metadata = hdr
+        .as_ref()
+        .map(|inputs| (inputs.exr_dir.clone(), inputs.full_float));
     let video = if local {
         #[cfg(any(feature = "cuda", feature = "metal"))]
         {
             crate::ui::print_using_local_inference();
             run_chain_local(
                 &req,
+                hdr,
                 &config,
                 gpus,
                 t5_variant,
@@ -285,6 +376,7 @@ pub async fn run_chain(
         #[cfg(not(any(feature = "cuda", feature = "metal")))]
         {
             let _ = (
+                hdr,
                 gpus,
                 t5_variant,
                 qwen3_variant,
@@ -312,6 +404,7 @@ pub async fn run_chain(
         preview,
         elapsed_ms,
         base_seed,
+        hdr_metadata.as_ref(),
     )?;
 
     mold_db::settings::record_last_model(&req.model);
@@ -346,6 +439,7 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
 #[allow(clippy::too_many_arguments)]
 async fn run_chain_local(
     chain_req: &ChainRequest,
+    hdr: Option<ChainHdrInputs>,
     config: &Config,
     gpus: Option<String>,
     t5_variant_override: Option<String>,
@@ -360,8 +454,56 @@ async fn run_chain_local(
         LocalBatchAdmission,
     };
 
-    // Normalise so we have expanded stages locally too.
+    // Normalise so we have expanded stages locally too. The exact-fit last
+    // stage the HDR path applies survives this round trip: its shrunken
+    // frame count is 8k+1 by construction and `normalise` on an
+    // already-canonical request only re-validates.
     let req = chain_req.clone().normalise()?;
+
+    // Convert the CLI-side sidecar inputs into the orchestrator's config,
+    // probing the reference against the requested timeline first: every
+    // stage conditions on its own temporal window of this clip, so a short
+    // or retimed reference would silently regrade the wrong frames.
+    let hdr_config: Option<mold_inference::chain::ChainHdrConfig> = match hdr {
+        None => None,
+        Some(inputs) => {
+            let mut reference_file = tempfile::Builder::new()
+                .suffix(".mp4")
+                .tempfile()
+                .map_err(|e| anyhow::anyhow!("failed to stage the reference video: {e}"))?;
+            std::io::Write::write_all(&mut reference_file, &inputs.reference_video)?;
+            let probe = mold_inference::ltx2::media::probe_video(reference_file.path())
+                .map_err(|e| anyhow::anyhow!("failed to read the HDR reference video: {e}"))?;
+            let reference_frames = probe
+                .frames
+                .ok_or_else(|| anyhow::anyhow!("the HDR reference video reports no frame count"))?;
+            if reference_frames < inputs.total_frames {
+                anyhow::bail!(
+                    "the HDR reference video has {reference_frames} frames but this chained \
+                     render covers {} frames; the reference must span the full requested \
+                     duration (every stage regrades its own window of it)",
+                    inputs.total_frames,
+                );
+            }
+            if probe.fps != req.fps {
+                anyhow::bail!(
+                    "the HDR reference video runs at {} fps but this render is {} fps; a \
+                     retimed reference would regrade the wrong frames (pass --fps {} to match)",
+                    probe.fps,
+                    req.fps,
+                    probe.fps,
+                );
+            }
+            Some(mold_inference::chain::ChainHdrConfig {
+                exr_dir: std::path::PathBuf::from(&inputs.exr_dir),
+                full_float: inputs.full_float,
+                ic_lora_control: inputs.control,
+                reference_video: inputs.reference_video,
+                control_loras: inputs.control_loras,
+                total_frames_cap: Some(inputs.total_frames),
+            })
+        }
+    };
 
     let model_name = req.model.clone();
 
@@ -405,7 +547,16 @@ async fn run_chain_local(
 
     let fps = req.fps;
     let output_format = req.output_format;
-    let total_frames_opt = Some(req.total_frames.unwrap_or(u32::MAX));
+    // With the exact-fit last stage, an HDR chain's stitched length already
+    // equals the requested total; the trim below is then a no-op kept as a
+    // second line of defence beside the window planner's cap.
+    let total_frames_opt = Some(
+        hdr_config
+            .as_ref()
+            .and_then(|config| config.total_frames_cap)
+            .or(req.total_frames)
+            .unwrap_or(u32::MAX),
+    );
     let req_clone = req.clone();
     let planning_request_clone = planning_request.clone();
     let effective_config_clone = effective_config.clone();
@@ -436,7 +587,16 @@ async fn run_chain_local(
         let mut chain_cb = move |event: ChainProgressEvent| {
             let _ = tx.send(event);
         };
-        let chain_output = orch.run(&req_clone, Some(&mut chain_cb))?;
+        let chain_output =
+            orch.run_with_hdr(&req_clone, Some(&mut chain_cb), hdr_config.as_ref())?;
+        if let Some(config) = hdr_config.as_ref() {
+            status!(
+                "{} Wrote {} EXR frame(s) to {}",
+                theme::icon_done(),
+                chain_output.hdr_frames_written,
+                config.exr_dir.display(),
+            );
+        }
 
         use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
         let boundaries: Vec<_> = req_clone
@@ -552,6 +712,7 @@ fn encode_and_save(
     preview: bool,
     elapsed_ms: u64,
     base_seed: u64,
+    hdr_sidecar: Option<&(String, bool)>,
 ) -> Result<()> {
     let piped = is_piped();
 
@@ -594,7 +755,16 @@ fn encode_and_save(
             // Persist to the gallery metadata DB with the structured
             // per-clip provenance block (no durable job id on the local
             // render path).
-            let metadata = req.stitched_output_metadata(video.format, video.frames, None);
+            let mut metadata = req.stitched_output_metadata(video.format, video.frames, None);
+            // The chain wire format carries no HDR fields (the sidecar is a
+            // CLI-forced-local concern), so the stitched print's saved
+            // metadata gets the sidecar overlaid here — matching the
+            // single-clip precedent where OutputMetadata records where the
+            // EXR sequence went so it stays findable from the Library.
+            if let Some((exr_dir, full_float)) = hdr_sidecar {
+                metadata.hdr_exr_dir = Some(exr_dir.clone());
+                metadata.hdr_exr_full_float = *full_float;
+            }
             crate::metadata_db::record_local_save_metadata(
                 std::path::Path::new(filename),
                 metadata,
@@ -792,6 +962,7 @@ pub async fn run_from_script(
     // silently replicated stages[0].prompt across all continuations).
     run_chain(
         req,
+        None,
         host,
         output,
         no_metadata,
@@ -956,6 +1127,7 @@ pub async fn run_from_sugar(
 
     run_chain(
         req,
+        None,
         host,
         output,
         no_metadata,
@@ -1271,6 +1443,146 @@ mod tests {
             None,
         );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
+    }
+
+    /// 121 total @ clip 97 / tail 17: auto-expand plans [97, 97] and
+    /// overshoots to 177; the sidecar path shrinks the last stage to 41 so
+    /// the stitch delivers exactly 121 — `97 + (41 − 17) = 121` — and no
+    /// stage renders past the reference video's end.
+    #[test]
+    fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
+        let mut req = ChainRequest {
+            model: "ltx-2.3-22b-distilled:fp8".into(),
+            stages: Vec::new(),
+            motion_tail_frames: 17,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: Some(7),
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            prompt: Some("x".into()),
+            total_frames: Some(121),
+            clip_frames: Some(97),
+            source_image: None,
+            enable_audio: None,
+        }
+        .normalise()
+        .unwrap();
+        assert_eq!(
+            req.stages.iter().map(|s| s.frames).collect::<Vec<_>>(),
+            vec![97, 97],
+        );
+
+        exact_fit_last_stage_for_sidecar(&mut req, 121).unwrap();
+        assert_eq!(
+            req.stages.iter().map(|s| s.frames).collect::<Vec<_>>(),
+            vec![97, 41],
+        );
+        assert_eq!(req.estimated_total_frames(), 121);
+        // The shrunken stage still satisfies every chain invariant, so a
+        // re-normalise (run_chain_local does one) is a no-op.
+        let renormalised = req.clone().normalise().unwrap();
+        assert_eq!(renormalised.stages[1].frames, 41);
+    }
+
+    /// The lattice closes for every canonical total: over a spread of 8k+1
+    /// totals and tails, the exact-fit last stage is 8k+1, strictly above the
+    /// tail, and the stitched total equals the request exactly.
+    #[test]
+    fn exact_fit_closes_the_lattice_for_canonical_totals() {
+        for tail in [9u32, 17, 25] {
+            for total in (105..=1537).step_by(8) {
+                let clip = 97u32;
+                let mut req = ChainRequest {
+                    model: "ltx-2.3-22b-distilled:fp8".into(),
+                    stages: Vec::new(),
+                    motion_tail_frames: tail,
+                    width: 1216,
+                    height: 704,
+                    fps: 24,
+                    seed: None,
+                    steps: 8,
+                    guidance: 3.0,
+                    strength: 1.0,
+                    output_format: OutputFormat::Mp4,
+                    placement: None,
+                    original_prompt: None,
+                    batch_id: None,
+                    batch_index: None,
+                    batch_count: None,
+                    prompt: Some("x".into()),
+                    total_frames: Some(total),
+                    clip_frames: Some(clip),
+                    source_image: None,
+                    enable_audio: None,
+                };
+                // Totals needing more than MAX_CHAIN_STAGES stages reject at
+                // normalise; skip them (the property is about the fit, not
+                // the stage ceiling).
+                let Ok(normalised) = req.clone().normalise() else {
+                    continue;
+                };
+                req = normalised;
+                if req.stages.len() < 2 {
+                    continue;
+                }
+                exact_fit_last_stage_for_sidecar(&mut req, total).unwrap_or_else(|e| {
+                    panic!("total {total} tail {tail}: {e}");
+                });
+                let last = req.stages.last().unwrap().frames;
+                assert_eq!(last % 8, 1, "total {total} tail {tail}: last {last}");
+                assert!(last > tail, "total {total} tail {tail}: last {last}");
+                assert_eq!(
+                    req.estimated_total_frames(),
+                    total,
+                    "total {total} tail {tail}",
+                );
+            }
+        }
+    }
+
+    /// An off-grid combination is refused with the arithmetic, never
+    /// silently re-shaped.
+    #[test]
+    fn exact_fit_refuses_a_layout_the_lattice_cannot_close() {
+        let mut req = ChainRequest {
+            model: "ltx-2.3-22b-distilled:fp8".into(),
+            stages: Vec::new(),
+            motion_tail_frames: 0,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: None,
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            prompt: Some("x".into()),
+            total_frames: Some(150),
+            clip_frames: Some(97),
+            source_image: None,
+            enable_audio: None,
+        }
+        .normalise()
+        .unwrap();
+        let err = exact_fit_last_stage_for_sidecar(&mut req, 150).unwrap_err();
+        assert!(
+            format!("{err}").contains("8k+1"),
+            "error must explain the frame grid: {err}",
+        );
     }
 
     #[test]
