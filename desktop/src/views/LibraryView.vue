@@ -735,10 +735,10 @@ watch(
   { immediate: true },
 );
 
-// Deep link: /library?print=<filename> (a ⌘K library result) reveals that
-// print — filters reset so it can't be hidden, then selection + lightbox
-// open once the buckets deliver it. One-shot: the param drops after use so
-// closing the lightbox doesn't re-open it.
+// Deep link: /library?print=<filename> (a ⌘K result or native notification)
+// reveals that print — filters reset so it can't be hidden, then selection +
+// lightbox open once the buckets deliver it. One-shot: the param drops after
+// use so closing the lightbox doesn't re-open it.
 watch(
   [() => route.query.print, () => gallery.merged.length],
   ([print]) => {

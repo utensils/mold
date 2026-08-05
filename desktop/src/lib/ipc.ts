@@ -340,11 +340,22 @@ export const ipc = {
     return invoke<void>("set_dock_badge", { count }).catch(() => {});
   },
   /** Use a platform-native notification when it can preserve Mold's app icon. */
-  sendNativeNotification(title: string, body?: string): Promise<boolean> {
+  sendNativeNotification(
+    title: string,
+    body?: string,
+    action?: { kind: "gallery"; filename: string },
+  ): Promise<boolean> {
     if (!inTauri()) return Promise.resolve(false);
-    return invoke<boolean>("send_native_notification", { title, body: body ?? null }).catch(
-      () => false,
-    );
+    return invoke<boolean>("send_native_notification", {
+      title,
+      body: body ?? null,
+      action: action ?? null,
+    }).catch(() => false);
+  },
+  /** Consume a notification activation retained during native/cold startup. */
+  takeNotificationAction(): Promise<{ kind: "gallery"; filename: string } | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<{ kind: "gallery"; filename: string } | null>("take_notification_action");
   },
   /** Open the engine's log directory in Finder. */
   openLogsDir(): Promise<void> {

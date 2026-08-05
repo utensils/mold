@@ -808,6 +808,10 @@ pub struct VideoData {
     /// Frames per second.
     #[schema(example = 24)]
     pub fps: u32,
+    /// Runtime-resolved LTX-2 pipeline. This records implicit/default choices
+    /// as executed; absent for non-LTX-2 video engines and older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Ltx2PipelineMode>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
@@ -1081,6 +1085,18 @@ impl OutputMetadata {
     pub fn apply_output_dimensions(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+    }
+
+    /// Record the video shape and runtime pipeline that actually completed.
+    /// The pipeline cannot be derived reliably from the request because LTX-2
+    /// resolves implicit/default modes against the loaded checkpoint assets.
+    pub fn apply_video_output(&mut self, video: &VideoData) {
+        self.apply_output_dimensions(video.width, video.height);
+        self.frames = Some(video.frames);
+        self.fps = Some(video.fps);
+        if let Some(pipeline) = video.pipeline {
+            self.pipeline = Some(pipeline);
+        }
     }
 }
 

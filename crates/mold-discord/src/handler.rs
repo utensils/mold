@@ -219,6 +219,7 @@ mod tests {
                 height: 512,
                 frames: 25,
                 fps: 24,
+                pipeline: None,
                 thumbnail: vec![],
                 gif_preview: preview,
                 has_audio: false,

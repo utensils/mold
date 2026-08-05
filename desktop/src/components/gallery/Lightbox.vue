@@ -107,6 +107,7 @@ const loraStack = computed(() => {
 const schedulerName = computed(() => formatScheduler(meta.value.scheduler));
 const frames = computed(() => meta.value.frames ?? meta.value.video_frames ?? null);
 const fps = computed(() => meta.value.fps ?? meta.value.video_fps ?? null);
+const pipeline = computed(() => (props.video ? meta.value.pipeline : null));
 const fileFormat = computed(() => props.item.format ?? meta.value.output_format ?? null);
 const fileSize = computed(() =>
   props.item.size_bytes != null ? formatBytes(props.item.size_bytes) : null,
@@ -404,6 +405,10 @@ async function saveMedia() {
               <dd class="data-mono text-caption text-ink">
                 {{ frames }}<template v-if="fps"> · {{ fps }} fps</template>
               </dd>
+            </div>
+            <div v-if="pipeline" class="flex justify-between gap-2" data-test="lightbox-pipeline">
+              <dt class="text-caption text-ink-3">Pipeline</dt>
+              <dd class="data-mono text-caption text-ink">{{ pipeline }}</dd>
             </div>
             <div
               v-for="l in loraStack"

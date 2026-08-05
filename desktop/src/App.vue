@@ -53,6 +53,30 @@ const toasts = useToastStore();
 const ui = useUiStore();
 const updater = useUpdaterStore();
 
+function openNotificationAction(action: { kind: "gallery"; filename: string } | null) {
+  if (action?.kind === "gallery" && action.filename) {
+    void router.push({ path: "/library", query: { print: action.filename } });
+  }
+}
+
+let unlistenNotificationAction: (() => void) | null = null;
+
+async function listenForNotificationActions() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  const { listen } = await import("@tauri-apps/api/event");
+  unlistenNotificationAction = await listen<{ kind: "gallery"; filename: string }>(
+    "notification-action",
+    ({ payload }) => {
+      // The native side retains the action in case activation races startup.
+      // Once the live listener receives it, consume that fallback so a later
+      // launch cannot replay a notification the user already opened.
+      void ipc.takeNotificationAction().catch(() => null);
+      openNotificationAction(payload);
+    },
+  );
+  openNotificationAction(await ipc.takeNotificationAction().catch(() => null));
+}
+
 // Dock badge mirrors THIS app's active jobs, event-driven (no poll lag) and
 // cleared the moment the last job settles.
 watch(
@@ -238,6 +262,7 @@ onMounted(async () => {
   const hostStartup = hostsStore.init();
   const connectionStartup = connection.init();
   void listenForMenu();
+  void listenForNotificationActions();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
   // white flash; reveal it once the shell has mounted. No-op in a browser.
   if ("__TAURI_INTERNALS__" in window) {
@@ -254,6 +279,7 @@ onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("contextmenu", suppressNativeContextMenu);
   window.removeEventListener("selectstart", suppressChromeSelection);
+  unlistenNotificationAction?.();
 });
 </script>
 

@@ -112,6 +112,24 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("reuse")).toHaveLength(1);
   });
 
+  it("shows the recorded runtime pipeline for an LTX video", async () => {
+    const view = mountViewer({
+      ...image,
+      filename: "ltx-print.mp4",
+      format: "mp4",
+      metadata: {
+        ...image.metadata,
+        model: "ltx-2.3-22b-dev:fp8",
+        frames: 97,
+        fps: 24,
+        pipeline: "two-stage-hq",
+      },
+    });
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-pipeline']").text()).toContain("two-stage-hq");
+  });
+
   it("offers a still print as a generation source when the selected model supports it", async () => {
     const view = mountViewer();
     await view.setProps({ canUseAsSource: true });

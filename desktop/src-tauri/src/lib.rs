@@ -98,7 +98,10 @@ pub fn run() {
             // offer to move it to /Applications first — running from a transient
             // bundle poisons the Launch Services icon lookup notifications use.
             #[cfg(target_os = "macos")]
-            relocate::maybe_offer_relocation(app.handle());
+            {
+                relocate::maybe_offer_relocation(app.handle());
+                notifications::install_notification_delegate(app.handle());
+            }
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(app_window_title(cfg!(debug_assertions)))?;
             }
@@ -148,6 +151,7 @@ pub fn run() {
             commands::get_output_dir,
             commands::set_dock_badge,
             notifications::send_native_notification,
+            notifications::take_notification_action,
             commands::reveal_output_file,
             commands::open_logs_dir,
             updater::check_for_updates,

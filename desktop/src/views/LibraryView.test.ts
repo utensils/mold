@@ -96,6 +96,7 @@ const historyDrawerStub = { name: "HistoryDrawer", props: ["open"], template: "<
 async function mountView(
   remotePrint?: GalleryImage,
   seed?: (gallery: ReturnType<typeof useGalleryStore>) => void,
+  route = "/library",
 ) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -104,7 +105,7 @@ async function mountView(
       { path: "/create", component: stub },
     ],
   });
-  await router.push("/library");
+  await router.push(route);
 
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -156,6 +157,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+});
+
+describe("LibraryView notification deep links", () => {
+  it("opens the exact saved print named by the route after the gallery loads", async () => {
+    const { wrapper } = await mountView(undefined, undefined, "/library?print=second.png");
+
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe("second.png");
+  });
 });
 
 describe("LibraryView delete keyboard handling", () => {

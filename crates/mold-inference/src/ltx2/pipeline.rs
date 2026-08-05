@@ -929,6 +929,7 @@ impl Ltx2Engine {
                     .and_then(|probe| probe.frames)
                     .unwrap_or(plan.num_frames),
                 fps,
+                pipeline: Some(plan.pipeline.wire_mode()),
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio: false,
@@ -1080,6 +1081,7 @@ impl Ltx2Engine {
                 height,
                 frames,
                 fps,
+                pipeline: Some(plan.pipeline.wire_mode()),
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio,

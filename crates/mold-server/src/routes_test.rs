@@ -9482,6 +9482,7 @@ mod tests {
                 height: 576,
                 frames: 97,
                 fps: 24,
+                pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
                 thumbnail: Vec::new(),
                 gif_preview: Vec::new(),
                 has_audio: true,
@@ -9500,6 +9501,7 @@ mod tests {
         assert_eq!(headers[axum::http::header::CONTENT_TYPE], "video/mp4");
         assert_eq!(headers["x-mold-video-frames"], "97");
         assert_eq!(headers["x-mold-video-fps"], "24");
+        assert_eq!(headers["x-mold-video-pipeline"], "two-stage-hq");
         assert_eq!(headers["x-mold-video-has-audio"], "1");
         assert_eq!(headers["x-mold-video-audio-sample-rate"], "48000");
     }

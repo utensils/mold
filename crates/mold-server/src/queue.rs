@@ -1634,12 +1634,15 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             // seed_used so the DB and embedded chunks agree. Awaited (still
             // off the async loop via spawn_blocking) so the complete event
             // below can carry the saved gallery filenames.
-            let metadata = OutputMetadata::from_generate_request(
+            let mut metadata = OutputMetadata::from_generate_request(
                 &job.request,
                 response.seed_used,
                 None,
                 mold_core::build_info::version_string(),
             );
+            if let Some(video) = response.video.as_ref() {
+                metadata.apply_video_output(video);
+            }
             let mut saved_names = SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
                 let _gallery_writer = state.gallery_publication_gate.write().await;
@@ -4286,6 +4289,7 @@ mod tests {
             height: 512,
             frames: 25,
             fps: 24,
+            pipeline: None,
             thumbnail: vec![0x89, 0x50, 0x4E, 0x47],
             gif_preview: vec![b'G', b'I', b'F', b'8'],
             has_audio: true,
@@ -4366,6 +4370,7 @@ mod tests {
             height: 256,
             frames: 17,
             fps: 12,
+            pipeline: None,
             thumbnail: vec![0x89, 0x50],
             gif_preview: Vec::new(),
             has_audio: false,
@@ -4592,6 +4597,7 @@ mod tests {
             height: 512,
             frames: 25,
             fps: 24,
+            pipeline: None,
             thumbnail: vec![9, 9],
             gif_preview: vec![],
             has_audio: false,
