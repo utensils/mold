@@ -47,3 +47,11 @@ codegen-units = 16
 incremental = true
 debug = 1
 strip = false
+
+# TEMPORARY: local override until candle fork v0.11.1 (restored mode() +
+# attention-score bounding) is tagged and published to crates.io.
+# Remove this section once 0.11.1 resolves from the registry.
+[patch.crates-io]
+candle-core-mold = { path = "../candle/candle-core" }
+candle-nn-mold = { path = "../candle/candle-nn" }
+candle-transformers-mold = { path = "../candle/candle-transformers" }
