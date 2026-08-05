@@ -1314,6 +1314,15 @@ fn process_scheduled_chain_stage(
         "chain stage reached execution without an exact execution plan".to_string()
     })?;
     job.stage_req.placement = Some(crate::execution_plan::materialized_placement(&plan));
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        model = %job.model,
+        work_id = %job.id,
+        work_kind = "chain_stage",
+        "dispatched job"
+    );
+    let memory_watchdog =
+        ChainStageMemoryWatchdog::start(worker.gpu.ordinal, job.model.clone(), job.id.clone());
     struct ActiveGuard<'a>(&'a GpuWorker);
     impl Drop for ActiveGuard<'_> {
         fn drop(&mut self) {
@@ -1397,10 +1406,90 @@ fn process_scheduled_chain_stage(
     )
     .map_err(|error| format!("{error:#}"))?
     .map_err(|error| format!("{error:#}"))?;
+    drop(memory_watchdog);
     Ok(crate::chain_job_runner::StageExecution {
         outcome: result,
         device_ordinal: Some(worker.gpu.ordinal),
     })
+}
+
+/// Scheduled chain stages bypass `process_job`, so they need their own memory
+/// heartbeat around model readiness and rendering. A channel-backed stop wakes
+/// the thread immediately for short stages instead of making completion wait
+/// for the one-second sampling interval.
+struct ChainStageMemoryWatchdog {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    rss_before: u64,
+    ordinal: usize,
+    model: String,
+    work_id: String,
+}
+
+impl ChainStageMemoryWatchdog {
+    fn start(ordinal: usize, model: String, work_id: String) -> Self {
+        let rss_before = crate::resources::ram_snapshot().used_by_mold;
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let thread_model = model.clone();
+        let thread_work_id = work_id.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("chain-rss-watchdog-{ordinal}"))
+            .spawn(move || {
+                let start = Instant::now();
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    stopped.recv_timeout(Duration::from_secs(1))
+                {
+                    let rss = crate::resources::ram_snapshot().used_by_mold;
+                    tracing::info!(
+                        gpu = ordinal,
+                        model = %thread_model,
+                        work_id = %thread_work_id,
+                        elapsed_s = start.elapsed().as_secs(),
+                        rss_mb = rss / 1_000_000,
+                        "chain stage rss watchdog"
+                    );
+                }
+            })
+            .map_err(|error| {
+                tracing::warn!(
+                    gpu = ordinal,
+                    model = %model,
+                    work_id = %work_id,
+                    %error,
+                    "could not start chain stage RSS watchdog"
+                );
+            })
+            .ok();
+        Self {
+            stop: Some(stop),
+            handle,
+            rss_before,
+            ordinal,
+            model,
+            work_id,
+        }
+    }
+}
+
+impl Drop for ChainStageMemoryWatchdog {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let rss_after = crate::resources::ram_snapshot().used_by_mold;
+        tracing::info!(
+            gpu = self.ordinal,
+            model = %self.model,
+            work_id = %self.work_id,
+            rss_before_mb = self.rss_before / 1_000_000,
+            rss_after_mb = rss_after / 1_000_000,
+            rss_delta_mb = (rss_after as i64 - self.rss_before as i64) / 1_000_000,
+            "chain stage memory delta"
+        );
+    }
 }
 
 fn fence_chain_stage_render(
@@ -4438,6 +4527,30 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
+
+    #[test]
+    fn scheduled_chain_stage_wraps_render_with_dispatch_and_memory_observability() {
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn process_scheduled_chain_stage(")
+            .expect("scheduled chain stage handler");
+        let end = source[start..]
+            .find("\nfn fence_chain_stage_render(")
+            .map(|offset| start + offset)
+            .expect("scheduled chain stage handler boundary");
+        let method = &source[start..end];
+        let dispatch = method.find("\"dispatched job\"").expect("dispatch log");
+        let watchdog = method
+            .find("ChainStageMemoryWatchdog::start(")
+            .expect("memory watchdog start");
+        let render = method
+            .find("run_stage_blocking_planned(")
+            .expect("planned stage render");
+        let stop = method
+            .find("drop(memory_watchdog)")
+            .expect("memory watchdog stop");
+        assert!(dispatch < watchdog && watchdog < render && render < stop);
+    }
 
     /// Weight-free engine that sleeps in `load()` to widen the critical-section
     /// window during concurrency tests.

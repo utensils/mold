@@ -5230,6 +5230,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_rejects_client_supplied_hdr_exr_directory() {
+        let app = app_with(MockEngine::ready());
+        let body = serde_json::json!({
+            "prompt": "an HDR sunset",
+            "model": "mock-model",
+            "width": 768,
+            "height": 768,
+            "steps": 4,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "hdr_exr_dir": "/tmp/client-chosen-server-path"
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("hdr_exr_dir") && error.contains("--local")),
+            "got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn server_local_media_paths_require_configured_roots() {
         let state = AppState::with_engine(MockEngine::ready());
         let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({

@@ -132,6 +132,7 @@ pub(crate) struct CreateJobParams {
 
 pub enum RunnerCmd {
     Kick,
+    Shutdown,
     Gc {
         reply: tokio::sync::oneshot::Sender<std::result::Result<GcOutcome, String>>,
     },
@@ -293,6 +294,20 @@ impl CancelRegistry {
         } else {
             false
         }
+    }
+
+    fn request_all(&self) -> usize {
+        let tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for token in &tokens {
+            token.cancel();
+        }
+        tokens.len()
     }
 
     fn is_cancelled(&self, job_id: &str) -> bool {
@@ -505,6 +520,14 @@ impl ChainJobRunnerHandle {
     /// Mark cancel-requested; false when the job is unknown to the registry.
     pub fn request_cancel(&self, job_id: &str) -> bool {
         self.cancel.request(job_id)
+    }
+
+    /// Fence every active chain attempt before the HTTP server starts
+    /// draining long-lived SSE responses, then stop the orchestration loop.
+    pub fn request_shutdown(&self) -> usize {
+        let cancelled = self.cancel.request_all();
+        let _ = self.kick_tx.send(RunnerCmd::Shutdown);
+        cancelled
     }
 
     pub fn is_cancelling(&self, job_id: &str) -> bool {
@@ -1232,6 +1255,7 @@ async fn claim_for_execution_async(deps: &RunnerDeps, job: &ChainJobRow) -> anyh
 async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
     match cmd {
         RunnerCmd::Kick => true,
+        RunnerCmd::Shutdown => false,
         RunnerCmd::Gc { reply } => {
             let result = run_gc_for_runner(deps, true).await;
             let _ = reply.send(result);
