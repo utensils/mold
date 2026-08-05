@@ -1,3 +1,7 @@
+import { blobToBase64 } from "@studio/lib/base64";
+
+export { blobToBase64 };
+
 /**
  * Read a `File` (drag-drop or <input type=file>) to base64 with no data-URI
  * prefix — the shape mold-core expects for `source_image` / `mask_image` /
@@ -8,19 +12,6 @@
  */
 export function fileToBase64(file: File): Promise<string> {
   return blobToBase64(file);
-}
-
-/** Read any `Blob` (e.g. a `fetch().blob()` of an authed gallery image) to
- * base64 with no data-URI prefix — the shape mold-core expects on the wire. */
-export function blobToBase64(blob: Blob): Promise<string> {
-  return blob.arrayBuffer().then((buffer) => {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-    }
-    return btoa(binary);
-  });
 }
 
 /** Object URL for a base64 payload so a `<img>` can preview it. */

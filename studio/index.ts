@@ -7,3 +7,4 @@ export * from "./lib/sourceFit";
 export * from "./lib/chainRouting";
 export * from "./lib/modelDisplay";
 export * from "./lib/sequence";
+export * from "./lib/base64";
