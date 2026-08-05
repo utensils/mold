@@ -263,6 +263,7 @@ const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
+const GALLERY_HOST_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
   { value: "sequence" as const, label: "Sequence" },
@@ -440,6 +441,7 @@ const hostProbes = new Map<
   string,
   { epoch: number; controller: AbortController; timeout: ReturnType<typeof setTimeout> }
 >();
+const knownHostReachability = new Set<string>();
 const generation = useGenerationStore();
 const mobileDownloads = useMobileDownloadsStore();
 function loadLibrarySeenAt(): Record<string, number> {
@@ -1162,6 +1164,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     };
     if (existing) Object.assign(existing, saved);
     else hosts.value.push(saved);
+    knownHostReachability.add(saved.id);
     if (saved.apiKey) {
       await invoke("keychain_set_api_key", { hostId: saved.id, apiKey: saved.apiKey });
     } else {
@@ -1285,6 +1288,7 @@ async function probeHost(host: MobileHost): Promise<void> {
   cancelHostProbe(host.id);
   const controller = new AbortController();
   const epoch = ++hostProbeEpoch;
+  const wasKnownOffline = knownHostReachability.has(host.id) && !host.online;
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
@@ -1293,9 +1297,12 @@ async function probeHost(host: MobileHost): Promise<void> {
       signal: controller.signal,
     });
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
+    knownHostReachability.add(host.id);
     updateHostStatus({ id: host.id, status });
+    if (wasKnownOffline && tab.value === "gallery") void refreshGallery();
   } catch {
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
+    knownHostReachability.add(host.id);
     updateHostStatus({ id: host.id, status: null });
   } finally {
     if (hostProbes.get(host.id)?.epoch === epoch) hostProbes.delete(host.id);
@@ -1328,12 +1335,14 @@ function reconnectHost(id: string): void {
   const host = hosts.value.find((candidate) => candidate.id === id);
   if (!host) return;
   host.connected = true;
+  knownHostReachability.delete(id);
   persistHosts();
   void probeHost(host);
 }
 
 function removeHost(id: string): void {
   cancelHostProbe(id);
+  knownHostReachability.delete(id);
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
   if (hostDetailId.value === id) hostDetailId.value = "";
@@ -1398,6 +1407,7 @@ async function refreshModels(): Promise<boolean> {
       ),
     ]);
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    knownHostReachability.add(hostId);
     host.online = true;
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
@@ -1418,6 +1428,7 @@ async function refreshModels(): Promise<boolean> {
     return true;
   } catch (error) {
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    knownHostReachability.add(hostId);
     host.online = false;
     // The banner above the model select owns this failure; the generation
     // status line keeps showing generation state, not background loads.
@@ -2938,10 +2949,23 @@ async function performGalleryRefresh(): Promise<void> {
   const prior = gallery.value;
   gallery.value = [];
   for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
+  const galleryHosts = connectedHosts.value.filter(
+    (host) => host.online || !knownHostReachability.has(host.id),
+  );
+  const knownOffline = connectedHosts.value.length - galleryHosts.length;
   const results = await Promise.allSettled(
-    connectedHosts.value.map(async (host) => {
+    galleryHosts.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
-      const prints = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
+      let prints: GalleryImage[];
+      try {
+        prints = await apiJsonTo<GalleryImage[]>(target, "/api/gallery", {
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       return prints.map((print) => ({
         ...print,
         hostId: host.id,
@@ -2954,7 +2978,7 @@ async function performGalleryRefresh(): Promise<void> {
     .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
     .sort((a, b) => b.timestamp - a.timestamp);
   pendingGallery = groupLogicalGalleryPrints(galleryCopies).map((group) => group.representative);
-  const failed = results.filter((result) => result.status === "rejected").length;
+  const failed = knownOffline + results.filter((result) => result.status === "rejected").length;
   if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
   await loadMoreGalleryPage();
   galleryLoading.value = false;
