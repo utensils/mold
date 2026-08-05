@@ -12,9 +12,9 @@ use crate::progress::{ProgressEvent, ProgressReporter};
 ///
 /// `QuantizedBypass` is the mold-owned GGUF path that supports
 /// bypass-mode LoRA — it never touches base weights, applying LoRA
-/// deltas at forward time instead. The legacy `Quantized` variant
-/// (upstream `candle_transformers::flux::quantized_model`) is the
-/// `MOLD_LORA_BYPASS=off` fallback.
+/// deltas at forward time instead. A merged GGUF LoRA also uses this Mold-owned
+/// variant with no runtime registry; ordinary unmodified GGUF loads retain the
+/// upstream `Quantized` variant.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum FluxTransformer {
     BF16(flux::model::Flux),
