@@ -651,6 +651,17 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, RequestWarnings, Option<usize>), ApiError> {
+    // `hdr_exr_dir` names an output directory on the machine doing inference.
+    // An HTTP client must never choose that server-local path: unlike media
+    // inputs there is no useful remote artifact to return and no safe root to
+    // resolve it beneath. Forced-local CLI generation bypasses this boundary
+    // and continues to own EXR export and metadata recording.
+    if request.hdr_exr_dir.is_some() {
+        return Err(ApiError::validation(
+            "hdr_exr_dir is local-only and cannot be set through the server API; \
+             re-run the CLI with --local so the EXR sidecar is written on your machine",
+        ));
+    }
     ensure_schedulable_device(state)?;
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check

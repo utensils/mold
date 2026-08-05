@@ -905,8 +905,20 @@ pub async fn run_server(
     // All inject + enforce layers use .layer() (not .route_layer()) so they run on
     // ALL requests, including unmatched 404 paths — preventing auth/rate-limit bypass.
     // Set up graceful shutdown: fires on SIGTERM or POST /api/shutdown.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // The public trigger feeds an arbiter that fences GPU scheduling and
+    // active chain attempts *before* Axum starts draining long-lived SSE
+    // responses. Waiting until `serve` returned could wedge forever on the
+    // very chain stream whose inference still needed cancellation (#586).
+    let (shutdown_tx, shutdown_request_rx) = tokio::sync::oneshot::channel::<()>();
+    let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     *state.shutdown_tx.lock().await = Some(shutdown_tx);
+    let shutdown_scheduler = scheduler_shutdown.clone();
+    let shutdown_chain_jobs = state.chain_jobs.clone();
+    tokio::spawn(async move {
+        let _ = shutdown_request_rx.await;
+        begin_runtime_shutdown(shutdown_chain_jobs.as_deref(), &shutdown_scheduler);
+        let _ = http_shutdown_tx.send(());
+    });
 
     #[cfg(unix)]
     {
@@ -1043,7 +1055,7 @@ pub async fn run_server(
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
+            let _ = http_shutdown_rx.await;
             tracing::info!("shutting down");
         }),
     );
@@ -1124,6 +1136,17 @@ pub async fn run_server(
     Ok(())
 }
 
+fn begin_runtime_shutdown(
+    chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
+    scheduler_shutdown: &tokio_util::sync::CancellationToken,
+) {
+    if let Some(chain_jobs) = chain_jobs {
+        let active_chains = chain_jobs.request_shutdown();
+        tracing::info!(active_chains, "cancelled chain work before HTTP drain");
+    }
+    scheduler_shutdown.cancel();
+}
+
 /// Spawn a tokio task that wakes every 60s and drops any cache entry whose
 /// `last_used` is older than `ttl` (and that isn't actively GPU-resident).
 /// Sweeps the legacy cache. Per-GPU caches are evicted by their dedicated
@@ -1202,8 +1225,8 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, GpuOwnerThreads,
-        StartupMode,
+        begin_runtime_shutdown, build_cors_layer, classify_startup_mode, startup_plan,
+        trace_request_path, GpuOwnerThreads, StartupMode,
     };
     use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
     use crate::device_registry::DeviceRegistry;
@@ -1222,6 +1245,20 @@ mod tests {
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn runtime_shutdown_cancels_chains_and_scheduler_before_http_drain() {
+        let chains = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
+        chains.register_cancel_for_tests("chain-in-flight");
+        let scheduler = tokio_util::sync::CancellationToken::new();
+
+        begin_runtime_shutdown(Some(&chains), &scheduler);
+
+        assert!(chains.is_cancelling("chain-in-flight"));
+        chains.register_cancel_for_tests("chain-claimed-during-shutdown");
+        assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
+        assert!(scheduler.is_cancelled());
+    }
 
     #[test]
     fn invalid_cors_origin_returns_error() {

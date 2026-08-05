@@ -119,6 +119,29 @@ mod tests {
     use crate::test_support::ENV_LOCK;
     use std::collections::HashMap;
 
+    /// Run an assertion that depends on config-based default-model resolution
+    /// without observing either the caller's environment or another test's
+    /// temporary `MOLD_DEFAULT_MODEL` override.
+    fn without_default_model_override<T>(f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_DEFAULT_MODEL");
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+
+        struct RestoreEnv(Option<std::ffi::OsString>);
+
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("MOLD_DEFAULT_MODEL", value),
+                    None => std::env::remove_var("MOLD_DEFAULT_MODEL"),
+                }
+            }
+        }
+
+        let _restore = RestoreEnv(previous);
+        f()
+    }
+
     fn empty_config() -> Config {
         Config {
             config_version: 1,
@@ -178,30 +201,36 @@ mod tests {
 
     #[test]
     fn show_default_returns_ok() {
-        let config = empty_config();
-        let result = show_default(&config);
-        assert!(result.is_ok());
+        without_default_model_override(|| {
+            let config = empty_config();
+            let result = show_default(&config);
+            assert!(result.is_ok());
+        });
     }
 
     #[test]
     fn resolve_source_default_config() {
-        let mut config = empty_config();
-        // Use a model name that won't be downloaded locally, so resolution
-        // falls through to the ConfigDefault step.
-        config.default_model = "wuerstchen:bf16".to_string();
-        let resolution = config.resolve_default_model();
-        assert_eq!(resolution.source, DefaultModelSource::ConfigDefault);
+        without_default_model_override(|| {
+            let mut config = empty_config();
+            // Use a model name that won't be downloaded locally, so resolution
+            // falls through to the ConfigDefault step.
+            config.default_model = "wuerstchen:bf16".to_string();
+            let resolution = config.resolve_default_model();
+            assert_eq!(resolution.source, DefaultModelSource::ConfigDefault);
+        });
     }
 
     #[test]
     fn resolve_source_custom_model_entry() {
-        let mut config = empty_config();
-        config.models.insert(
-            "flux2-klein".to_string(),
-            mold_core::config::ModelConfig::default(),
-        );
-        let resolution = config.resolve_default_model();
-        assert_eq!(resolution.source, DefaultModelSource::ConfigCustomEntry);
+        without_default_model_override(|| {
+            let mut config = empty_config();
+            config.models.insert(
+                "flux2-klein".to_string(),
+                mold_core::config::ModelConfig::default(),
+            );
+            let resolution = config.resolve_default_model();
+            assert_eq!(resolution.source, DefaultModelSource::ConfigCustomEntry);
+        });
     }
 
     #[test]

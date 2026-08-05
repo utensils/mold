@@ -1819,6 +1819,49 @@ pub async fn run_queue_dispatcher_until_cancelled(
     run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals, shutdown).await;
 }
 
+const LEGACY_UNAVAILABLE_INITIAL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+const LEGACY_UNAVAILABLE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct LegacyUnavailableBackoff {
+    next_wait: std::time::Duration,
+    warning_emitted: bool,
+}
+
+impl LegacyUnavailableBackoff {
+    fn new() -> Self {
+        Self {
+            next_wait: LEGACY_UNAVAILABLE_INITIAL_WAIT,
+            warning_emitted: false,
+        }
+    }
+
+    /// Return whether this is the transition into unavailable state. The
+    /// caller logs only on that transition instead of once per retry tick.
+    fn enter_unavailable(&mut self) -> bool {
+        !std::mem::replace(&mut self.warning_emitted, true)
+    }
+
+    fn take_wait(&mut self) -> std::time::Duration {
+        let wait = self.next_wait;
+        self.next_wait = self
+            .next_wait
+            .saturating_mul(2)
+            .min(LEGACY_UNAVAILABLE_MAX_WAIT);
+        wait
+    }
+}
+
+async fn wait_for_legacy_worker_retry(
+    shutdown: &tokio_util::sync::CancellationToken,
+    wait: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = tokio::time::sleep(wait) => true,
+    }
+}
+
 pub async fn run_legacy_scheduled_work_dispatcher(
     mut scheduled_work_rx: tokio::sync::mpsc::Receiver<crate::scheduler::ScheduledOwnerWork>,
     mut owner_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::gpu_worker::LegacyOwnerEvent>,
@@ -1886,6 +1929,7 @@ async fn dispatch_legacy_scheduled_work(
     }
     let mut pending = Some(work);
     let mut skip = Vec::new();
+    let mut unavailable = LegacyUnavailableBackoff::new();
     loop {
         if !wait_for_legacy_dispatch(state, shutdown).await {
             pending
@@ -1933,7 +1977,14 @@ async fn dispatch_legacy_scheduled_work(
                 return true;
             }
             skip.clear();
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !wait_for_legacy_worker_retry(shutdown, unavailable.take_wait()).await {
+                pending
+                    .take()
+                    .expect("legacy scheduled work remains pending")
+                    .work
+                    .reject(legacy_dispatch_stop_message(state));
+                return false;
+            }
             continue;
         };
 
@@ -2286,6 +2337,7 @@ async fn run_queue_dispatcher_with_tuning(
             Vec::new()
         };
         let mut dispatched = false;
+        let mut unavailable = LegacyUnavailableBackoff::new();
 
         while !dispatched {
             if shutdown.is_cancelled()
@@ -2324,11 +2376,19 @@ async fn run_queue_dispatcher_with_tuning(
 
             let Some(worker) = worker else {
                 if preferred_gpu.is_none() && state.gpu_pool.worker_count() > 0 {
-                    tracing::warn!(
-                        model = %model_name,
-                        "all GPU workers are temporarily unavailable; keeping job queued"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if unavailable.enter_unavailable() {
+                        tracing::warn!(
+                            model = %model_name,
+                            "all GPU workers are temporarily unavailable; keeping job queued"
+                        );
+                    }
+                    if !wait_for_legacy_worker_retry(&shutdown, unavailable.take_wait()).await {
+                        if let Some(job) = gpu_job.take() {
+                            crate::gpu_pool::OwnerWork::Generation(Box::new(job))
+                                .reject(legacy_dispatch_stop_message(&state));
+                        }
+                        break 'dispatcher;
+                    }
                     continue;
                 }
                 let rejected = gpu_job
@@ -2837,6 +2897,25 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex, RwLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn legacy_unavailable_backoff_warns_once_and_caps_retry_frequency() {
+        let mut backoff = LegacyUnavailableBackoff::new();
+        assert!(backoff.enter_unavailable());
+        assert!(!backoff.enter_unavailable());
+        assert_eq!(backoff.take_wait(), std::time::Duration::from_millis(250));
+        assert_eq!(backoff.take_wait(), std::time::Duration::from_millis(500));
+        assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(1));
+        assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(2));
+        assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn legacy_unavailable_wait_is_immediately_shutdown_cancellable() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        assert!(!wait_for_legacy_worker_retry(&shutdown, std::time::Duration::from_secs(60)).await);
+    }
 
     /// A `GenerateRequest` with the bare minimum fields populated — enough to
     /// hand to `OutputMetadata::from_generate_request` in tests.
