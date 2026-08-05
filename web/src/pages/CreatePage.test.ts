@@ -812,11 +812,15 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("keeps a long advanced video request single-shot and preserves its settings", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
+    const guidedModel = {
+      ...installedSequenceModel(),
+      name: "ltx-2-19b-dev:fp8",
+    };
+    hostModelsMock.mockResolvedValue([guidedModel]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
-    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.model = guidedModel.name;
     form.state.value.modelFamily = "ltx2";
     form.state.value.frames = 153;
     form.state.value.fps = 24;
