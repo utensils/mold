@@ -1288,6 +1288,7 @@ async function probeHost(host: MobileHost): Promise<void> {
   cancelHostProbe(host.id);
   const controller = new AbortController();
   const epoch = ++hostProbeEpoch;
+  const wasKnownOffline = knownHostReachability.has(host.id) && !host.online;
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
@@ -1298,6 +1299,7 @@ async function probeHost(host: MobileHost): Promise<void> {
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
     updateHostStatus({ id: host.id, status });
+    if (wasKnownOffline && tab.value === "gallery") void refreshGallery();
   } catch {
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
