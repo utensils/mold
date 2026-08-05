@@ -358,6 +358,11 @@ also default to absent; scales and skip use bounded keyboard cycles, while Enter
 on STG blocks opens a validated comma-separated editor. Pipeline and
 conditioning-file controls remain the separate broader TUI gap.
 
+`VideoData.pipeline` is the runtime authority for completed LTX-2 videos,
+including an implicit Auto selection. Server, CLI, and TUI save paths preserve
+it in `OutputMetadata.pipeline`; web, desktop, iPhone, and both TUI Library
+detail presentations show it only when present.
+
 Community LTX-2 checkpoints can be video-only even when their transformer and
 video VAE are complete. Mold inspects the installed safetensors for both the
 audio VAE and vocoder; web, desktop, and iPhone disable generated audio when

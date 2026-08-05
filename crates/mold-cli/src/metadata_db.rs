@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
+use mold_core::{GenerateRequest, OutputFormat, OutputMetadata, VideoData};
 use mold_db::{MetadataDb, RecordSource};
 
 /// Install the `Config::load_or_default()` post-load hook so every freshly
@@ -34,6 +34,8 @@ fn backend_label() -> Option<String> {
 /// `generation_time_ms` come from the engine's response. When
 /// `actual_dims` is set, it overwrites the requested dimensions so the
 /// row describes the file that exists (e.g. post-upscale).
+/// `video` supplies completed runtime metadata that cannot be inferred from
+/// the request, notably an Auto-selected LTX-2 pipeline.
 ///
 /// Best-effort: errors are logged and discarded. Returns `false` when the
 /// DB is disabled or open failed, true otherwise.
@@ -44,13 +46,9 @@ pub fn record_local_save(
     generation_time_ms: u64,
     format: OutputFormat,
     actual_dims: Option<(u32, u32)>,
+    video: Option<&VideoData>,
 ) -> bool {
-    let metadata = OutputMetadata::from_generate_request(
-        req,
-        seed_used,
-        None,
-        mold_core::build_info::version_string(),
-    );
+    let metadata = metadata_for_local_save(req, seed_used, video);
     record_local_save_metadata(
         saved_path,
         metadata,
@@ -58,6 +56,23 @@ pub fn record_local_save(
         format,
         actual_dims,
     )
+}
+
+fn metadata_for_local_save(
+    req: &GenerateRequest,
+    seed_used: u64,
+    video: Option<&VideoData>,
+) -> OutputMetadata {
+    let mut metadata = OutputMetadata::from_generate_request(
+        req,
+        seed_used,
+        None,
+        mold_core::build_info::version_string(),
+    );
+    if let Some(video) = video {
+        metadata.apply_video_output(video);
+    }
+    metadata
 }
 
 /// Like [`record_local_save`] but with caller-built metadata — the chain
@@ -172,5 +187,32 @@ mod tests {
     fn backend_label_is_non_empty() {
         let label = backend_label().unwrap();
         assert!(["cuda", "metal", "cpu"].contains(&label.as_str()));
+    }
+
+    #[test]
+    fn local_video_metadata_uses_the_runtime_resolved_pipeline() {
+        let video = mold_core::VideoData {
+            data: Vec::new(),
+            format: OutputFormat::Mp4,
+            width: 1216,
+            height: 704,
+            frames: 97,
+            fps: 24,
+            pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+            thumbnail: Vec::new(),
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+
+        let metadata = metadata_for_local_save(&req(), 42, Some(&video));
+
+        assert_eq!(
+            metadata.pipeline,
+            Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+            "the runtime response is authoritative when an Auto request omitted pipeline"
+        );
     }
 }

@@ -6140,7 +6140,7 @@ impl App {
                             source_video_path: None,
                             extend_video_path: None,
                             extend_overlap_frames: None,
-                            pipeline: None,
+                            pipeline: response.video.as_ref().and_then(|video| video.pipeline),
                             ic_lora_control: None,
                             hdr_exr_dir: None,
                             hdr_exr_full_float: false,
@@ -6153,6 +6153,32 @@ impl App {
                             frames: response.video.as_ref().map(|v| v.frames),
                             fps: response.video.as_ref().map(|v| v.fps),
                         };
+
+                        if let (Ok(Some(db)), Some(output_dir)) =
+                            (mold_db::open_default(), saved_path.parent())
+                        {
+                            let saved_format = response
+                                .video
+                                .as_ref()
+                                .map(|video| video.format)
+                                .or_else(|| response.images.first().map(|image| image.format))
+                                .unwrap_or(self.generate.params.format);
+                            mold_db::persist::record_saved_output(
+                                &db,
+                                output_dir,
+                                &saved_name,
+                                &saved_path,
+                                &mold_db::persist::OutputRecordParams {
+                                    format: saved_format,
+                                    metadata: &meta,
+                                    source: mold_db::RecordSource::Tui,
+                                    generation_time_ms: Some(
+                                        response.generation_time_ms.try_into().unwrap_or(i64::MAX),
+                                    ),
+                                    backend: Some(mold_inference::compiled_backend_label()),
+                                },
+                            );
+                        }
 
                         self.gallery.entries.insert(
                             0,
@@ -9786,6 +9812,73 @@ mod tests {
                 app.gallery.entries[0].metadata.guidance_overrides,
                 Some(submitted_guidance),
                 "local gallery metadata must record submitted LTX-2 guidance overrides"
+            );
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn local_video_completion_preserves_the_runtime_resolved_pipeline() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.generating = true;
+            app.generate.batch_remaining = 1;
+            app.generate.prompt = TextArea::from(["a runtime pipeline provenance test"]);
+            app.generate.params.format = OutputFormat::Mp4;
+
+            let response = GenerateResponse {
+                audio: None,
+                images: Vec::new(),
+                generation_time_ms: 100,
+                model: "ltx-2.3-22b-dev:fp8".to_string(),
+                seed_used: 42,
+                video: Some(mold_core::VideoData {
+                    data: b"test-mp4".to_vec(),
+                    format: OutputFormat::Mp4,
+                    width: 1216,
+                    height: 704,
+                    frames: 97,
+                    fps: 24,
+                    pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+                    thumbnail: Vec::new(),
+                    gif_preview: Vec::new(),
+                    has_audio: true,
+                    duration_ms: None,
+                    audio_sample_rate: None,
+                    audio_channels: None,
+                }),
+                gpu: None,
+            };
+            app.bg_tx
+                .send(BackgroundEvent::GenerationComplete {
+                    response: Box::new(response),
+                    from_local: true,
+                    guidance_overrides: None,
+                })
+                .unwrap();
+
+            app.process_background_events();
+
+            assert_eq!(app.gallery.entries.len(), 1);
+            assert_eq!(
+                app.gallery.entries[0].metadata.pipeline,
+                Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+                "local TUI metadata must retain the pipeline the engine actually ran"
+            );
+
+            let saved_path = app.gallery.entries[0].path.clone();
+            let saved_dir = saved_path.parent().unwrap();
+            let saved_name = saved_path.file_name().unwrap().to_str().unwrap();
+            let db = mold_db::open_default().unwrap().unwrap();
+            let persisted = db
+                .get(saved_dir, saved_name)
+                .unwrap()
+                .expect("the local TUI save must survive a Library rescan");
+            assert_eq!(
+                persisted.metadata.pipeline,
+                Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+                "the runtime pipeline must survive process restart and gallery reconciliation"
             );
         });
     }

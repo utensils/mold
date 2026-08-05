@@ -158,6 +158,10 @@ complete workflows.
   as a checkpoint-aware default/on/off choice and family-gated
   `spatial_upscale` / `temporal_upscale` native modes. The remaining pipeline,
   conditioning-file, and chain-job controls remain a separate tracked gap.
+- Completed LTX-2 videos report the runtime-resolved pipeline separately from
+  the requested Auto/explicit choice. Server, CLI, and TUI saves preserve that
+  response in gallery metadata, and web, desktop, iPhone, and TUI Library
+  details show it when present; older and non-LTX prints simply omit the row.
 - LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
   not supported in this release.
 

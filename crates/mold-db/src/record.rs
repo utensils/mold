@@ -11,6 +11,8 @@ pub enum RecordSource {
     Server,
     /// Written by the CLI's local generation path (`mold run --local` or local fallback).
     Cli,
+    /// Written by the TUI's local generation path.
+    Tui,
     /// Imported by the startup reconciliation walk from a file already on disk.
     Backfill,
     /// Catch-all for rows whose origin was lost (e.g. an upgrade migrating
@@ -23,6 +25,7 @@ impl RecordSource {
         match self {
             RecordSource::Server => "server",
             RecordSource::Cli => "cli",
+            RecordSource::Tui => "tui",
             RecordSource::Backfill => "backfill",
             RecordSource::Unknown => "unknown",
         }
@@ -35,6 +38,7 @@ impl RecordSource {
         match s {
             "server" => RecordSource::Server,
             "cli" => RecordSource::Cli,
+            "tui" => RecordSource::Tui,
             "backfill" => RecordSource::Backfill,
             _ => RecordSource::Unknown,
         }
@@ -188,6 +192,7 @@ mod tests {
         for src in [
             RecordSource::Server,
             RecordSource::Cli,
+            RecordSource::Tui,
             RecordSource::Backfill,
             RecordSource::Unknown,
         ] {

@@ -2160,6 +2160,7 @@ fn save_and_preview_video(
             persist.generation_time_ms,
             video.format,
             Some((video.width, video.height)),
+            Some(video),
         );
     }
     if preview {
@@ -2221,6 +2222,7 @@ fn save_and_preview_audio(
             persist.generation_time_ms,
             audio.format,
             Some((audio.thumbnail_width, audio.thumbnail_height)),
+            None,
         );
     }
     if preview && !audio.thumbnail.is_empty() {
@@ -2313,6 +2315,7 @@ fn save_and_preview_image(
             p.generation_time_ms,
             output_format,
             Some((img.width, img.height)),
+            None,
         );
     }
     if preview {
