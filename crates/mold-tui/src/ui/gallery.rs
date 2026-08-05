@@ -617,6 +617,53 @@ mod tests {
             "narrow grid must suppress the Details side panel; got: {rendered:?}"
         );
     }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn full_detail_shows_the_runtime_pipeline_when_present() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        let mut metadata = test_metadata(1216, 704);
+        metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        metadata.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStageHq);
+        app.gallery.entries = vec![GalleryEntry {
+            path: PathBuf::from("runtime-pipeline.mp4"),
+            metadata,
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            origins: Vec::new(),
+        }];
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_detail(frame, &mut app, Rect::new(0, 0, 100, 40)))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("Pipeline"),
+            "pipeline label: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("two-stage-hq"),
+            "runtime pipeline value: {rendered:?}"
+        );
+    }
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -691,6 +738,13 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<10}", label), theme.param_label()),
             Span::styled(value.clone(), theme.param_value()),
+        ]));
+    }
+
+    if let Some(pipeline) = meta.pipeline {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<10}", "Pipeline"), theme.param_label()),
+            Span::styled(pipeline.to_string(), theme.param_value()),
         ]));
     }
 

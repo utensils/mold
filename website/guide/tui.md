@@ -217,9 +217,11 @@ automatically when the last scan is stale or a host was added/removed).
 
 On wide terminals a **Details side panel** shows the selected print: its
 thumbnail, the wrapped prompt (plus a dim `neg:` line), and Model / Seed /
-Size / **Machine** rows — Machine names the host the print lives on ("This
-Mac", a host name, or `2 machines` when copies exist on several). The
-panel hides automatically on narrow terminals.
+Size / optional video **Pipeline** / **Machine** rows — Pipeline is the recipe
+the engine actually ran, including an Auto-selected LTX-2 recipe, while Machine
+names the host the print lives on ("This Mac", a host name, or `2 machines`
+when copies exist on several). The panel hides automatically on narrow
+terminals. Full detail mode shows the same runtime pipeline when recorded.
 
 ### Grid Mode
 

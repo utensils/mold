@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CLI and TUI Library entries now preserve the video pipeline that actually ran.** Auto-selected LTX-2 recipes arrive on `VideoData.pipeline`, but client-side CLI/TUI saves dropped that runtime value and the TUI hid it even when server gallery metadata carried it. Local saves now apply the completed video metadata, and both TUI Library detail presentations show the pipeline when present; old prints and non-LTX video remain unchanged.
+
 ## [0.21.0] - 2026-08-05
 
 ### Added

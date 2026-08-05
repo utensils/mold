@@ -54,6 +54,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         mold_core::ModelInfoExtended::human_name_for(&entry.metadata.model, &app.models.catalog);
     let seed = entry.metadata.seed.to_string();
     let dims = format!("{}×{}", entry.metadata.width, entry.metadata.height);
+    let pipeline = entry.metadata.pipeline.map(|pipeline| pipeline.to_string());
     let machine = entry.machine_label();
     let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
 
@@ -75,9 +76,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // ── Prompt (wrapped) + dim negative line ────────────────────
     let remaining = (inner.y + inner.height).saturating_sub(y);
     let neg_rows = u16::from(negative.is_some());
-    // KV rows (4) + blank + hints (2) + blank = 8 rows below the prompt.
+    // Four required KV rows, optional pipeline, blank, two hints, and blank.
+    let kv_rows = 4 + u16::from(pipeline.is_some());
     let prompt_rows = PROMPT_MAX_ROWS
-        .min(remaining.saturating_sub(neg_rows + 8))
+        .min(remaining.saturating_sub(neg_rows + kv_rows + 4))
         .max(1)
         .min(remaining);
     let prompt_area = Rect {
@@ -114,9 +116,16 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::ui::widgets::kv_row_line(theme, "Model", &model, 8, false),
         crate::ui::widgets::kv_row_line(theme, "Seed", &seed, 8, false),
         crate::ui::widgets::kv_row_line(theme, "Size", &dims, 8, false),
+    ];
+    if let Some(ref pipeline) = pipeline {
+        lines.push(crate::ui::widgets::kv_row_line(
+            theme, "Pipeline", pipeline, 8, false,
+        ));
+    }
+    lines.extend([
         crate::ui::widgets::kv_row_line(theme, "Machine", &machine, 8, false),
         Line::from(""),
-    ];
+    ]);
     for (key, label) in [("[r]", "Recall prompt"), ("[u]", "Upscale")] {
         lines.push(Line::from(vec![
             Span::styled(key, theme.status_key()),
@@ -325,6 +334,31 @@ mod tests {
         assert!(
             rendered.contains("hal9000"),
             "remote entries name their host: {rendered:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mold_env)]
+    fn panel_shows_the_runtime_pipeline_when_present() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut app = test_app_with_entry(Vec::new());
+        app.gallery.entries[0].metadata.output_format = Some(mold_core::OutputFormat::Mp4);
+        app.gallery.entries[0].metadata.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStageHq);
+
+        let rendered = render_to_string(&mut app);
+
+        assert!(
+            rendered.contains("Pipeline"),
+            "pipeline label: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("two-stage-hq"),
+            "runtime pipeline value: {rendered:?}"
         );
     }
 

@@ -176,6 +176,9 @@ const ignoredEnvVars = new Set([
   'MOLD_TEST_INCOMPLETE_PARENT_TAIL',
   'MOLD_TEST_PREDECESSOR_MODE',
   'MOLD_TEST_CLIP_TOKENIZER',
+  // Execution-plan classifier/error-display sentinels, not real settings.
+  'MOLD_NOT_A_SHAPING_VARIABLE',
+  'MOLD_X',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))
