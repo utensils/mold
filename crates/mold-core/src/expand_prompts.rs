@@ -384,6 +384,9 @@ pub fn build_batch_messages_with_context(
 }
 
 /// Build batch expansion messages for an explicitly resolved task.
+// This is the task-aware counterpart to the public builder above. Keeping the
+// existing template inputs explicit preserves API compatibility at call sites.
+#[allow(clippy::too_many_arguments)]
 pub fn build_batch_messages_with_context_for_task(
     prompt: &str,
     family: &str,
