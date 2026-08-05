@@ -391,6 +391,9 @@ fn shim_build_response_and_cleanup(
         height: probe.height,
         frames: frame_count,
         fps: probe.fps,
+        pipeline: output_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pipeline),
         thumbnail,
         gif_preview,
         has_audio: actual_format == OutputFormat::Mp4 && probe.has_audio,
