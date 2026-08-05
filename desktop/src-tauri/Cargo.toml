@@ -106,3 +106,10 @@ codegen-units = 16
 strip = true
 
 [dev-dependencies]
+
+# TEMPORARY: mirror of the root workspace's local candle-fork override until
+# v0.11.1 is published to crates.io. Remove together with the root patch.
+[patch.crates-io]
+candle-core-mold = { path = "../../../candle/candle-core" }
+candle-nn-mold = { path = "../../../candle/candle-nn" }
+candle-transformers-mold = { path = "../../../candle/candle-transformers" }
