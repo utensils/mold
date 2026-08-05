@@ -130,6 +130,23 @@ describe("GenerateView source-fit submit path", () => {
     document.body.innerHTML = "";
   });
 
+  it("preserves an attached source and its fit policy when Create remounts", async () => {
+    const form = primeForm();
+    form.sourceImageName = "camera.png";
+    form.sourceFit = { mode: "crop-fill", alignX: "right", alignY: "bottom" };
+
+    const first = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    first.unmount();
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("camera.png");
+    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "right", alignY: "bottom" });
+  });
+
   it("resolves the host before preprocessing and routes the upscale to it", async () => {
     const hosts = setupMultiHost();
     const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");

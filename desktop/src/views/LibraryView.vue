@@ -708,6 +708,7 @@ async function useAsSource(entry: MergedPrint) {
     const base64 = await fetchItemBase64(entry);
     generateForm.form.sourceImage = base64;
     generateForm.form.sourceImageName = entry.item.filename;
+    generateForm.form.sourceFit = { mode: "lanczos-resize" };
     lightboxOpen.value = false;
     toasts.push("Loaded as source");
     void router.push("/create");

@@ -42,6 +42,7 @@ export function applyDesktopImageDrop(
     form.imageAttachments = [];
     form.sourceImage = image.base64;
     form.sourceImageName = image.filename;
+    form.sourceFit = { mode: "lanczos-resize" };
   } else {
     return { attached: false, metadataApplied };
   }

@@ -651,6 +651,7 @@ export function applyRequestToForm(
   form.strength = request.strength ?? form.strength;
   form.sourceImage = request.source_image ?? null;
   form.sourceImageName = request.source_image_name ?? null;
+  if (form.sourceImage) form.sourceFit = { mode: "lanczos-resize" };
   form.sourceImageWidth = null;
   form.sourceImageHeight = null;
   form.imageAttachments = [...(request.edit_images ?? [])];
