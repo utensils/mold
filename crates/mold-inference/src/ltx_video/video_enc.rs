@@ -75,7 +75,22 @@ impl VideoMetadata {
 ///
 /// Uses per-frame NeuQuant palette quantization (256 colors).
 pub fn encode_gif(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
+    encode_gif_with_options(frames, fps, false, true)
+}
+
+/// Encode GIF frames with export-time playback controls.
+///
+/// `bounce` appends the interior frames in reverse order so the first and last
+/// frames are not held twice at each turn. `repeat_forever = false` emits a
+/// single play-through rather than an infinite animation.
+pub fn encode_gif_with_options(
+    frames: &[RgbImage],
+    fps: u32,
+    bounce: bool,
+    repeat_forever: bool,
+) -> Result<Vec<u8>> {
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+    anyhow::ensure!(fps > 0, "GIF frame rate must be greater than zero");
 
     let (width, height) = (frames[0].width() as u16, frames[0].height() as u16);
     let delay_cs = (100.0 / fps as f64).round() as u16;
@@ -85,10 +100,14 @@ pub fn encode_gif(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
         let mut encoder = gif::Encoder::new(&mut buf, width, height, &[])
             .context("failed to create GIF encoder")?;
         encoder
-            .set_repeat(gif::Repeat::Infinite)
+            .set_repeat(if repeat_forever {
+                gif::Repeat::Infinite
+            } else {
+                gif::Repeat::Finite(0)
+            })
             .context("failed to set GIF repeat")?;
 
-        for frame_img in frames {
+        let mut write_frame = |frame_img: &RgbImage| -> Result<()> {
             let rgba: image::RgbaImage =
                 image::DynamicImage::ImageRgb8(frame_img.clone()).into_rgba8();
             let mut pixels = rgba.into_raw();
@@ -100,6 +119,17 @@ pub fn encode_gif(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
             encoder
                 .write_frame(&gif_frame)
                 .context("failed to write GIF frame")?;
+            Ok(())
+        };
+
+        for frame_img in frames {
+            write_frame(frame_img)?;
+        }
+        if bounce && frames.len() > 1 {
+            let reverse_start = usize::from(repeat_forever);
+            for frame_img in frames[reverse_start..frames.len() - 1].iter().rev() {
+                write_frame(frame_img)?;
+            }
         }
     }
     Ok(buf)
@@ -680,6 +710,27 @@ mod tests {
     #[test]
     fn gif_empty_frames_rejected() {
         assert!(encode_gif(&[], 24).is_err());
+    }
+
+    #[test]
+    fn gif_export_supports_bounce_and_single_playback() {
+        let frames = test_frames(16, 16, 4);
+        let data = encode_gif_with_options(&frames, 12, true, false).unwrap();
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(std::io::Cursor::new(data)).unwrap();
+        assert_eq!(decoder.repeat(), gif::Repeat::Finite(0));
+
+        let mut decoded = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            decoded.push(frame.buffer.to_vec());
+        }
+        assert_eq!(
+            decoded.len(),
+            7,
+            "one-shot bounce returns all the way to the first frame"
+        );
+        assert_eq!(decoded.first(), decoded.last());
     }
 
     #[test]

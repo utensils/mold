@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
+import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import AuthedMedia from "./AuthedMedia.vue";
 import { galleryMediaPath, type GallerySource } from "../../lib/gallery/media";
 import { ipc } from "../../lib/ipc";
@@ -17,6 +18,14 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import type { ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
 import { isUpscaledImage } from "../../lib/gallery/upscaled";
+import {
+  DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+  saveVideoExport,
+  videoExportFilename,
+  videoExportPath,
+  type VideoExportCapabilities,
+  type VideoExportOptions,
+} from "@studio/lib/videoExport";
 
 const props = withDefaults(
   defineProps<{
@@ -79,6 +88,10 @@ watch(
 );
 
 const confirmingDelete = ref(false);
+const exportOpen = ref(false);
+const exportBusy = ref(false);
+const exportError = ref("");
+const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 watch(
   () => props.item.filename,
   () => (confirmingDelete.value = false),
@@ -96,6 +109,9 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 const meta = computed(() => props.item.metadata);
 const upscaled = computed(() => isUpscaledImage(props.item));
+const canExportVideo = computed(
+  () => props.video && props.item.filename.toLowerCase().endsWith(".mp4"),
+);
 
 /** Full LoRA stack; a legacy single `lora`/`lora_scale` pair becomes one row. */
 const loraStack = computed(() => {
@@ -217,6 +233,49 @@ async function saveMedia() {
     URL.revokeObjectURL(url);
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function openVideoExport() {
+  exportOpen.value = true;
+  exportError.value = "";
+  try {
+    const { apiJson, apiJsonTo } = await import("../../lib/api/client");
+    exportCapabilities.value = props.target
+      ? await apiJsonTo<VideoExportCapabilities>(props.target, "/api/gallery/export-options")
+      : await apiJson<VideoExportCapabilities>("/api/gallery/export-options");
+  } catch (error) {
+    exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+    exportError.value =
+      error instanceof Error ? error.message : "Couldn’t read export options from this host.";
+  }
+}
+
+async function performVideoExport(options: VideoExportOptions) {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const { apiFetch, apiFetchTo } = await import("../../lib/api/client");
+    const path = videoExportPath(props.item.filename);
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    };
+    const response = props.target
+      ? await apiFetchTo(props.target, path, init)
+      : await apiFetch(path, init);
+    const result = await saveVideoExport(
+      await response.blob(),
+      videoExportFilename(props.item.filename, options.format),
+    );
+    exportOpen.value = false;
+    toasts.push(result === "shared" ? "Export ready to share" : "Video exported");
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
   }
 }
 </script>
@@ -493,6 +552,15 @@ async function saveMedia() {
         </div>
         <div class="mt-2 flex gap-2.5">
           <button
+            v-if="canExportVideo"
+            type="button"
+            data-test="export-video"
+            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            @click="openVideoExport"
+          >
+            Export format…
+          </button>
+          <button
             v-if="canReveal"
             type="button"
             class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
@@ -516,6 +584,15 @@ async function saveMedia() {
         </div>
       </aside>
     </div>
+    <VideoExportDialog
+      :open="exportOpen"
+      :filename="item.filename"
+      :formats="exportCapabilities.formats"
+      :busy="exportBusy"
+      :error="exportError"
+      @close="exportOpen = false"
+      @export="performVideoExport"
+    />
   </div>
 </template>
 

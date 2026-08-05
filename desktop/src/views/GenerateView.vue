@@ -11,6 +11,7 @@ import {
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
+import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
@@ -116,6 +117,14 @@ import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
 import { randomSeed } from "../stores/generation";
 import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
+  DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+  saveVideoExport,
+  videoExportFilename,
+  videoExportPath,
+  type VideoExportCapabilities,
+  type VideoExportOptions,
+} from "@studio/lib/videoExport";
+import {
   metadataReferencesSource,
   restoreEditImages,
   restoreSourceImage,
@@ -166,6 +175,10 @@ const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
+const videoExportJob = ref<Job | null>(null);
+const videoExportBusy = ref(false);
+const videoExportError = ref("");
+const videoExportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 // Multi-host gallery — source-image restore looks up prints across hosts.
 const hostGallery = useGalleryStore();
 const downloads = useDownloadsStore();
@@ -1557,6 +1570,11 @@ function canvasMenu(): MenuEntry[] {
       },
     },
     {
+      label: "Export video format…",
+      disabled: !j.result?.video_frames || !j.result.filename?.toLowerCase().endsWith(".mp4"),
+      action: () => void openGeneratedVideoExport(j),
+    },
+    {
       label: "Copy file path",
       disabled: !j.result?.filename,
       action: () => {
@@ -1575,6 +1593,55 @@ function canvasMenu(): MenuEntry[] {
       action: () => void router.push("/gallery"),
     },
   ];
+}
+
+async function openGeneratedVideoExport(candidate: Job): Promise<void> {
+  if (!candidate.result?.filename) return;
+  videoExportJob.value = candidate;
+  videoExportError.value = "";
+  const target = generation.targetForJob(candidate.clientId);
+  if (!target) {
+    videoExportError.value = "The video’s host is no longer connected.";
+    return;
+  }
+  try {
+    const { apiJsonTo } = await import("../lib/api/client");
+    videoExportCapabilities.value = await apiJsonTo<VideoExportCapabilities>(
+      target,
+      "/api/gallery/export-options",
+    );
+  } catch (error) {
+    videoExportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+    videoExportError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function exportGeneratedVideo(options: VideoExportOptions): Promise<void> {
+  const candidate = videoExportJob.value;
+  const filename = candidate?.result?.filename;
+  if (!candidate || !filename || videoExportBusy.value) return;
+  const target = generation.targetForJob(candidate.clientId);
+  if (!target) {
+    videoExportError.value = "The video’s host is no longer connected.";
+    return;
+  }
+  videoExportBusy.value = true;
+  videoExportError.value = "";
+  try {
+    const { apiFetchTo } = await import("../lib/api/client");
+    const response = await apiFetchTo(target, videoExportPath(filename), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    await saveVideoExport(await response.blob(), videoExportFilename(filename, options.format));
+    videoExportJob.value = null;
+    toasts.push("Video exported");
+  } catch (error) {
+    videoExportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    videoExportBusy.value = false;
+  }
 }
 
 function expansionInputs(count: number): PreparedExpansionInputs {
@@ -3164,6 +3231,16 @@ onBeforeUnmount(() => {
       :models="hostModels.unionInstalled"
       @confirm="pullMissingModel"
       @close="missingModel = null"
+    />
+    <VideoExportDialog
+      v-if="videoExportJob?.result?.filename"
+      :open="true"
+      :filename="videoExportJob.result.filename"
+      :formats="videoExportCapabilities.formats"
+      :busy="videoExportBusy"
+      :error="videoExportError"
+      @close="videoExportJob = null"
+      @export="exportGeneratedVideo"
     />
   </div>
 </template>

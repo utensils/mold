@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { apiFetchTo, type ApiTarget } from "../lib/api/client";
+import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
 import { blobToBase64 } from "../lib/image";
 import {
@@ -12,6 +13,14 @@ import {
   streamableMediaUrl,
 } from "../lib/gallery/media";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
+import {
+  DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+  saveVideoExport,
+  videoExportFilename,
+  videoExportPath,
+  type VideoExportCapabilities,
+  type VideoExportOptions,
+} from "@studio/lib/videoExport";
 
 const props = withDefaults(
   defineProps<{
@@ -30,6 +39,7 @@ const props = withDefaults(
     canUseAsSource?: boolean;
     usingSource?: boolean;
     mediaUrlOverride?: string;
+    exportEnabled?: boolean;
   }>(),
   {
     reusing: false,
@@ -42,6 +52,7 @@ const props = withDefaults(
     canUseAsSource: false,
     usingSource: false,
     mediaUrlOverride: "",
+    exportEnabled: true,
   },
 );
 
@@ -61,6 +72,9 @@ const loadError = ref("");
 const mediaLoadKey = ref(0);
 const video = computed(() => isVideoItem(props.item));
 const audio = computed(() => isAudioItem(props.item));
+const canExportVideo = computed(
+  () => props.exportEnabled && video.value && props.item.filename.toLowerCase().endsWith(".mp4"),
+);
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(
   () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
@@ -91,6 +105,10 @@ const originalPrompt = computed(() => props.item.metadata.original_prompt?.trim(
 const upscaled = computed(() => isUpscaledImage(props.item));
 const actionStatus = ref("");
 const actionBusy = ref<"copy" | "save" | null>(null);
+const exportOpen = ref(false);
+const exportBusy = ref(false);
+const exportError = ref("");
+const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 
 let restoreFocusElement: HTMLElement | null = null;
 let loadEpoch = 0;
@@ -293,6 +311,44 @@ async function performImageAction(action: "copy" | "save"): Promise<void> {
   }
 }
 
+async function openVideoExport(): Promise<void> {
+  exportOpen.value = true;
+  exportError.value = "";
+  try {
+    exportCapabilities.value = await apiJsonTo<VideoExportCapabilities>(
+      props.target,
+      "/api/gallery/export-options",
+    );
+  } catch (error) {
+    exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+    exportError.value =
+      error instanceof Error ? error.message : "Couldn’t read export options from this host.";
+  }
+}
+
+async function performVideoExport(options: VideoExportOptions): Promise<void> {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const response = await apiFetchTo(props.target, videoExportPath(props.item.filename), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    const result = await saveVideoExport(
+      await response.blob(),
+      videoExportFilename(props.item.filename, options.format),
+    );
+    exportOpen.value = false;
+    actionStatus.value = result === "shared" ? "Export ready to share" : "Video exported";
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
 onMounted(() => {
   mounted = true;
   restoreFocusElement = document.activeElement as HTMLElement | null;
@@ -470,6 +526,15 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="gallery-viewer-actions">
+        <button
+          v-if="canExportVideo"
+          class="secondary-button gallery-viewer-export"
+          type="button"
+          data-test="gallery-viewer-export"
+          @click="openVideoExport"
+        >
+          Export format…
+        </button>
         <template v-if="!video && !audio">
           <button
             class="secondary-button gallery-viewer-copy"
@@ -521,6 +586,15 @@ onBeforeUnmount(() => {
         {{ actionStatus }}
       </p>
     </footer>
+    <VideoExportDialog
+      :open="exportOpen"
+      :filename="item.filename"
+      :formats="exportCapabilities.formats"
+      :busy="exportBusy"
+      :error="exportError"
+      @close="exportOpen = false"
+      @export="performVideoExport"
+    />
   </dialog>
 </template>
 
