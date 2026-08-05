@@ -3975,6 +3975,51 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
+  it("loads reachable hosts without waiting for a host already known to be offline", async () => {
+    const offlineTarget = { baseUrl: "http://halcyon.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Plato",
+          baseUrl: target.baseUrl,
+          hostname: "plato",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "halcyon-id",
+          name: "Halcyon",
+          baseUrl: offlineTarget.baseUrl,
+          hostname: "halcyon",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      if (baseUrl === offlineTarget.baseUrl) {
+        if (path === "/api/status") return Promise.reject(new Error("offline"));
+        if (path === "/api/gallery") return new Promise(() => {});
+      }
+      if (path === "/api/status") return Promise.resolve({ ...status, hostname: "plato" });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    expect(wrapper.find(".empty-state").exists()).toBe(false);
+    expect(wrapper.text()).toContain("1 host unavailable");
+  });
+
   it("keeps the native image context menu and enters multi-select from Select", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -4386,7 +4431,10 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") {
         return Promise.resolve(baseUrl === remoteTarget.baseUrl ? [print] : []);
       }
-      if (baseUrl === remoteTarget.baseUrl) return Promise.reject(new Error("offline"));
+      if (baseUrl === remoteTarget.baseUrl && path === "/api/status") {
+        return Promise.resolve({ ...status, hostname: "remote", instance_id: "remote-id" });
+      }
+      if (baseUrl === remoteTarget.baseUrl) return Promise.reject(new Error("models offline"));
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
