@@ -81,7 +81,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/mold-core/Cargo.toml crates/mold-core/Cargo.toml
 COPY crates/mold-catalog/Cargo.toml crates/mold-catalog/Cargo.toml
 COPY crates/mold-db/Cargo.toml crates/mold-db/Cargo.toml
+COPY crates/mold-candle/Cargo.toml crates/mold-candle/Cargo.toml
 COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
+COPY crates/mold-scheduler/Cargo.toml crates/mold-scheduler/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
 COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
@@ -91,7 +93,9 @@ COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
 RUN mkdir -p crates/mold-core/src \
              crates/mold-catalog/src \
              crates/mold-db/src \
+             crates/mold-candle/src \
              crates/mold-inference/src \
+             crates/mold-scheduler/src \
              crates/mold-server/src \
              crates/mold-cli/src \
              crates/mold-discord/src \
@@ -99,15 +103,16 @@ RUN mkdir -p crates/mold-core/src \
     && echo "// stub" > crates/mold-core/src/lib.rs \
     && echo "// stub" > crates/mold-catalog/src/lib.rs \
     && echo "// stub" > crates/mold-db/src/lib.rs \
+    && echo "// stub" > crates/mold-candle/src/lib.rs \
     && echo "// stub" > crates/mold-inference/src/lib.rs \
+    && echo "// stub" > crates/mold-scheduler/src/lib.rs \
     && echo "// stub" > crates/mold-server/src/lib.rs \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
     && echo "// stub" > crates/mold-discord/src/lib.rs \
     && echo "// stub" > crates/mold-tui/src/lib.rs
 
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
-RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics \
-    || true
+RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
 
 # Now copy the real source code
 COPY crates/ crates/

@@ -101,6 +101,33 @@ require_text "Dockerfile" \
   'scripts/seal-cuda-ptx-manifest.py /build/target/release/mold'
 require_text "Dockerfile" \
   'scripts/probe-cuda-embedded-ptx.py /build/target/release/mold'
+while IFS= read -r workspace_member; do
+  require_text "Dockerfile" \
+    "COPY ${workspace_member}/Cargo.toml ${workspace_member}/Cargo.toml"
+  if [[ -f "$repo_root/${workspace_member}/src/lib.rs" ]]; then
+    source_name="lib.rs"
+  else
+    source_name="main.rs"
+  fi
+  require_text "Dockerfile" \
+    "${workspace_member}/src/${source_name}"
+done < <(
+  python3 - "$repo_root/Cargo.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as manifest:
+    for member in tomllib.load(manifest)["workspace"]["members"]:
+        print(member)
+PY
+)
+if awk '
+  /# Build dependencies only/ { in_dependency_build = 1 }
+  in_dependency_build { print }
+  /# Now copy the real source code/ { exit }
+' "$repo_root/Dockerfile" | grep -Fq '|| true'; then
+  fail "Docker dependency-cache build must not hide workspace resolution failures"
+fi
 require_text "Dockerfile" \
   'python3 \'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
