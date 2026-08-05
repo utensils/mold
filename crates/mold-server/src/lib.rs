@@ -1254,6 +1254,8 @@ mod tests {
         begin_runtime_shutdown(Some(&chains), &scheduler);
 
         assert!(chains.is_cancelling("chain-in-flight"));
+        chains.register_cancel_for_tests("chain-claimed-during-shutdown");
+        assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
         assert!(scheduler.is_cancelled());
     }
 

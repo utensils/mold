@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ pub struct ChainJobRunnerHandle {
 
 pub struct CancelRegistry {
     tokens: Mutex<HashMap<String, mold_inference::InferenceCancellationToken>>,
+    shutting_down: AtomicBool,
 }
 
 struct ActiveChainAttemptGuard {
@@ -263,15 +264,22 @@ impl CancelRegistry {
     pub fn new() -> Self {
         Self {
             tokens: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
     fn register(&self, job_id: &str) {
-        self.tokens
+        let mut tokens = self
+            .tokens
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(job_id.to_string())
-            .or_default();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let token = tokens.entry(job_id.to_string()).or_default();
+        // The load happens while the token map is locked. If shutdown races
+        // after this load, request_all() must acquire the same lock and will
+        // observe/cancel this token; if shutdown won first, cancel it here.
+        if self.shutting_down.load(Ordering::Acquire) {
+            token.cancel();
+        }
     }
 
     fn unregister(&self, job_id: &str) {
@@ -297,6 +305,10 @@ impl CancelRegistry {
     }
 
     fn request_all(&self) -> usize {
+        // Fence future registrations before snapshotting current attempts.
+        // register() checks this flag while holding the token-map lock, making
+        // a claim racing shutdown either visible here or cancelled on insert.
+        self.shutting_down.store(true, Ordering::Release);
         let tokens = self
             .tokens
             .lock()
@@ -319,12 +331,15 @@ impl CancelRegistry {
     }
 
     fn token(&self, job_id: &str) -> mold_inference::InferenceCancellationToken {
-        self.tokens
+        let mut tokens = self
+            .tokens
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(job_id.to_string())
-            .or_default()
-            .clone()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let token = tokens.entry(job_id.to_string()).or_default();
+        if self.shutting_down.load(Ordering::Acquire) {
+            token.cancel();
+        }
+        token.clone()
     }
 }
 
