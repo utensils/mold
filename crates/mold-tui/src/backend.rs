@@ -6,7 +6,7 @@ use mold_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::app::{BackgroundEvent, GenerateParams, InferenceMode};
+use crate::app::{BackgroundEvent, GenerateParams, GenerationMetadataSnapshot, InferenceMode};
 
 /// Run a generation request — tries remote first, falls back to local on connection error.
 /// When batch > 1, loops client-side with `batch_size=1` per iteration (matching CLI behavior).
@@ -39,9 +39,21 @@ pub async fn run_generation(
             }));
         }
 
+        let metadata_snapshot = GenerationMetadataSnapshot::new(
+            iter_params.clone(),
+            prompt.clone(),
+            negative_prompt.clone(),
+        );
+
         if iter_params.inference_mode == InferenceMode::Local {
-            run_local_generation_single(iter_params, prompt.clone(), negative_prompt.clone(), &tx)
-                .await;
+            run_local_generation_single(
+                iter_params,
+                prompt.clone(),
+                negative_prompt.clone(),
+                metadata_snapshot,
+                &tx,
+            )
+            .await;
         } else {
             let effective_url = iter_params.host.clone().or_else(|| server_url.clone());
 
@@ -50,7 +62,7 @@ pub async fn run_generation(
                 let client = crate::hosts::client_for(url, api_key.as_deref());
                 let req = build_request(&iter_params, &prompt, &negative_prompt);
 
-                match try_server_generate(&client, &req, &tx).await {
+                match try_server_generate(&client, &req, &metadata_snapshot, &tx).await {
                     ServerResult::Done => {}
                     ServerResult::FallbackLocal => {
                         fell_through = true;
@@ -78,6 +90,7 @@ pub async fn run_generation(
                     iter_params,
                     prompt.clone(),
                     negative_prompt.clone(),
+                    metadata_snapshot,
                     &tx,
                 )
                 .await;
@@ -134,9 +147,17 @@ async fn run_local_generation_single(
     params: GenerateParams,
     prompt: String,
     negative_prompt: Option<String>,
+    metadata_snapshot: GenerationMetadataSnapshot,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    run_local_generation(params, prompt, negative_prompt, tx.clone()).await;
+    run_local_generation(
+        params,
+        prompt,
+        negative_prompt,
+        metadata_snapshot,
+        tx.clone(),
+    )
+    .await;
 }
 
 /// Pull a model with progress reporting to the TUI.
@@ -268,6 +289,7 @@ enum ServerResult {
 async fn try_server_generate(
     client: &MoldClient,
     req: &GenerateRequest,
+    metadata_snapshot: &GenerationMetadataSnapshot,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> ServerResult {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
@@ -284,7 +306,7 @@ async fn try_server_generate(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
-                guidance_overrides: req.guidance_overrides.clone(),
+                metadata_snapshot: Box::new(metadata_snapshot.clone()),
             });
             ServerResult::Done
         }
@@ -328,7 +350,7 @@ async fn try_server_generate(
                         let _ = tx.send(BackgroundEvent::GenerationComplete {
                             response: Box::new(response),
                             from_local: false,
-                            guidance_overrides: req.guidance_overrides.clone(),
+                            metadata_snapshot: Box::new(metadata_snapshot.clone()),
                         });
                         ServerResult::Done
                     }
@@ -365,6 +387,7 @@ async fn run_local_generation(
     params: GenerateParams,
     prompt: String,
     negative_prompt: Option<String>,
+    metadata_snapshot: GenerationMetadataSnapshot,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
     use mold_core::{Config, ModelPaths};
@@ -403,8 +426,6 @@ async fn run_local_generation(
 
     let offload = params.offload;
     let req = build_request(&params, &prompt, &negative_prompt);
-    let guidance_overrides = req.guidance_overrides.clone();
-
     let tx_clone = tx.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -439,7 +460,7 @@ async fn run_local_generation(
             let _ = tx.send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: true,
-                guidance_overrides,
+                metadata_snapshot: Box::new(metadata_snapshot),
             });
         }
         Ok(Err(e)) => {

@@ -27,12 +27,12 @@ pub enum BackgroundEvent {
     /// response produced by the in-process inference engine — including
     /// Auto-mode fallbacks after the remote server goes unreachable —
     /// so the completion handler can still write the file locally even
-    /// when `server_url` remains set. `guidance_overrides` is the exact
-    /// request snapshot so later form edits cannot corrupt provenance.
+    /// when `server_url` remains set. `metadata_snapshot` is the exact
+    /// submitted request state so later form edits cannot corrupt provenance.
     GenerationComplete {
         response: Box<GenerateResponse>,
         from_local: bool,
-        guidance_overrides: Option<Ltx2GuidanceOverrides>,
+        metadata_snapshot: Box<GenerationMetadataSnapshot>,
     },
     /// Generation or background task failed.
     Error(String),
@@ -589,6 +589,29 @@ pub struct GenerateParams {
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
     pub control_scale: f64,
+}
+
+/// Immutable, lightweight provenance captured for one submitted generation.
+/// Runtime-only output facts still come from `GenerateResponse`.
+#[derive(Debug, Clone)]
+pub struct GenerationMetadataSnapshot {
+    pub params: GenerateParams,
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+}
+
+impl GenerationMetadataSnapshot {
+    pub(crate) fn new(
+        params: GenerateParams,
+        prompt: String,
+        negative_prompt: Option<String>,
+    ) -> Self {
+        Self {
+            params,
+            prompt,
+            negative_prompt,
+        }
+    }
 }
 
 /// How inference is dispatched.
@@ -5850,8 +5873,13 @@ impl App {
                 BackgroundEvent::GenerationComplete {
                     response,
                     from_local,
-                    guidance_overrides,
+                    metadata_snapshot,
                 } => {
+                    let GenerationMetadataSnapshot {
+                        params: submitted_params,
+                        prompt: prompt_text,
+                        negative_prompt,
+                    } = *metadata_snapshot;
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
                         self.generate.generating = false;
@@ -5896,14 +5924,7 @@ impl App {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
 
-                    let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
-                    let neg_text = self
-                        .generate
-                        .negative_prompt
-                        .lines()
-                        .join("\n")
-                        .trim()
-                        .to_string();
+                    let neg_text = negative_prompt.clone().unwrap_or_default();
 
                     for (i, img_data) in response.images.iter().enumerate() {
                         let ext = img_data.format.extension();
@@ -6058,7 +6079,7 @@ impl App {
                     } else if let Some(ref video) = response.video {
                         (video.width, video.height)
                     } else {
-                        (self.generate.params.width, self.generate.params.height)
+                        (submitted_params.width, submitted_params.height)
                     };
                     // In remote-server mode we don't write a local copy, so
                     // `saved_path` is empty and there's nothing for the
@@ -6082,60 +6103,55 @@ impl App {
                         && !saved_path.as_os_str().is_empty()
                     {
                         let meta = mold_core::OutputMetadata {
-                            guidance_overrides,
+                            guidance_overrides: submitted_params
+                                .guidance_overrides
+                                .clone()
+                                .into_option(),
                             prompt: prompt_text,
-                            negative_prompt: if neg_text.is_empty() {
-                                None
-                            } else {
-                                Some(neg_text)
-                            },
+                            negative_prompt,
                             original_prompt: None,
                             batch_id: None,
                             batch_index: None,
                             batch_count: None,
                             model: actual_model,
                             seed: response.seed_used,
-                            steps: self.generate.params.steps,
-                            guidance: self.generate.params.guidance,
+                            steps: submitted_params.steps,
+                            guidance: submitted_params.guidance,
                             width: entry_width,
                             height: entry_height,
                             generation_width: Some(entry_width),
                             generation_height: Some(entry_height),
-                            strength: if self.generate.params.source_image_path.is_some() {
-                                Some(self.generate.params.strength)
+                            strength: if submitted_params.source_image_path.is_some() {
+                                Some(submitted_params.strength)
                             } else {
                                 None
                             },
                             source_image_name: None,
                             source_image_sha256: None,
                             edit_image_sha256s: None,
-                            scheduler: self.generate.params.scheduler,
-                            output_format: Some(self.generate.params.format),
+                            scheduler: submitted_params.scheduler,
+                            output_format: Some(submitted_params.format),
                             cfg_plus: None,
-                            lora: self.generate.params.lora_path.clone(),
-                            lora_scale: self
-                                .generate
-                                .params
+                            lora: submitted_params.lora_path.clone(),
+                            lora_scale: submitted_params
                                 .lora_path
                                 .as_ref()
-                                .map(|_| self.generate.params.lora_scale),
-                            loras: self.generate.params.lora_path.as_ref().map(|path| {
+                                .map(|_| submitted_params.lora_scale),
+                            loras: submitted_params.lora_path.as_ref().map(|path| {
                                 vec![mold_core::LoraWeight {
                                     path: path.clone(),
-                                    scale: self.generate.params.lora_scale,
+                                    scale: submitted_params.lora_scale,
                                 }]
                             }),
-                            control_model: self.generate.params.control_model.clone(),
-                            control_scale: self
-                                .generate
-                                .params
+                            control_model: submitted_params.control_model.clone(),
+                            control_scale: submitted_params
                                 .control_image_path
                                 .as_ref()
-                                .and(self.generate.params.control_model.as_ref())
-                                .map(|_| self.generate.params.control_scale),
+                                .and(submitted_params.control_model.as_ref())
+                                .map(|_| submitted_params.control_scale),
                             upscale_model: None,
                             gif_preview: response.video.as_ref().map(|_| true),
-                            enable_audio: self.generate.params.enable_audio,
+                            enable_audio: submitted_params.enable_audio,
                             audio_file_path: None,
                             source_video_path: None,
                             extend_video_path: None,
@@ -6145,8 +6161,8 @@ impl App {
                             hdr_exr_dir: None,
                             hdr_exr_full_float: false,
                             retake_range: None,
-                            spatial_upscale: self.generate.params.spatial_upscale,
-                            temporal_upscale: self.generate.params.temporal_upscale,
+                            spatial_upscale: submitted_params.spatial_upscale,
+                            temporal_upscale: submitted_params.temporal_upscale,
                             chain_job_id: None,
                             chain: None,
                             version: mold_core::build_info::VERSION.to_string(),
@@ -6162,7 +6178,7 @@ impl App {
                                 .as_ref()
                                 .map(|video| video.format)
                                 .or_else(|| response.images.first().map(|image| image.format))
-                                .unwrap_or(self.generate.params.format);
+                                .unwrap_or(submitted_params.format);
                             mold_db::persist::record_saved_output(
                                 &db,
                                 output_dir,
@@ -6911,6 +6927,26 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generation_metadata_snapshot(app: &App) -> Box<GenerationMetadataSnapshot> {
+        let prompt = app.generate.prompt.lines().join("\n").trim().to_string();
+        let negative = app
+            .generate
+            .negative_prompt
+            .lines()
+            .join("\n")
+            .trim()
+            .to_string();
+        Box::new(GenerationMetadataSnapshot::new(
+            app.generate.params.clone(),
+            prompt,
+            if negative.is_empty() {
+                None
+            } else {
+                Some(negative)
+            },
+        ))
+    }
 
     #[test]
     fn inference_mode_cycle() {
@@ -9729,11 +9765,12 @@ mod tests {
             video: None,
             gpu: None,
         };
+        let metadata_snapshot = generation_metadata_snapshot(&app);
         app.bg_tx
             .send(BackgroundEvent::GenerationComplete {
                 response: Box::new(response),
                 from_local: false,
-                guidance_overrides: None,
+                metadata_snapshot,
             })
             .unwrap();
 
@@ -9777,6 +9814,7 @@ mod tests {
                 modality_scale: Some(3.0),
                 skip_step: Some(1),
             };
+            app.generate.params.guidance_overrides = submitted_guidance.clone();
 
             let response = GenerateResponse {
                 audio: None,
@@ -9793,11 +9831,12 @@ mod tests {
                 video: None,
                 gpu: None,
             };
+            let metadata_snapshot = generation_metadata_snapshot(&app);
             app.bg_tx
                 .send(BackgroundEvent::GenerationComplete {
                     response: Box::new(response),
                     from_local: true,
-                    guidance_overrides: Some(submitted_guidance.clone()),
+                    metadata_snapshot,
                 })
                 .unwrap();
 
@@ -9825,7 +9864,10 @@ mod tests {
             app.generate.generating = true;
             app.generate.batch_remaining = 1;
             app.generate.prompt = TextArea::from(["a runtime pipeline provenance test"]);
+            app.generate.negative_prompt = TextArea::from(["submitted negative"]);
             app.generate.params.format = OutputFormat::Mp4;
+            app.generate.params.steps = 28;
+            app.generate.params.guidance = 4.0;
 
             let response = GenerateResponse {
                 audio: None,
@@ -9850,13 +9892,22 @@ mod tests {
                 }),
                 gpu: None,
             };
+            let metadata_snapshot = generation_metadata_snapshot(&app);
             app.bg_tx
                 .send(BackgroundEvent::GenerationComplete {
                     response: Box::new(response),
                     from_local: true,
-                    guidance_overrides: None,
+                    metadata_snapshot,
                 })
                 .unwrap();
+
+            // The user can prepare their next draft while inference is running.
+            // Every durable field must come from the submitted request snapshot,
+            // while runtime-only fields such as pipeline come from the response.
+            app.generate.prompt = TextArea::from(["a later draft"]);
+            app.generate.negative_prompt = TextArea::from(["later negative"]);
+            app.generate.params.steps = 99;
+            app.generate.params.guidance = 9.0;
 
             app.process_background_events();
 
@@ -9866,6 +9917,16 @@ mod tests {
                 Some(mold_core::Ltx2PipelineMode::TwoStageHq),
                 "local TUI metadata must retain the pipeline the engine actually ran"
             );
+            assert_eq!(
+                app.gallery.entries[0].metadata.prompt,
+                "a runtime pipeline provenance test"
+            );
+            assert_eq!(
+                app.gallery.entries[0].metadata.negative_prompt.as_deref(),
+                Some("submitted negative")
+            );
+            assert_eq!(app.gallery.entries[0].metadata.steps, 28);
+            assert!((app.gallery.entries[0].metadata.guidance - 4.0).abs() < f64::EPSILON);
 
             let saved_path = app.gallery.entries[0].path.clone();
             let saved_dir = saved_path.parent().unwrap();
@@ -9912,11 +9973,12 @@ mod tests {
                 video: None,
                 gpu: None,
             };
+            let metadata_snapshot = generation_metadata_snapshot(&app);
             app.bg_tx
                 .send(BackgroundEvent::GenerationComplete {
                     response: Box::new(response),
                     from_local: false,
-                    guidance_overrides: None,
+                    metadata_snapshot,
                 })
                 .unwrap();
             app.process_background_events();
