@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Candle fork upgraded to the 0.11 line** (`candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold` 0.11.1, tracking upstream candle 0.11). The LTX-Video STG perturbed pass now uses the transformer's `set_skip_block_list` hard-skip instead of the removed per-layer skip mask — output-equivalent for the 0/1 masks mold built, and faster since skipped blocks are no longer executed. The 0.11.1 fork release restores two patches the 0.11.0 upstream sync dropped: the deterministic `DiagonalGaussianDistribution::mode()` used by SD1.5/SDXL/SD3 img2img latent encoding, and the bounded high-resolution attention-score chunking that keeps SD1.5 CFG at 1024x1024 inside 32-bit CUDA indexing.
+
 ### Fixed
 
 - **CLI and TUI Library entries now preserve the video pipeline that actually ran.** Auto-selected LTX-2 recipes arrive on `VideoData.pipeline`, but client-side CLI/TUI saves dropped that runtime value and the TUI hid it even when server gallery metadata carried it. Local saves now apply the completed video metadata, and both TUI Library detail presentations show the pipeline when present; old prints and non-LTX video remain unchanged.
