@@ -13,6 +13,13 @@ use std::sync::OnceLock;
 
 /// Every environment variable whose value can alter device choice, concrete
 /// weights, numeric execution, memory residency, or output semantics.
+///
+/// Every name added here must also gain a matching `RuntimeSemanticVariable`
+/// arm in mold-server's `execution_plan.rs` (`runtime_semantic_variable`).
+/// `every_engine_shaping_variable_has_a_semantic_class` over there fails CI on
+/// a mismatch; at runtime an unclassified name fails the job with
+/// `ExecutionPlanError::UnclassifiedRuntimeVariable` instead of panicking the
+/// server (issue #685).
 pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_ATTN",
     "MOLD_ATTN_CHUNK",
