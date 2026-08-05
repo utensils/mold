@@ -15,7 +15,8 @@ import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
 import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
-import type { ModelEntry } from "../lib/api/types";
+import { useComposerStore } from "../stores/composer";
+import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import type { SourceFitInput } from "../lib/sourceFitPreprocess";
 
 vi.mock("vue-router", () => ({
@@ -54,7 +55,8 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
     previewChainPlacement: planned,
   };
 });
-vi.mock("../lib/ipc", () => ({ ipc: {} }));
+const { sourceStashGet } = vi.hoisted(() => ({ sourceStashGet: vi.fn() }));
+vi.mock("../lib/ipc", () => ({ ipc: { sourceStashGet } }));
 vi.mock("../lib/api/history", () => ({ fetchHistory: vi.fn(() => Promise.resolve([])) }));
 
 const upscaleImage = vi.fn();
@@ -124,6 +126,7 @@ describe("GenerateView source-fit submit path", () => {
     upscaleImage.mockReset();
     upscaleImage.mockResolvedValue("UPSCALED");
     applySourceFitPreprocess.mockReset();
+    sourceStashGet.mockReset();
     useModelStore().all = [model];
   });
   afterEach(() => {
@@ -143,6 +146,34 @@ describe("GenerateView source-fit submit path", () => {
     await flushPromises();
 
     expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("camera.png");
+    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "right", alignY: "bottom" });
+  });
+
+  it("preserves the fit policy while Reuse settings restores source bytes", async () => {
+    const form = useGenerateFormStore().form;
+    form.sourceFit = { mode: "crop-fill", alignX: "right", alignY: "bottom" };
+    sourceStashGet.mockResolvedValue("RESTORED");
+    useComposerStore().set({
+      metadata: {
+        prompt: "a camera",
+        model: model.name,
+        seed: 42,
+        steps: 20,
+        guidance: 7,
+        width: 512,
+        height: 512,
+        version: "test",
+        source_image_sha256: "a".repeat(64),
+        source_image_name: "camera.png",
+      } as OutputMetadata,
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    expect(sourceStashGet).toHaveBeenCalledWith("a".repeat(64));
+    expect(form.sourceImage).toBe("RESTORED");
     expect(form.sourceImageName).toBe("camera.png");
     expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "right", alignY: "bottom" });
   });

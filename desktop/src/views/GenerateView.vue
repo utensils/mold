@@ -2500,7 +2500,6 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   } else if (!attachmentMode && caps.value.sourceImageMode === "single" && restored) {
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
-    form.sourceFit = { mode: "lanczos-resize" };
   } else {
     toasts.push(
       attachmentMode
