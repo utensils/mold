@@ -14,10 +14,24 @@ else
   else
     profile="release"
   fi
+
+  candidates=("$target_root/$profile/mold-desktop")
   if [[ -n "${TAURI_ENV_TARGET_TRIPLE:-}" ]]; then
-    binary="$target_root/$TAURI_ENV_TARGET_TRIPLE/$profile/mold-desktop"
-  else
-    binary="$target_root/$profile/mold-desktop"
+    candidates+=("$target_root/$TAURI_ENV_TARGET_TRIPLE/$profile/mold-desktop")
+  fi
+
+  binary=""
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then
+      binary="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$binary" ]]; then
+    echo "missing desktop binary; checked:" >&2
+    printf '  %s\n' "${candidates[@]}" >&2
+    exit 1
   fi
 fi
 if [[ ! -f "$binary" ]]; then
