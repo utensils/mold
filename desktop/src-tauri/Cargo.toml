@@ -107,9 +107,9 @@ strip = true
 
 [dev-dependencies]
 
-# TEMPORARY: mirror of the root workspace's local candle-fork override until
-# v0.11.1 is published to crates.io. Remove together with the root patch.
+# TEMPORARY: mirror the root workspace's same-name compatibility patch because
+# this standalone Cargo root owns an independent dependency graph.
 [patch.crates-io]
-candle-core-mold = { path = "../../../candle/candle-core" }
-candle-nn-mold = { path = "../../../candle/candle-nn" }
-candle-transformers-mold = { path = "../../../candle/candle-transformers" }
+candle-core = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
+candle-nn = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
+candle-transformers = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }

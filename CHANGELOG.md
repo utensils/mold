@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Candle fork upgraded to the 0.11 line** (`candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold` 0.11.1, tracking upstream candle 0.11). The LTX-Video STG perturbed pass now uses the transformer's `set_skip_block_list` hard-skip instead of the removed per-layer skip mask — output-equivalent for the 0/1 masks mold built, and faster since skipped blocks are no longer executed. The 0.11.1 fork release restores two patches the 0.11.0 upstream sync dropped: the deterministic `DiagonalGaussianDistribution::mode()` used by SD1.5/SDXL/SD3 img2img latent encoding, and the bounded high-resolution attention-score chunking that keeps SD1.5 CFG at 1024x1024 inside 32-bit CUDA indexing.
+- **Mold no longer consumes renamed Candle crates.** Upstream's official `candle-core`, `candle-nn`, and `candle-transformers` package identities now flow through the entire graph, so ecosystem crates such as `candle-flash-attn` share the same `Tensor` type and Flash Attention no longer needs a hidden `RUSTFLAGS` gate. Mold-owned LTX-Video code, Stable Diffusion component factories, GGUF in-memory builders, and efficient public-API quantization helpers now live in the `mold-ai-candle` workspace crate. The remaining backend-only changes use a narrow same-name `[patch.crates-io]` compatibility branch and are documented with upstream exit criteria in `docs/architecture/candle-extension.md`. The Candle 0.11 migration also changes LTX-Video STG to the transformer's hard skip list, avoiding execution of blocks whose old per-layer mask was zero.
 
 ### Fixed
 

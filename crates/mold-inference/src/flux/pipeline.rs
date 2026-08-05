@@ -759,7 +759,7 @@ fn flux_gguf_lora_var_builder(
     device: &Device,
     progress: &ProgressReporter,
     delta_cache: Option<std::sync::Arc<std::sync::Mutex<super::lora::LoraDeltaCache>>>,
-) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+) -> Result<mold_candle::quantized::VarBuilder> {
     use super::lora;
 
     let adapters: Vec<std::sync::Arc<lora::LoraAdapter>> = loras
@@ -1975,7 +1975,7 @@ impl FluxEngine {
                     gpu_dtype,
                     &self.base.progress,
                 )?;
-                let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
+                let vb = mold_candle::quantized::VarBuilder::from_gguf(&transformer_path, &device)?;
                 FluxTransformer::QuantizedBypass(
                     crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
                         &flux_cfg,
@@ -1993,7 +1993,14 @@ impl FluxEngine {
                     &self.base.progress,
                     self.lora_delta_cache_handle(),
                 )?;
-                FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                FluxTransformer::QuantizedBypass(
+                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                        &flux_cfg,
+                        vb,
+                        None,
+                        &self.base.progress,
+                    )?,
+                )
             }
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
@@ -2398,7 +2405,7 @@ impl FluxEngine {
                             loaded.dtype,
                             progress,
                         )?;
-                        let vb = quantized_var_builder::VarBuilder::from_gguf(
+                        let vb = mold_candle::quantized::VarBuilder::from_gguf(
                             &transformer_path,
                             &loaded.device,
                         )?;
@@ -2418,7 +2425,11 @@ impl FluxEngine {
                             progress,
                             cache_handle.clone(),
                         )?;
-                        FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                        FluxTransformer::QuantizedBypass(
+                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                                &flux_cfg, vb, None, progress,
+                            )?,
+                        )
                     }
                 } else if loaded.is_quantized {
                     let vb = quantized_var_builder::VarBuilder::from_gguf(

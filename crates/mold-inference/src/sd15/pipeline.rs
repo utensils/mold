@@ -316,7 +316,7 @@ impl SD15Engine {
     /// the resulting `VarBuilder` to `UNet2DConditionModel::new`.
     fn build_unet_diffusers_with_lora(
         &self,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -369,7 +369,7 @@ impl SD15Engine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sd15_unet(),
         )?)
     }
 
@@ -382,7 +382,7 @@ impl SD15Engine {
         &self,
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -398,7 +398,7 @@ impl SD15Engine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sd15_unet(),
         )?)
     }
 
@@ -484,7 +484,7 @@ impl SD15Engine {
 
     fn build_vae_diffusers(
         &self,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
@@ -493,7 +493,7 @@ impl SD15Engine {
             vb,
             3,
             3,
-            sd_config.autoencoder().clone(),
+            mold_candle::stable_diffusion::vae(),
         )?)
     }
 
@@ -517,7 +517,7 @@ impl SD15Engine {
     fn build_unet_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -530,7 +530,7 @@ impl SD15Engine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sd15_unet(),
         )?)
     }
 
@@ -539,7 +539,7 @@ impl SD15Engine {
     fn build_vae_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
@@ -551,7 +551,7 @@ impl SD15Engine {
             vb,
             3,
             3,
-            sd_config.autoencoder().clone(),
+            mold_candle::stable_diffusion::vae(),
         )?)
     }
 
@@ -722,8 +722,8 @@ impl SD15Engine {
     /// per-component constructors. UNet, VAE, and CLIP-L all read from the
     /// same single-file mmap — no on-disk shard files needed.
     ///
-    /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
-    /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
+    /// Mold-owned component factories reproduce the upstream aggregate
+    /// configuration without reaching through Candle's private fields.
     #[allow(clippy::too_many_arguments)]
     fn load_components_single_file(
         &mut self,

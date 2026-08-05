@@ -1,7 +1,7 @@
 //! Quantized (GGUF) MMDiT for SD3.5
 //!
 //! Mirrors `candle_transformers::models::mmdit::model::MMDiT` but uses quantized layer
-//! types from `candle_transformers::quantized_nn`. The GGUF tensor naming from city96
+//! types from `mold_candle::quantized_nn`. The GGUF tensor naming from city96
 //! quantizations preserves the BF16 naming convention, so tensor paths match directly.
 //!
 //! Supports both sd3_5_large (depth=38) and sd3_5_medium (depth=24) configs.
@@ -10,8 +10,8 @@ use anyhow::Result;
 use candle_core::{DType, Module, Tensor, D};
 use candle_nn::RmsNorm as CandleRmsNorm;
 use candle_transformers::models::mmdit::model::Config as MMDiTConfig;
-use candle_transformers::quantized_nn::{self, Linear};
-use candle_transformers::quantized_var_builder::VarBuilder;
+use mold_candle::quantized::VarBuilder;
+use mold_candle::quantized_nn::{self, Linear};
 
 /// Apply a quantized linear layer and replace any NaN values with 0.0.
 /// Candle's CUDA QMatMul produces hidden NaN in some output elements when

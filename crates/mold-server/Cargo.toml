@@ -88,7 +88,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 # Chain route tests build a synthetic motion-tail Tensor via the same
 # candle APIs the inference crate uses — keep this in lockstep with
-# mold-inference's pinned candle-core-mold version.
-candle-core = { package = "candle-core-mold", version = "0.11.1" }
+# Keep server tests on the same patched official Candle identity as inference.
+candle-core = "0.11"
 # Live-search integration tests stub Civitai with a wiremock server.
 wiremock = "0.6"

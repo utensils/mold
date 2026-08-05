@@ -4,7 +4,7 @@
 //! operation, matching the approach used by ComfyUI and InvokeAI. A Q4 Klein-9B
 //! model uses ~6GB VRAM instead of ~18GB with full dequantization.
 //!
-//! Uses `candle_transformers::quantized_nn::Linear` which wraps `QMatMul` — the
+//! Uses `mold_candle::quantized_nn::Linear` which wraps `QMatMul` — the
 //! quantized matmul dequantizes to F32 per operation, so inference runs in F32.
 //! Norm weights (small, <1MB total) are dequantized to F32 at load time.
 //!
@@ -23,8 +23,8 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, RmsNorm};
-use candle_transformers::quantized_nn::{self, Linear};
-use candle_transformers::quantized_var_builder::VarBuilder;
+use mold_candle::quantized::VarBuilder;
+use mold_candle::quantized_nn::{self, Linear};
 
 use super::transformer::EmbedNd;
 use super::transformer::Flux2Config;

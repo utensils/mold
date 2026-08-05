@@ -714,7 +714,7 @@ pub(crate) fn gguf_lora_var_builder_flux2(
     device: &Device,
     progress: &ProgressReporter,
     _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+) -> Result<mold_candle::quantized::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
 
     if specs.is_empty() {
@@ -781,7 +781,7 @@ pub(crate) fn gguf_lora_var_builder_flux2(
             applied += 1;
         }
 
-        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        let patched = mold_candle::quantized::quantize_onto(&t, orig_dtype, device)?;
         drop(t);
         data.insert(candle_key.clone(), Arc::new(patched));
 
@@ -803,7 +803,9 @@ pub(crate) fn gguf_lora_var_builder_flux2(
         device.synchronize()?;
     }
 
-    Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
+    Ok(mold_candle::quantized::VarBuilder::from_qtensors(
+        data, device,
+    ))
 }
 
 /// Build `Flux2LoraSpec`s from a list of `LoraWeight`s, loading adapters via

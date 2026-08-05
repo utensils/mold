@@ -22,7 +22,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::Linear;
-use candle_transformers::quantized_nn::Linear as QuantizedLinear;
+use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::collections::HashMap;
 
 /// Slice a [`LinearLoraAdapter`]'s contribution into a fused output.

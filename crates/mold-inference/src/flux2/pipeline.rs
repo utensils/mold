@@ -520,7 +520,7 @@ impl Flux2Engine {
             }
             // Weights stay quantized in VRAM via QMatMul — no dequantization at load
             // time. A Q4 Klein-9B uses ~6GB VRAM instead of ~18GB with full dequant.
-            let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
+            let gguf_vb = mold_candle::quantized::VarBuilder::from_gguf(
                 &self.base.paths.transformer,
                 device,
             )?;

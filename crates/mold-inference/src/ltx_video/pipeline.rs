@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::ltx_video::{
+use mold_candle::ltx_video::{
     sampling::{
         FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
     },

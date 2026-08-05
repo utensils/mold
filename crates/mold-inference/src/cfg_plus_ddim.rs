@@ -42,7 +42,7 @@ const DEFAULT_TRAIN_TIMESTEPS: usize = 1000;
 ///
 /// Built once per generation alongside `build_scheduler`; the alphas_cumprod
 /// computation matches `candle_transformers::models::stable_diffusion::ddim::
-/// DDIMScheduler::new` (lines 100-117 in candle-transformers-mold-0.9.12).
+/// DDIMScheduler::new` in the Candle 0.9 implementation.
 /// Independent of the candle scheduler instance — exists purely to expose
 /// `(α_t, α_{t-1})` per timestep so the CFG++ step can be computed without
 /// reaching into private fields.

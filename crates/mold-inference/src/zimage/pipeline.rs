@@ -4,7 +4,7 @@ use candle_transformers::models::z_image::{
     calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
     SchedulerConfig, VaeConfig,
 };
-use candle_transformers::quantized_var_builder;
+use mold_candle::quantized as quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};

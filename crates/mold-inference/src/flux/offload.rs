@@ -240,7 +240,7 @@ fn prefetch_status_label(requested: bool, stream_ready: bool, buffer_ready: bool
         return "off";
     }
     if stream_ready && buffer_ready {
-        // The CUDA stream and destination buffer exist, but candle-core-mold
+        // The CUDA stream and destination buffer exist, but Candle
         // still routes Tensor::to_device() through the primary stream. Until
         // a stream-aware tensor copy API exists, this is not real async H2D.
         "scaffold-only"
@@ -945,13 +945,13 @@ pub(crate) struct OffloadedFluxTransformer {
     /// computes on the device's primary stream. None on Metal/CPU and
     /// when `MOLD_OFFLOAD_PREFETCH=off`.
     ///
-    /// **Implementation note:** candle-core-mold's `Tensor::to_device`
+    /// **Implementation note:** Candle's `Tensor::to_device`
     /// dispatches H2D through the device's *primary* stream — there is
     /// no public API to redirect a single tensor transfer onto a
     /// different stream. Hooking the actual block-prefetch onto this
     /// side stream therefore requires either a `Tensor::from_storage` +
     /// manual `cuMemcpyHtoDAsync_v2` path (one branch per dtype) or a
-    /// candle-core-mold patch exposing a stream override on `to_device`.
+    /// Candle patch exposing a stream override on `to_device`.
     /// The stream itself is created and held here so the follow-up that
     /// wires the manual transfer path can simply consume it; pinning
     /// alone already captures the bulk of the H2D speedup.
