@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Tensor};
 use candle_nn::VarBuilder as DenseVarBuilder;
-use candle_transformers::{
-    models::z_image::Config, quantized_var_builder::VarBuilder as QuantizedVarBuilder,
-};
+use candle_transformers::models::z_image::Config;
+use mold_candle::quantized::VarBuilder as QuantizedVarBuilder;
 
 use super::transformer::MoldZImageTransformer2DModel;
 
@@ -354,9 +353,8 @@ mod tests {
         quantized::{gguf_file, GgmlDType, QTensor},
         DType, Device, Tensor,
     };
-    use candle_transformers::{
-        models::z_image::Config, quantized_var_builder::VarBuilder as QuantizedVarBuilder,
-    };
+    use candle_transformers::models::z_image::Config;
+    use mold_candle::quantized::VarBuilder as QuantizedVarBuilder;
     use std::{collections::HashMap, io::Cursor};
 
     fn gguf_builder(entries: Vec<(&str, Tensor)>) -> QuantizedVarBuilder {

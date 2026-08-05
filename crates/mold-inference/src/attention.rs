@@ -6,10 +6,9 @@
 //!   Materialises the full `B·H·N·N` attention matrix; fine on CPU/Metal,
 //!   the dominant VRAM cost on CUDA at FLUX 1024^2.
 //! * `Flash` — `candle-flash-attn` (flash-attention v2). Only available with
-//!   `--features cuda,flash-attn` AND `RUSTFLAGS='--cfg mold_flash_attn_real'`
-//!   AND a CUDA tensor in fp16/bf16. Falls through to `Math` (with a one-shot
-//!   warning) for any tensor that doesn't satisfy those constraints, or when
-//!   the FFI gate is closed.
+//!   `--features cuda,flash-attn` and a CUDA tensor in fp16/bf16. Falls through
+//!   to `Math` for an ineligible tensor, or with a one-shot warning when the
+//!   binary was not compiled with FlashAttention support.
 //!
 //! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
 //! `OnceLock` so we don't re-read the environment on every block.
@@ -109,15 +108,15 @@ pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
     })
 }
 
-/// Emit the "flash requested but FFI gate closed" warning at most once per
+/// Emit the "flash requested but not compiled" warning at most once per
 /// process. Returns `true` if this call was the one that fired the warning.
 /// Exposed at `pub(crate)` so the unit tests can assert the OnceLock state.
 pub(crate) fn warn_flash_fallback_once() -> bool {
     let mut fired = false;
     FLASH_FALLBACK_WARNED.get_or_init(|| {
         tracing::warn!(
-            "attention backend 'flash' requested but FlashAttention FFI is gated off \
-             (build with --features cuda,flash-attn AND RUSTFLAGS='--cfg mold_flash_attn_real'); \
+            "attention backend 'flash' requested but FlashAttention is not compiled \
+             (build with --features cuda,flash-attn); \
              falling back to math"
         );
         fired = true;
@@ -245,22 +244,10 @@ fn math_attention_chunked_flat(
 
 /// Flash-attention v2 path.
 ///
-/// When the `flash-attn` feature is on AND the tensors are CUDA + fp16/bf16
-/// AND the build was configured against a `candle-core` that matches the one
-/// `candle-flash-attn` was compiled against (the `mold_flash_attn_real` cfg),
-/// this calls `candle_flash_attn::flash_attn`. Otherwise it falls back to
-/// `math_attention` — same numerical answer, just slower. The first
-/// fall-through caused by an FFI gate (rather than tensor ineligibility)
-/// fires a one-shot `tracing::warn!` so operators see exactly why their
-/// `MOLD_ATTN=flash` request didn't take effect.
-///
-/// Why two gates? `candle-flash-attn` 0.9.x links upstream `candle-core`
-/// while mold pulls `candle-core-mold`, so the two `Tensor` types don't
-/// unify in the same build graph. The `mold_flash_attn_real` cfg is the
-/// FFI-link gate — set via `RUSTFLAGS='--cfg mold_flash_attn_real'` once a
-/// `candle-flash-attn-mold` companion lands or a workspace `[patch.crates-io]`
-/// unifies the two `candle-core` packages. Until then the cargo feature still
-/// builds cleanly so users can opt into the dispatcher's plumbing.
+/// When the `flash-attn` feature is on and the tensors are CUDA + fp16/bf16,
+/// this calls `candle_flash_attn::flash_attn`. The workspace patch retains
+/// Candle's upstream package names, so the FFI crate and Mold share the same
+/// `Tensor` type without an out-of-band build cfg.
 pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     if !flash_is_eligible(q) {
         // CPU/Metal tensors or wrong dtype — fall back without the
@@ -269,7 +256,7 @@ pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result
         return math_attention(q, k, v, scale);
     }
 
-    #[cfg(all(feature = "flash-attn", mold_flash_attn_real))]
+    #[cfg(feature = "flash-attn")]
     {
         // FLUX QKV are `[B, H, N, D]`. candle-flash-attn wants `[B, N, H, D]`.
         let q_t = q.transpose(1, 2)?.contiguous()?;
@@ -280,11 +267,9 @@ pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result
         return out.transpose(1, 2)?.contiguous();
     }
 
-    // Either the cargo feature is off, or the FFI gate hasn't been opened.
-    // Tensor was eligible (CUDA + fp16/bf16) so the user genuinely asked for
-    // flash and didn't get it — fire the one-shot warning before falling
-    // through to math.
-    #[cfg(not(all(feature = "flash-attn", mold_flash_attn_real)))]
+    // Tensor was eligible (CUDA + fp16/bf16), but this binary omitted the
+    // optional kernel. Warn once before falling through to math.
+    #[cfg(not(feature = "flash-attn"))]
     {
         warn_flash_fallback_once();
     }
@@ -418,18 +403,14 @@ mod tests {
         }
     }
 
-    /// When `MOLD_ATTN=flash` is requested but the FFI gate is closed, the
+    /// When `MOLD_ATTN=flash` is requested but the kernel was not compiled, the
     /// dispatcher must fire a `tracing::warn!` exactly once per process —
     /// not on every block of every step. We assert the OnceLock state
     /// directly because tracing-test introduces a heavy dep for what is
     /// fundamentally a single-bit observation.
     ///
-    /// Note: this test only meaningfully exercises the warning path when
-    /// the FFI gate is closed (the common case — `mold_flash_attn_real`
-    /// requires an explicit RUSTFLAGS opt-in). In a build that has both
-    /// the cargo feature and the cfg gate enabled the warning function
-    /// is never reached on eligible tensors; we still assert the helper
-    /// is idempotent because the OnceLock semantics are the contract.
+    /// The CPU test build does not compile the optional CUDA kernel; asserting
+    /// the helper directly keeps the one-shot contract independent of hardware.
     #[test]
     fn flash_fallback_warns_once() {
         // First call fires the warning; subsequent calls are no-ops.

@@ -25,9 +25,8 @@
 //!   [`RenameOutput::FusedSlice`] case.
 //!
 //! Naming reference: every diffusers key in the table below comes from a
-//! `vs.pp("…")` chain in
-//! `~/.cargo/registry/src/index.crates.io-*/candle-transformers-mold-0.9.10/
-//! src/models/stable_diffusion/{unet_2d,clip,vae}.rs`. Confirmed against
+//! `vs.pp("…")` chain in Candle 0.9's
+//! `src/models/stable_diffusion/{unet_2d,clip,vae}.rs`. Confirmed against
 //! the depth-2 audit dump for Pony / Juggernaut / generic SDXL.
 
 use crate::loader::single_file::SingleFileBundle;

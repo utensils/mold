@@ -475,7 +475,12 @@
               src = craneLib.path ./.;
               cargoRoot = "desktop/src-tauri";
               buildAndTestSubdir = "desktop/src-tauri";
-              cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock;
+              cargoLock = {
+                lockFile = ./desktop/src-tauri/Cargo.lock;
+                outputHashes = {
+                  "candle-core-0.11.0" = "sha256-eXlm3gYG1r+5rUcx2sFXy32ARsotfiOXPUbpnedrp6M=";
+                };
+              };
               buildFeatures = [ desktopFeature ];
 
               MOLD_GIT_SHA = gitShortRev;

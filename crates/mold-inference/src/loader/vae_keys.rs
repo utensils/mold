@@ -7,8 +7,7 @@
 //! loader landed.
 //!
 //! Diffusers naming reference:
-//! `~/.cargo/registry/src/index.crates.io-*/candle-transformers-mold-0.9.10/
-//! src/models/stable_diffusion/vae.rs` — every key here corresponds to a
+//! Candle 0.9's `src/models/stable_diffusion/vae.rs` — every key here corresponds to a
 //! `vs.pp("…")` chain in candle's `AutoEncoderKL::new`.
 
 /// Translate a Civitai single-file VAE key (`first_stage_model.*` LDM

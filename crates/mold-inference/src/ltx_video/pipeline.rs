@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::ltx_video::{
+use mold_candle::ltx_video::{
     sampling::{
         FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
     },
@@ -543,30 +543,6 @@ fn cfg_star_rescale_uncond(noise_pred_uncond: &Tensor, noise_pred_text: &Tensor)
     let alpha = dot.broadcast_div(&squared)?;
     let alpha = alpha.reshape((batch, 1, 1))?;
     Ok(noise_pred_uncond.broadcast_mul(&alpha.broadcast_as(noise_pred_uncond.shape())?)?)
-}
-
-fn create_skip_layer_mask(
-    num_layers: usize,
-    batch_size: usize,
-    layers_to_skip: &[usize],
-    device: &Device,
-) -> Result<Option<Tensor>> {
-    let layers_to_skip = clamp_skip_blocks(layers_to_skip, num_layers);
-    if layers_to_skip.is_empty() {
-        return Ok(None);
-    }
-
-    let mut mask_data = vec![0.0f32; num_layers * batch_size];
-    for &layer_idx in &layers_to_skip {
-        for batch_idx in 0..batch_size {
-            mask_data[layer_idx * batch_size + batch_idx] = 1.0;
-        }
-    }
-    Ok(Some(Tensor::from_vec(
-        mask_data,
-        (num_layers, batch_size),
-        device,
-    )?))
 }
 
 fn tone_map_latents(latents: &Tensor, compression: f32) -> Result<Tensor> {
@@ -1213,7 +1189,6 @@ impl LtxVideoEngine {
                 latent_w,
                 None,
                 Some(&video_coords),
-                None,
             )?;
             let cond_f32 = cond_pred.to_dtype(DType::F32)?;
             let mut combined = cond_f32.clone();
@@ -1229,7 +1204,6 @@ impl LtxVideoEngine {
                     latent_w,
                     None,
                     Some(&video_coords),
-                    None,
                 )?;
                 let mut uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
                 if pass.guidance.cfg_star_rescale {
@@ -1241,12 +1215,11 @@ impl LtxVideoEngine {
             }
 
             if do_stg {
-                let skip_layer_mask = create_skip_layer_mask(
-                    transformer.config().num_layers,
-                    batch,
-                    &resolved.skip_blocks,
-                    device,
-                )?;
+                // Hard-skip the STG blocks for the perturbed pass; equivalent to
+                // the old 0/1 skip-layer mask (identity passthrough) but never
+                // runs the skipped blocks. `resolved.skip_blocks` is pre-clamped
+                // by `resolve_step_schedule`.
+                transformer.set_skip_block_list(resolved.skip_blocks.clone());
                 let perturbed = transformer.forward(
                     &latents_input,
                     prompt_embeds,
@@ -1257,8 +1230,8 @@ impl LtxVideoEngine {
                     latent_w,
                     None,
                     Some(&video_coords),
-                    skip_layer_mask.as_ref(),
                 )?;
+                transformer.set_skip_block_list(vec![]);
                 let perturbed_f32 = perturbed.to_dtype(DType::F32)?;
                 let diff_stg = cond_f32.broadcast_sub(&perturbed_f32)?;
                 combined =

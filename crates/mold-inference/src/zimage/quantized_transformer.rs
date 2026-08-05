@@ -1,7 +1,7 @@
 //! Quantized (GGUF) Z-Image Transformer
 //!
 //! Mirrors `candle_transformers::models::z_image::transformer::ZImageTransformer2DModel`
-//! but uses quantized layer types from `candle_transformers::quantized_nn`.
+//! but uses quantized layer types from `mold_candle::quantized_nn`.
 //!
 //! Key differences from the BF16 version:
 //! - Uses `quantized_nn::Linear` / `quantized_nn::RmsNorm` (dequantize on forward)
@@ -14,8 +14,8 @@ use candle_transformers::models::z_image::transformer::{
     apply_rotary_emb, create_coordinate_grid, patchify, unpatchify, Config, LayerNormNoParams,
     RopeEmbedder, ADALN_EMBED_DIM, FREQUENCY_EMBEDDING_SIZE, MAX_PERIOD,
 };
-use candle_transformers::quantized_nn::{self, Linear};
-use candle_transformers::quantized_var_builder::VarBuilder;
+use mold_candle::quantized::VarBuilder;
+use mold_candle::quantized_nn::{self, Linear};
 
 // ==================== TimestepEmbedder ====================
 

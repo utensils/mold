@@ -30,8 +30,8 @@ use anyhow::Result;
 use candle_core::{quantized::QTensor, DType, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, RmsNorm};
 use candle_transformers::models::flux::model::{Config, EmbedNd};
-use candle_transformers::quantized_nn::Linear as QuantizedLinear;
-use candle_transformers::quantized_var_builder::VarBuilder;
+use mold_candle::quantized::VarBuilder;
+use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::sync::Arc;
 
 use crate::flux::lora_bypass::{LoraLinear, LoraRegistry};
@@ -104,9 +104,9 @@ fn load_quantized_linear(
     key: &str,
 ) -> Result<LoraLinear> {
     let inner = if bias {
-        candle_transformers::quantized_nn::linear_b(in_dim, out_dim, true, vb)?
+        mold_candle::quantized_nn::linear_b(in_dim, out_dim, true, vb)?
     } else {
-        candle_transformers::quantized_nn::linear_no_bias(in_dim, out_dim, vb)?
+        mold_candle::quantized_nn::linear_no_bias(in_dim, out_dim, vb)?
     };
     let adapters = registry
         .map(|r| r.adapters_for(key).to_vec())
@@ -545,12 +545,8 @@ impl FinalLayer {
     fn load(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             norm_final: layer_norm(h_sz, &vb.pp("norm_final"))?,
-            linear: candle_transformers::quantized_nn::linear(
-                h_sz,
-                p_sz * p_sz * out_c,
-                vb.pp("linear"),
-            )?,
-            ada_ln_modulation: candle_transformers::quantized_nn::linear(
+            linear: mold_candle::quantized_nn::linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?,
+            ada_ln_modulation: mold_candle::quantized_nn::linear(
                 h_sz,
                 2 * h_sz,
                 vb.pp("adaLN_modulation.1"),
@@ -578,8 +574,8 @@ struct StemMlpEmbedder {
 impl StemMlpEmbedder {
     fn load(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            in_layer: candle_transformers::quantized_nn::linear(in_sz, h_sz, vb.pp("in_layer"))?,
-            out_layer: candle_transformers::quantized_nn::linear(h_sz, h_sz, vb.pp("out_layer"))?,
+            in_layer: mold_candle::quantized_nn::linear(in_sz, h_sz, vb.pp("in_layer"))?,
+            out_layer: mold_candle::quantized_nn::linear(h_sz, h_sz, vb.pp("out_layer"))?,
         })
     }
 }
@@ -625,12 +621,9 @@ impl QuantizedFluxTransformer {
     ) -> Result<Self> {
         progress.info("Loading FLUX quantized transformer (bypass-mode LoRA)");
 
-        let img_in = candle_transformers::quantized_nn::linear(
-            cfg.in_channels,
-            cfg.hidden_size,
-            vb.pp("img_in"),
-        )?;
-        let txt_in = candle_transformers::quantized_nn::linear(
+        let img_in =
+            mold_candle::quantized_nn::linear(cfg.in_channels, cfg.hidden_size, vb.pp("img_in"))?;
+        let txt_in = mold_candle::quantized_nn::linear(
             cfg.context_in_dim,
             cfg.hidden_size,
             vb.pp("txt_in"),
@@ -779,7 +772,7 @@ fn quantize_cpu(
     dtype: candle_core::quantized::GgmlDType,
     device: &candle_core::Device,
 ) -> Result<QTensor> {
-    Ok(QTensor::quantize_onto(src, dtype, device)?)
+    Ok(mold_candle::quantized::quantize_onto(src, dtype, device)?)
 }
 
 /// Convenience to construct an `Arc<QTensor>` directly from a CPU F32

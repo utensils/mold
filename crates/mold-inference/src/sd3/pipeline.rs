@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
-use candle_transformers::quantized_var_builder;
+use mold_candle::quantized as quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::collections::HashMap;
 use std::path::Path;

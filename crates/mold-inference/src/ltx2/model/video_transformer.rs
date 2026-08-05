@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-// LTX-2 video transformer — adapted from candle-transformers-mold's LTX Video model.
+// LTX-2 video transformer — adapted from Mold's LTX Video model.
 // This keeps the proven video-only denoiser structure but patches the positional
 // embedding path and config surface to match the native LTX-2 checkpoints.
 

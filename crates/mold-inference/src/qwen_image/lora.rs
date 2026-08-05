@@ -544,7 +544,7 @@ pub(crate) fn gguf_lora_var_builder(
     device: &Device,
     progress: &ProgressReporter,
     _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+) -> Result<mold_candle::quantized::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
 
     if specs.is_empty() {
@@ -653,7 +653,9 @@ pub(crate) fn gguf_lora_var_builder(
         device.synchronize()?;
     }
 
-    Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
+    Ok(mold_candle::quantized::VarBuilder::from_qtensors(
+        data, device,
+    ))
 }
 
 /// Build [`QwenImageLoraSpec`]s by loading every adapter through the

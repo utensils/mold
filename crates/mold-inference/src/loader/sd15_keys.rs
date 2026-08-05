@@ -10,11 +10,10 @@
 //! and returns the diffusers→a1111 lookup the SimpleBackend will index by.
 //!
 //! Naming reference: every diffusers key in the table below comes from a
-//! `vs.pp("…")` chain in
-//! `~/.cargo/registry/src/index.crates.io-*/candle-transformers-mold-0.9.10/
-//! src/models/stable_diffusion/{unet_2d,unet_2d_blocks,vae,clip,resnet,
-//! attention,embeddings}.rs`. Verified against the depth-2 audit dump in
-//! The mapping was validated against DreamShaper 8 / SD 1.5.
+//! `vs.pp("…")` chain in Candle 0.9's
+//! `src/models/stable_diffusion/{unet_2d,unet_2d_blocks,vae,clip,resnet,
+//! attention,embeddings}.rs`. The mapping was validated against
+//! DreamShaper 8 / SD 1.5.
 
 use crate::loader::single_file::SingleFileBundle;
 use std::collections::BTreeMap;

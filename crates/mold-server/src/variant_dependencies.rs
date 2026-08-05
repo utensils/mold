@@ -1377,10 +1377,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let before = downloads()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len();
         let dependency = ensure_downloaded(
             None,
             "placement-preview",
@@ -1397,10 +1393,11 @@ mod tests {
         )
         .await
         .expect("known dependency must remain previewable");
-        let after = downloads()
+        let registered_for_preview = downloads()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len();
+            .keys()
+            .any(|key| key.models_root.starts_with(cache.path()));
 
         let ResolvedDependency::Pending(dependency) = dependency else {
             panic!("fixture dependency must be reported as pending");
@@ -1410,7 +1407,10 @@ mod tests {
         assert_eq!(dependency.download.name, "missing.safetensors");
         assert_eq!(dependency.download.bytes, 123_456);
         assert!(!dependency.path.is_file());
-        assert_eq!(after, before, "preview must not register a download");
+        assert!(
+            !registered_for_preview,
+            "preview must not register a download for its isolated models root"
+        );
     }
 
     #[tokio::test]
@@ -1594,10 +1594,6 @@ mod tests {
         let (_root, mut config, request) = zimage_case();
         config.models.get_mut("prepared-z").unwrap().family = Some("flux2".to_string());
         config.qwen3_variant = Some("q8".to_string());
-        let before = downloads()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len();
         let prepared = prepare_inputs_for_devices(
             None,
             "placement-preview",
@@ -1615,10 +1611,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let after = downloads()
+        let registered_for_preview = downloads()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len();
+            .keys()
+            .any(|key| key.models_root.starts_with(cache.path()));
 
         let pending_downloads = prepared.pending_downloads_for_device("cuda:0");
         assert_eq!(pending_downloads.len(), 1);
@@ -1704,7 +1701,10 @@ mod tests {
                     .saturating_add(ENCODER_DEPENDENCY_HEADROOM_BYTES),
             "CPU-placed pending encoder must not be charged against GPU peak"
         );
-        assert_eq!(after, before, "preview must not register a download");
+        assert!(
+            !registered_for_preview,
+            "preview must not register a download for its isolated models root"
+        );
 
         std::env::remove_var("MOLD_MODELS_DIR");
         std::env::remove_var("HF_HOME");

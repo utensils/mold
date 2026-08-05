@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilder;
+use mold_candle::quantized::VarBuilder as QuantizedVarBuilder;
 
 use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
 use crate::progress::ProgressReporter;
@@ -681,7 +681,7 @@ pub(crate) fn gguf_lora_var_builder(
             applied += 1;
         }
 
-        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        let patched = mold_candle::quantized::quantize_onto(&t, orig_dtype, device)?;
         drop(t);
         data.insert(tensor_key.clone(), Arc::new(patched));
 

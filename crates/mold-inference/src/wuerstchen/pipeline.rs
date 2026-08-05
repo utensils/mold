@@ -513,8 +513,8 @@ impl WuerstchenEngine {
 
         let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         // Use F16 on GPU for ~2x throughput and ~2x less VRAM.
-        // gen_r_embedding computes sincos basis in F32 internally, then casts to
-        // model dtype before the matmul — patched in candle-transformers-mold 0.9.4.
+        // gen_r_embedding computes its sincos basis in F32 internally, then the
+        // compatibility patch casts it to the model dtype before the matmul.
         let dtype = if device.is_cpu() {
             DType::F32
         } else {

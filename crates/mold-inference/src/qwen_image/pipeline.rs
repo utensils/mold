@@ -17,7 +17,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_transformers::models::z_image::postprocess_image;
-use candle_transformers::quantized_var_builder;
+use mold_candle::quantized as quantized_var_builder;
 use mold_core::{fit_to_target_area, GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::collections::HashMap;
 use std::path::Path;

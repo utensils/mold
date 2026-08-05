@@ -11,8 +11,8 @@
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
-use candle_transformers::quantized_nn::Linear as QMatMulLinear;
-use candle_transformers::quantized_var_builder::VarBuilder;
+use mold_candle::quantized::VarBuilder;
+use mold_candle::quantized_nn::Linear as QMatMulLinear;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

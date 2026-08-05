@@ -190,7 +190,7 @@ Sequence mode on web, desktop, and iPhone filters the picker to chain-capable in
 ## Key design decisions
 
 1. **Crate boundaries are clean** — `mold-cli` doesn't depend on candle; `mold-server` doesn't depend on clap; `mold-discord` only depends on `mold-core`.
-2. **candle over tch/ort** — pure Rust, no libtorch. Uses a published fork (`candle-*-mold` on crates.io) for Metal quantized matmul precision + seed buffer size fixes.
+2. **candle over tch/ort** — pure Rust, no libtorch. Mold keeps upstream Candle's official crate names so the ecosystem shares one `Tensor` type. Application-owned models and public-API extensions live in `mold-ai-candle`; the narrow same-name `[patch.crates-io]` compatibility branch contains only backend changes that cannot be implemented outside Candle and is removed patch-by-patch as upstream accepts them.
 3. **Single binary** — `mold` includes `serve` via `mold-server` library; GPU flags forward `mold-cli` → `mold-server` → `mold-inference`.
 4. **`tokio::sync::Mutex` + `spawn_blocking`** — single-model-at-a-time fits GPU workloads. `AppState.model_cache` is an LRU (max 3) with `ModelResidency { Gpu, Parked, Unloaded }`; at most one engine is GPU-resident.
 5. **Nix flake (flake-parts + crane)** — CUDA 12.8 on Linux (default sm_89 Ada; `mold-sm86` for RTX 3090/A40, `mold-sm100` for B200/B300, `mold-sm120` for RTX 50-series; `mkMold` for any), Metal on macOS. B200 is server-only and remains simulated, not hardware-qualified. Devshell sets `CPATH`/`LIBRARY_PATH`/`LD_LIBRARY_PATH` for CUDA compilation.

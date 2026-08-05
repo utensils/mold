@@ -9,6 +9,7 @@ members = [
     "crates/mold-tui",
     "crates/mold-catalog",
     "crates/mold-scheduler",
+    "crates/mold-candle",
 ]
 # The Tauri desktop and iOS apps are standalone cargo roots: their platform UI
 # dependencies must stay out of this workspace's lockfile and `--workspace` CI.
@@ -47,3 +48,13 @@ codegen-units = 16
 incremental = true
 debug = 1
 strip = false
+
+# TEMPORARY: one-package-identity compatibility patch while the remaining
+# backend fixes land upstream. Unlike the old `candle-*-mold` packages, these
+# crates retain Candle's upstream package names, so every transitive consumer
+# shares one `Tensor` type. Remove patches individually as upstream releases
+# absorb them.
+[patch.crates-io]
+candle-core = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
+candle-nn = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
+candle-transformers = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }

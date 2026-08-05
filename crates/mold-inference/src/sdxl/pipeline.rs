@@ -377,7 +377,7 @@ impl SDXLEngine {
     /// the resulting `VarBuilder` to `UNet2DConditionModel::new`.
     fn build_unet_diffusers_with_lora(
         &self,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -430,7 +430,7 @@ impl SDXLEngine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sdxl_unet(),
         )?)
     }
 
@@ -443,7 +443,7 @@ impl SDXLEngine {
         &self,
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -459,7 +459,7 @@ impl SDXLEngine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sdxl_unet(),
         )?)
     }
 
@@ -545,7 +545,7 @@ impl SDXLEngine {
 
     fn build_vae_diffusers(
         &self,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
@@ -554,7 +554,7 @@ impl SDXLEngine {
             vb,
             3,
             3,
-            sd_config.autoencoder().clone(),
+            mold_candle::stable_diffusion::vae(),
         )?)
     }
 
@@ -717,8 +717,8 @@ impl SDXLEngine {
     /// candle's per-component constructors: UNet, VAE, CLIP-L, CLIP-G.
     /// All four read from the same single-file mmap.
     ///
-    /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
-    /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
+    /// Mold-owned component factories reproduce the upstream aggregate
+    /// configuration without reaching through Candle's private fields.
     fn load_components_single_file(
         &mut self,
         single_file: &std::path::Path,
@@ -795,7 +795,7 @@ impl SDXLEngine {
     fn build_unet_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
@@ -808,7 +808,7 @@ impl SDXLEngine {
             4,
             4,
             false,
-            sd_config.unet().clone(),
+            mold_candle::stable_diffusion::sdxl_unet(),
         )?)
     }
 
@@ -817,7 +817,7 @@ impl SDXLEngine {
     fn build_vae_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
@@ -829,7 +829,7 @@ impl SDXLEngine {
             vb,
             3,
             3,
-            sd_config.autoencoder().clone(),
+            mold_candle::stable_diffusion::vae(),
         )?)
     }
 

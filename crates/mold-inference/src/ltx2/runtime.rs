@@ -5,10 +5,10 @@ use crate::audio::NativeAudioTrack;
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::ltx_video::sampling::{
+use image::{imageops, GenericImage, Rgb, RgbImage};
+use mold_candle::ltx_video::sampling::{
     FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
 };
-use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use std::env;

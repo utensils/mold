@@ -964,7 +964,7 @@ pub(crate) fn gguf_lora_var_builder(
     device: &Device,
     progress: &ProgressReporter,
     delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+) -> Result<mold_candle::quantized::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
     use std::sync::Arc;
 
@@ -1129,7 +1129,7 @@ pub(crate) fn gguf_lora_var_builder(
         // into CPU Q8_0 blocks, then copies the raw bytes to GPU — producing
         // the exact same storage size as the original GGUF-loaded tensor.
         // This avoids the 2x VRAM inflation that storing as F16 would cause.
-        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        let patched = mold_candle::quantized::quantize_onto(&t, orig_dtype, device)?;
         drop(t); // free CPU F32 copy
         data.insert(tensor_key, Arc::new(patched));
 
@@ -1160,7 +1160,9 @@ pub(crate) fn gguf_lora_var_builder(
         device.synchronize()?;
     }
 
-    Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
+    Ok(mold_candle::quantized::VarBuilder::from_qtensors(
+        data, device,
+    ))
 }
 
 /// Strip a known prefix from all tensor keys in a HashMap.
