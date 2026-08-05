@@ -12,6 +12,7 @@ import {
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
+import { blobToBase64 } from "@studio/lib/base64";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
@@ -108,15 +109,6 @@ const canReveal = (entry: MergedPrint) =>
  *  once a local copy exists. */
 const canSaveLocally = (entry: MergedPrint) =>
   inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote" && !gallery.existsLocally(entry);
-
-async function blobToBase64(blob: Blob): Promise<string> {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
 
 /** Authed source bytes for a host-gallery item, as base64 (origin-aware). */
 async function fetchItemBase64(entry: MergedPrint): Promise<string> {
