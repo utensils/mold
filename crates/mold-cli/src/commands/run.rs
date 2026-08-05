@@ -809,7 +809,7 @@ pub async fn run(
         source_image.is_some(),
         source_video_bytes.is_some() || extend_video_bytes.is_some(),
         audio_file_bytes.is_some(),
-        keyframes.as_ref().is_some_and(|frames| !frames.is_empty()),
+        keyframes.as_ref().map_or(0, Vec::len),
         retake_range.is_some(),
     );
 

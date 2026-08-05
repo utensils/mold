@@ -27,6 +27,12 @@ describe("expansionTaskForRequest", () => {
         source_image: "image",
         keyframes: [{ frame: 0 }],
       }),
+    ).toBe("image-to-video");
+    expect(
+      expansionTaskForRequest("ltx2", {
+        source_image: "image",
+        keyframes: [{ frame: 0 }, { frame: 8 }],
+      }),
     ).toBe("keyframe-interpolation");
     expect(
       expansionTaskForRequest("ltx2", {

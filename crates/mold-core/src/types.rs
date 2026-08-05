@@ -223,9 +223,7 @@ impl ExpandTask {
                     .audio_file_path
                     .as_deref()
                     .is_some_and(|path| !path.trim().is_empty()),
-            req.keyframes
-                .as_ref()
-                .is_some_and(|frames| !frames.is_empty()),
+            req.keyframes.as_ref().map_or(0, Vec::len),
             req.retake_range.is_some(),
         )
     }
@@ -239,7 +237,7 @@ impl ExpandTask {
         has_source_image: bool,
         has_source_video: bool,
         has_audio: bool,
-        has_keyframes: bool,
+        keyframe_count: usize,
         has_retake_range: bool,
     ) -> Self {
         if !matches!(
@@ -268,7 +266,7 @@ impl ExpandTask {
                 if has_audio {
                     return Self::AudioDrivenVideo;
                 }
-                if has_keyframes {
+                if keyframe_count > 1 {
                     return Self::KeyframeInterpolation;
                 }
             }
@@ -2950,10 +2948,19 @@ mod tests {
         }]);
         assert_eq!(
             ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::ImageToVideo
+        );
+
+        req.keyframes.as_mut().unwrap().push(KeyframeCondition {
+            frame: 8,
+            image: vec![3],
+        });
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
             ExpandTask::KeyframeInterpolation
         );
 
-        req.audio_file = Some(vec![3]);
+        req.audio_file = Some(vec![4]);
         assert_eq!(
             ExpandTask::for_generation("ltx2", &req),
             ExpandTask::AudioDrivenVideo

@@ -57,7 +57,7 @@ export function expansionTaskForRequest(
       if (request.audio_file || presentPath(request.audio_file_path)) {
         return "audio-driven-video";
       }
-      if ((request.keyframes?.length ?? 0) > 0) {
+      if ((request.keyframes?.length ?? 0) > 1) {
         return "keyframe-interpolation";
       }
       break;
