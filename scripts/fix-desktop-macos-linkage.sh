@@ -7,10 +7,18 @@ fi
 
 if [[ $# -gt 0 ]]; then
   binary="$1"
-elif [[ "${TAURI_ENV_DEBUG:-false}" == "true" ]]; then
-  binary="src-tauri/target/debug/mold-desktop"
 else
-  binary="src-tauri/target/release/mold-desktop"
+  target_root="${CARGO_TARGET_DIR:-src-tauri/target}"
+  if [[ "${TAURI_ENV_DEBUG:-false}" == "true" ]]; then
+    profile="debug"
+  else
+    profile="release"
+  fi
+  if [[ -n "${TAURI_ENV_TARGET_TRIPLE:-}" ]]; then
+    binary="$target_root/$TAURI_ENV_TARGET_TRIPLE/$profile/mold-desktop"
+  else
+    binary="$target_root/$profile/mold-desktop"
+  fi
 fi
 if [[ ! -f "$binary" ]]; then
   echo "missing desktop binary: $binary" >&2
