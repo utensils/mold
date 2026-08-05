@@ -927,6 +927,13 @@ pub struct GenerateState {
 }
 
 impl GenerateState {
+    /// TUI currently exposes the checkpoint's default LTX recipe rather than
+    /// a pipeline picker, so distilled checkpoint identity fully resolves the
+    /// primary guidance control.
+    pub fn guidance_adjustable(&self) -> bool {
+        !self.capabilities.supports_video || self.capabilities.supports_negative_prompt
+    }
+
     /// Whether the inline Negative prompt editor is currently rendered and
     /// therefore focusable: the model supports it, the Advanced accordion
     /// is open, and the Negative section is the expanded one. This is the
@@ -1679,10 +1686,15 @@ impl App {
         let family = family_for_model(&params.model, &config);
         let capabilities = capabilities_for_model(
             &family,
+            &params.model,
             catalog
                 .iter()
                 .find(|model| model.name == params.model)
                 .and_then(|model| model.supports_audio),
+            catalog
+                .iter()
+                .find(|model| model.name == params.model)
+                .and_then(|model| model.guidance_capabilities),
         );
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
@@ -1991,7 +2003,18 @@ impl App {
             .iter()
             .find(|entry| entry.name == *model)
             .and_then(|entry| entry.supports_audio);
-        self.generate.capabilities = capabilities_for_model(&family, advertised_audio_support);
+        let advertised_guidance = self
+            .models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == *model)
+            .and_then(|entry| entry.guidance_capabilities);
+        self.generate.capabilities = capabilities_for_model(
+            &family,
+            model,
+            advertised_audio_support,
+            advertised_guidance,
+        );
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
         }
@@ -4042,6 +4065,7 @@ impl App {
         } else {
             None
         };
+        let guidance_adjustable = self.generate.guidance_adjustable();
         let p = &mut self.generate.params;
         match field {
             ParamField::Size => {
@@ -4063,6 +4087,9 @@ impl App {
                 p.steps = (p.steps as i32 + delta).clamp(1, 200) as u32;
             }
             ParamField::Guidance => {
+                if !guidance_adjustable {
+                    return;
+                }
                 p.guidance = (p.guidance + delta as f64 * 0.5).clamp(0.0, 30.0);
             }
             ParamField::Seed => {
@@ -10181,6 +10208,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn distilled_checkpoint_guidance_cannot_be_adjusted() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "ltx-2.3-22b-distilled:fp8".into();
+        app.generate.capabilities = crate::model_info::capabilities_for_model(
+            "ltx2",
+            &app.generate.params.model,
+            None,
+            None,
+        );
+        app.generate.params.guidance = 7.0;
+        app.adjust_field(ParamField::Guidance, 1);
+        assert_eq!(app.generate.params.guidance, 7.0);
+
+        app.generate.params.model = "ltx-2.3-22b-dev:fp8".into();
+        app.generate.capabilities = crate::model_info::capabilities_for_model(
+            "ltx2",
+            &app.generate.params.model,
+            None,
+            None,
+        );
+        app.adjust_field(ParamField::Guidance, 1);
+        assert_eq!(app.generate.params.guidance, 7.5);
+    }
+
     #[test]
     fn stg_block_input_rejects_invalid_lists_before_request_building() {
         assert_eq!(parse_stg_blocks_input(""), Ok(None));
@@ -10949,6 +11001,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }
     }
 
@@ -12618,6 +12671,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }
     }
 

@@ -918,6 +918,25 @@ describe("useGenerateForm", () => {
     expect(wire.scheduler).toBeUndefined();
   });
 
+  it("preserves a distilled LTX negative in form state but omits it from the request", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "hf:opaque/distilled-checkpoint",
+      modelFamily: "ltx2",
+      pipeline: null,
+      negativePrompt: "flicker",
+      guidance: 7,
+      guidanceCapabilities: {
+        adjustable: false,
+        supports_negative_prompt: false,
+        fixed_scale: 1,
+      },
+    });
+    expect(form.toRequest().negative_prompt).toBeNull();
+    expect(form.state.value.negativePrompt).toBe("flicker");
+    expect(form.state.value.guidance).toBe(7);
+  });
+
   it("family-capability helpers match the documented allow-lists", () => {
     const form = useGenerateForm();
     // Video families.

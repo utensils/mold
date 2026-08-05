@@ -114,6 +114,21 @@ afterEach(() => {
 });
 
 describe("MobileSequenceComposer clips", () => {
+  it("preserves but disables clip negatives for distilled LTX", async () => {
+    const form = newGenerateForm();
+    form.family = "ltx2";
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    useSequenceDraftStore().clips[0]!.negativePrompt = "flicker";
+    mountComposer({ form });
+    await wrapper!.get("[data-test='mobile-sequence-open-advanced']").trigger("click");
+    const input = wrapper!.get("[data-test='mobile-sequence-advanced-negative'] input");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(useSequenceDraftStore().clips[0]!.negativePrompt).toBe("flicker");
+    expect(
+      wrapper!.get("[data-test='mobile-sequence-negative-unavailable-hint']").text(),
+    ).toContain("does not use negative-prompt guidance");
+  });
+
   it("stores and resets camera motion on the active clip", async () => {
     const draft = useSequenceDraftStore();
     mountComposer();

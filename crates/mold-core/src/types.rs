@@ -611,6 +611,73 @@ impl Ltx2PipelineMode {
                 | Self::A2Vid
         )
     }
+
+    /// Whether this recipe uses classifier-free guidance and therefore
+    /// consumes an unconditional (negative-prompt) text context.
+    pub const fn uses_cfg(self) -> bool {
+        !matches!(
+            self,
+            Self::Distilled | Self::IcLora | Self::Retake | Self::LipDub
+        )
+    }
+}
+
+/// User-facing guidance controls for a resolved model/pipeline recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GuidanceCapabilities {
+    /// Whether the primary guidance scale changes the render.
+    pub adjustable: bool,
+    /// Whether the recipe encodes and uses a negative prompt for CFG.
+    pub supports_negative_prompt: bool,
+    /// Effective fixed scale when `adjustable` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_scale: Option<f64>,
+}
+
+impl GuidanceCapabilities {
+    pub const ADJUSTABLE_CFG: Self = Self {
+        adjustable: true,
+        supports_negative_prompt: true,
+        fixed_scale: None,
+    };
+    pub const FIXED_ONE: Self = Self {
+        adjustable: false,
+        supports_negative_prompt: false,
+        fixed_scale: Some(1.0),
+    };
+    pub const ADJUSTABLE_NO_NEGATIVE: Self = Self {
+        adjustable: true,
+        supports_negative_prompt: false,
+        fixed_scale: None,
+    };
+
+    /// Resolve the effective guidance contract for the selected recipe.
+    /// `None` means the model's default pipeline.
+    pub fn for_recipe(family: &str, model: &str, pipeline: Option<Ltx2PipelineMode>) -> Self {
+        match family.trim().to_ascii_lowercase().as_str() {
+            "ltx-video" => {
+                if model.to_ascii_lowercase().contains("distilled") {
+                    Self::FIXED_ONE
+                } else {
+                    Self::ADJUSTABLE_CFG
+                }
+            }
+            "ltx2" | "ltx-2" => {
+                let uses_cfg = pipeline
+                    .map(Ltx2PipelineMode::uses_cfg)
+                    .unwrap_or_else(|| !model.to_ascii_lowercase().contains("distilled"));
+                if uses_cfg {
+                    Self::ADJUSTABLE_CFG
+                } else {
+                    Self::FIXED_ONE
+                }
+            }
+            "flux" | "flux2" | "flux.2" | "flux-2" | "z-image" | "qwen-image" | "qwen_image" => {
+                Self::ADJUSTABLE_NO_NEGATIVE
+            }
+            _ => Self::ADJUSTABLE_CFG,
+        }
+    }
 }
 
 impl std::fmt::Display for Ltx2PipelineMode {
@@ -1305,6 +1372,10 @@ pub struct ModelInfoExtended {
     /// answer against a server that would still reject the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_sequence: Option<bool>,
+    /// Guidance controls for this model's default resolved recipe. Clients
+    /// refine this with an explicitly selected pipeline when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_capabilities: Option<GuidanceCapabilities>,
 }
 
 impl ModelInfoExtended {
@@ -1477,6 +1548,7 @@ mod model_display_name_tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }
     }
 
@@ -3674,6 +3746,46 @@ mod tests {
                  a mismatched member makes every request using it fail with 422"
             );
         }
+    }
+
+    #[test]
+    fn ltx_guidance_capabilities_follow_checkpoint_and_pipeline_recipe() {
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("ltx2", "ltx-2.3-22b-distilled:fp8", None,),
+            GuidanceCapabilities::FIXED_ONE,
+        );
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("ltx2", "ltx-2.3-22b-dev:fp8", None),
+            GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+        assert_eq!(
+            GuidanceCapabilities::for_recipe(
+                "ltx2",
+                "ltx-2.3-22b-dev:fp8",
+                Some(Ltx2PipelineMode::Distilled),
+            ),
+            GuidanceCapabilities::FIXED_ONE,
+        );
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("flux", "flux-dev:q8", None),
+            GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE,
+        );
+        assert_eq!(
+            GuidanceCapabilities::for_recipe(
+                "ltx2",
+                "ltx-2.3-22b-distilled:fp8",
+                Some(Ltx2PipelineMode::TwoStage),
+            ),
+            GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+        assert_eq!(
+            GuidanceCapabilities::for_recipe(
+                "ltx-video",
+                "ltx-video-0.9.8-13b-distilled:bf16",
+                None,
+            ),
+            GuidanceCapabilities::FIXED_ONE,
+        );
     }
 
     /// Every Studio surface has to know which pipeline renders audio only

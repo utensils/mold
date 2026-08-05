@@ -24,6 +24,20 @@ beforeEach(() => {
 });
 
 describe("SequenceAdvancedSettings camera motion", () => {
+  it("preserves but disables clip negatives for distilled LTX", () => {
+    const form = newGenerateForm();
+    form.family = "ltx2";
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    useSequenceDraftStore().clips[0]!.negativePrompt = "flicker";
+    const wrapper = mount(SequenceAdvancedSettings, { props: { form } });
+    const input = wrapper.get("textarea[aria-label='Active clip negative prompt']");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(useSequenceDraftStore().clips[0]!.negativePrompt).toBe("flicker");
+    expect(wrapper.get("[data-test='sequence-negative-unavailable-hint']").text()).toContain(
+      "does not use negative-prompt guidance",
+    );
+  });
+
   it("edits the active clip and labels a first-use download", async () => {
     const draft = useSequenceDraftStore();
     const wrapper = mount(SequenceAdvancedSettings, {

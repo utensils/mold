@@ -706,18 +706,31 @@ pub async fn run(
         prompt.to_string()
     };
     status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
-    if let Some(ref neg) = effective_negative_prompt {
-        let display_neg = if neg.chars().count() > 50 {
-            let truncated: String = neg.chars().take(47).collect();
-            format!("{truncated}...")
-        } else {
-            neg.clone()
-        };
+    let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
+        family.as_deref().unwrap_or_default(),
+        &req.model,
+        req.pipeline,
+    );
+    if !guidance_caps.adjustable {
         status!(
-            "{} Negative: \"{}\"",
-            theme::icon_info(),
-            display_neg.dimmed()
+            "{} Distilled recipe fixes CFG at 1.0 and does not use negative-prompt guidance; choose a Dev checkpoint with Auto or a guided pipeline to adjust it",
+            theme::icon_info()
         );
+    }
+    if guidance_caps.supports_negative_prompt {
+        if let Some(ref neg) = effective_negative_prompt {
+            let display_neg = if neg.chars().count() > 50 {
+                let truncated: String = neg.chars().take(47).collect();
+                format!("{truncated}...")
+            } else {
+                neg.clone()
+            };
+            status!(
+                "{} Negative: \"{}\"",
+                theme::icon_info(),
+                display_neg.dimmed()
+            );
+        }
     }
     if mask_image.is_some() {
         status!(
@@ -778,6 +791,7 @@ pub async fn run(
             status!("{} LTX-2 pipeline: {}", theme::icon_mode(), audio_mode);
         }
     }
+    let displayed_guidance = guidance_caps.fixed_scale.unwrap_or(effective_guidance);
     if audio_only_pipeline {
         // No raster to report. Printing the request's width and height here
         // would describe a frame this pipeline never renders.
@@ -785,7 +799,7 @@ pub async fn run(
             "{} Generating audio ({} steps, guidance {:.1})",
             theme::icon_info(),
             effective_steps,
-            effective_guidance,
+            displayed_guidance,
         );
     } else {
         status!(
@@ -794,7 +808,7 @@ pub async fn run(
             effective_width,
             effective_height,
             effective_steps,
-            effective_guidance,
+            displayed_guidance,
         );
     }
     status!("{}", "─".repeat(40).dimmed());

@@ -56,6 +56,31 @@ describe("ControlsAside", () => {
   });
   afterEach(() => __testing__.resetForTest());
 
+  it("fixes distilled LTX guidance while guided pipelines remain editable", async () => {
+    const wrapper = factory(
+      { model: "ltx-2.3-22b-distilled:fp8", modelFamily: "ltx2", guidance: 7 },
+      "ltx2",
+    );
+    const guidance = wrapper
+      .findAllComponents(SliderRow)
+      .find((row) => row.props("label") === "Prompt strength")!;
+    expect(guidance.props("disabled")).toBe(true);
+    expect(guidance.props("modelValue")).toBe(1);
+    expect(wrapper.get("[data-test='fixed-guidance-hint']").text()).toContain(
+      "fixes CFG at 1.0",
+    );
+
+    await wrapper.setProps({
+      modelValue: { ...wrapper.props("modelValue"), pipeline: "two-stage" },
+    });
+    expect(
+      wrapper
+        .findAllComponents(SliderRow)
+        .find((row) => row.props("label") === "Prompt strength")!
+        .props("disabled"),
+    ).toBe(false);
+  });
+
   it("projects the current pixels onto Shape and Resolution", () => {
     const wrapper = factory({ width: 1024, height: 1024 });
     expect(wrapper.getComponent(ShapePicker).props("modelValue")).toBe(

@@ -185,6 +185,19 @@ describe("AdvancedSettings — output & seed", () => {
 });
 
 describe("AdvancedSettings — negative prompt", () => {
+  it("preserves but disables a saved negative prompt for a distilled recipe", () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    form.negativePrompt = "watermark";
+    const wrapper = mountSettings(form);
+    const input = wrapper.get("textarea[aria-label='Negative prompt']");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(form.negativePrompt).toBe("watermark");
+    expect(wrapper.get("[data-test='negative-unavailable-hint']").text()).toContain(
+      "Saved for reuse",
+    );
+  });
+
   it("appends quick-add words to the negative prompt", async () => {
     const form = formFor("sdxl");
     const wrapper = mountSettings(form);
@@ -357,7 +370,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
 
   it("explains when advanced settings keep a long request single-shot", async () => {
     const form = formFor("ltx2");
-    form.model = "ltx-2.3-22b-distilled:fp8";
+    form.model = "ltx-2.3-22b-dev:fp8";
     form.frames = 153;
     form.negativePrompt = "flicker";
     const wrapper = mountSettings(form);

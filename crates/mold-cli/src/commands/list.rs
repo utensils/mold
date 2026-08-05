@@ -400,6 +400,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }
     }
 

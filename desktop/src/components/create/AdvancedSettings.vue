@@ -97,7 +97,14 @@ const props = withDefaults(
 
 const emit = defineEmits<{ "append-word": [word: string] }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.selectedModel?.guidance_capabilities,
+  ),
+);
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
@@ -396,7 +403,7 @@ function reset() {
 
       <!-- 2 · Negative prompt -->
       <AccordionSection
-        v-if="caps.supportsNegativePrompt"
+        v-if="caps.supportsNegativePrompt || form.negativePrompt.trim()"
         icon="negative"
         title="Negative prompt"
         summary="What to steer away from"
@@ -406,12 +413,21 @@ function reset() {
       >
         <textarea
           v-model="form.negativePrompt"
+          :disabled="!caps.supportsNegativePrompt"
           data-selectable
           rows="2"
           placeholder="blurry, low quality, deformed…"
           class="ms-textarea"
           aria-label="Negative prompt"
         />
+        <p
+          v-if="!caps.supportsNegativePrompt"
+          class="ms-hint"
+          data-test="negative-unavailable-hint"
+        >
+          Saved for reuse, but this distilled recipe fixes CFG and does not use negative-prompt
+          guidance. Choose a Dev checkpoint with Auto or a guided pipeline to enable it.
+        </p>
         <div class="ms-chips">
           <Chip
             v-for="word in NEGATIVE_QUICK_ADDS"

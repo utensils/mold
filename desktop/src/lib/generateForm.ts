@@ -79,6 +79,7 @@ export interface GenerateForm {
   height: number;
   steps: number;
   guidance: number;
+  guidanceCapabilities: ModelEntry["guidance_capabilities"];
   /** Empty string = random seed. */
   seed: string;
   negativePrompt: string;
@@ -156,6 +157,7 @@ export function newGenerateForm(): GenerateForm {
     height: 1024,
     steps: 4,
     guidance: 3.5,
+    guidanceCapabilities: null,
     seed: "",
     negativePrompt: "",
     scheduler: "default",
@@ -237,6 +239,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.height = m.default_height;
   form.steps = m.default_steps;
   form.guidance = m.default_guidance;
+  form.guidanceCapabilities = m.guidance_capabilities ?? null;
   // The model's advertised rate is applied like steps/guidance — it is only
   // absent-server/absent-field that leaves the current value in place.
   form.fps = defaultVideoFps(m, form.fps);
@@ -369,7 +372,12 @@ export function resetFormToModelDefaults(
  * ships even if the form retained a stale value.
  */
 export function buildRequest(form: GenerateForm): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(form.family, form.model);
+  const caps = generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    form.guidanceCapabilities,
+  );
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
 

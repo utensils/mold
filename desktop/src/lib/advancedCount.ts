@@ -10,7 +10,12 @@ import type { GenerateForm } from "./generateForm";
 import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
 
 export function advancedActiveCount(form: GenerateForm): number {
-  const caps = generationCapabilitiesForFamily(form.family, form.model);
+  const caps = generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    form.guidanceCapabilities,
+  );
   let count = 0;
   if (caps.supportsNegativePrompt && form.negativePrompt.trim()) count += 1;
   if (caps.supportsScheduler && form.scheduler !== "default") count += 1;

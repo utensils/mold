@@ -98,6 +98,7 @@ function defaultForm(): GenerateFormState {
     height: 1024,
     steps: 20,
     guidance: 3.5,
+    guidanceCapabilities: null,
     seedMode: "random",
     seed: null,
     batchSize: 1,
@@ -188,6 +189,7 @@ function modelDefaultsPatch(
     height: model.default_height,
     steps: model.default_steps,
     guidance: model.default_guidance,
+    guidanceCapabilities: model.guidance_capabilities ?? null,
     loras: [],
     icLoraControl: null,
   };
@@ -634,6 +636,8 @@ export function useGenerateForm(): UseGenerateForm {
       const capabilities = generationCapabilitiesForFamily(
         selectedFamily(s),
         s.model,
+        s.pipeline,
+        s.guidanceCapabilities,
       );
       const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];

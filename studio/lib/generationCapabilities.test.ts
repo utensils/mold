@@ -37,4 +37,54 @@ describe("baseGenerationCapabilities", () => {
       "unipc",
     ]);
   });
+
+  it("resolves LTX guidance from both checkpoint and explicit pipeline", () => {
+    expect(
+      baseGenerationCapabilities("ltx2", "ltx-2.3-22b-distilled:fp8"),
+    ).toMatchObject({
+      guidanceAdjustable: false,
+      fixedGuidance: 1,
+      supportsNegativePrompt: false,
+    });
+    expect(
+      baseGenerationCapabilities("ltx2", "ltx-2.3-22b-dev:fp8"),
+    ).toMatchObject({
+      guidanceAdjustable: true,
+      fixedGuidance: null,
+      supportsNegativePrompt: true,
+    });
+    expect(
+      baseGenerationCapabilities("ltx2", "ltx-2.3-22b-dev:fp8", "distilled"),
+    ).toMatchObject({
+      guidanceAdjustable: false,
+      supportsNegativePrompt: false,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "ltx2",
+        "ltx-2.3-22b-distilled:fp8",
+        "two-stage",
+      ),
+    ).toMatchObject({ guidanceAdjustable: true, supportsNegativePrompt: true });
+    expect(
+      baseGenerationCapabilities(
+        "ltx-video",
+        "ltx-video-0.9.8-13b-distilled:bf16",
+      ),
+    ).toMatchObject({
+      guidanceAdjustable: false,
+      supportsNegativePrompt: false,
+    });
+    expect(
+      baseGenerationCapabilities("ltx2", "hf:opaque/checkpoint", null, {
+        adjustable: false,
+        supports_negative_prompt: false,
+        fixed_scale: 1,
+      }),
+    ).toMatchObject({
+      guidanceAdjustable: false,
+      fixedGuidance: 1,
+      supportsNegativePrompt: false,
+    });
+  });
 });

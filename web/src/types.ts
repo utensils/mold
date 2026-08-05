@@ -317,6 +317,11 @@ export interface ModelInfoExtended extends ModelDefaults {
   extend_default_overlap_frames?: number | null;
   /** Model-specific sequence support; absent on older servers. */
   supports_sequence?: boolean | null;
+  guidance_capabilities?: {
+    adjustable: boolean;
+    supports_negative_prompt: boolean;
+    fixed_scale?: number | null;
+  } | null;
   /** Model's own default frame count (`/api/models`, additive) — LTX-2
    * ships 97, LTX-Video 25; absent on older servers and image models. */
   default_frames?: number | null;
@@ -752,6 +757,7 @@ export interface GenerateFormState {
   height: number;
   steps: number;
   guidance: number;
+  guidanceCapabilities?: ModelInfoExtended["guidance_capabilities"];
   seedMode: SeedMode;
   seed: number | null; // null = random
   batchSize: number;

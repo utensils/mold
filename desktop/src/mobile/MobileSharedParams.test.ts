@@ -9,6 +9,29 @@ import MobileSharedParams from "./MobileSharedParams.vue";
 describe("MobileSharedParams video duration", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
+  it("renders distilled guidance fixed but preserves the stored value", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      model: "ltx-2.3-22b-distilled:fp8",
+      family: "ltx2",
+      guidance: 7,
+    });
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+    const guidance = wrapper.get("input[step='0.1']");
+    expect(guidance.attributes("disabled")).toBeDefined();
+    expect((guidance.element as HTMLInputElement).value).toBe("1");
+    expect(form.guidance).toBe(7);
+    expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").text()).toContain(
+      "fixes CFG at 1.0",
+    );
+    form.pipeline = "two-stage";
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("input[step='0.1']").attributes("disabled")).toBeUndefined();
+  });
+
   it("shows the model-aware seconds slider for one-shot video", async () => {
     const form = reactive({
       ...newGenerateForm(),

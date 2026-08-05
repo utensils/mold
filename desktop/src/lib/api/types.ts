@@ -155,6 +155,11 @@ export interface ModelEntry {
   extend_default_overlap_frames?: number | null;
   /** Explicit durable sequence eligibility; absent on older servers. */
   supports_sequence?: boolean | null;
+  guidance_capabilities?: {
+    adjustable: boolean;
+    supports_negative_prompt: boolean;
+    fixed_scale?: number | null;
+  } | null;
   /** Server-advertised per-clip frame default (LTX-2 ships 97, LTX-Video
    * 25); absent on older servers. Sizes new sequence clips. */
   default_frames?: number | null;
