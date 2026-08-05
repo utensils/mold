@@ -25,6 +25,7 @@ function factory(props: Record<string, unknown> = {}) {
       prompt: "a lighthouse",
       expand,
       currentModel: null,
+      task: "text-to-image",
       ...props,
     },
   });
@@ -46,6 +47,7 @@ describe("ExpandModal", () => {
       model_family: "flux",
       variations: 1,
       style: "Cinematic look — anamorphic",
+      task: "text-to-image",
     });
   });
 
@@ -58,6 +60,7 @@ describe("ExpandModal", () => {
       prompt: "a lighthouse",
       model_family: "flux",
       variations: 1,
+      task: "text-to-image",
     });
   });
 
@@ -72,6 +75,7 @@ describe("ExpandModal", () => {
         prompt: "a lighthouse",
         model_family: "flux",
         variations: 1,
+        task: "text-to-image",
       },
       undefined,
       target,

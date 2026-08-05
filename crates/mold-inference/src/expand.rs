@@ -13,7 +13,7 @@ use tokenizers::Tokenizer;
 
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{
-    build_batch_messages_with_context, build_single_messages, format_chatml,
+    build_batch_messages_with_context_for_task, build_single_messages_for_task, format_chatml,
 };
 
 use crate::device::{
@@ -691,19 +691,21 @@ impl PromptExpander for LocalExpander {
                 .family_overrides
                 .get(&attempt_config.model_family);
             let messages = if attempt.total > 1 {
-                build_batch_messages_with_context(
+                build_batch_messages_with_context_for_task(
                     prompt,
                     &attempt_config.model_family,
                     attempt_config.variations,
+                    attempt_config.task,
                     Some((attempt.start, attempt.total)),
                     attempt_config.batch_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
                 )
             } else {
-                build_single_messages(
+                build_single_messages_for_task(
                     prompt,
                     &attempt_config.model_family,
+                    attempt_config.task,
                     attempt_config.system_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),

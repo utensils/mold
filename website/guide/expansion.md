@@ -1,8 +1,8 @@
 # Prompt Expansion
 
-Expand short prompts into richly detailed image generation prompts using a local
-LLM (Qwen3-1.7B, ~1.8 GB). The expansion model auto-downloads on first use and
-is dropped from memory before diffusion runs.
+Expand short prompts into richly detailed image, video, or audio generation
+prompts using a local LLM (Qwen3-1.7B, ~1.8 GB). The expansion model
+auto-downloads on first use and is dropped from memory before generation runs.
 
 ## Preview Expansion
 
@@ -15,7 +15,28 @@ mold expand "cyberpunk city" --variations 5
 
 # JSON output
 mold expand "a cat" --variations 3 --json
+
+# Preview a conditioned video policy without attaching media
+mold expand "she turns toward the window" --model ltx-2-19b-distilled:fp8 --task image-to-video
 ```
+
+## Video and conditioning policy
+
+Mold derives the expansion task from the generation request on every Create
+surface. Text-to-video becomes one chronological shot with explicit subject
+motion, camera behavior, environment, and continuity. Image-to-video and
+video-to-video treat the source as visual and temporal authority and describe
+only the intended change. Retakes preserve everything outside the corrected
+interval, keyframe interpolation treats each anchor as fixed, and audio-driven
+video follows the source audio's timing and events. Text-to-audio expansion does
+not introduce camera or image language.
+
+The additive `/api/expand` `task` values are `text-to-image`, `text-to-video`,
+`image-to-video`, `video-to-video`, `retake`, `keyframe-interpolation`,
+`audio-driven-video`, and `text-to-audio`. Older clients may omit the field;
+the server then chooses image or text-to-video behavior from the model family.
+Only this semantic value is sent for preview expansion—source media stays on the
+generation request.
 
 ## Generate with Expansion
 
@@ -52,7 +73,7 @@ route for every sibling. Large expansions are assembled from bounded
 four-prompt model calls with position-aware instructions and per-chunk token
 budgets. Missing or duplicate positions are retried, and Mold rejects any
 result that is not exactly N distinct, non-empty prompts. Changing the source
-prompt, model, host, or Batch count keeps
+prompt, model, host, conditioning task, or Batch count keeps
 the reviewed prompts visible but blocks generation until you refresh or discard
 them. A missing expansion model is pulled on the named host without falling
 back to another machine. Create keeps that recovery inline for both quick and

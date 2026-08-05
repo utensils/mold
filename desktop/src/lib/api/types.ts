@@ -256,6 +256,16 @@ export interface LoraInfo {
 }
 
 /** `POST /api/expand` — mirrors mold-core `ExpandRequest`. */
+export type ExpandTask =
+  | "text-to-image"
+  | "text-to-video"
+  | "image-to-video"
+  | "video-to-video"
+  | "retake"
+  | "keyframe-interpolation"
+  | "audio-driven-video"
+  | "text-to-audio";
+
 export interface ExpandRequest {
   prompt: string;
   model_family?: string;
@@ -263,6 +273,8 @@ export interface ExpandRequest {
   /** Natural-language visual-style directive the server weaves into the
    * expander's system message (additive; absent on the wire when unset). */
   style?: string;
+  /** Resolved generation/conditioning policy; no media bytes travel here. */
+  task?: ExpandTask;
 }
 
 /** `POST /api/expand` — mirrors mold-core `ExpandResponse`. */

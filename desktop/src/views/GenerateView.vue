@@ -102,6 +102,7 @@ import {
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
@@ -578,6 +579,7 @@ const preparedStaleReasons = computed(() => {
     sourcePrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, buildRequest(form)),
     requestedCount: effectiveBatchSize.value,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
@@ -619,6 +621,7 @@ const quickStaleReasons = computed(() => {
     expandedPrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, buildRequest(form)),
     selectedHostPolicy: stickyTarget.value,
     modelLabels: modelLabels.value,
     ...currentHostSnapshot(),
@@ -1575,10 +1578,12 @@ function canvasMenu(): MenuEntry[] {
 }
 
 function expansionInputs(count: number): PreparedExpansionInputs {
+  const request = buildRequest(form);
   return {
     sourcePrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, request),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
@@ -1664,6 +1669,7 @@ async function expandForCurrentBatch(
       {
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
+        task: inputs.task,
         ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
@@ -1681,6 +1687,7 @@ async function expandForCurrentBatch(
         current.sourcePrompt !== inputs.sourcePrompt ||
         current.model !== inputs.model ||
         current.family !== inputs.family ||
+        current.task !== inputs.task ||
         current.stylePreset !== inputs.stylePreset ||
         current.selectedHostPolicy !== inputs.selectedHostPolicy ||
         !hostStillReady
@@ -1698,6 +1705,7 @@ async function expandForCurrentBatch(
         expandedPrompt: prompts[0]!,
         model: inputs.model,
         family: inputs.family,
+        task: inputs.task,
         stylePreset: inputs.stylePreset,
         selectedHostPolicy: inputs.selectedHostPolicy,
         route: { ...route, target: { ...route.target } },

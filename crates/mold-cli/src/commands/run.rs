@@ -803,48 +803,117 @@ pub async fn run(
     if should_expand {
         mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
     }
+    let expansion_task = mold_core::ExpandTask::for_conditioning(
+        &family,
+        pipeline,
+        source_image.is_some(),
+        source_video_bytes.is_some() || extend_video_bytes.is_some(),
+        audio_file_bytes.is_some(),
+        keyframes.as_ref().is_some_and(|frames| !frames.is_empty()),
+        retake_range.is_some(),
+    );
 
     // Expansion strategy:
     // - If --local or server unreachable: expand client-side (existing path)
     // - If remote: delegate to server (single request: expand=true on GenerateRequest;
     //   batch: call /api/expand for all variations upfront)
     let defer_expand_to_server = should_expand && !local;
-    let (final_prompt, original_prompt, batch_prompts, server_expand) =
-        if should_expand && !defer_expand_to_server {
-            // --- Client-side expansion (--local mode or forced local) ---
-            use colored::Colorize;
+    let (final_prompt, original_prompt, batch_prompts, server_expand) = if should_expand
+        && !defer_expand_to_server
+    {
+        // --- Client-side expansion (--local mode or forced local) ---
+        use colored::Colorize;
 
-            let mut settings = expand_settings;
-            if let Some(ref backend) = expand_backend {
-                settings.backend = backend.clone();
+        let mut settings = expand_settings;
+        if let Some(ref backend) = expand_backend {
+            settings.backend = backend.clone();
+        }
+        if let Some(ref m) = expand_model {
+            if settings.is_local() {
+                settings.model = m.clone();
+            } else {
+                settings.api_model = m.clone();
             }
-            if let Some(ref m) = expand_model {
-                if settings.is_local() {
-                    settings.model = m.clone();
+        }
+
+        // Validate custom templates if present
+        let template_errors = settings.validate_templates();
+        if !template_errors.is_empty() {
+            for err in &template_errors {
+                eprintln!("{} {err}", crate::theme::prefix_warning());
+            }
+        }
+
+        let model_family = super::expand::resolve_family_from_config(&model, &config);
+        let mut expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
+        expand_config.task = expansion_task;
+
+        let expander = super::expand::create_expander(&settings, &config).await?;
+
+        crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
+
+        let result = expander.expand(&prompt, &expand_config)?;
+        validate_run_expansion(&result.expanded, batch)?;
+
+        if result.expanded.len() == 1 {
+            let expanded = &result.expanded[0];
+            let display = if expanded.chars().count() > 80 {
+                let truncated: String = expanded.chars().take(77).collect();
+                format!("{truncated}...")
+            } else {
+                expanded.clone()
+            };
+            crate::output::status!(
+                "{} Expanded: \"{}\"",
+                crate::theme::icon_ok(),
+                display.dimmed()
+            );
+            (expanded.clone(), Some(prompt.clone()), None, None)
+        } else {
+            // Multiple variations: each batch image gets a different prompt.
+            crate::output::status!(
+                "{} Generated {} prompt variations",
+                crate::theme::icon_ok(),
+                result.expanded.len()
+            );
+            for (i, expanded) in result.expanded.iter().enumerate() {
+                let display = if expanded.chars().count() > 70 {
+                    let truncated: String = expanded.chars().take(67).collect();
+                    format!("{truncated}...")
                 } else {
-                    settings.api_model = m.clone();
-                }
+                    expanded.clone()
+                };
+                crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
             }
+            let first = result.expanded[0].clone();
+            (first, Some(prompt.clone()), Some(result.expanded), None)
+        }
+    } else if defer_expand_to_server {
+        // --- Server-side expansion via /api/expand ---
+        // Always expand upfront so the prompt is ready before generate_remote.
+        // This ensures the local fallback path also gets the expanded prompt.
+        #[allow(unused_imports)]
+        use colored::Colorize;
 
-            // Validate custom templates if present
-            let template_errors = settings.validate_templates();
-            if !template_errors.is_empty() {
-                for err in &template_errors {
-                    eprintln!("{} {err}", crate::theme::prefix_warning());
-                }
-            }
+        let variations = batch.max(1) as usize;
+        let model_family = super::expand::resolve_family_from_config(&model, &config);
+        let client = match host.as_deref() {
+            Some(h) => mold_core::MoldClient::new(h),
+            None => mold_core::MoldClient::from_env(),
+        };
+        let expand_req = mold_core::ExpandRequest {
+            prompt: prompt.clone(),
+            model_family,
+            variations,
+            style: None,
+            task: Some(expansion_task),
+        };
 
-            let model_family = super::expand::resolve_family_from_config(&model, &config);
-            let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
+        crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());
 
-            let expander = super::expand::create_expander(&settings, &config).await?;
-
-            crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
-
-            let result = expander.expand(&prompt, &expand_config)?;
-            validate_run_expansion(&result.expanded, batch)?;
-
-            if result.expanded.len() == 1 {
+        match client.expand_prompt(&expand_req).await {
+            Ok(result) if result.expanded.len() == 1 => {
+                validate_run_expansion(&result.expanded, batch)?;
                 let expanded = &result.expanded[0];
                 let display = if expanded.chars().count() > 80 {
                     let truncated: String = expanded.chars().take(77).collect();
@@ -853,15 +922,16 @@ pub async fn run(
                     expanded.clone()
                 };
                 crate::output::status!(
-                    "{} Expanded: \"{}\"",
+                    "{} Expanded (server): \"{}\"",
                     crate::theme::icon_ok(),
                     display.dimmed()
                 );
                 (expanded.clone(), Some(prompt.clone()), None, None)
-            } else {
-                // Multiple variations: each batch image gets a different prompt.
+            }
+            Ok(result) => {
+                validate_run_expansion(&result.expanded, batch)?;
                 crate::output::status!(
-                    "{} Generated {} prompt variations",
+                    "{} Generated {} prompt variations (server)",
                     crate::theme::icon_ok(),
                     result.expanded.len()
                 );
@@ -877,105 +947,48 @@ pub async fn run(
                 let first = result.expanded[0].clone();
                 (first, Some(prompt.clone()), Some(result.expanded), None)
             }
-        } else if defer_expand_to_server {
-            // --- Server-side expansion via /api/expand ---
-            // Always expand upfront so the prompt is ready before generate_remote.
-            // This ensures the local fallback path also gets the expanded prompt.
-            #[allow(unused_imports)]
-            use colored::Colorize;
-
-            let variations = batch.max(1) as usize;
-            let model_family = super::expand::resolve_family_from_config(&model, &config);
-            let client = match host.as_deref() {
-                Some(h) => mold_core::MoldClient::new(h),
-                None => mold_core::MoldClient::from_env(),
-            };
-            let expand_req = mold_core::ExpandRequest {
-                prompt: prompt.clone(),
-                model_family,
-                variations,
-                style: None,
-            };
-
-            crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());
-
-            match client.expand_prompt(&expand_req).await {
-                Ok(result) if result.expanded.len() == 1 => {
-                    validate_run_expansion(&result.expanded, batch)?;
-                    let expanded = &result.expanded[0];
-                    let display = if expanded.chars().count() > 80 {
-                        let truncated: String = expanded.chars().take(77).collect();
-                        format!("{truncated}...")
+            Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
+                // Server unreachable — fall back to local expansion so the prompt
+                // is expanded even when generate_remote also falls back to local.
+                crate::output::status!(
+                    "{} Server unreachable, expanding locally",
+                    crate::theme::prefix_warning()
+                );
+                let mut settings = expand_settings;
+                if let Some(ref backend) = expand_backend {
+                    settings.backend = backend.clone();
+                }
+                if let Some(ref m) = expand_model {
+                    if settings.is_local() {
+                        settings.model = m.clone();
                     } else {
-                        expanded.clone()
-                    };
-                    crate::output::status!(
-                        "{} Expanded (server): \"{}\"",
-                        crate::theme::icon_ok(),
-                        display.dimmed()
-                    );
-                    (expanded.clone(), Some(prompt.clone()), None, None)
+                        settings.api_model = m.clone();
+                    }
                 }
-                Ok(result) => {
-                    validate_run_expansion(&result.expanded, batch)?;
-                    crate::output::status!(
-                        "{} Generated {} prompt variations (server)",
-                        crate::theme::icon_ok(),
-                        result.expanded.len()
-                    );
-                    for (i, expanded) in result.expanded.iter().enumerate() {
-                        let display = if expanded.chars().count() > 70 {
-                            let truncated: String = expanded.chars().take(67).collect();
-                            format!("{truncated}...")
-                        } else {
-                            expanded.clone()
-                        };
-                        crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
-                    }
-                    let first = result.expanded[0].clone();
-                    (first, Some(prompt.clone()), Some(result.expanded), None)
-                }
-                Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
-                    // Server unreachable — fall back to local expansion so the prompt
-                    // is expanded even when generate_remote also falls back to local.
-                    crate::output::status!(
-                        "{} Server unreachable, expanding locally",
-                        crate::theme::prefix_warning()
-                    );
-                    let mut settings = expand_settings;
-                    if let Some(ref backend) = expand_backend {
-                        settings.backend = backend.clone();
-                    }
-                    if let Some(ref m) = expand_model {
-                        if settings.is_local() {
-                            settings.model = m.clone();
-                        } else {
-                            settings.api_model = m.clone();
-                        }
-                    }
-                    let family = super::expand::resolve_family_from_config(&model, &config);
-                    let expand_config = settings.to_expand_config(&family, batch.max(1) as usize);
-                    match super::expand::create_expander(&settings, &config).await {
-                        Ok(expander) => match expander.expand(&prompt, &expand_config) {
-                            Ok(result) => {
-                                validate_run_expansion(&result.expanded, batch)?;
-                                let first = result.expanded[0].clone();
-                                if result.expanded.len() == 1 {
-                                    (first, Some(prompt.clone()), None, None)
-                                } else {
-                                    (first, Some(prompt.clone()), Some(result.expanded), None)
-                                }
+                let family = super::expand::resolve_family_from_config(&model, &config);
+                let mut expand_config = settings.to_expand_config(&family, batch.max(1) as usize);
+                expand_config.task = expansion_task;
+                match super::expand::create_expander(&settings, &config).await {
+                    Ok(expander) => match expander.expand(&prompt, &expand_config) {
+                        Ok(result) => {
+                            validate_run_expansion(&result.expanded, batch)?;
+                            let first = result.expanded[0].clone();
+                            if result.expanded.len() == 1 {
+                                (first, Some(prompt.clone()), None, None)
+                            } else {
+                                (first, Some(prompt.clone()), Some(result.expanded), None)
                             }
-                            Err(_) => (prompt, None, None, None),
-                        },
+                        }
                         Err(_) => (prompt, None, None, None),
-                    }
+                    },
+                    Err(_) => (prompt, None, None, None),
                 }
-                Err(e) => return Err(e),
             }
-        } else {
-            (prompt, None, None, None)
-        };
+            Err(e) => return Err(e),
+        }
+    } else {
+        (prompt, None, None, None)
+    };
 
     // Resolve effective negative prompt: CLI flag > per-model config > global config > None.
     // --no-negative suppresses all defaults (forces empty unconditional).

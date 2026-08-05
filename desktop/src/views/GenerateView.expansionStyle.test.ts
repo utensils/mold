@@ -162,7 +162,7 @@ describe("GenerateView style-aware expansion", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 1, modelFamily: "flux", style: cinematicHint },
+      { variations: 1, modelFamily: "flux", task: "text-to-image", style: cinematicHint },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     const form = useGenerateFormStore().form;
@@ -300,7 +300,7 @@ describe("GenerateView style-aware expansion", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 3, modelFamily: "flux", style: cinematicHint },
+      { variations: 3, modelFamily: "flux", task: "text-to-image", style: cinematicHint },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     const prepared = wrapper.findComponent(PreparedExpansionBatch);

@@ -1388,6 +1388,7 @@ describe("CreatePage layout and behavior", () => {
         prompt: "a lighthouse",
         model_family: "flux",
         variations: 3,
+        task: "text-to-image",
       },
       undefined,
       undefined,
@@ -1612,8 +1613,28 @@ describe("CreatePage layout and behavior", () => {
 
     const modal = wrapper.getComponent({ name: "ExpandModal" });
     expect(modal.props("prompt")).toBe("a stage prompt");
+    expect(modal.props("task")).toBe("text-to-video");
     // The style row belongs to the single-print composer, not to clip text.
     expect(modal.props("styleDirective")).toBeNull();
+  });
+
+  it("resolves image-conditioned video expansion without sending source bytes", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2:q8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "she turns toward the window";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "opening.png", base64: "secret-image-bytes" },
+    ];
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("task")).toBe("image-to-video");
+    expect(JSON.stringify(modal.props())).not.toContain("secret-image-bytes");
   });
 
   it("bakes and clears the chip when a quick expansion is applied", async () => {
@@ -2968,6 +2989,7 @@ function pageStubs() {
         "expand",
         "currentModel",
         "styleDirective",
+        "task",
         "target",
       ],
       template: "<div />",

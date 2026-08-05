@@ -152,6 +152,11 @@ first-eight summary and bounded Review all pages. Edits and specifically named
 stale work remain local until explicit approval, refresh, collapse, or discard.
 One reviewed set is capped at 10,000 variations for memory safety; accepted
 sets do not impose a cumulative queue limit.
+The snapshot also freezes the conditioning-aware expansion task derived from
+the actual request. T2V uses chronological shot language; I2V/V2V, retake,
+keyframes, and audio-driven video preserve their source authority. Changing the
+conditioning names the work as stale, and `/api/expand` receives only the task,
+never source media bytes.
 Once the host accepts the batch, the composer is immediately available to
 prepare another while earlier siblings remain queued or running.
 After source preprocessing, Create performs one read-only placement preview for

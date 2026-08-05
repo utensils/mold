@@ -1275,14 +1275,15 @@ Clean up:
         action: LambdaAction,
     },
 
-    /// Preview LLM prompt expansion without generating images
+    /// Preview LLM prompt expansion without generating
     ///
-    /// Expand a short prompt into detailed image generation prompts using an LLM.
+    /// Expand a short prompt into detailed generation prompts using an LLM.
     /// Useful for previewing what --expand will produce.
     #[command(after_long_help = "\
 Examples:
   mold expand \"a cat\"
   mold expand \"a cat\" --model flux-schnell
+  mold expand \"she turns\" --model ltx-2-19b-distilled:fp8 --task image-to-video
   mold expand \"cyberpunk city\" --variations 5
   mold expand \"a cat\" --variations 3 --json")]
     Expand {
@@ -1308,6 +1309,10 @@ Examples:
         /// LLM model name override
         #[arg(long)]
         expand_model: Option<String>,
+
+        /// Resolved conditioning policy for previewing without attached media
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
     },
 
     /// Unload the current model from the server to free GPU memory
@@ -1870,6 +1875,7 @@ async fn run() -> anyhow::Result<()> {
             json,
             backend,
             expand_model,
+            task,
         } => {
             commands::expand::run(
                 &prompt,
@@ -1878,6 +1884,7 @@ async fn run() -> anyhow::Result<()> {
                 json,
                 backend.as_deref(),
                 expand_model.as_deref(),
+                task.as_deref(),
             )
             .await?;
         }

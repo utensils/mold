@@ -1,5 +1,5 @@
 import { apiJson, apiJsonTo, type ApiTarget } from "./client";
-import type { ExpandRequest, ExpandResponse } from "./types";
+import type { ExpandRequest, ExpandResponse, ExpandTask } from "./types";
 
 export interface ExpandPromptOptions {
   /** Steers the expansion style; omitted → the server's default family. */
@@ -12,6 +12,8 @@ export interface ExpandPromptOptions {
    * never the literal preset suffix, and never appended to the prompt text.
    */
   style?: string;
+  /** Resolved generation/conditioning policy. */
+  task?: ExpandTask;
 }
 
 /**
@@ -31,6 +33,7 @@ export function expandPrompt(
   if (family) body.model_family = family;
   const style = opts.style?.trim();
   if (style) body.style = style;
+  if (opts.task) body.task = opts.task;
   const init = {
     method: "POST",
     headers: { "Content-Type": "application/json" },

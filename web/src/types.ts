@@ -659,6 +659,16 @@ export interface RetakeRequest {
   prompt?: string;
 }
 
+export type ExpandTask =
+  | "text-to-image"
+  | "text-to-video"
+  | "image-to-video"
+  | "video-to-video"
+  | "retake"
+  | "keyframe-interpolation"
+  | "audio-driven-video"
+  | "text-to-audio";
+
 export interface ExpandRequestWire {
   prompt: string;
   model_family: string;
@@ -669,6 +679,8 @@ export interface ExpandRequestWire {
    * never the literal preset suffix, and never appended to the prompt text.
    */
   style?: string;
+  /** Resolved generation/conditioning policy; no media bytes travel here. */
+  task?: ExpandTask;
 }
 
 export interface ExpandResponseWire {

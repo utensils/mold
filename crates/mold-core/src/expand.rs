@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::expand_prompts::{build_batch_messages_with_context, build_single_messages};
+use crate::expand_prompts::{
+    build_batch_messages_with_context_for_task, build_single_messages_for_task,
+};
+use crate::ExpandTask;
 
 /// Maximum number of prompt variations for Discord (embed character limit).
 pub const DISCORD_MAX_VARIATIONS: usize = 5;
@@ -53,6 +56,8 @@ pub struct FamilyOverride {
 pub struct ExpandConfig {
     /// Diffusion model family (e.g. "flux", "sd15", "sdxl").
     pub model_family: String,
+    /// Resolved generation task and conditioning policy.
+    pub task: ExpandTask,
     /// Number of prompt variations to generate (1 = single expansion).
     pub variations: usize,
     /// Sampling temperature (0.0-2.0). Higher = more creative.
@@ -80,6 +85,7 @@ impl Default for ExpandConfig {
     fn default() -> Self {
         Self {
             model_family: "flux".to_string(),
+            task: ExpandTask::TextToImage,
             variations: 1,
             temperature: 0.7,
             top_p: 0.9,
@@ -273,19 +279,21 @@ impl PromptExpander for ApiExpander {
                 .family_overrides
                 .get(&attempt_config.model_family);
             let messages = if attempt.total > 1 {
-                build_batch_messages_with_context(
+                build_batch_messages_with_context_for_task(
                     prompt,
                     &attempt_config.model_family,
                     attempt_config.variations,
+                    attempt_config.task,
                     Some((attempt.start, attempt.total)),
                     attempt_config.batch_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
                 )
             } else {
-                build_single_messages(
+                build_single_messages_for_task(
                     prompt,
                     &attempt_config.model_family,
+                    attempt_config.task,
                     attempt_config.system_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
@@ -576,6 +584,7 @@ impl ExpandSettings {
     pub fn to_expand_config(&self, model_family: &str, variations: usize) -> ExpandConfig {
         ExpandConfig {
             model_family: model_family.to_string(),
+            task: ExpandTask::for_family(model_family),
             variations,
             temperature: self.temperature,
             top_p: self.top_p,
@@ -635,6 +644,7 @@ impl ExpandSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expand_prompts::build_batch_messages_with_context;
 
     // ── clean_expanded_prompt ────────────────────────────────────────────
 
