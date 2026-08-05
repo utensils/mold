@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-05
+
 ### Added
 
 - **HDR EXR export now covers chained renders** ([#688](https://github.com/utensils/mold/issues/688)). `--hdr-exr-dir` used to be single-clip only: a frame count past the per-clip cap auto-chains, and the combination was a hard error because the sidecar's frame numbering had no way to survive the stitch. The sidecar's numbering is now **global across the stitched timeline** — one pure window planner beside `StitchPlan::assemble` gives each stage a `skip/start/count` window, so a 121-frame render writes exactly `frame_00000.exr..frame_00120.exr` with no holes and no index written twice, and the property is pinned against the stitch arithmetic and mold-core's `stage_contributed_frames` at the unit level. Because an HDR render is an IC-LoRA regrade of an SDR reference, each chain stage now carries the full HDR authority — the adapter LoRA stack and its own temporal window of the reference video (the per-window slicing upstream's `hdr_ic_lora.py` uses for temporal tiles) — and the auto-expanded chain's last stage is sized to the exact remainder, so nothing renders past the reference's end and the stitched length equals the request exactly. Chained EXR export is deliberately local-only (`--local`): the chain wire format carries no HDR fields, so a remote server could only silently drop the sidecar — the empty-directory-beside-`✓ Saved` failure the old refusal existed to prevent. Fade transitions are refused with a typed error (their blended frames are a post-quantization u8 crossfade that exists in no stage's linear tensor), the streaming one-frame-at-a-time memory property is preserved by construction, and the engine now clears any request-borne EXR target on stage/extend renders unless an explicit window arrives with it, making the latent extend-path misalignment unrepresentable.
@@ -1495,7 +1497,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
