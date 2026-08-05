@@ -466,7 +466,7 @@ describe("MobileApp sequence generation", () => {
 describe("MobileApp Output field", () => {
   const sequenceModel: ModelEntry = {
     ...model,
-    name: "ltx-video-0.9.8-2b-distilled:bf16",
+    name: "ltx-video-0.9.8-2b-dev:bf16",
     family: "ltx-video",
     default_steps: 7,
     default_guidance: 1,

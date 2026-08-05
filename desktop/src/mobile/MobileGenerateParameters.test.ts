@@ -233,7 +233,7 @@ describe("MobileGenerateParameters", () => {
   });
 
   it("keeps a long request single-shot when chaining would lose selected settings", async () => {
-    const form = formFor("ltx2", "ltx-2-19b-distilled:fp8");
+    const form = formFor("ltx2", "ltx-2-19b-dev:fp8");
     form.frames = 177;
     form.negativePrompt = "flicker";
     const chain = mountParameters(form);
