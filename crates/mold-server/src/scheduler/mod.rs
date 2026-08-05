@@ -2552,6 +2552,11 @@ impl Coordinator {
                         determinism_class,
                         false,
                         &BTreeMap::new(),
+                    )
+                    .expect(
+                        "synthetic coordinator-test descriptor classifies every frozen \
+                         engine-shaping variable (guarded by \
+                         every_engine_shaping_variable_has_a_semantic_class)",
                     );
                     let equivalence = environment.fingerprint();
                     crate::execution_plan::ResolvedExecutionPlan {

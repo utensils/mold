@@ -242,6 +242,10 @@ pub enum SemanticVaeDType {
     F32,
 }
 
+/// One equivalence class per entry in `mold_inference::runtime_env::
+/// ENGINE_SHAPING_VARIABLES`. Adding a name to that list requires a matching
+/// variant and `runtime_semantic_variable` arm here;
+/// `every_engine_shaping_variable_has_a_semantic_class` enforces the pairing.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum RuntimeSemanticVariable {
     Attn,
@@ -463,7 +467,9 @@ impl ExecutionEnvironmentDescriptor {
 }
 
 impl ExecutionSemanticConfig {
-    pub fn from_frozen(frozen: &mold_inference::FrozenEngineConfig) -> Self {
+    pub fn from_frozen(
+        frozen: &mold_inference::FrozenEngineConfig,
+    ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
             is_schnell,
@@ -489,9 +495,15 @@ impl ExecutionSemanticConfig {
         } = frozen;
         let runtime = mold_inference::runtime_env::ENGINE_SHAPING_VARIABLES
             .iter()
-            .map(|name| runtime_semantic_setting(name, runtime_environment.value(name)))
-            .collect();
-        Self {
+            .map(|name| {
+                runtime_semantic_setting(name, runtime_environment.value(name)).ok_or_else(|| {
+                    ExecutionPlanError::UnclassifiedRuntimeVariable {
+                        name: (*name).to_string(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             family: family.clone(),
             is_schnell: *is_schnell,
             is_turbo: *is_turbo,
@@ -528,11 +540,20 @@ impl ExecutionSemanticConfig {
                 mold_inference::device::VaeDtypePolicy::F32 => SemanticVaeDType::F32,
             },
             runtime,
-        }
+        })
     }
 }
 
-fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticSetting {
+/// Classifies an engine-shaping environment variable into its execution-
+/// equivalence class, or `None` for a name this build does not know.
+///
+/// The list of names lives in `mold_inference::runtime_env::
+/// ENGINE_SHAPING_VARIABLES`; every entry added there must gain an arm here.
+/// `every_engine_shaping_variable_has_a_semantic_class` fails CI on a
+/// mismatch, and at runtime an unclassified name fails the job with
+/// `ExecutionPlanError::UnclassifiedRuntimeVariable` instead of panicking the
+/// server (issue #685).
+fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
     let variable = match name {
         "MOLD_ATTN" => RuntimeSemanticVariable::Attn,
         "MOLD_ATTN_CHUNK" => RuntimeSemanticVariable::AttnChunk,
@@ -585,9 +606,16 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticS
         "MOLD_VAE_TILED" => RuntimeSemanticVariable::VaeTiled,
         "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
         // A new engine-shaping input must never silently collapse into an old
-        // equivalence class.
-        _ => panic!("unclassified frozen engine-shaping variable {name}"),
+        // equivalence class. `None` here surfaces as a per-job
+        // `UnclassifiedRuntimeVariable` planning error and as a named CI
+        // failure, never as a corrupted fingerprint or a server abort.
+        _ => return None,
     };
+    Some(variable)
+}
+
+fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSemanticSetting> {
+    let variable = runtime_semantic_variable(name)?;
     let value = match value {
         None => CanonicalRuntimeValue::Unset,
         Some(value)
@@ -643,7 +671,7 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticS
         // negatives, but never a false-equivalent execution class.
         Some(value) => CanonicalRuntimeValue::Text(value.to_string()),
     };
-    RuntimeSemanticSetting { variable, value }
+    Some(RuntimeSemanticSetting { variable, value })
 }
 
 fn execution_code_identity_for(package_version: &str, git_sha: &str) -> ExecutionCodeIdentity {
@@ -934,6 +962,12 @@ pub enum ExecutionPlanError {
         "camera-motion preset '{alias}' does not resolve to an installed adapter for this model"
     )]
     UnresolvableLora { alias: String },
+    #[error(
+        "engine-shaping environment variable '{name}' has no execution-equivalence \
+         classification; add a RuntimeSemanticVariable arm in mold-server's \
+         execution_plan.rs (build defect, not a user error)"
+    )]
+    UnclassifiedRuntimeVariable { name: String },
 }
 
 pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
@@ -1994,7 +2028,7 @@ fn build_plan(
         OffloadMode::None
     };
     let determinism_class = DeterminismClass::CpuSeededCrossBackend;
-    let execution_environment = execution_environment_descriptor(
+    let execution_environment = match execution_environment_descriptor(
         device,
         context.model,
         context.family,
@@ -2009,7 +2043,10 @@ fn build_plan(
         determinism_class,
         context.equivalence_cache_only,
         context.pending_artifacts,
-    );
+    ) {
+        Ok(environment) => environment,
+        Err(error) => return Some(Err(error)),
+    };
     let execution_equivalence_fingerprint = execution_environment.fingerprint();
     Some(Ok(ResolvedExecutionPlan {
         device_id: device.id.clone(),
@@ -2053,7 +2090,7 @@ pub(crate) fn execution_environment_descriptor(
     determinism_class: DeterminismClass,
     equivalence_cache_only: bool,
     pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
-) -> ExecutionEnvironmentDescriptor {
+) -> Result<ExecutionEnvironmentDescriptor, ExecutionPlanError> {
     let architecture = match (device.backend, device.compute_capability) {
         (GpuBackend::Cuda, Some((major, minor))) => {
             DeviceArchitectureClass::CudaComputeCapability { major, minor }
@@ -2136,7 +2173,7 @@ pub(crate) fn execution_environment_descriptor(
             scale_bits: lora.scale_bits,
         })
         .collect();
-    ExecutionEnvironmentDescriptor {
+    Ok(ExecutionEnvironmentDescriptor {
         schema_version: 3,
         backend: device.backend,
         architecture,
@@ -2145,7 +2182,7 @@ pub(crate) fn execution_environment_descriptor(
             AttentionBackend::Flash => AttentionKernelClass::Flash,
         },
         code: execution_code_identity(),
-        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config),
+        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config)?,
         runtime_model_id: runtime_model_id.to_string(),
         runtime_artifact_paths,
         model_family: model_family.to_string(),
@@ -2159,7 +2196,7 @@ pub(crate) fn execution_environment_descriptor(
         offload_mode,
         output_format,
         determinism_class,
-    }
+    })
 }
 
 fn gpu_resident_paths(
@@ -4755,39 +4792,57 @@ mod tests {
     #[test]
     fn runtime_semantic_parser_matches_cfg_plus_and_long_prompt_contracts() {
         assert_eq!(
-            runtime_semantic_setting("MOLD_CFG_PLUS", Some("true")).value,
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("true"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(true)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_CFG_PLUS", Some("yes")).value,
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("yes"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(true)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_CFG_PLUS", Some("TRUE")).value,
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("TRUE"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(false)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_CFG_PLUS", Some(" true ")).value,
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some(" true "))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(false)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("1")).value,
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("1"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(true)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("true")).value,
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("true"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(false)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("yes")).value,
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("yes"))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Boolean(false)
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES", Some(" 4 ")).value,
+            runtime_semantic_setting("MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES", Some(" 4 "))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Unsigned(mold_inference::runtime_env::parse_u64(" 4 "))
         );
         assert_eq!(
-            runtime_semantic_setting("MOLD_WUERSTCHEN_DECODER_GUIDANCE", Some(" 1.5 ")).value,
+            runtime_semantic_setting("MOLD_WUERSTCHEN_DECODER_GUIDANCE", Some(" 1.5 "))
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::FloatBits(
                 mold_inference::runtime_env::parse_f64(" 1.5 ").map(f64::to_bits)
             )
@@ -4799,13 +4854,67 @@ mod tests {
         for value in ["", "0", "false", "anything"] {
             assert_eq!(
                 runtime_semantic_setting("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", Some(value),)
+                    .unwrap()
                     .value,
                 CanonicalRuntimeValue::Presence(true)
             );
         }
         assert_eq!(
-            runtime_semantic_setting("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", None).value,
+            runtime_semantic_setting("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", None)
+                .unwrap()
+                .value,
             CanonicalRuntimeValue::Unset
+        );
+    }
+
+    /// The classification contract for issue #685: every name in
+    /// `mold_inference::runtime_env::ENGINE_SHAPING_VARIABLES` must map to its
+    /// own `RuntimeSemanticVariable`. A variable registered in mold-inference
+    /// without a matching arm here used to compile, pass CI, and then panic on
+    /// the first generation request that reached planning; this test turns
+    /// that mismatch into a named CI failure at the point of the mistake.
+    #[test]
+    fn every_engine_shaping_variable_has_a_semantic_class() {
+        let mut classes = BTreeSet::new();
+        for name in mold_inference::runtime_env::ENGINE_SHAPING_VARIABLES {
+            let variable = runtime_semantic_variable(name).unwrap_or_else(|| {
+                panic!(
+                    "engine-shaping variable {name} has no RuntimeSemanticVariable \
+                     classification; add a match arm in runtime_semantic_variable \
+                     (crates/mold-server/src/execution_plan.rs)"
+                )
+            });
+            assert!(
+                classes.insert(variable),
+                "engine-shaping variable {name} collapsed into an equivalence class \
+                 already claimed by another variable ({variable:?}); every name needs \
+                 its own RuntimeSemanticVariable variant"
+            );
+            // Exercise the value-canonicalization arms too: a classified name
+            // must accept any raw value without panicking.
+            assert!(runtime_semantic_setting(name, Some("probe")).is_some());
+        }
+    }
+
+    #[test]
+    fn unknown_variable_names_are_unclassified() {
+        assert_eq!(
+            runtime_semantic_variable("MOLD_NOT_A_SHAPING_VARIABLE"),
+            None
+        );
+        assert!(runtime_semantic_setting("MOLD_NOT_A_SHAPING_VARIABLE", Some("1")).is_none());
+    }
+
+    #[test]
+    fn unclassified_runtime_variable_error_names_the_variable() {
+        let error = ExecutionPlanError::UnclassifiedRuntimeVariable {
+            name: "MOLD_X".to_string(),
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("MOLD_X"), "{rendered}");
+        assert!(
+            rendered.contains("RuntimeSemanticVariable"),
+            "the error must point at the classifier to edit: {rendered}"
         );
     }
 
@@ -4861,6 +4970,7 @@ mod tests {
                 false,
                 &BTreeMap::new(),
             )
+            .expect("rebuild descriptor classifies every frozen engine-shaping variable")
         };
 
         assert_eq!(
