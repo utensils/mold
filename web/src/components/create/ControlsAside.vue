@@ -81,6 +81,8 @@ const capabilities = computed(() =>
   generationCapabilitiesForFamily(
     props.family,
     props.model?.name ?? props.modelValue.model,
+    props.modelValue.pipeline,
+    props.model?.guidance_capabilities,
   ),
 );
 const sequenceMode = computed(() => props.output === "sequence");
@@ -384,13 +386,24 @@ function lockLastSeed() {
     <div class="controls__group">
       <SliderRow
         label="Prompt strength"
-        :model-value="modelValue.guidance"
+        :model-value="capabilities.fixedGuidance ?? modelValue.guidance"
         :min="0"
         :max="12"
         :step="0.1"
-        :value-label="modelValue.guidance.toFixed(1)"
+        :value-label="
+          (capabilities.fixedGuidance ?? modelValue.guidance).toFixed(1)
+        "
+        :disabled="!capabilities.guidanceAdjustable"
         @update:model-value="patch({ guidance: $event })"
       />
+      <p
+        v-if="!capabilities.guidanceAdjustable"
+        class="controls__hint"
+        data-test="fixed-guidance-hint"
+      >
+        Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or
+        a guided pipeline to adjust it.
+      </p>
     </div>
 
     <div class="controls__group">

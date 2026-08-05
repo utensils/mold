@@ -183,11 +183,20 @@ function onInspectorReset() {
   void appPrefs.update({ generateParamsWidth: null });
 }
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    selectedModel.value?.guidance_capabilities,
+  ),
+);
 const advancedCount = computed(() =>
   isSequence.value
     ? Number(Boolean(draft.openingImage)) +
-      Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(
+        caps.value.supportsNegativePrompt && draft.clips.some((clip) => clip.negativePrompt.trim()),
+      ) +
       Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
       Number(draft.enableAudio)
     : advancedActiveCount(props.form),
@@ -590,14 +599,19 @@ function resetSettings() {
       <!-- Prompt strength (guidance) -->
       <div class="ms-field">
         <SliderRow
-          :model-value="form.guidance"
+          :model-value="caps.fixedGuidance ?? form.guidance"
           :min="0"
           :max="12"
           :step="0.1"
           label="Prompt strength"
-          :value-label="form.guidance.toFixed(1)"
+          :value-label="(caps.fixedGuidance ?? form.guidance).toFixed(1)"
+          :disabled="!caps.guidanceAdjustable"
           @update:model-value="form.guidance = $event"
         />
+        <p v-if="!caps.guidanceAdjustable" class="ms-hint" data-test="fixed-guidance-hint">
+          Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline
+          to adjust it.
+        </p>
       </div>
 
       <!-- Duration is the human-facing video control; exact frames/FPS stay in Advanced. -->

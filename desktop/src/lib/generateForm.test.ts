@@ -125,6 +125,20 @@ describe("cloneGenerateForm", () => {
 });
 
 describe("buildRequest — LTX-2 advanced video", () => {
+  it("preserves distilled guidance state while omitting an ineffective negative", () => {
+    const form = ltx2Form();
+    form.model = "hf:opaque/distilled-checkpoint";
+    form.guidance = 7;
+    form.negativePrompt = "flicker";
+    form.guidanceCapabilities = {
+      adjustable: false,
+      supports_negative_prompt: false,
+      fixed_scale: 1,
+    };
+    expect(buildRequest(form).negative_prompt).toBeUndefined();
+    expect(form.negativePrompt).toBe("flicker");
+    expect(form.guidance).toBe(7);
+  });
   it("round-trips a built-in reference control beside custom LoRAs", () => {
     const form = ltx2Form();
     form.prompt = "a guided dancer";

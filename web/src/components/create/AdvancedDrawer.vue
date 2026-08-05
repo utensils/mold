@@ -188,7 +188,12 @@ const NEG_CHIPS = [
 const inline = computed(() => !props.mobile);
 
 const caps = computed(() =>
-  generationCapabilitiesForFamily(props.family, props.modelValue.model),
+  generationCapabilitiesForFamily(
+    props.family,
+    props.modelValue.model,
+    props.modelValue.pipeline,
+    selectedModel.value?.guidance_capabilities,
+  ),
 );
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
 const formats = computed(() => outputFormatsForFamily(props.family));
@@ -602,11 +607,20 @@ function setSequenceCameraMode(mode: string) {
         >
           <textarea
             v-model="activeSequenceClip.negativePrompt"
+            :disabled="!caps.supportsNegativePrompt"
             class="adv__textarea"
             data-test="sequence-negative-input"
             placeholder="blurry, low quality, deformed…"
           />
-          <div class="adv__chips">
+          <p
+            v-if="!caps.supportsNegativePrompt"
+            class="adv__hint"
+            data-test="sequence-negative-unavailable-hint"
+          >
+            Saved for reuse, but this distilled recipe does not use
+            negative-prompt guidance.
+          </p>
+          <div v-if="caps.supportsNegativePrompt" class="adv__chips">
             <Chip
               v-for="word in NEG_CHIPS"
               :key="word"
@@ -675,7 +689,7 @@ function setSequenceCameraMode(mode: string) {
         </AccordionSection>
 
         <AccordionSection
-          v-if="caps.supportsNegativePrompt"
+          v-if="caps.supportsNegativePrompt || modelValue.negativePrompt.trim()"
           icon="negative"
           title="Negative prompt"
           summary="What to steer away from"
@@ -688,12 +702,22 @@ function setSequenceCameraMode(mode: string) {
             data-test="negative-input"
             placeholder="blurry, low quality, deformed…"
             :value="modelValue.negativePrompt"
+            :disabled="!caps.supportsNegativePrompt"
             @input="
               patch({
                 negativePrompt: ($event.target as HTMLTextAreaElement).value,
               })
             "
           />
+          <p
+            v-if="!caps.supportsNegativePrompt"
+            class="adv__hint"
+            data-test="negative-unavailable-hint"
+          >
+            Saved for reuse, but this distilled recipe fixes CFG and does not
+            use negative-prompt guidance. Choose a Dev checkpoint with Auto or a
+            guided pipeline to enable it.
+          </p>
           <div class="adv__chips">
             <Chip
               v-for="word in NEG_CHIPS"

@@ -1058,7 +1058,11 @@ const currentFamily = computed(
 );
 
 const capabilities = computed(() =>
-  generationCapabilitiesForFamily(currentFamily.value, form.state.value.model),
+  generationCapabilitiesForFamily(
+    currentFamily.value,
+    form.state.value.model,
+    form.state.value.pipeline,
+  ),
 );
 
 // A conditioned LTX-2 render may go out undescribed — the server admits it,
@@ -1673,7 +1677,10 @@ const aspectLabel = computed(
 const advCount = computed(() =>
   sequenceMode.value
     ? Number(Boolean(draft.openingImage)) +
-      Number(Boolean(draft.clips.some((clip) => clip.negativePrompt.trim()))) +
+      Number(
+        capabilities.value.supportsNegativePrompt &&
+          draft.clips.some((clip) => clip.negativePrompt.trim()),
+      ) +
       Number(Boolean(draft.clips.some((clip) => clip.cameraControl))) +
       Number(draft.enableAudio)
     : advancedActiveCount({

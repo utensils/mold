@@ -46,7 +46,17 @@ const emit = defineEmits<{
 
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
 const supportsVideo = computed(
-  () => generationCapabilitiesForFamily(props.form.family, props.form.model).supportsVideo,
+  () =>
+    generationCapabilitiesForFamily(props.form.family, props.form.model, props.form.pipeline)
+      .supportsVideo,
+);
+const guidanceCaps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.model?.guidance_capabilities,
+  ),
 );
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
@@ -118,16 +128,29 @@ const sourceDimensions = computed(() => {
     <label class="field"
       ><span>Guidance</span
       ><input
-        v-model.number="form.guidance"
+        :value="guidanceCaps.fixedGuidance ?? form.guidance"
         class="control"
         type="number"
         inputmode="decimal"
         step="0.1"
         min="0"
         max="100"
+        :disabled="!guidanceCaps.guidanceAdjustable"
         :aria-invalid="guidanceError ? 'true' : undefined"
+        @input="
+          guidanceCaps.guidanceAdjustable &&
+          (form.guidance = Number(($event.target as HTMLInputElement).value))
+        "
     /></label>
   </div>
+  <p
+    v-if="!guidanceCaps.guidanceAdjustable"
+    class="mobile-generate-validation"
+    data-test="mobile-fixed-guidance-hint"
+  >
+    Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to
+    adjust it.
+  </p>
   <p
     v-if="stepsError || guidanceError"
     class="mobile-generate-validation"

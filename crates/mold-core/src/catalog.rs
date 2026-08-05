@@ -138,6 +138,11 @@ pub fn build_model_catalog(
             supports_extend: Some(manifest.family == "ltx2"),
             supports_sequence: Some(chain_capable_family(&manifest.family)),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+            guidance_capabilities: Some(crate::GuidanceCapabilities::for_recipe(
+                &manifest.family,
+                &manifest.name,
+                None,
+            )),
         });
     }
 
@@ -158,6 +163,11 @@ pub fn build_model_catalog(
         let resolution = resolution_defaults(name, &family);
         let is_ltx2 = family == "ltx2";
         let sequence_capable = chain_capable_family(&family);
+        let guidance_identity = format!(
+            "{} {}",
+            name,
+            model_cfg.description.as_deref().unwrap_or_default()
+        );
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -188,7 +198,7 @@ pub fn build_model_catalog(
             },
             info: ModelInfo {
                 name: name.clone(),
-                family,
+                family: family.clone(),
                 size_gb,
                 is_loaded: loaded_model.is_some_and(|loaded| engine_is_loaded && loaded == name),
                 last_used: None,
@@ -204,6 +214,11 @@ pub fn build_model_catalog(
             supports_extend: Some(is_ltx2),
             supports_sequence: Some(sequence_capable),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+            guidance_capabilities: Some(crate::GuidanceCapabilities::for_recipe(
+                &family,
+                &guidance_identity,
+                None,
+            )),
         });
     }
 
@@ -382,6 +397,34 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_advertises_default_ltx_guidance_recipe() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let capability = |name: &str| {
+            catalog
+                .iter()
+                .find(|model| model.name == name)
+                .and_then(|model| model.guidance_capabilities)
+                .expect("current model rows advertise guidance capabilities")
+        };
+        assert_eq!(
+            capability("ltx-2.3-22b-distilled:fp8"),
+            crate::GuidanceCapabilities::FIXED_ONE,
+        );
+        assert_eq!(
+            capability("ltx-2.3-22b-dev:fp8"),
+            crate::GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+        assert_eq!(
+            capability("ltx-video-0.9.8-13b-distilled:bf16"),
+            crate::GuidanceCapabilities::FIXED_ONE,
+        );
+        assert_eq!(
+            capability("ltx-video-0.9.8-13b-dev:bf16"),
+            crate::GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+    }
+
+    #[test]
     fn build_model_catalog_marks_downloaded_manifest_models() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("downloaded");
@@ -497,6 +540,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             }
         }
 

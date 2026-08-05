@@ -43,6 +43,7 @@ import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ApiTarget } from "../lib/api/client";
 import type { Ltx2CameraControlInfo, ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
+import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { base64ToDataUrl } from "../lib/image";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
@@ -88,6 +89,14 @@ const props = withDefaults(
 const emit = defineEmits<{ submit: [] }>();
 
 const draft = useSequenceDraftStore();
+const guidanceCaps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.selectedModel?.guidance_capabilities,
+  ),
+);
 
 const motionTail = computed(() => sequenceMotionTailFrames(props.selectedModel));
 const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
@@ -107,7 +116,9 @@ const activeIndex = computed(() =>
 const advancedCount = computed(
   () =>
     Number(Boolean(draft.openingImage)) +
-    Number(Boolean(activeClip.value?.negativePrompt.trim())) +
+    Number(
+      guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
+    ) +
     Number(Boolean(activeClip.value?.cameraControl)) +
     Number(draft.enableAudio),
 );
@@ -584,7 +595,18 @@ function sourceImageMime(filename: string): string {
       </details>
       <label v-if="activeClip" class="field" data-test="mobile-sequence-advanced-negative">
         <span>Clip {{ activeIndex + 1 }} negative prompt</span>
-        <input v-model="activeClip.negativePrompt" class="control" placeholder="Optional" />
+        <input
+          v-model="activeClip.negativePrompt"
+          class="control"
+          placeholder="Optional"
+          :disabled="!guidanceCaps.supportsNegativePrompt"
+        />
+        <small
+          v-if="!guidanceCaps.supportsNegativePrompt"
+          data-test="mobile-sequence-negative-unavailable-hint"
+        >
+          Saved for reuse, but this distilled recipe does not use negative-prompt guidance.
+        </small>
       </label>
       <label
         v-if="activeClip && selectedModel?.family === 'ltx2'"

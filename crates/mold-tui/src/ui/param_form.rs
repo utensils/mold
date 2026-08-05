@@ -205,6 +205,9 @@ fn field_value(state: &GenerateState, field: ParamField) -> String {
             create_form::detail_dots(state.params.steps, DETAIL_MIN, DETAIL_MAX),
             state.params.steps
         ),
+        ParamField::Guidance if !state.guidance_adjustable() => {
+            "1.0 · fixed (distilled CFG)".into()
+        }
         _ => state.params.display_value(&field),
     }
 }
@@ -236,6 +239,7 @@ fn row_lines(
             };
             let suffix = match field {
                 ParamField::Model => " \u{25be}".to_string(),
+                ParamField::Guidance if !state.guidance_adjustable() => String::new(),
                 f if selected && adjustable(*f) => " \u{25c0}\u{25b6}".to_string(),
                 _ => String::new(),
             };

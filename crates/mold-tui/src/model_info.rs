@@ -209,9 +209,14 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
 /// explicit `false` hides a control the checkpoint cannot honor.
 pub fn capabilities_for_model(
     family: &str,
+    model: &str,
     advertised_audio_support: Option<bool>,
+    advertised_guidance: Option<mold_core::GuidanceCapabilities>,
 ) -> ModelCapabilities {
     let mut caps = capabilities_for_family(family);
+    caps.supports_negative_prompt = advertised_guidance
+        .unwrap_or_else(|| mold_core::GuidanceCapabilities::for_recipe(family, model, None))
+        .supports_negative_prompt;
     if advertised_audio_support == Some(false) {
         caps.supports_audio = false;
     }
@@ -303,10 +308,37 @@ mod tests {
 
     #[test]
     fn checkpoint_audio_fact_can_disable_ltx2_audio_without_enabling_other_families() {
-        assert!(capabilities_for_model("ltx2", None).supports_audio);
-        assert!(capabilities_for_model("ltx2", Some(true)).supports_audio);
-        assert!(!capabilities_for_model("ltx2", Some(false)).supports_audio);
-        assert!(!capabilities_for_model("ltx-video", Some(true)).supports_audio);
+        assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None).supports_audio);
+        assert!(capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None).supports_audio);
+        assert!(!capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None).supports_audio);
+        assert!(
+            !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None).supports_audio
+        );
+    }
+
+    #[test]
+    fn ltx_negative_prompt_support_tracks_the_checkpoint_recipe() {
+        assert!(
+            capabilities_for_model("ltx2", "ltx-2.3-22b-dev:fp8", None, None)
+                .supports_negative_prompt
+        );
+        assert!(
+            !capabilities_for_model("ltx2", "ltx-2.3-22b-distilled:fp8", None, None)
+                .supports_negative_prompt
+        );
+        assert!(
+            capabilities_for_model("ltx-video", "ltx-video-0.9.8-13b-dev:bf16", None, None,)
+                .supports_negative_prompt
+        );
+        assert!(
+            !capabilities_for_model(
+                "ltx2",
+                "hf:opaque/checkpoint",
+                None,
+                Some(mold_core::GuidanceCapabilities::FIXED_ONE),
+            )
+            .supports_negative_prompt
+        );
     }
 
     #[test]
