@@ -287,6 +287,8 @@ async function editSequence(entry: MergedPrint) {
 function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
+  const selectedForBulkDelete =
+    selectMode.value && bulkSelection.value.has(item.filename) && bulkSelection.value.size > 1;
   return [
     ...(isSequencePrint(entry)
       ? [
@@ -351,9 +353,12 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     { separator: true },
     {
-      label: "Delete",
+      label: selectedForBulkDelete ? `Delete ${bulkSelection.value.size} selected` : "Delete",
       danger: true,
-      action: () => deletePrint(entry),
+      action: () => {
+        if (selectedForBulkDelete) void deleteSelectedPrints();
+        else deletePrint(entry);
+      },
     },
   ];
 }
