@@ -1,6 +1,7 @@
 import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
+import type { ExpandTask } from "@studio/lib/expandTask";
 
 export type HostSelectionPolicy = string | null;
 
@@ -8,6 +9,8 @@ export interface PreparedExpansionInputs {
   sourcePrompt: string;
   model: string;
   family: string;
+  /** Frozen conditioning policy used to create the reviewed rewrite. */
+  task: ExpandTask;
   requestedCount: number;
   /** Style-preset chip active when the expansion was requested (`null` = none).
    * Frozen with the batch — prepared work keeps the chip as its indicator. */
@@ -32,6 +35,7 @@ export interface QuickExpansionSnapshot {
   expandedPrompt: string;
   model: string;
   family: string;
+  task: ExpandTask;
   /** Chip active when the quick expansion was requested — the bake-and-clear
    * apply clears the live chip, and undo restores it from here. */
   stylePreset: string | null;
@@ -43,6 +47,7 @@ export interface CurrentQuickExpansionInputs {
   expandedPrompt: string;
   model: string;
   family: string;
+  task: ExpandTask;
   selectedHostPolicy: HostSelectionPolicy;
   readyHostIds: ReadonlySet<string>;
   hostLabels: ReadonlyMap<string, string>;
@@ -182,6 +187,9 @@ export function preparedExpansionStaleReasons(
   if (current.family !== batch.family) {
     reasons.push(`Model family changed from "${batch.family}" to "${current.family}".`);
   }
+  if (current.task !== batch.task) {
+    reasons.push(`Conditioning changed from ${batch.task} to ${current.task}.`);
+  }
   const styleReason = styleStaleReason(batch.stylePreset, current.stylePreset);
   if (styleReason) reasons.push(styleReason);
   if (current.requestedCount !== batch.requestedCount) {
@@ -225,6 +233,9 @@ export function quickExpansionStaleReasons(
   }
   if (current.family !== snapshot.family) {
     reasons.push(`Model family changed from "${snapshot.family}" to "${current.family}".`);
+  }
+  if (current.task !== snapshot.task) {
+    reasons.push(`Conditioning changed from ${snapshot.task} to ${current.task}.`);
   }
   if (current.selectedHostPolicy !== snapshot.selectedHostPolicy) {
     reasons.push(

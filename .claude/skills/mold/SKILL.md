@@ -95,6 +95,9 @@ mold expand "cyberpunk city" --variations 5
 # Expand as JSON
 mold expand "a cat" --variations 3 --json
 
+# Preview conditioned video expansion without attaching media
+mold expand "she turns" --model ltx-2-19b-distilled:fp8 --task image-to-video
+
 # Generate with expansion (short prompt -> detailed prompt -> image)
 mold run "a cat" --expand
 
@@ -908,7 +911,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
   - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
   - `POST /api/chain-jobs/:id/amend` — edit a settled/queued sequence in place: body is `AmendRequest` (the FULL edited `stages[]` plus optional `motion_tail_frames`/`fps`/`seed`/`steps`/`guidance`/`enable_audio` overlays; model, size, output format, placement, strength, and batch provenance are NOT amendable). Returns 202 `AmendResponse` (flattened `ChainJobSummary` + `preserved_stages`) and requeues from the earliest dirty clip; `cut`↔`fade` and fade-length edits re-finalize with zero re-renders
   - `DELETE /api/chain-jobs/:id` · `POST /api/chain-jobs/gc` · `GET /api/chain-jobs/:id/stages/:idx/preview`
-- `POST /api/expand` — LLM prompt expansion; optional `style` is absorbed as a natural-language directive
+- `POST /api/expand` — LLM prompt expansion; optional `style` is absorbed as a natural-language directive and additive `task` selects T2V/I2V/V2V/retake/keyframe/audio-driven/audio policy without carrying source media
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/discovery/peers` — cached `_mold._tcp` peers visible from the server's LAN; call only when `/api/capabilities.discovery.can_browse` is true, then connect to the returned URL directly
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded

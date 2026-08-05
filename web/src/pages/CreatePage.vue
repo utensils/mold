@@ -39,6 +39,10 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import {
+  expansionTaskForRequest,
+  type ExpandTask,
+} from "@studio/lib/expandTask";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -236,6 +240,7 @@ interface QuickPreparedExpansion {
   originalPrompt: string;
   model: string;
   family: string;
+  task: ExpandTask;
   selectedHostPolicy: string;
   route: HostRoute | null;
 }
@@ -245,6 +250,7 @@ interface PreparedWebBatch {
   sourcePrompt: string;
   model: string;
   family: string;
+  task: ExpandTask;
   requestedCount: number;
   selectedHostPolicy: string;
   baseRequest: GenerateRequestWire;
@@ -283,6 +289,11 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
     reasons.push(
       `Model family changed from "${batch.family}" to "${currentFamily.value}".`,
     );
+  const currentTask = expansionTaskForCurrentOutput(
+    form.toRequest(currentModel.value),
+  );
+  if (currentTask !== batch.task)
+    reasons.push(`Conditioning changed from ${batch.task} to ${currentTask}.`);
   if (form.state.value.batchSize !== batch.requestedCount)
     reasons.push(
       `Batch changed from ${batch.requestedCount} to ${form.state.value.batchSize}.`,
@@ -310,6 +321,13 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
   if (currentFamily.value !== snapshot.family)
     reasons.push(
       `Model family changed from "${snapshot.family}" to "${currentFamily.value}".`,
+    );
+  const currentTask = expansionTaskForCurrentOutput(
+    form.toRequest(currentModel.value),
+  );
+  if (currentTask !== snapshot.task)
+    reasons.push(
+      `Conditioning changed from ${snapshot.task} to ${currentTask}.`,
     );
   if (routing.targetId.value !== snapshot.selectedHostPolicy)
     reasons.push(
@@ -457,6 +475,18 @@ function consumeOutputQuery(query: Record<string, unknown>) {
 
 const expandClipId = ref<string | null>(null);
 const expandStagePrompt = ref("");
+const expandTask = ref<ExpandTask>("text-to-image");
+
+function expansionTaskForCurrentOutput(
+  request: GenerateRequestWire,
+): ExpandTask {
+  if (sequenceMode.value) {
+    return expansionTaskForRequest(currentFamily.value, {
+      source_image: draft.openingImage?.base64,
+    });
+  }
+  return expansionTaskForRequest(currentFamily.value, request);
+}
 // The composer's style chip steers the main-prompt expansion as natural
 // language. Sequence clips are their own text — the style row never touches
 // them.
@@ -2420,6 +2450,7 @@ async function onExpand() {
     const model = form.state.value.model;
     const selectedHostPolicy = routing.targetId.value;
     const baseRequest = form.toRequest(currentModel.value);
+    const task = expansionTaskForCurrentOutput(baseRequest);
     const result =
       decision.kind === "chain"
         ? await routing.resolveFeasibleChain(
@@ -2442,6 +2473,7 @@ async function onExpand() {
           model_family: family,
           variations: count,
           ...(style ? { style } : {}),
+          task,
         },
         undefined,
         submitRoute?.target,
@@ -2452,6 +2484,7 @@ async function onExpand() {
         sourcePrompt,
         model,
         family,
+        task,
         requestedCount: count,
         selectedHostPolicy,
         baseRequest,
@@ -2468,6 +2501,9 @@ async function onExpand() {
   const route = resolveSubmitRoute();
   if (route === false) return;
   expandRoute.value = cloneRoute(route);
+  expandTask.value = expansionTaskForCurrentOutput(
+    form.toRequest(currentModel.value),
+  );
   showExpand.value = true;
 }
 
@@ -2477,6 +2513,16 @@ function onExpandClip(clipId: string, prompt: string) {
   expandRoute.value = cloneRoute(route);
   expandClipId.value = clipId;
   expandStagePrompt.value = prompt;
+  const index = draft.clips.findIndex((clip) => clip.id === clipId);
+  const clip = index >= 0 ? draft.clips[index] : null;
+  const sourceImage =
+    clip?.sourceImage?.base64 ||
+    (index === 0 ? draft.openingImage?.base64 : undefined);
+  expandTask.value = sourceImage
+    ? "image-to-video"
+    : index > 0 && clip?.transition === "smooth"
+      ? "video-to-video"
+      : expansionTaskForRequest(currentFamily.value, {});
   showExpand.value = true;
 }
 
@@ -2510,6 +2556,7 @@ function applyExpandedPrompt(v: string) {
     originalPrompt: form.state.value.prompt.trim(),
     model: form.state.value.model,
     family: currentFamily.value,
+    task: expandTask.value,
     selectedHostPolicy: routing.targetId.value,
     route: cloneRoute(expandRoute.value),
   };
@@ -3474,6 +3521,7 @@ onBeforeUnmount(() => {
       :expand="form.state.value.expand"
       :current-model="currentModel"
       :style-directive="expandStyleDirective"
+      :task="expandTask"
       :target="expandRoute?.target"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
       @apply-prompt="applyExpandedPrompt"

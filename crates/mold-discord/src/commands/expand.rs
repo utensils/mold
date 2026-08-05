@@ -44,6 +44,7 @@ pub async fn expand(
         model_family: family.clone(),
         variations,
         style: None,
+        task: None,
     };
 
     match ctx.data().client.expand_prompt(&req).await {
@@ -76,6 +77,7 @@ mod tests {
             model_family: "flux".to_string(),
             variations: 1,
             style: None,
+            task: None,
         };
         assert_eq!(req.prompt, "a cat");
         assert_eq!(req.model_family, "flux");
@@ -89,6 +91,7 @@ mod tests {
             model_family: "sdxl".to_string(),
             variations: 3,
             style: None,
+            task: None,
         };
         assert_eq!(req.variations, 3);
         assert_eq!(req.model_family, "sdxl");

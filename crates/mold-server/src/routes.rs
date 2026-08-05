@@ -672,9 +672,6 @@ async fn prepare_generation(
 
     let preferred_gpu = validate_multi_gpu_placement(state, request.placement.as_ref())?;
 
-    // Expand prompt if requested (before validation, so the expanded prompt gets validated)
-    maybe_expand_prompt(state, request, preferred_gpu).await?;
-
     // Catalog (`cv:*` / `hf:*`) IDs aren't in the static manifest, so the
     // pure-mold-core family lookup returns `None` for them. Run the live
     // single-id install first so the intent cache has the entry; then
@@ -693,6 +690,9 @@ async fn prepare_generation(
     // static manifest first (covers all built-in models), then falls back to the
     // catalog DB entry (covers `cv:*` / `hf:*` models installed above).
     let resolved_family = model_manager::family_for_model(state, &request.model).await;
+    // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
+    // their authoritative family and conditioning-aware task template.
+    maybe_expand_prompt(state, request, preferred_gpu, resolved_family.as_deref()).await?;
     // Fill in a family-aware output format default when the caller omitted the
     // field. This must happen before validation so the validator sees a concrete
     // format and can gate on it correctly.
@@ -1691,6 +1691,7 @@ async fn maybe_expand_prompt(
     state: &AppState,
     req: &mut mold_core::GenerateRequest,
     preferred_gpu: Option<usize>,
+    resolved_family: Option<&str>,
 ) -> Result<(), ApiError> {
     if req.expand != Some(true) {
         return Ok(());
@@ -1721,9 +1722,9 @@ async fn maybe_expand_prompt(
     }
 
     // Resolve model family for prompt style
-    let model_family = config
-        .resolved_model_config(&req.model)
-        .family
+    let model_family = resolved_family
+        .map(str::to_owned)
+        .or_else(|| config.resolved_model_config(&req.model).family)
         .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()))
         .unwrap_or_else(|| {
             tracing::warn!(
@@ -1733,7 +1734,8 @@ async fn maybe_expand_prompt(
             "flux".to_string()
         });
 
-    let expand_config = expand_settings.to_expand_config(&model_family, 1);
+    let mut expand_config = expand_settings.to_expand_config(&model_family, 1);
+    expand_config.task = mold_core::ExpandTask::for_generation(&model_family, req);
     let original_prompt = req.prompt.clone();
 
     // Drop config lock before blocking
@@ -1803,6 +1805,9 @@ fn expand_config_for_request(
 ) -> mold_core::ExpandConfig {
     let mut config = settings.to_expand_config(&req.model_family, req.variations);
     config.style = req.style.clone();
+    config.task = req
+        .task
+        .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
     config
 }
 
@@ -7072,19 +7077,24 @@ mod tests {
             model_family: "flux".to_string(),
             variations: 2,
             style: Some("oil painting".to_string()),
+            task: Some(mold_core::ExpandTask::ImageToVideo),
         };
         let config = expand_config_for_request(&settings, &req);
         assert_eq!(config.style.as_deref(), Some("oil painting"));
         assert_eq!(config.model_family, "flux");
         assert_eq!(config.variations, 2);
+        assert_eq!(config.task, mold_core::ExpandTask::ImageToVideo);
 
         let bare = mold_core::ExpandRequest {
             prompt: "a cat".to_string(),
             model_family: "flux".to_string(),
             variations: 1,
             style: None,
+            task: None,
         };
-        assert!(expand_config_for_request(&settings, &bare).style.is_none());
+        let config = expand_config_for_request(&settings, &bare);
+        assert!(config.style.is_none());
+        assert_eq!(config.task, mold_core::ExpandTask::TextToImage);
     }
 
     #[test]
@@ -7746,7 +7756,7 @@ mod tests {
         }))
         .unwrap();
 
-        maybe_expand_prompt(&state, &mut request, None)
+        maybe_expand_prompt(&state, &mut request, None, None)
             .await
             .unwrap();
 

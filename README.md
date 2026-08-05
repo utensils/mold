@@ -32,8 +32,10 @@ Mold Studio brings local and remote generation into one native desktop app for
 macOS and Linux:
 
 - **Create** images, edits, upscales, and multi-stage videos with
-  capability-aware controls, prompt expansion, batches, LoRAs, ControlNet, and
-  reproducible seeds.
+  capability-aware controls, conditioning-aware prompt expansion, batches,
+  LoRAs, ControlNet, and reproducible seeds. Video expansion follows the actual
+  T2V, I2V, V2V, retake, keyframe, or audio-driven task without uploading source
+  media to the expansion endpoint.
 - **Library** merges prints from every connected machine into a fast,
   searchable gallery with saved prompts, settings, provenance, and native media
   actions, multi-select on every GUI surface, delete-across-devices semantics,

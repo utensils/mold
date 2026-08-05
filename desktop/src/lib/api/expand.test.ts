@@ -36,6 +36,20 @@ describe("expandPrompt", () => {
     expect(sentBody()).toEqual({ prompt: "a cat", model_family: "sdxl", variations: 5 });
   });
 
+  it("sends resolved conditioning task without media bytes", async () => {
+    await expandPrompt("she looks up", {
+      modelFamily: "ltx2",
+      variations: 3,
+      task: "image-to-video",
+    });
+    expect(sentBody()).toEqual({
+      prompt: "she looks up",
+      model_family: "ltx2",
+      variations: 3,
+      task: "image-to-video",
+    });
+  });
+
   it("sends variations alone when no family is given", async () => {
     await expandPrompt("a cat", { variations: 3 });
     const body = sentBody();

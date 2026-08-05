@@ -164,7 +164,161 @@ impl std::str::FromStr for Scheduler {
     }
 }
 
-/// Request to expand a short prompt into detailed image generation prompts.
+/// Resolved generation task that shapes prompt expansion.
+///
+/// This is intentionally semantic rather than a media payload: clients tell
+/// the expander which conditioning contract the generation route resolved,
+/// while source images, videos, keyframes, and audio remain on the generation
+/// request that owns them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExpandTask {
+    /// Ordinary image generation (the backward-compatible default).
+    #[default]
+    TextToImage,
+    /// Video generated from text alone.
+    TextToVideo,
+    /// Motion generated from an authoritative opening image.
+    ImageToVideo,
+    /// Transformation or continuation of an authoritative source video.
+    VideoToVideo,
+    /// Partial regeneration of a bounded source-video range.
+    Retake,
+    /// Motion connecting authoritative keyframe images.
+    KeyframeInterpolation,
+    /// Video motion synchronized to authoritative conditioning audio.
+    AudioDrivenVideo,
+    /// Audio-only generation from text.
+    TextToAudio,
+}
+
+impl ExpandTask {
+    /// Backward-compatible policy for callers that only send a family.
+    pub fn for_family(family: &str) -> Self {
+        match family.trim().to_ascii_lowercase().as_str() {
+            "ltx2" | "ltx-2" | "ltx-video" => Self::TextToVideo,
+            _ => Self::TextToImage,
+        }
+    }
+
+    /// Resolve the narrow expansion policy from an admitted generation
+    /// request. More authoritative conditioning wins over incidental media.
+    pub fn for_generation(family: &str, req: &GenerateRequest) -> Self {
+        Self::for_conditioning(
+            family,
+            req.pipeline,
+            req.source_image.is_some(),
+            req.source_video.is_some()
+                || req
+                    .source_video_path
+                    .as_deref()
+                    .is_some_and(|path| !path.trim().is_empty())
+                || req.extend_video.is_some()
+                || req
+                    .extend_video_path
+                    .as_deref()
+                    .is_some_and(|path| !path.trim().is_empty()),
+            req.audio_file.is_some()
+                || req
+                    .audio_file_path
+                    .as_deref()
+                    .is_some_and(|path| !path.trim().is_empty()),
+            req.keyframes.as_ref().map_or(0, Vec::len),
+            req.retake_range.is_some(),
+        )
+    }
+
+    /// Resolve from the minimal conditioning facts available before a full
+    /// generation request is assembled (notably the CLI expansion phase).
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_conditioning(
+        family: &str,
+        pipeline: Option<Ltx2PipelineMode>,
+        has_source_image: bool,
+        has_source_video: bool,
+        has_audio: bool,
+        keyframe_count: usize,
+        has_retake_range: bool,
+    ) -> Self {
+        if !matches!(
+            family.trim().to_ascii_lowercase().as_str(),
+            "ltx2" | "ltx-2" | "ltx-video"
+        ) {
+            return Self::TextToImage;
+        }
+        match pipeline {
+            Some(Ltx2PipelineMode::T2a) => return Self::TextToAudio,
+            Some(Ltx2PipelineMode::Retake) => return Self::Retake,
+            Some(Ltx2PipelineMode::Keyframe) => return Self::KeyframeInterpolation,
+            Some(Ltx2PipelineMode::A2Vid | Ltx2PipelineMode::LipDub) => {
+                return Self::AudioDrivenVideo;
+            }
+            // Other explicit pipelines win over incidental incompatible
+            // selectors, but their actual image/video conditioning still
+            // distinguishes T2V, I2V, and V2V below.
+            Some(_) => {}
+            None => {
+                // Mirrors `validation::ltx2_implicit_pipeline`: retake wins,
+                // then audio, then keyframes, then source video.
+                if has_retake_range {
+                    return Self::Retake;
+                }
+                if has_audio {
+                    return Self::AudioDrivenVideo;
+                }
+                if keyframe_count > 1 {
+                    return Self::KeyframeInterpolation;
+                }
+            }
+        }
+        if has_source_video {
+            return Self::VideoToVideo;
+        }
+        if has_source_image {
+            return Self::ImageToVideo;
+        }
+        Self::TextToVideo
+    }
+}
+
+impl std::fmt::Display for ExpandTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TextToImage => "text-to-image",
+            Self::TextToVideo => "text-to-video",
+            Self::ImageToVideo => "image-to-video",
+            Self::VideoToVideo => "video-to-video",
+            Self::Retake => "retake",
+            Self::KeyframeInterpolation => "keyframe-interpolation",
+            Self::AudioDrivenVideo => "audio-driven-video",
+            Self::TextToAudio => "text-to-audio",
+        })
+    }
+}
+
+impl std::str::FromStr for ExpandTask {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "text-to-image" => Ok(Self::TextToImage),
+            "text-to-video" => Ok(Self::TextToVideo),
+            "image-to-video" => Ok(Self::ImageToVideo),
+            "video-to-video" => Ok(Self::VideoToVideo),
+            "retake" => Ok(Self::Retake),
+            "keyframe-interpolation" => Ok(Self::KeyframeInterpolation),
+            "audio-driven-video" => Ok(Self::AudioDrivenVideo),
+            "text-to-audio" => Ok(Self::TextToAudio),
+            _ => Err(format!(
+                "unknown expansion task '{value}'. Valid: text-to-image, text-to-video, \
+                 image-to-video, video-to-video, retake, keyframe-interpolation, \
+                 audio-driven-video, text-to-audio"
+            )),
+        }
+    }
+}
+
+/// Request to expand a short prompt into a generation-aware prompt.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExpandRequest {
     /// Short prompt to expand
@@ -184,6 +338,10 @@ pub struct ExpandRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "gritty film noir")]
     pub style: Option<String>,
+    /// Resolved generation/conditioning task. Additive: older clients omit it
+    /// and the server infers text-to-video for known video families.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<ExpandTask>,
 }
 
 fn default_expand_model_family() -> String {
@@ -2750,6 +2908,73 @@ mod tests {
     }
 
     #[test]
+    fn expand_request_task_is_additive_and_backward_compatible() {
+        let legacy: ExpandRequest =
+            serde_json::from_str(r#"{"prompt":"a wave","model_family":"ltx2","variations":1}"#)
+                .unwrap();
+        assert_eq!(legacy.task, None);
+
+        let contextual: ExpandRequest = serde_json::from_str(
+            r#"{"prompt":"a wave","model_family":"ltx2","task":"image-to-video"}"#,
+        )
+        .unwrap();
+        assert_eq!(contextual.task, Some(ExpandTask::ImageToVideo));
+        assert!(serde_json::to_string(&legacy)
+            .unwrap()
+            .find("task")
+            .is_none());
+    }
+
+    #[test]
+    fn generation_expansion_task_follows_video_conditioning_priority() {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a wave","model":"ltx-2-19b-distilled:fp8","width":768,"height":512,"steps":8,"batch_size":1}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::TextToVideo
+        );
+
+        req.source_image = Some(vec![1]);
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::ImageToVideo
+        );
+
+        req.keyframes = Some(vec![KeyframeCondition {
+            frame: 0,
+            image: vec![2],
+        }]);
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::ImageToVideo
+        );
+
+        req.keyframes.as_mut().unwrap().push(KeyframeCondition {
+            frame: 8,
+            image: vec![3],
+        });
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::KeyframeInterpolation
+        );
+
+        req.audio_file = Some(vec![4]);
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::AudioDrivenVideo
+        );
+
+        req.audio_file = None;
+        req.pipeline = Some(Ltx2PipelineMode::LipDub);
+        assert_eq!(
+            ExpandTask::for_generation("ltx2", &req),
+            ExpandTask::AudioDrivenVideo
+        );
+    }
+
+    #[test]
     fn output_format_new_formats() {
         assert_eq!("apng".parse::<OutputFormat>().unwrap(), OutputFormat::Apng);
         assert_eq!("webp".parse::<OutputFormat>().unwrap(), OutputFormat::Webp);
@@ -2781,6 +3006,7 @@ mod tests {
             model_family: "flux".to_string(),
             variations: 4,
             style: Some("gritty film noir".to_string()),
+            task: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ExpandRequest = serde_json::from_str(&json).unwrap();
@@ -2796,6 +3022,7 @@ mod tests {
             model_family: "sdxl".to_string(),
             variations: 1,
             style: None,
+            task: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // No style set — the field stays off the wire entirely.

@@ -721,12 +721,14 @@ impl DependencyPreparer for PostUpscalePreparer {
             let family = config
                 .resolved_model_config(&request.model)
                 .family
+                .or(crate::model_manager::family_for_model(&state, &request.model).await)
                 .or_else(|| {
                     mold_core::manifest::find_manifest(&request.model)
                         .map(|manifest| manifest.family.clone())
                 })
                 .unwrap_or_else(|| "flux".to_string());
-            let expand_config = settings.to_expand_config(&family, 1);
+            let mut expand_config = settings.to_expand_config(&family, 1);
+            expand_config.task = mold_core::ExpandTask::for_generation(&family, &request);
             let preferred_gpu = state
                 .gpu_pool
                 .resolve_explicit_placement_gpu(request.placement.as_ref())?;

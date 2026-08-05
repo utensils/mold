@@ -15,7 +15,7 @@ import Icon from "@ui/components/Icon.vue";
 import { expandPrompt } from "../api";
 import type { StreamTarget } from "../api";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
-import type { ExpandFormState, ModelInfoExtended } from "../types";
+import type { ExpandFormState, ExpandTask, ModelInfoExtended } from "../types";
 
 const props = defineProps<{
   open: boolean;
@@ -29,6 +29,8 @@ const props = defineProps<{
    * text — and never appended to the prompt itself.
    */
   styleDirective?: string | null;
+  /** Resolved generation/conditioning policy for this prompt or clip. */
+  task: ExpandTask;
   /** Exact generation route. Expansion must use the same host as the print. */
   target?: StreamTarget;
 }>();
@@ -74,6 +76,7 @@ async function preview() {
       model_family: effectiveFamily.value,
       variations: props.expand.variations,
       ...(style ? { style } : {}),
+      task: props.task,
     };
     const res = props.target
       ? await expandPrompt(request, undefined, props.target)

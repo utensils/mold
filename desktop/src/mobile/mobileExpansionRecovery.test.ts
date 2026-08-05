@@ -10,6 +10,7 @@ const inputs: PreparedExpansionInputs = {
   sourcePrompt: "a lighthouse",
   model: "flux-dev:q8",
   family: "flux",
+  task: "text-to-image",
   requestedCount: 3,
   stylePreset: null,
   selectedHostPolicy: "studio",

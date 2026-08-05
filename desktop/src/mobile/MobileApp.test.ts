@@ -895,7 +895,7 @@ describe("MobileApp generation queue", () => {
     // The chip travels as a natural-language directive, never a prompt suffix.
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse",
-      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      { variations: 1, modelFamily: model.family, task: "text-to-video", style: cinematicHint },
       target,
     );
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
@@ -994,7 +994,7 @@ describe("MobileApp generation queue", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "three storm studies",
-      { variations: 3, modelFamily: model.family, style: cinematicHint },
+      { variations: 3, modelFamily: model.family, task: "text-to-video", style: cinematicHint },
       target,
     );
     // Prepared keeps the chip — it is the frozen-style indicator…
@@ -1103,7 +1103,7 @@ describe("MobileApp generation queue", () => {
     // The retried request reuses the immutable recovery record's frozen style.
     expect(expandPrompt).toHaveBeenLastCalledWith(
       "lighthouse",
-      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      { variations: 1, modelFamily: model.family, task: "text-to-video", style: cinematicHint },
       target,
     );
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
@@ -1515,7 +1515,7 @@ describe("MobileApp generation queue", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "three variations of a storm",
-      { variations: 3, modelFamily: model.family },
+      { variations: 3, modelFamily: model.family, task: "text-to-video" },
       target,
     );
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(0);

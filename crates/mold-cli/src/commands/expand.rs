@@ -36,9 +36,10 @@ pub async fn run(
     json_output: bool,
     backend_override: Option<&str>,
     model_override: Option<&str>,
+    task_override: Option<&str>,
 ) -> Result<()> {
     mold_core::expand::validate_expansion_variation_count(variations)?;
-    let config = Config::load_or_default();
+    let mut config = Config::load_or_default();
     let mut expand_settings = config.expand.clone().with_env_overrides();
 
     // Apply overrides
@@ -63,12 +64,18 @@ pub async fn run(
 
     // Determine model family for prompt style
     let model_family = if let Some(model_name) = model {
+        crate::catalog_bridge::ensure_catalog_model(&mut config, model_name).await?;
         resolve_family(model_name, &config)
     } else {
         "flux".to_string() // Default to FLUX-style prompts
     };
 
-    let expand_config = expand_settings.to_expand_config(&model_family, variations);
+    let mut expand_config = expand_settings.to_expand_config(&model_family, variations);
+    if let Some(task) = task_override {
+        expand_config.task = task
+            .parse::<mold_core::ExpandTask>()
+            .map_err(anyhow::Error::msg)?;
+    }
 
     // Get expander (auto-pulls expand model if needed)
     let expander = create_expander(&expand_settings, &config).await?;

@@ -175,6 +175,7 @@ mold expand <PROMPT> [OPTIONS]
 | Flag                     | Description                    |
 | ------------------------ | ------------------------------ |
 | `-m, --model <MODEL>`    | Target model for style/context |
+| `--task <TASK>`          | Conditioning task to preview   |
 | `--variations <N>`       | Number of variations           |
 | `--json`                 | Output as JSON array           |
 | `--backend <URL>`        | Expansion backend override     |

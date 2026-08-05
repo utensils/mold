@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Prompt expansion now understands video tasks and their conditioning** ([#711](https://github.com/utensils/mold/issues/711)). One additive `task` value drives the server, CLI preview, CLI/TUI generation, Discord, web, desktop, and iPhone: T2V rewrites describe a chronological shot; I2V and V2V preserve their source as visual and temporal authority; retakes preserve everything outside the requested correction; keyframe interpolation treats every anchor as fixed; audio-driven video follows source timing and events; and text-to-audio avoids visual language. Existing `/api/expand` clients remain compatible when they omit `task`, while prepared batches and sequence clips freeze the derived task and become explicitly stale if conditioning changes. Expansion requests carry only the semantic task, never source media bytes.
+
 ### Changed
 
 - **Mold no longer consumes renamed Candle crates.** Upstream's official `candle-core`, `candle-nn`, and `candle-transformers` package identities now flow through the entire graph, so ecosystem crates such as `candle-flash-attn` share the same `Tensor` type and Flash Attention no longer needs a hidden `RUSTFLAGS` gate. Mold-owned LTX-Video code, Stable Diffusion component factories, GGUF in-memory builders, and efficient public-API quantization helpers now live in the `mold-ai-candle` workspace crate. The remaining backend-only changes use a narrow same-name `[patch.crates-io]` compatibility branch and are documented with upstream exit criteria in `docs/architecture/candle-extension.md`. The Candle 0.11 migration also changes LTX-Video STG to the transformer's hard skip list, avoiding execution of blocks whose old per-layer mask was zero.

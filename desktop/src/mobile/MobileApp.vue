@@ -19,6 +19,7 @@ import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -627,6 +628,7 @@ const preparedStaleReasons = computed(() => {
     sourcePrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, buildRequest(form)),
     requestedCount: effectiveBatchSize.value,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
@@ -652,6 +654,7 @@ const quickStaleReasons = computed(() => {
     expandedPrompt: form.prompt,
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, buildRequest(form)),
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
@@ -1838,10 +1841,12 @@ async function loadTemplate(template: GenerationTemplate): Promise<void> {
 }
 
 function expansionInputs(count: number): PreparedExpansionInputs {
+  const request = buildRequest(form);
   return {
     sourcePrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
+    task: expansionTaskForRequest(form.family, request),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
@@ -2009,6 +2014,7 @@ function commitExpandedPrompts(
       expandedPrompt: prompts[0]!,
       model: inputs.model,
       family: inputs.family,
+      task: inputs.task,
       stylePreset: inputs.stylePreset,
       selectedHostPolicy: inputs.selectedHostPolicy,
       route: { ...route, target: { ...route.target } },
@@ -2077,6 +2083,7 @@ async function expandForCurrentBatch(
       {
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
+        task: inputs.task,
         ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
@@ -2089,6 +2096,7 @@ async function expandForCurrentBatch(
       current.sourcePrompt !== inputs.sourcePrompt ||
       current.model !== inputs.model ||
       current.family !== inputs.family ||
+      current.task !== inputs.task ||
       current.requestedCount !== inputs.requestedCount ||
       current.stylePreset !== inputs.stylePreset ||
       current.selectedHostPolicy !== inputs.selectedHostPolicy ||
@@ -2372,6 +2380,7 @@ async function retryExpansionAfterPull(): Promise<void> {
       {
         variations: recovery.inputs.requestedCount,
         ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
+        task: recovery.inputs.task,
         ...(styleDirective ? { style: styleDirective } : {}),
       },
       recovery.route.target,
