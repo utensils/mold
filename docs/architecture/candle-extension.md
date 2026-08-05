@@ -29,6 +29,7 @@ Focused upstream submissions track each exit independently:
 - Stable Diffusion attention bounds: [huggingface/candle#3842](https://github.com/huggingface/candle/pull/3842)
 - Wuerstchen timestep dtype: [huggingface/candle#3843](https://github.com/huggingface/candle/pull/3843)
 - Native CUDA FP8 matmul: [huggingface/candle#3844](https://github.com/huggingface/candle/pull/3844)
+- Stable AArch64 FP16 vector storage: [huggingface/candle#3845](https://github.com/huggingface/candle/pull/3845)
 
 The former Metal quantized-matmul override is deliberately absent. Upstream's
 fused kernels already accumulate in F32, upstream fixed the valid BF16 GGML
