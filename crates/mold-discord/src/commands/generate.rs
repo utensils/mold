@@ -1154,6 +1154,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }
     }
 
@@ -1270,6 +1271,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -1304,6 +1306,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1326,6 +1329,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -1354,6 +1358,7 @@ mod tests {
             supports_extend: None,
             supports_sequence: None,
             extend_default_overlap_frames: None,
+            guidance_capabilities: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -1387,6 +1392,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1409,6 +1415,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -1438,6 +1445,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1460,6 +1468,7 @@ mod tests {
                 supports_extend: None,
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
+                guidance_capabilities: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

@@ -15,6 +15,7 @@ import {
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
+import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 
 const props = withDefaults(
   defineProps<{
@@ -44,10 +45,20 @@ const activeClip = computed(
 const activeIndex = computed(() =>
   activeClip.value ? draft.clips.findIndex((clip) => clip.id === activeClip.value?.id) : -1,
 );
+const guidanceCaps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.form.guidanceCapabilities,
+  ),
+);
 const activeCount = computed(
   () =>
     Number(Boolean(draft.openingImage)) +
-    Number(Boolean(activeClip.value?.negativePrompt.trim())) +
+    Number(
+      guidanceCaps.value.supportsNegativePrompt && Boolean(activeClip.value?.negativePrompt.trim()),
+    ) +
     Number(props.cameraControlsEnabled && Boolean(activeClip.value?.cameraControl)) +
     Number(draft.enableAudio),
 );
@@ -206,13 +217,21 @@ function reset() {
       >
         <textarea
           v-model="activeClip.negativePrompt"
+          :disabled="!guidanceCaps.supportsNegativePrompt"
           data-selectable
           rows="2"
           placeholder="blurry, low quality, deformed…"
           class="ms-textarea"
           aria-label="Active clip negative prompt"
         />
-        <div class="ms-chips">
+        <p
+          v-if="!guidanceCaps.supportsNegativePrompt"
+          class="ms-hint"
+          data-test="sequence-negative-unavailable-hint"
+        >
+          Saved for reuse, but this distilled recipe does not use negative-prompt guidance.
+        </p>
+        <div v-if="guidanceCaps.supportsNegativePrompt" class="ms-chips">
           <Chip v-for="word in NEGATIVE_QUICK_ADDS" :key="word" @click="addNegative(word)"
             >+ {{ word }}</Chip
           >

@@ -248,6 +248,16 @@ pub struct Ltx2Options {
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
 }
 
+fn require_local_hdr_exr_dir(hdr_exr_dir: Option<String>, local: bool) -> Result<Option<String>> {
+    if hdr_exr_dir.is_some() && !local {
+        anyhow::bail!(
+            "--hdr-exr-dir renders locally; re-run with --local — a remote server cannot write \
+             the EXR sidecar to your machine"
+        );
+    }
+    Ok(hdr_exr_dir)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
@@ -309,6 +319,10 @@ pub async fn run(
         temporal_upscale,
         guidance_overrides,
     } = ltx2;
+    // Keep the filesystem path out of every remote request shape. Local
+    // generation retains the exact user path so export metadata remains
+    // faithful to the sidecar written on this machine.
+    let hdr_exr_dir = require_local_hdr_exr_dir(hdr_exr_dir, local)?;
 
     // Load config and pull model-specific defaults.
     let ctx = CliContext::new(host.as_deref());
@@ -377,21 +391,11 @@ pub async fn run(
                 clip_frames: cf,
                 motion_tail: mt,
             } => {
-                // Chained EXR export is local-only: the ChainRequest wire
-                // carries no HDR fields, so a remote server could only
-                // silently drop the sidecar — the empty-directory failure
-                // #681 refused. The forced-local orchestrator carries the
-                // whole HDR authority instead (control id, adapter LoRAs,
-                // per-stage reference windows), so every stage renders a
-                // true regrade of its own slice of the reference (#688).
-                if hdr_exr_dir.is_some() && !local {
-                    anyhow::bail!(
-                        "--hdr-exr-dir with auto-chaining renders locally; re-run with --local \
-                         — a remote server cannot write the EXR sidecar to your machine \
-                         ({} frames auto-chains at {cf} frames per clip)",
-                        effective_frames.unwrap_or_default()
-                    );
-                }
+                // Chained EXR export reaches this arm only after the shared
+                // local-only gate above. The forced-local orchestrator carries
+                // the whole HDR authority (control id, adapter LoRAs, and
+                // per-stage reference windows), so every stage renders a true
+                // regrade of its own slice of the reference (#688).
                 warn_if_clamped(
                     clip_frames,
                     family
@@ -706,18 +710,31 @@ pub async fn run(
         prompt.to_string()
     };
     status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
-    if let Some(ref neg) = effective_negative_prompt {
-        let display_neg = if neg.chars().count() > 50 {
-            let truncated: String = neg.chars().take(47).collect();
-            format!("{truncated}...")
-        } else {
-            neg.clone()
-        };
+    let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
+        family.as_deref().unwrap_or_default(),
+        &req.model,
+        req.pipeline,
+    );
+    if !guidance_caps.adjustable {
         status!(
-            "{} Negative: \"{}\"",
-            theme::icon_info(),
-            display_neg.dimmed()
+            "{} Distilled recipe fixes CFG at 1.0 and does not use negative-prompt guidance; choose a Dev checkpoint with Auto or a guided pipeline to adjust it",
+            theme::icon_info()
         );
+    }
+    if guidance_caps.supports_negative_prompt {
+        if let Some(ref neg) = effective_negative_prompt {
+            let display_neg = if neg.chars().count() > 50 {
+                let truncated: String = neg.chars().take(47).collect();
+                format!("{truncated}...")
+            } else {
+                neg.clone()
+            };
+            status!(
+                "{} Negative: \"{}\"",
+                theme::icon_info(),
+                display_neg.dimmed()
+            );
+        }
     }
     if mask_image.is_some() {
         status!(
@@ -778,6 +795,7 @@ pub async fn run(
             status!("{} LTX-2 pipeline: {}", theme::icon_mode(), audio_mode);
         }
     }
+    let displayed_guidance = guidance_caps.fixed_scale.unwrap_or(effective_guidance);
     if audio_only_pipeline {
         // No raster to report. Printing the request's width and height here
         // would describe a frame this pipeline never renders.
@@ -785,7 +803,7 @@ pub async fn run(
             "{} Generating audio ({} steps, guidance {:.1})",
             theme::icon_info(),
             effective_steps,
-            effective_guidance,
+            displayed_guidance,
         );
     } else {
         status!(
@@ -794,7 +812,7 @@ pub async fn run(
             effective_width,
             effective_height,
             effective_steps,
-            effective_guidance,
+            displayed_guidance,
         );
     }
     status!("{}", "─".repeat(40).dimmed());
@@ -3330,15 +3348,37 @@ mod tests {
 
 #[cfg(test)]
 mod hdr_chain_guard_tests {
-    /// Chained EXR export renders locally: the ChainRequest wire carries no
-    /// HDR fields, so a remote submission could only silently drop the
-    /// sidecar — the empty-directory-beside-`✓ Saved` failure #681 refused.
-    /// The Chain arm must therefore reject hdr+remote with an error naming
-    /// `--local`, and must NOT reject hdr+local (that path builds the
-    /// ChainHdrInputs authority and hands it to the orchestrator).
-    ///
-    /// Asserted against the source because the guard sits inside the routing
-    /// match in a long function, the way the other CLI routing contracts are.
+    #[test]
+    fn remote_hdr_exr_is_rejected_before_request_construction() {
+        let path = "/tmp/client-side-exr".to_string();
+        let error = super::require_local_hdr_exr_dir(Some(path.clone()), false).unwrap_err();
+        assert!(error.to_string().contains("--local"), "got: {error:#}");
+        assert!(
+            error.to_string().contains("remote server"),
+            "got: {error:#}"
+        );
+
+        assert_eq!(
+            super::require_local_hdr_exr_dir(Some(path.clone()), true).unwrap(),
+            Some(path)
+        );
+        assert_eq!(super::require_local_hdr_exr_dir(None, false).unwrap(), None);
+
+        let source = include_str!("generate.rs");
+        let gate = source
+            .find("require_local_hdr_exr_dir(hdr_exr_dir, local)?")
+            .expect("run must apply the local-only HDR gate");
+        let request = source
+            .find("let mut req = GenerateRequest")
+            .expect("run must construct the generation request");
+        assert!(
+            gate < request,
+            "the local-only gate must run before a normal remote GenerateRequest can be built"
+        );
+    }
+
+    /// Forced-local chaining must retain the sidecar authority after the
+    /// shared local-only gate rather than dropping its export metadata.
     #[test]
     fn auto_chaining_routes_the_exr_sidecar_to_the_local_orchestrator() {
         let source = include_str!("generate.rs");
@@ -3346,20 +3386,6 @@ mod hdr_chain_guard_tests {
             .split("ChainRoutingDecision::Chain {")
             .nth(1)
             .expect("the Chain routing arm must exist");
-        let guard = chain_arm
-            .split("warn_if_clamped")
-            .next()
-            .expect("the guard must precede any other chain work");
-
-        assert!(
-            guard.contains("hdr_exr_dir.is_some() && !local"),
-            "the Chain arm must reject an EXR sidecar only for remote submission; \
-             forced-local chains carry the sidecar for real now"
-        );
-        assert!(
-            guard.contains("anyhow::bail!") && guard.contains("--local"),
-            "the hdr+remote combination must be an error that names --local"
-        );
         assert!(
             chain_arm.contains("ChainHdrInputs"),
             "the local branch must build the ChainHdrInputs authority"

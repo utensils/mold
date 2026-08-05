@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ pub struct ChainJobRunnerHandle {
 
 pub struct CancelRegistry {
     tokens: Mutex<HashMap<String, mold_inference::InferenceCancellationToken>>,
+    shutting_down: AtomicBool,
 }
 
 struct ActiveChainAttemptGuard {
@@ -132,6 +133,7 @@ pub(crate) struct CreateJobParams {
 
 pub enum RunnerCmd {
     Kick,
+    Shutdown,
     Gc {
         reply: tokio::sync::oneshot::Sender<std::result::Result<GcOutcome, String>>,
     },
@@ -262,15 +264,22 @@ impl CancelRegistry {
     pub fn new() -> Self {
         Self {
             tokens: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
     fn register(&self, job_id: &str) {
-        self.tokens
+        let mut tokens = self
+            .tokens
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(job_id.to_string())
-            .or_default();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let token = tokens.entry(job_id.to_string()).or_default();
+        // The load happens while the token map is locked. If shutdown races
+        // after this load, request_all() must acquire the same lock and will
+        // observe/cancel this token; if shutdown won first, cancel it here.
+        if self.shutting_down.load(Ordering::Acquire) {
+            token.cancel();
+        }
     }
 
     fn unregister(&self, job_id: &str) {
@@ -295,6 +304,24 @@ impl CancelRegistry {
         }
     }
 
+    fn request_all(&self) -> usize {
+        // Fence future registrations before snapshotting current attempts.
+        // register() checks this flag while holding the token-map lock, making
+        // a claim racing shutdown either visible here or cancelled on insert.
+        self.shutting_down.store(true, Ordering::Release);
+        let tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for token in &tokens {
+            token.cancel();
+        }
+        tokens.len()
+    }
+
     fn is_cancelled(&self, job_id: &str) -> bool {
         self.tokens
             .lock()
@@ -304,12 +331,15 @@ impl CancelRegistry {
     }
 
     fn token(&self, job_id: &str) -> mold_inference::InferenceCancellationToken {
-        self.tokens
+        let mut tokens = self
+            .tokens
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(job_id.to_string())
-            .or_default()
-            .clone()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let token = tokens.entry(job_id.to_string()).or_default();
+        if self.shutting_down.load(Ordering::Acquire) {
+            token.cancel();
+        }
+        token.clone()
     }
 }
 
@@ -505,6 +535,14 @@ impl ChainJobRunnerHandle {
     /// Mark cancel-requested; false when the job is unknown to the registry.
     pub fn request_cancel(&self, job_id: &str) -> bool {
         self.cancel.request(job_id)
+    }
+
+    /// Fence every active chain attempt before the HTTP server starts
+    /// draining long-lived SSE responses, then stop the orchestration loop.
+    pub fn request_shutdown(&self) -> usize {
+        let cancelled = self.cancel.request_all();
+        let _ = self.kick_tx.send(RunnerCmd::Shutdown);
+        cancelled
     }
 
     pub fn is_cancelling(&self, job_id: &str) -> bool {
@@ -1232,6 +1270,7 @@ async fn claim_for_execution_async(deps: &RunnerDeps, job: &ChainJobRow) -> anyh
 async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
     match cmd {
         RunnerCmd::Kick => true,
+        RunnerCmd::Shutdown => false,
         RunnerCmd::Gc { reply } => {
             let result = run_gc_for_runner(deps, true).await;
             let _ = reply.send(result);

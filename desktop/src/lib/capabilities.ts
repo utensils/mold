@@ -42,8 +42,10 @@ export interface GenerationCapabilities extends Omit<
 export function generationCapabilitiesForFamily(
   family: string,
   model = "",
+  pipeline?: string | null,
+  advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
 ): GenerationCapabilities {
-  const shared = baseGenerationCapabilities(family, model);
+  const shared = baseGenerationCapabilities(family, model, pipeline, advertisedGuidance);
   const supportsAdvancedVideo = isAdvancedVideoFamily(family);
   return {
     ...shared,

@@ -19,8 +19,15 @@ export interface GenerationCapabilities extends Omit<
 export function generationCapabilitiesForFamily(
   family: string,
   model = "",
+  pipeline?: string | null,
+  advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
 ): GenerationCapabilities {
-  return baseGenerationCapabilities(family, model);
+  return baseGenerationCapabilities(
+    family,
+    model,
+    pipeline,
+    advertisedGuidance,
+  );
 }
 
 export function schedulerOptionsForFamily(family: string): Scheduler[] {

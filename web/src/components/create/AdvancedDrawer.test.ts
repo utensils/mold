@@ -76,6 +76,21 @@ function factory(
 }
 
 describe("AdvancedDrawer sequence contract", () => {
+  it("preserves but disables clip negatives for a distilled recipe", () => {
+    const wrapper = factory(
+      "ltx2",
+      { model: "ltx-2.3-22b-distilled:fp8" },
+      { output: "sequence" },
+    );
+    useSequenceDraftStore().clips[0]!.negativePrompt = "flicker";
+    const input = wrapper.get("[data-test='sequence-negative-input']");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(useSequenceDraftStore().clips[0]!.negativePrompt).toBe("flicker");
+    expect(
+      wrapper.get("[data-test='sequence-negative-unavailable-hint']").text(),
+    ).toContain("does not use negative-prompt guidance");
+  });
+
   it("shows only sequence-owned controls", () => {
     const wrapper = factory(
       "ltx2",
@@ -284,6 +299,19 @@ describe("AdvancedDrawer section ordering contract", () => {
 describe("AdvancedDrawer capability matrix", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
+
+  it("preserves but disables a saved negative prompt for distilled LTX", () => {
+    const wrapper = factory("ltx2", {
+      model: "ltx-2.3-22b-distilled:fp8",
+      negativePrompt: "watermark",
+    });
+    const input = wrapper.get("[data-test='negative-input']");
+    expect(input.attributes("disabled")).toBeDefined();
+    expect((input.element as HTMLTextAreaElement).value).toBe("watermark");
+    expect(
+      wrapper.get("[data-test='negative-unavailable-hint']").text(),
+    ).toContain("Saved for reuse");
+  });
 
   it("matches desktop with always-open icon sections and no nested disclosure", () => {
     const wrapper = factory("sdxl");

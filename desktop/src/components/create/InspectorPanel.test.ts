@@ -35,6 +35,21 @@ function formFor(family: string): GenerateForm {
 }
 
 describe("InspectorPanel — layout", () => {
+  it("disables ineffective distilled guidance and re-enables a guided recipe", async () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    form.guidance = 6;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const guidance = () =>
+      wrapper.findAllComponents(SliderRow).find((row) => row.props("label") === "Prompt strength")!;
+    expect(guidance().props("disabled")).toBe(true);
+    expect(guidance().props("modelValue")).toBe(1);
+    expect(wrapper.get("[data-test='fixed-guidance-hint']").text()).toContain("fixes CFG at 1.0");
+    form.pipeline = "two-stage";
+    await flushPromises();
+    expect(guidance().props("disabled")).toBe(false);
+  });
+
   it("renders every primary generation control", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);

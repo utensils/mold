@@ -649,6 +649,11 @@ fn installed_catalog_models(
                 crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false)
                     .supported,
             ),
+            guidance_capabilities: Some(mold_core::GuidanceCapabilities::for_recipe(
+                &sidecar.family,
+                &format!("{} {} {}", sidecar.id, sidecar.name, primary_path.display()),
+                None,
+            )),
         });
     }
     out

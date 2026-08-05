@@ -322,7 +322,16 @@ const advancedSheetOpen = ref(false);
  * "Advanced" trigger badge and the sheet header badge. */
 const advancedActiveCount = computed(() => {
   let count = 0;
-  if (form.negativePrompt.trim()) count += 1;
+  if (
+    generationCapabilitiesForFamily(
+      form.family,
+      form.model,
+      form.pipeline,
+      form.guidanceCapabilities,
+    ).supportsNegativePrompt &&
+    form.negativePrompt.trim()
+  )
+    count += 1;
   if (form.sourceImage || form.controlImage || form.imageAttachments.length) count += 1;
   if (form.loras.length) count += 1;
   if (form.upscaleModel) count += 1;
@@ -589,7 +598,14 @@ watch(
   },
   { immediate: true },
 );
-const caps = computed(() => generationCapabilitiesForFamily(form.family, form.model));
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    selectedGenerationModel.value?.guidance_capabilities,
+  ),
+);
 const effectiveBatchSize = computed(() =>
   caps.value.forcesBatchSizeOne ||
   (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
@@ -3912,9 +3928,25 @@ onBeforeUnmount(() => {
                 :camera-unsupported-reason="cameraUnsupportedReason"
                 @validity-change="parameterValid = $event"
               />
-              <label v-if="form.model && caps.supportsNegativePrompt" class="field">
+              <label
+                v-if="form.model && (caps.supportsNegativePrompt || form.negativePrompt.trim())"
+                class="field"
+              >
                 <span>Negative prompt</span>
-                <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
+                <input
+                  v-model="form.negativePrompt"
+                  class="control"
+                  placeholder="Optional"
+                  :disabled="!caps.supportsNegativePrompt"
+                />
+                <small
+                  v-if="!caps.supportsNegativePrompt"
+                  data-test="mobile-negative-unavailable-hint"
+                >
+                  Saved for reuse, but this distilled recipe fixes CFG and does not use
+                  negative-prompt guidance. Choose a Dev checkpoint with Auto or a guided pipeline
+                  to enable it.
+                </small>
               </label>
               <details
                 v-if="form.model && caps.supportsImg2img"

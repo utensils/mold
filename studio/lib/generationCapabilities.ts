@@ -5,6 +5,8 @@ export type SourceImageMode = "single" | "qwen-edit" | "references";
 
 export interface BaseGenerationCapabilities {
   supportsNegativePrompt: boolean;
+  guidanceAdjustable: boolean;
+  fixedGuidance: number | null;
   supportsScheduler: boolean;
   schedulerOptions: GenerationScheduler[];
   supportsCfgPlus: boolean;
@@ -15,6 +17,12 @@ export interface BaseGenerationCapabilities {
   sourceImageMode: SourceImageMode;
   supportsMask: boolean;
   forcesBatchSizeOne: boolean;
+}
+
+export interface AdvertisedGuidanceCapabilities {
+  adjustable: boolean;
+  supports_negative_prompt: boolean;
+  fixed_scale?: number | null;
 }
 
 const SCHEDULER_OPTIONS: GenerationScheduler[] = [
@@ -65,6 +73,8 @@ export const LORA_CAPABLE_FAMILIES = [
 export function baseGenerationCapabilities(
   family: string,
   model = "",
+  pipeline?: string | null,
+  advertisedGuidance?: AdvertisedGuidanceCapabilities | null,
 ): BaseGenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
@@ -72,8 +82,30 @@ export function baseGenerationCapabilities(
   const schedulerOptions = SCHEDULER_FAMILIES.has(normalized)
     ? SCHEDULER_OPTIONS.slice()
     : [];
+  const normalizedModel = model.trim().toLowerCase();
+  const ltx =
+    normalized === "ltx-video" ||
+    normalized === "ltx2" ||
+    normalized === "ltx-2";
+  const fixedLtxPipeline = [
+    "distilled",
+    "ic-lora",
+    "retake",
+    "lip-dub",
+  ].includes(pipeline ?? "");
+  const inferredFixedGuidance =
+    ltx &&
+    (fixedLtxPipeline || (!pipeline && normalizedModel.includes("distilled")));
+  const advertisedDefault = !pipeline ? advertisedGuidance : null;
+  const fixedGuidance = advertisedDefault
+    ? !advertisedDefault.adjustable
+    : inferredFixedGuidance;
   return {
-    supportsNegativePrompt: !NO_NEGATIVE_PROMPT_FAMILIES.has(normalized),
+    supportsNegativePrompt:
+      advertisedDefault?.supports_negative_prompt ??
+      (!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) && !fixedGuidance),
+    guidanceAdjustable: !fixedGuidance,
+    fixedGuidance: fixedGuidance ? (advertisedDefault?.fixed_scale ?? 1) : null,
     supportsScheduler: schedulerOptions.length > 0,
     schedulerOptions,
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),

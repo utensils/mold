@@ -16,6 +16,7 @@ const props = withDefaults(
     label: string;
     /** Formatted readout; defaults to String(modelValue). */
     valueLabel?: string;
+    disabled?: boolean;
   }>(),
   { step: 1 },
 );
@@ -44,6 +45,7 @@ function onInput(event: Event) {
       :value="modelValue"
       :aria-label="label"
       :aria-valuetext="readout"
+      :disabled="disabled"
       @input="onInput"
     />
   </div>
@@ -105,5 +107,10 @@ function onInput(event: Event) {
 .ms-slider__input:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+
+.ms-slider__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 </style>
