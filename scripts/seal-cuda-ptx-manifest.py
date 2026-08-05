@@ -62,14 +62,52 @@ def dump_section(binary: Path, section: str, output: Path) -> bytes:
 def current_kernel_output_dirs(build_root: Path, compute_cap: str) -> list[Path]:
     matches: list[Path] = []
     for ptx_rs in build_root.glob("candle-kernels-*/out/ptx.rs"):
-        build_dir = ptx_rs.parent.parent
-        output = build_dir / "output"
-        if not output.is_file():
+        output_dir = ptx_rs.parent
+        cache = output_dir / ".cudaforge_cache.json"
+        if cache.is_file():
+            if cudaforge_cache_matches(output_dir, compute_cap):
+                matches.append(output_dir)
             continue
+
+        output = output_dir.parent / "output"
         marker = f"cargo:rustc-env=CUDA_COMPUTE_CAP={compute_cap}"
-        if marker in output.read_text(encoding="utf-8", errors="replace"):
-            matches.append(ptx_rs.parent)
+        if output.is_file() and marker in output.read_text(
+            encoding="utf-8", errors="replace"
+        ):
+            matches.append(output_dir)
     return matches
+
+
+def cudaforge_cache_matches(output_dir: Path, compute_cap: str) -> bool:
+    cache_path = output_dir / ".cudaforge_cache.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(cache, dict):
+        return False
+    entries = cache.get("entries")
+    if not isinstance(entries, dict):
+        return False
+
+    expected_arch = f"sm_{compute_cap}"
+    referenced_names = {path.name for path in referenced_ptx_files(output_dir)}
+    observed: dict[str, set[str]] = {}
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        object_path = entry.get("object_path")
+        gpu_arch = entry.get("gpu_arch")
+        if not isinstance(object_path, str) or not isinstance(gpu_arch, str):
+            continue
+        name = Path(object_path).name
+        if name in referenced_names:
+            observed.setdefault(name, set()).add(gpu_arch)
+
+    return bool(referenced_names) and all(
+        observed.get(name) == {expected_arch} for name in referenced_names
+    )
 
 
 def referenced_ptx_files(output_dir: Path) -> list[Path]:

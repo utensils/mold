@@ -119,8 +119,18 @@ class EmbeddedPtxParserContract(unittest.TestCase):
                 'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
                 encoding="utf-8",
             )
-            (output_dir.parent / "output").write_text(
-                f"cargo:rustc-env=CUDA_COMPUTE_CAP={compute_cap}\n",
+            (output_dir / ".cudaforge_cache.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "fixture": {
+                                "object_path": str(output_dir / "fixture.ptx"),
+                                "gpu_arch": f"sm_{compute_cap}",
+                            }
+                        },
+                    }
+                ),
                 encoding="utf-8",
             )
             seal = subprocess.run(
@@ -138,6 +148,96 @@ class EmbeddedPtxParserContract(unittest.TestCase):
             if seal.returncode != 0:
                 raise AssertionError(seal.stderr)
         return path
+
+    def test_legacy_bindgen_cuda_marker_remains_supported(self) -> None:
+        build_root = self.temp_dir / "legacy-kernel-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "fixture.ptx").write_text("fixture", encoding="utf-8")
+        (output_dir / "ptx.rs").write_text(
+            'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir.parent / "output").write_text(
+            "cargo:rustc-env=CUDA_COMPUTE_CAP=86\n", encoding="utf-8"
+        )
+
+        self.assertEqual(
+            self.seal_module.current_kernel_output_dirs(build_root, "86"),
+            [output_dir],
+        )
+
+    def test_cudaforge_cache_must_cover_every_referenced_ptx(self) -> None:
+        build_root = self.temp_dir / "incomplete-cudaforge-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "ptx.rs").write_text(
+            'pub const FIRST: &str = include_str!(concat!(env!("OUT_DIR"), "/first.ptx"));\n'
+            'pub const SECOND: &str = include_str!(concat!(env!("OUT_DIR"), "/second.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir / ".cudaforge_cache.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        "first": {
+                            "object_path": str(output_dir / "first.ptx"),
+                            "gpu_arch": "sm_86",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_dir.parent / "output").write_text(
+            "cargo:rustc-env=CUDA_COMPUTE_CAP=86\n", encoding="utf-8"
+        )
+
+        self.assertEqual(
+            self.seal_module.current_kernel_output_dirs(build_root, "86"), []
+        )
+
+    def test_cudaforge_cache_rejects_a_different_architecture(self) -> None:
+        build_root = self.temp_dir / "wrong-cudaforge-arch-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "ptx.rs").write_text(
+            'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir / ".cudaforge_cache.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        "fixture": {
+                            "object_path": str(output_dir / "fixture.ptx"),
+                            "gpu_arch": "sm_89",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.seal_module.current_kernel_output_dirs(build_root, "86"), []
+        )
+
+    def test_cudaforge_cache_rejects_a_non_object_document(self) -> None:
+        build_root = self.temp_dir / "malformed-cudaforge-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "ptx.rs").write_text(
+            'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir / ".cudaforge_cache.json").write_text("[]", encoding="utf-8")
+
+        self.assertEqual(
+            self.seal_module.current_kernel_output_dirs(build_root, "86"), []
+        )
 
     def test_unsealed_shell_heredoc_ptx_is_not_qualification_evidence(
         self,
