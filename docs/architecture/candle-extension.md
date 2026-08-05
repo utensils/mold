@@ -57,6 +57,22 @@ Do not add a renamed Candle package, duplicate git source, or local copy of a
 Candle backend. `cargo tree -d` should not report Candle packages from multiple
 sources, and Flash Attention must compile without a private cfg flag.
 
+## crates.io boundary
+
+Cargo applies `[patch]` only from the top-level build root. The patch is not
+embedded in `mold-ai-candle` or any other published Mold crate, so crates.io
+consumers resolve the declared Candle `0.11` dependencies from crates.io. Keep
+`mold-ai-candle` independently packageable against that unpatched public API;
+backend behavior that depends on the compatibility branch is available only to
+workspace/source builds until the corresponding upstream release lands.
+
+`scripts/release/publish-crates.sh` is the publication authority. It lists every
+publishable Mold workspace crate in dependency order, skips an exact version
+that already exists during partial-release recovery, and waits until each crate
+is resolvable from the crates.io index before publishing a dependent. Adding a
+workspace crate requires adding it to that list; the crates publication
+contract test checks completeness and topological order.
+
 ## Compatibility branch lifecycle
 
 The current compatibility source is
