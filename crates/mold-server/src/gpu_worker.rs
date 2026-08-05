@@ -3084,12 +3084,15 @@ fn finish_generation_success(
     image: ImageData,
     original_image: Option<ImageData>,
 ) {
-    let metadata = OutputMetadata::from_generate_request(
+    let mut metadata = OutputMetadata::from_generate_request(
         &job.request,
         response.seed_used,
         None,
         mold_core::build_info::version_string(),
     );
+    if let Some(video) = response.video.as_ref() {
+        metadata.apply_video_output(video);
+    }
     let mut saved_names = crate::queue::SavedOutputNames::default();
     if let Some(ref dir) = job.output_dir {
         let _gallery_writer = job.gallery_publication_gate.blocking_write();

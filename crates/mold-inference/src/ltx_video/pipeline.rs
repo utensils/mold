@@ -1731,6 +1731,7 @@ impl LtxVideoEngine {
                 height,
                 frames: num_output_frames as u32,
                 fps,
+                pipeline: None,
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio: false,

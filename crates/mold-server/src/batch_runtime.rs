@@ -608,10 +608,7 @@ fn completed_record(
         metadata.apply_output_dimensions(audio.thumbnail_width, audio.thumbnail_height);
         audio.format
     } else if let Some(video) = &result.response.video {
-        metadata.width = video.width;
-        metadata.height = video.height;
-        metadata.frames = Some(video.frames);
-        metadata.fps = Some(video.fps);
+        metadata.apply_video_output(video);
         video.format
     } else {
         crate::queue::apply_output_dimensions_to_metadata(&mut metadata, &result.image);
@@ -1180,8 +1177,11 @@ pub(crate) async fn execute_server_batch(
             completion_payload == SseCompletionPayload::Full,
         )?;
         if let Some(events) = events.as_mut() {
-            let metadata =
+            let mut metadata =
                 child_metadata(&metadata_template, index as u32, result.response.seed_used);
+            if let Some(video) = result.response.video.as_ref() {
+                metadata.apply_video_output(video);
+            }
             let saved = SavedOutputNames {
                 output: Some(filename.clone()),
                 original: None,
@@ -1672,6 +1672,7 @@ mod tests {
                     height: 64,
                     frames: 9,
                     fps: 24,
+                    pipeline: None,
                     thumbnail: b"png".to_vec(),
                     gif_preview: b"GIF89a".to_vec(),
                     has_audio: false,
