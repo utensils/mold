@@ -58,6 +58,7 @@ describe("applyDesktopImageDrop", () => {
     });
     expect(form.sourceImage).toBe("IMAGE_BYTES");
     expect(form.sourceImageName).toBe("reference.png");
+    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
     expect(form.sourceImageWidth).toBe(896);
     expect(form.sourceImageHeight).toBe(1152);
   });

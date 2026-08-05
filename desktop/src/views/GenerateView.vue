@@ -692,7 +692,9 @@ watch(
   ],
   ([base64]) => {
     if (isSequence.value) return;
-    const replaced = Boolean(base64 && base64 !== previousStillSource);
+    // This watcher also runs when Create remounts. Keep it limited to derived
+    // dimensions; source attachment boundaries own their one-time fit default
+    // so a route change cannot overwrite the user's selected policy.
     const next = applyDecodedSourceResolution(
       base64,
       {
@@ -706,9 +708,6 @@ watch(
     );
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
-    if (replaced && caps.value.sourceImageMode === "single") {
-      form.sourceFit = { mode: "lanczos-resize" };
-    }
   },
   { immediate: true },
 );

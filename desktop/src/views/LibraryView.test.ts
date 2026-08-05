@@ -187,6 +187,7 @@ describe("LibraryView delete keyboard handling", () => {
     );
     expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
     expect(useGenerateFormStore().form.sourceImageName).toBe("remote-source.png");
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
     expect(router.currentRoute.value.path).toBe("/create");
     expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source");
     wrapper.unmount();
