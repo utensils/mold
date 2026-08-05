@@ -48,8 +48,8 @@ path = "src/bin/sd_singlefile_inspect.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.20.2" }
-mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.20.2" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.13" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.13" }
