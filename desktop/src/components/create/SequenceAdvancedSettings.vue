@@ -46,7 +46,12 @@ const activeIndex = computed(() =>
   activeClip.value ? draft.clips.findIndex((clip) => clip.id === activeClip.value?.id) : -1,
 );
 const guidanceCaps = computed(() =>
-  generationCapabilitiesForFamily(props.form.family, props.form.model, props.form.pipeline),
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.form.guidanceCapabilities,
+  ),
 );
 const activeCount = computed(
   () =>
