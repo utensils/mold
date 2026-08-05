@@ -2930,6 +2930,10 @@ impl ProductionStageExecutor {
                     &stage_req,
                     carry_owned.as_ref(),
                     motion_tail_frames,
+                    // Durable server chains deliberately carry no HDR EXR
+                    // sidecar: the directory is a client-local path the CLI's
+                    // forced-local chain owns (#688).
+                    None,
                     Some(&mut stage_progress),
                 )?;
                 if cancelled {
@@ -4119,6 +4123,7 @@ mod tests {
             },
             frames,
             audio: None,
+            hdr_frames_written: None,
             generation_time_ms: 10,
         }
     }

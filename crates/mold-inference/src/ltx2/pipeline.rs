@@ -493,6 +493,8 @@ impl Ltx2Engine {
         Ok(Ltx2GeneratePlan {
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
+            hdr_exr_window: None,
+            reference_frame_offset: 0,
             scene_embeddings_path: resolve_scene_embeddings_path(req, &loras),
             pipeline,
             preset,
@@ -884,7 +886,7 @@ impl Ltx2Engine {
             tail_rgb_frames: source_frames[tail_start..].to_vec(),
         };
 
-        let outcome = self.render_chain_stage(req, Some(&carry), overlap)?;
+        let outcome = self.render_chain_stage(req, Some(&carry), overlap, None)?;
         self.checkpoint()?;
 
         let source_len = source_frames.len();
@@ -1202,6 +1204,7 @@ impl Ltx2Engine {
         req: &GenerateRequest,
         carry: Option<&ChainTail>,
         motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&crate::chain::StageSidecar>,
     ) -> Result<StageOutcome> {
         if let Some(token) = self.cancellation.as_ref() {
             token.checkpoint()?;
@@ -1216,7 +1219,12 @@ impl Ltx2Engine {
         self.emit("Preparing native LTX-2 chain stage");
 
         let pipeline = self.select_pipeline(req)?;
-        if !pipeline_supports_render_chain(pipeline) {
+        // IC-LoRA joins the chain contract only under an orchestrator HDR
+        // sidecar, which supplies the per-stage reference window the generic
+        // chain carry cannot: the whole clip is a regrade of a shared SDR
+        // reference, and each stage conditions on its own temporal slice.
+        let ic_lora_hdr_stage = pipeline == PipelineKind::IcLora && hdr_sidecar.is_some();
+        if !pipeline_supports_render_chain(pipeline) && !ic_lora_hdr_stage {
             bail!(
                 "sequence clips render through the one-stage, distilled, two-stage, and \
                  two-stage-hq LTX-2 pipelines; {:?} conditions on inputs a clip carry cannot \
@@ -1228,6 +1236,7 @@ impl Ltx2Engine {
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        apply_stage_sidecar_to_plan(&mut plan, hdr_sidecar);
         if let Some(token) = self.cancellation.as_ref() {
             token.checkpoint()?;
         }
@@ -1322,6 +1331,7 @@ impl Ltx2Engine {
 
         let frames = rendered.frames;
         let audio = rendered.audio_track;
+        let hdr_frames_written = rendered.hdr_frames_written;
         let tail_pixel_frames = motion_tail_pixel_frames as usize;
         if frames.len() < tail_pixel_frames {
             bail!(
@@ -1344,6 +1354,7 @@ impl Ltx2Engine {
                 tail_rgb_frames,
             },
             audio,
+            hdr_frames_written,
             generation_time_ms,
         })
     }
@@ -1371,6 +1382,34 @@ pub(crate) fn stitch_extend_frames(
     Ok(source)
 }
 
+/// Stamp (or clear) a chain stage's HDR EXR target on its materialized plan.
+///
+/// The sidecar argument is the ONLY route to a plan-level EXR target for
+/// stage renders. A request-borne `hdr_exr_dir` without a window is cleared
+/// rather than honoured: a per-stage decode numbering its EXRs from zero
+/// would collide with every other stage and disagree with the stitched
+/// timeline — the latent extend-path misalignment issue #688 predicted.
+/// The single-render path never comes through here, so its request-derived
+/// target is untouched.
+fn apply_stage_sidecar_to_plan(
+    plan: &mut Ltx2GeneratePlan,
+    hdr_sidecar: Option<&crate::chain::StageSidecar>,
+) {
+    match hdr_sidecar {
+        Some(sidecar) => {
+            plan.hdr_exr_dir = Some(sidecar.exr_dir.to_string_lossy().to_string());
+            plan.hdr_exr_full_float = sidecar.full_float;
+            plan.hdr_exr_window = Some(sidecar.window);
+            plan.reference_frame_offset = sidecar.reference_frame_offset;
+        }
+        None => {
+            plan.hdr_exr_dir = None;
+            plan.hdr_exr_full_float = false;
+            plan.hdr_exr_window = None;
+        }
+    }
+}
+
 /// Pipelines whose runtime honours the chain contract: a hard frame-0 token
 /// replacement from the carry tail, re-encoded at each stage's own pixel grid.
 ///
@@ -1395,6 +1434,7 @@ impl ChainStageRenderer for Ltx2Engine {
         stage_req: &GenerateRequest,
         carry: Option<&ChainTail>,
         motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&crate::chain::StageSidecar>,
         _stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
     ) -> Result<StageOutcome> {
         // `_stage_progress` is intentionally unused in v1: per-stage
@@ -1404,7 +1444,7 @@ impl ChainStageRenderer for Ltx2Engine {
         // in. If the orchestrator later needs denoise-step events routed
         // through its own channel, we can plumb `stage_progress` into a
         // temporary ProgressCallback wrapper here.
-        self.render_chain_stage(stage_req, carry, motion_tail_pixel_frames)
+        self.render_chain_stage(stage_req, carry, motion_tail_pixel_frames, hdr_sidecar)
     }
 }
 
@@ -2597,7 +2637,7 @@ mod tests {
         let mut req = request(OutputFormat::Mp4, Some(false));
         req.pipeline = Some(mold_core::Ltx2PipelineMode::Keyframe);
         let err = engine
-            .render_chain_stage(&req, None, 4)
+            .render_chain_stage(&req, None, 4, None)
             .expect_err("must fail on a pipeline a clip carry cannot feed");
         let msg = format!("{err}");
         assert!(
@@ -2622,11 +2662,114 @@ mod tests {
             frames: 4,
             tail_rgb_frames: vec![image::RgbImage::new(64, 64); 4],
         };
-        if let Err(err) = engine.render_chain_stage(&req, Some(&carry), 4) {
+        if let Err(err) = engine.render_chain_stage(&req, Some(&carry), 4, None) {
             let msg = format!("{err}");
             assert!(
                 !msg.contains("sequence clips render through"),
                 "two-stage must not be rejected by the chain gate, got: {msg}",
+            );
+        }
+    }
+
+    /// A request-borne `hdr_exr_dir` on a chain/extend stage is cleared
+    /// unless an explicit sidecar window arrives with it — the only route to
+    /// a stage-level EXR target is the orchestrator's per-stage window, so a
+    /// continuation can never stream clip-local `frame_00000.exr..` over
+    /// another stage's frames (the latent extend-path bug #688 predicted).
+    #[test]
+    fn stage_sidecar_is_the_only_route_to_a_stage_exr_target() {
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
+        let plan = |dir: Option<&str>| -> Ltx2GeneratePlan {
+            let engine = Ltx2Engine::with_runtime_session(
+                "ltx-2-19b:fp8".to_string(),
+                dummy_paths_with_gemma_root(gemma_dir.path()),
+                runtime_session(),
+            );
+            let mut req = request(OutputFormat::Mp4, Some(false));
+            req.hdr_exr_dir = dir.map(str::to_string);
+            req.hdr_exr_full_float = dir.is_some();
+            let work_dir = tempfile::tempdir().unwrap();
+            let output = work_dir.path().join("out.mp4");
+            engine
+                .materialize_request(&req, work_dir.path(), &output)
+                .unwrap()
+        };
+
+        // Without a window, the request-derived target is cleared.
+        let mut cleared = plan(Some("/tmp/stage_exr"));
+        assert_eq!(cleared.hdr_exr_dir.as_deref(), Some("/tmp/stage_exr"));
+        super::apply_stage_sidecar_to_plan(&mut cleared, None);
+        assert_eq!(cleared.hdr_exr_dir, None);
+        assert!(!cleared.hdr_exr_full_float);
+        assert_eq!(cleared.hdr_exr_window, None);
+
+        // With a window, the sidecar is authoritative — dir, precision,
+        // window, and the stage's reference offset all come from it.
+        let mut stamped = plan(None);
+        let sidecar = crate::chain::StageSidecar {
+            exr_dir: std::path::PathBuf::from("/tmp/chain_exr"),
+            full_float: true,
+            window: crate::chain::ExrStageWindow {
+                skip_leading: 17,
+                start_index: 97,
+                write_count: 24,
+            },
+            reference_frame_offset: 80,
+        };
+        super::apply_stage_sidecar_to_plan(&mut stamped, Some(&sidecar));
+        assert_eq!(stamped.hdr_exr_dir.as_deref(), Some("/tmp/chain_exr"));
+        assert!(stamped.hdr_exr_full_float);
+        assert_eq!(
+            stamped.hdr_exr_window,
+            Some(crate::chain::ExrStageWindow {
+                skip_leading: 17,
+                start_index: 97,
+                write_count: 24,
+            }),
+        );
+        assert_eq!(stamped.reference_frame_offset, 80);
+    }
+
+    /// IC-LoRA joins the chain contract only under an orchestrator HDR
+    /// sidecar. Without one it stays rejected — the reference-window
+    /// authority is what makes a chained regrade well-defined.
+    #[test]
+    fn render_chain_stage_admits_ic_lora_only_with_a_sidecar() {
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let mut req = request(OutputFormat::Mp4, Some(false));
+        req.pipeline = Some(mold_core::Ltx2PipelineMode::IcLora);
+        let err = engine
+            .render_chain_stage(&req, None, 4, None)
+            .expect_err("IcLora without a sidecar must stay rejected");
+        assert!(
+            format!("{err}").contains("sequence clips render through"),
+            "got: {err}",
+        );
+
+        let sidecar = crate::chain::StageSidecar {
+            exr_dir: std::path::PathBuf::from("/tmp/chain_exr"),
+            full_float: false,
+            window: crate::chain::ExrStageWindow {
+                skip_leading: 0,
+                start_index: 0,
+                write_count: 97,
+            },
+            reference_frame_offset: 0,
+        };
+        // With a sidecar the gate admits IcLora; the render still fails
+        // later on the placeholder fixture checkpoint — the point is the
+        // failure is no longer the gate.
+        if let Err(err) = engine.render_chain_stage(&req, None, 4, Some(&sidecar)) {
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains("sequence clips render through"),
+                "IcLora with a sidecar must pass the chain gate, got: {msg}",
             );
         }
     }
@@ -2641,7 +2784,10 @@ mod tests {
     /// the guiding-latent path, which is a soft attractor where the chain
     /// contract needs a hard prefix pin; `A2Vid` and `IcLora` require
     /// conditioning that is mutually exclusive with the carry; and `Retake`
-    /// regenerates a window of an existing clip, which has no "next clip".
+    /// regenerates a window of an existing clip, which has no "next clip"
+    /// (`IcLora` is admitted by `render_chain_stage` only when an HDR
+    /// sidecar supplies the per-stage reference window — see
+    /// `render_chain_stage_admits_ic_lora_only_with_a_sidecar`).
     #[test]
     fn render_chain_supports_single_stage_distilled_and_two_stage_pipelines() {
         for supported in [
@@ -2680,7 +2826,7 @@ mod tests {
         engine.loaded = true;
         let req = request(OutputFormat::Mp4, Some(false));
         let err = engine
-            .render_chain_stage(&req, None, 0)
+            .render_chain_stage(&req, None, 0, None)
             .expect_err("must fail on zero motion tail");
         let msg = format!("{err}");
         assert!(

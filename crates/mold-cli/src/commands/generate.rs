@@ -377,18 +377,18 @@ pub async fn run(
                 clip_frames: cf,
                 motion_tail: mt,
             } => {
-                // A chain renders one clip per stage and stitches the decoded
-                // RGB, and the per-stage requests deliberately carry no EXR
-                // directory — so the sidecar would silently come out empty
-                // while the run still reported success. Refuse instead: an
-                // empty directory beside a saved video is the kind of result
-                // a user only discovers in a compositor.
-                if hdr_exr_dir.is_some() {
+                // Chained EXR export is local-only: the ChainRequest wire
+                // carries no HDR fields, so a remote server could only
+                // silently drop the sidecar — the empty-directory failure
+                // #681 refused. The forced-local orchestrator carries the
+                // whole HDR authority instead (control id, adapter LoRAs,
+                // per-stage reference windows), so every stage renders a
+                // true regrade of its own slice of the reference (#688).
+                if hdr_exr_dir.is_some() && !local {
                     anyhow::bail!(
-                        "--hdr-exr-dir cannot be combined with auto-chaining: {} frames exceeds \
-                         the {cf}-frame clip this model auto-chains at, and EXR export writes \
-                         one sequence per render rather than per clip. Render at most {cf} \
-                         frames, or drop --hdr-exr-dir and keep the tonemapped video.",
+                        "--hdr-exr-dir with auto-chaining renders locally; re-run with --local \
+                         — a remote server cannot write the EXR sidecar to your machine \
+                         ({} frames auto-chains at {cf} frames per clip)",
                         effective_frames.unwrap_or_default()
                     );
                 }
@@ -480,11 +480,97 @@ pub async fn run(
                     &scheduler,
                     expand,
                 );
+                // Chained HDR: resolve the adapter + validate the request
+                // shape through the same production path a single-clip HDR
+                // render uses (which also downloads the gated adapter), then
+                // hand the whole authority to the orchestrator.
+                let hdr_chain = if let Some(dir) = hdr_exr_dir.clone() {
+                    let reference_video = source_video.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--hdr-exr-dir requires --video <reference>: the HDR adapter \
+                             regrades an SDR reference clip"
+                        )
+                    })?;
+                    let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
+                    let mut probe_req = GenerateRequest {
+                        hdr_exr_dir: Some(dir.clone()),
+                        hdr_exr_full_float,
+                        guidance_overrides: None,
+                        prompt: prompt.to_string(),
+                        negative_prompt: None,
+                        model: model.to_string(),
+                        width: eff_w,
+                        height: eff_h,
+                        steps: eff_steps,
+                        guidance: eff_guidance,
+                        seed,
+                        batch_size: 1,
+                        output_format: Some(OutputFormat::Mp4),
+                        embed_metadata: None,
+                        scheduler: None,
+                        cfg_plus: None,
+                        source_image: None,
+                        source_image_name: None,
+                        edit_images: None,
+                        strength: 1.0,
+                        mask_image: None,
+                        control_image: None,
+                        control_model: None,
+                        control_scale: 1.0,
+                        expand: None,
+                        original_prompt: None,
+                        batch_id: None,
+                        batch_index: None,
+                        batch_count: None,
+                        lora: lora.clone(),
+                        frames: Some(cf),
+                        fps: Some(eff_fps),
+                        upscale_model: None,
+                        gif_preview: false,
+                        enable_audio: Some(false),
+                        audio_file: None,
+                        audio_file_path: None,
+                        source_video: Some(reference_video.clone()),
+                        source_video_path: None,
+                        extend_video: None,
+                        extend_video_path: None,
+                        extend_overlap_frames: None,
+                        keyframes: None,
+                        pipeline: Some(pipeline.unwrap_or(mold_core::Ltx2PipelineMode::IcLora)),
+                        ic_lora_control: Some(control.clone()),
+                        loras: loras.clone(),
+                        retake_range: None,
+                        spatial_upscale: None,
+                        temporal_upscale: None,
+                        placement: placement.clone(),
+                    };
+                    materialize_local_builtin_control(&mut probe_req, &config).await?;
+                    let control_loras = probe_req.loras.take().unwrap_or_default();
+                    Some(super::chain::ChainHdrInputs {
+                        exr_dir: dir,
+                        full_float: hdr_exr_full_float,
+                        control,
+                        reference_video,
+                        control_loras,
+                        total_frames,
+                    })
+                } else {
+                    None
+                };
+
                 // Expand the single-prompt inputs into a canonical
                 // ChainRequest and normalise before handing off to run_chain.
-                let chain_req = inputs.to_chain_request().normalise()?;
+                let mut chain_req = inputs.to_chain_request().normalise()?;
+                if hdr_chain.is_some() {
+                    // The EXR sequence and the reference slices both follow
+                    // the stitched timeline, so the chain must deliver
+                    // exactly the requested total — no overshoot to
+                    // truncate, no stage rendering past the reference's end.
+                    super::chain::exact_fit_last_stage_for_sidecar(&mut chain_req, total_frames)?;
+                }
                 return super::chain::run_chain(
                     chain_req,
+                    hdr_chain,
                     host,
                     output,
                     no_metadata,
@@ -3243,15 +3329,17 @@ mod tests {
 
 #[cfg(test)]
 mod hdr_chain_guard_tests {
-    /// A chain stitches decoded RGB from one clip per stage, and both stage
-    /// builders hard-code `hdr_exr_dir: None`. Without this guard the sidecar
-    /// directory comes out **empty** while the run still prints `✓ Saved` —
-    /// found on a 121-frame render that silently auto-chained to 177.
+    /// Chained EXR export renders locally: the ChainRequest wire carries no
+    /// HDR fields, so a remote submission could only silently drop the
+    /// sidecar — the empty-directory-beside-`✓ Saved` failure #681 refused.
+    /// The Chain arm must therefore reject hdr+remote with an error naming
+    /// `--local`, and must NOT reject hdr+local (that path builds the
+    /// ChainHdrInputs authority and hands it to the orchestrator).
     ///
     /// Asserted against the source because the guard sits inside the routing
     /// match in a long function, the way the other CLI routing contracts are.
     #[test]
-    fn auto_chaining_refuses_an_exr_sidecar_rather_than_writing_nothing() {
+    fn auto_chaining_routes_the_exr_sidecar_to_the_local_orchestrator() {
         let source = include_str!("generate.rs");
         let chain_arm = source
             .split("ChainRoutingDecision::Chain {")
@@ -3263,20 +3351,29 @@ mod hdr_chain_guard_tests {
             .expect("the guard must precede any other chain work");
 
         assert!(
-            guard.contains("hdr_exr_dir.is_some()"),
-            "the Chain arm must reject an EXR sidecar before building the chain; \
-             without it the directory is silently left empty"
+            guard.contains("hdr_exr_dir.is_some() && !local"),
+            "the Chain arm must reject an EXR sidecar only for remote submission; \
+             forced-local chains carry the sidecar for real now"
         );
         assert!(
-            guard.contains("anyhow::bail!"),
-            "the EXR/auto-chain combination must be an error, not a warning: a \
-             warning beside a successful save is what made this invisible"
+            guard.contains("anyhow::bail!") && guard.contains("--local"),
+            "the hdr+remote combination must be an error that names --local"
+        );
+        assert!(
+            chain_arm.contains("ChainHdrInputs"),
+            "the local branch must build the ChainHdrInputs authority"
+        );
+        assert!(
+            chain_arm.contains("exact_fit_last_stage_for_sidecar"),
+            "an HDR chain must deliver exactly the requested total so the EXR \
+             sequence and the reference slices both follow the stitched timeline"
         );
     }
 
-    /// The stage builders are the reason the guard is needed; if either ever
-    /// starts carrying the directory, the guard should be revisited rather
-    /// than left rejecting something that would now work.
+    /// Both stage-request builders keep pinning `hdr_exr_dir: None`: the
+    /// sidecar rides `ChainStageRenderer::render_stage`'s dedicated argument
+    /// (stamped onto the plan by `render_chain_stage`), so a stage request
+    /// built anywhere else can never claim an EXR target by accident.
     #[test]
     fn chain_stage_requests_still_drop_the_exr_directory() {
         for (label, source) in [
@@ -3291,8 +3388,9 @@ mod hdr_chain_guard_tests {
         ] {
             assert!(
                 source.contains("hdr_exr_dir: None"),
-                "{label} no longer pins hdr_exr_dir to None — if chain stages can \
-                 now carry it, the CLI guard is obsolete"
+                "{label} no longer pins hdr_exr_dir to None — the render_stage \
+                 sidecar argument must stay the one carrier, or per-stage EXR \
+                 numbering can drift from the stitched timeline"
             );
         }
     }

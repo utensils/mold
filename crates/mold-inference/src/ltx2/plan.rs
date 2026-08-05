@@ -81,6 +81,17 @@ pub(crate) struct Ltx2GeneratePlan {
     /// HDR cannot be recovered from the frames afterwards.
     pub(crate) hdr_exr_dir: Option<String>,
     pub(crate) hdr_exr_full_float: bool,
+    /// Chain-stage EXR window on the stitched timeline. `None` keeps the
+    /// single-render behaviour (write every decoded frame from index 0).
+    /// Stamped only by `render_chain_stage` from its sidecar argument —
+    /// never derived from the request, so a stage or extend render whose
+    /// request carries `hdr_exr_dir` without a window writes nothing.
+    pub(crate) hdr_exr_window: Option<crate::chain::ExrStageWindow>,
+    /// First reference-video frame this render conditions on. Non-zero only
+    /// for chain stages, where each stage regrades its own temporal window
+    /// of the shared SDR reference (upstream slices reference conditioning
+    /// per temporal tile the same way: `hdr_ic_lora.py:521-541`).
+    pub(crate) reference_frame_offset: u32,
     /// Pre-computed text embeddings shipped beside an IC-LoRA control's
     /// weights. Upstream's HDR pipeline requires these and never encodes a
     /// prompt, so when this is set the Gemma encode is skipped entirely and

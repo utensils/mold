@@ -1563,6 +1563,15 @@ pub fn validate_generate_request_with_family(
         if dir.trim().is_empty() {
             return Err("hdr_exr_dir must not be empty".to_string());
         }
+        // Today this is also unreachable transitively (hdr needs the ic-lora
+        // control, which needs source_video, which extend forbids), but the
+        // engine's extend path re-renders through the chain-stage machinery
+        // where a per-clip EXR sequence would misalign with the stitched
+        // timeline — say it directly instead of leaning on that implication
+        // chain staying intact.
+        if req.extend_video.is_some() || req.extend_video_path.is_some() {
+            return Err("hdr_exr_dir cannot be combined with extend_video".to_string());
+        }
         // The adapter is what makes the render HDR. Without it the decode
         // would apply a LogC3 inverse to an ordinary SDR signal and write a
         // wrongly-graded EXR that looks deliberate.
@@ -2557,6 +2566,23 @@ mod tests {
         }]);
         validate_generate_request_with_family(&req, Some("ltx2"))
             .expect("the HDR adapter makes EXR output valid");
+    }
+
+    /// The extend path re-renders through the chain-stage machinery, where a
+    /// per-clip EXR sequence would misalign with the stitched timeline. The
+    /// rejection must be direct, not an accident of the ic-lora ⇒
+    /// source_video ⇒ extend-exclusive implication chain.
+    #[test]
+    fn exr_output_rejects_extend_directly() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.hdr_exr_dir = Some("/tmp/shot_exr".to_string());
+        req.extend_video_path = Some("/tmp/base.mp4".to_string());
+
+        let err = validate_generate_request_with_family(&req, Some("ltx2"))
+            .expect_err("EXR + extend must be rejected");
+        assert!(err.contains("extend_video"), "got: {err}");
     }
 
     #[test]

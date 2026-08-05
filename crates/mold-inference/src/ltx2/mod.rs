@@ -4,7 +4,7 @@ pub mod chain;
 mod conditioning;
 pub(crate) mod convrot;
 mod execution;
-mod exr;
+pub(crate) mod exr;
 mod guidance;
 mod hdr;
 mod lora;

@@ -9477,6 +9477,7 @@ mod tests {
                                 tail_rgb_frames: Vec::new(),
                             },
                             audio: None,
+                            hdr_frames_written: None,
                             generation_time_ms: 1,
                         },
                     ),

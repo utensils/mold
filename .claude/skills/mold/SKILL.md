@@ -279,7 +279,12 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 mold run ltx-2.3-22b-distilled:fp8 "she says: the harbour freezes every winter" \
   --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448
 
-# Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid)
+# HDR regrade with an EXR sidecar — scene-referred linear frames beside the
+# tonemapped video. Requires the (gated) HDR adapter and an SDR reference.
+mold run ltx-2.3-22b-distilled:fp8 "" \
+  --ic-lora-control hdr --video reference.mp4 \
+  --frames 121 --local --hdr-exr-dir ./shot_exr
+
 # Advanced guidance overrides (two-stage / two-stage-hq / keyframe / a2-vid / t2a)
 mold run ltx-2-19b-distilled:fp8 "handheld shot through a night market" \
   --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9
@@ -315,7 +320,18 @@ multiples of 64: the pipeline always renders in two stages, and unlike generic
 IC-LoRA it keeps the adapter and the reference on both of them, freezes the
 audio through stage 2, and exports the audio stage 1 generated.
 
-**Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`, `--stg-scale`, `--stg-blocks`, `--rescale-scale`, `--modality-scale`, `--guidance-skip-step`
+**HDR EXR export** (`--hdr-exr-dir <dir>`, `--hdr-exr-full-float`) writes one
+scene-referred linear `frame_%05d.exr` per frame from the HDR adapter's LogC3
+signal (`--ic-lora-control hdr` + `--video <SDR reference>`; the adapter's
+scene embeddings replace the prompt). Frame counts past the per-clip cap
+auto-chain with **global** frame numbering across the stitched timeline — a
+121-frame render is exactly `frame_00000..frame_00120`, each stage regrading
+its own window of the reference, with the last stage sized to the exact
+remainder. Chained EXR export requires `--local` (a remote server cannot write
+the sidecar to your machine), a reference covering the full duration at the
+render fps, and Smooth/Cut transitions only.
+
+**Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`, `--stg-scale`, `--stg-blocks`, `--rescale-scale`, `--modality-scale`, `--guidance-skip-step`, `--hdr-exr-dir`, `--hdr-exr-full-float`
 
 The five guidance flags (wire: an additive optional `guidance_overrides`
 object) each replace one per-(pipeline, stage) guider constant. Omitting a flag

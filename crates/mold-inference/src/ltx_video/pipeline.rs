@@ -907,8 +907,15 @@ impl crate::chain::ChainStageRenderer for LtxVideoEngine {
         stage_req: &GenerateRequest,
         _carry: Option<&crate::chain::ChainTail>,
         motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&crate::chain::StageSidecar>,
         _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
     ) -> Result<crate::chain::StageOutcome> {
+        if hdr_sidecar.is_some() {
+            bail!(
+                "LtxVideoEngine.render_stage: the HDR EXR sidecar is an LTX-2 feature; \
+                 ltx-video stages cannot honour it"
+            );
+        }
         let start = Instant::now();
         let frames = self.render_chain_frames_internal(stage_req)?;
         let generation_time_ms = start.elapsed().as_millis() as u64;
@@ -937,6 +944,7 @@ impl crate::chain::ChainStageRenderer for LtxVideoEngine {
             // ltx-video has no audio path. Chain orchestrator validation
             // already rejects enable_audio=true for this family.
             audio: None,
+            hdr_frames_written: None,
             generation_time_ms,
         })
     }

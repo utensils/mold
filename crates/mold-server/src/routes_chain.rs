@@ -1587,6 +1587,7 @@ mod tests {
                     },
                     frames: test_frames(80),
                     audio: None,
+                    hdr_frames_written: None,
                     generation_time_ms: 10,
                 },
             ))

@@ -102,10 +102,100 @@ impl StitchPlan {
     }
 }
 
+/// Per-stage EXR sidecar window on the stitched timeline.
+///
+/// Stage `i` renders `frames_i` local frames; the sidecar writes local frames
+/// `[skip_leading, skip_leading + write_count)` to global indices
+/// `[start_index, start_index + write_count)`. Windows across a chain tile
+/// the stitched timeline exactly once — no gaps, no index written twice —
+/// which is the contract [`plan_exr_stage_windows`] guarantees and the tests
+/// pin against [`StitchPlan::assemble`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExrStageWindow {
+    /// Local frames to skip at the head of this stage's render (the Smooth
+    /// motion-tail duplicate of the prior stage's delivered tail).
+    pub skip_leading: u32,
+    /// Global index of the first EXR frame this stage writes.
+    pub start_index: u32,
+    /// Number of EXR frames this stage writes.
+    pub write_count: u32,
+}
+
+/// Plan the per-stage EXR windows for a chained render.
+///
+/// `boundaries[i]` is the transition on the incoming side of stage `i + 1`,
+/// exactly as [`StitchPlan`] consumes it. `total_frames_cap` clamps the tail
+/// of the sequence when the caller trims the stitched video to a target
+/// length; stages entirely past the cap get `write_count == 0`.
+///
+/// `Fade` is refused, never approximated: the stitched fade block is a u8
+/// crossfade of two clips built after the lossy 8-bit conversion, so those
+/// frames exist in no stage's linear f32 tensor and an EXR sequence
+/// containing either source clip's frames would disagree with the video
+/// across every fade boundary.
+pub fn plan_exr_stage_windows(
+    stage_frames: &[u32],
+    boundaries: &[TransitionMode],
+    motion_tail_frames: u32,
+    total_frames_cap: Option<u32>,
+) -> Result<Vec<ExrStageWindow>, StitchError> {
+    if stage_frames.is_empty() {
+        return Err(StitchError::NoClips);
+    }
+    if boundaries.len() != stage_frames.len() - 1 {
+        return Err(StitchError::BoundaryMismatch {
+            clips: stage_frames.len(),
+            boundaries: boundaries.len(),
+        });
+    }
+    if let Some(idx) = boundaries
+        .iter()
+        .position(|&transition| transition == TransitionMode::Fade)
+    {
+        return Err(StitchError::FadeUnsupportedForSidecar { stage: idx + 1 });
+    }
+
+    let cap = total_frames_cap.unwrap_or(u32::MAX);
+    let mut windows = Vec::with_capacity(stage_frames.len());
+    let mut start = 0u32;
+    for (idx, &frames) in stage_frames.iter().enumerate() {
+        let skip_leading = if idx == 0 {
+            0
+        } else {
+            match boundaries[idx - 1] {
+                TransitionMode::Smooth => motion_tail_frames,
+                TransitionMode::Cut => 0,
+                TransitionMode::Fade => unreachable!("fade boundaries are rejected above"),
+            }
+        };
+        if frames < skip_leading {
+            return Err(StitchError::ClipTooShortForTrim {
+                stage: idx,
+                have: frames as usize,
+                need: skip_leading as usize,
+            });
+        }
+        let delivered = frames - skip_leading;
+        let write_count = delivered.min(cap.saturating_sub(start));
+        windows.push(ExrStageWindow {
+            skip_leading,
+            start_index: start,
+            write_count,
+        });
+        start += write_count;
+    }
+    Ok(windows)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StitchError {
     #[error("stitch plan has no clips")]
     NoClips,
+    #[error(
+        "stage {stage} enters on a fade boundary, whose blended frames exist in no stage's \
+         linear tensor; an EXR sidecar cannot be combined with fade transitions"
+    )]
+    FadeUnsupportedForSidecar { stage: usize },
     #[error("stitch plan has {clips} clips but {boundaries} boundaries (expected {})", clips.saturating_sub(1))]
     BoundaryMismatch { clips: usize, boundaries: usize },
     #[error("fade_lens length does not match boundaries length")]
@@ -553,6 +643,224 @@ mod tests {
         let out = plan.assemble().unwrap();
         // 97 + (97 - 8) = 186
         assert_eq!(out.len(), 186);
+    }
+
+    #[test]
+    fn exr_windows_all_smooth_uniform_chain() {
+        let windows = plan_exr_stage_windows(
+            &[97, 97, 97],
+            &[TransitionMode::Smooth, TransitionMode::Smooth],
+            17,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            windows,
+            vec![
+                ExrStageWindow {
+                    skip_leading: 0,
+                    start_index: 0,
+                    write_count: 97,
+                },
+                ExrStageWindow {
+                    skip_leading: 17,
+                    start_index: 97,
+                    write_count: 80,
+                },
+                ExrStageWindow {
+                    skip_leading: 17,
+                    start_index: 177,
+                    write_count: 80,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn exr_windows_cap_clamps_the_tail() {
+        let windows =
+            plan_exr_stage_windows(&[97, 97], &[TransitionMode::Smooth], 17, Some(121)).unwrap();
+        assert_eq!(
+            windows[1],
+            ExrStageWindow {
+                skip_leading: 17,
+                start_index: 97,
+                write_count: 24,
+            },
+        );
+        // A stage entirely past the cap writes nothing.
+        let windows = plan_exr_stage_windows(
+            &[97, 97, 97],
+            &[TransitionMode::Smooth, TransitionMode::Smooth],
+            17,
+            Some(97),
+        )
+        .unwrap();
+        assert_eq!(windows[1].write_count, 0);
+        assert_eq!(windows[2].write_count, 0);
+        assert_eq!(windows[2].start_index, 97);
+    }
+
+    #[test]
+    fn exr_windows_exact_fit_last_stage_covers_the_total_exactly() {
+        // The HDR chain path sizes its last stage to the exact remainder:
+        // 121 total @ clip 97 / tail 17 → stages [97, 41]. Windows must sum
+        // to exactly 121 with the last stage delivering 24.
+        let windows =
+            plan_exr_stage_windows(&[97, 41], &[TransitionMode::Smooth], 17, Some(121)).unwrap();
+        assert_eq!(
+            windows,
+            vec![
+                ExrStageWindow {
+                    skip_leading: 0,
+                    start_index: 0,
+                    write_count: 97,
+                },
+                ExrStageWindow {
+                    skip_leading: 17,
+                    start_index: 97,
+                    write_count: 24,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn exr_windows_cut_boundaries_skip_nothing() {
+        let windows = plan_exr_stage_windows(&[97, 97], &[TransitionMode::Cut], 17, None).unwrap();
+        assert_eq!(windows[1].skip_leading, 0);
+        assert_eq!(windows[1].start_index, 97);
+        assert_eq!(windows[1].write_count, 97);
+    }
+
+    #[test]
+    fn exr_windows_zero_tail_smooth_equals_cut() {
+        let smooth = plan_exr_stage_windows(&[25, 25], &[TransitionMode::Smooth], 0, None).unwrap();
+        let cut = plan_exr_stage_windows(&[25, 25], &[TransitionMode::Cut], 0, None).unwrap();
+        assert_eq!(smooth, cut);
+    }
+
+    #[test]
+    fn exr_windows_reject_fade_naming_the_boundary() {
+        let err = plan_exr_stage_windows(
+            &[97, 97, 97],
+            &[TransitionMode::Smooth, TransitionMode::Fade],
+            17,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, StitchError::FadeUnsupportedForSidecar { stage: 2 }),
+            "expected FadeUnsupportedForSidecar at stage 2, got {err:?}",
+        );
+    }
+
+    /// The windows must tile `[0, N)` exactly once, where `N` is the length
+    /// of the stitched video `StitchPlan::assemble` produces for the same
+    /// shape (truncated to the cap). This is the "EXR count equals the
+    /// stitched frame count and no index is written twice" requirement from
+    /// issue #688, proven at the arithmetic level over a grid of Smooth/Cut
+    /// mixes, tails, and caps.
+    #[test]
+    fn exr_windows_tile_the_stitched_timeline_exactly_once() {
+        use std::collections::BTreeSet;
+        let tails = [0u32, 9, 17];
+        let shapes: [&[u32]; 4] = [&[97], &[97, 97], &[97, 41, 97], &[25, 33, 25, 97]];
+        let boundary_choices = [TransitionMode::Smooth, TransitionMode::Cut];
+        for tail in tails {
+            for stage_frames in shapes {
+                let boundary_count = stage_frames.len() - 1;
+                // Enumerate every Smooth/Cut assignment for the boundaries.
+                for mask in 0..(1u32 << boundary_count) {
+                    let boundaries: Vec<TransitionMode> = (0..boundary_count)
+                        .map(|bit| boundary_choices[((mask >> bit) & 1) as usize])
+                        .collect();
+                    let clips: Vec<Vec<RgbImage>> = stage_frames
+                        .iter()
+                        .map(|&frames| clip(frames as usize, [0, 0, 0]))
+                        .collect();
+                    let stitched = StitchPlan {
+                        clips,
+                        boundaries: boundaries.clone(),
+                        fade_lens: vec![0; boundary_count],
+                        motion_tail_frames: tail,
+                    }
+                    .assemble()
+                    .unwrap()
+                    .len() as u32;
+                    for cap in [
+                        None,
+                        Some(stitched),
+                        Some(stitched.saturating_sub(5)),
+                        Some(1),
+                    ] {
+                        let windows =
+                            plan_exr_stage_windows(stage_frames, &boundaries, tail, cap).unwrap();
+                        let expected = cap.map_or(stitched, |cap| cap.min(stitched));
+                        let mut seen = BTreeSet::new();
+                        for window in &windows {
+                            for offset in 0..window.write_count {
+                                assert!(
+                                    seen.insert(window.start_index + offset),
+                                    "index {} written twice (tail {tail}, stages {stage_frames:?}, \
+                                     boundaries {boundaries:?}, cap {cap:?})",
+                                    window.start_index + offset,
+                                );
+                            }
+                        }
+                        assert_eq!(
+                            seen.len() as u32,
+                            expected,
+                            "window total != stitched length (tail {tail}, stages \
+                             {stage_frames:?}, boundaries {boundaries:?}, cap {cap:?})",
+                        );
+                        assert_eq!(seen.first().copied(), (expected > 0).then_some(0));
+                        assert_eq!(
+                            seen.last().copied(),
+                            expected.checked_sub(1),
+                            "windows must be contiguous from zero",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The planner's per-stage delivery must agree with mold-core's
+    /// `stage_contributed_frames` — the arithmetic home the server persists
+    /// as `frames_emitted` — for every Smooth/Cut chain. Three consumers,
+    /// one answer.
+    #[test]
+    fn exr_windows_agree_with_stage_contributed_frames() {
+        let stage_frames: &[u32] = &[97, 41, 97, 25];
+        let boundaries = [
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+            TransitionMode::Smooth,
+        ];
+        let tail = 17;
+        let windows = plan_exr_stage_windows(stage_frames, &boundaries, tail, None).unwrap();
+        for (idx, window) in windows.iter().enumerate() {
+            let transition = if idx == 0 {
+                TransitionMode::Smooth
+            } else {
+                boundaries[idx - 1]
+            };
+            let expected = mold_core::chain::stage_contributed_frames(
+                idx,
+                stage_frames[idx],
+                transition,
+                // Fade attribution is the only case where the NEXT boundary
+                // matters; the sidecar planner rejects fades outright.
+                None,
+                None,
+                tail,
+            );
+            assert_eq!(
+                window.write_count, expected,
+                "stage {idx} delivery disagrees with stage_contributed_frames",
+            );
+        }
     }
 
     #[test]
