@@ -71,7 +71,10 @@ describe("ControlsAside", () => {
     );
 
     await wrapper.setProps({
-      modelValue: { ...wrapper.props("modelValue"), pipeline: "two-stage" },
+      modelValue: {
+        ...(wrapper.props("modelValue") as GenerateFormState),
+        pipeline: "two-stage",
+      },
     });
     expect(
       wrapper
