@@ -3865,7 +3865,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-catalog"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "mold-ai-core",
  "reqwest 0.12.28",
@@ -3879,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3903,7 +3903,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-db"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3953,11 +3953,11 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-scheduler"
-version = "0.20.2"
+version = "0.21.0"
 
 [[package]]
 name = "mold-ai-server"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "mold-desktop"
-version = "0.20.2"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
