@@ -168,6 +168,46 @@ describe("LibraryView notification deep links", () => {
 });
 
 describe("LibraryView delete keyboard handling", () => {
+  it("routes a selected video's context-menu Delete through the full bulk selection", async () => {
+    const videos = prints.map((print, index) => ({
+      ...print,
+      filename: `${index + 1}.mp4`,
+    }));
+    localGalleryList.mockResolvedValueOnce({ images: videos, target: null });
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      g.buckets.local!.items = videos;
+    });
+
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    const tiles = wrapper.findAll(".ms-lib-tile");
+    await tiles[0]!.trigger("click");
+    await tiles[1]!.trigger("click", { metaKey: true });
+    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 / 2 selected");
+
+    await tiles[0]!.trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const deleteEntry = menu.entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Delete 2 selected",
+    );
+    expect(deleteEntry).toBeDefined();
+    menu.activate(deleteEntry!);
+    await flushPromises();
+
+    const confirm = wrapper
+      .get('[data-test="bulk-action-bar"]')
+      .findAll("button")
+      .find((button) => button.text().includes("Delete 2 prints?"));
+    expect(confirm).toBeDefined();
+    await confirm!.trigger("click");
+    await flushPromises();
+
+    expect(localGalleryDelete).toHaveBeenCalledTimes(2);
+    expect(localGalleryDelete).toHaveBeenCalledWith("1.mp4");
+    expect(localGalleryDelete).toHaveBeenCalledWith("2.mp4");
+    expect(gallery.filtered).toHaveLength(0);
+    wrapper.unmount();
+  });
+
   it("loads a remote gallery image as the Create source from its context menu", async () => {
     const remotePrint: GalleryImage = {
       ...prints[0]!,
@@ -196,6 +236,7 @@ describe("LibraryView delete keyboard handling", () => {
     );
     expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
     expect(useGenerateFormStore().form.sourceImageName).toBe("remote-source.png");
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
     expect(router.currentRoute.value.path).toBe("/create");
     expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source");
     wrapper.unmount();
