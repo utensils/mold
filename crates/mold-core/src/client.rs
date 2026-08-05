@@ -146,6 +146,7 @@ impl MoldClient {
             height: meta.height.unwrap_or(height),
             frames: meta.frames,
             fps: meta.fps,
+            pipeline: meta.pipeline,
             thumbnail: Vec::new(),
             gif_preview: Vec::new(),
             has_audio: meta.has_audio,
@@ -411,6 +412,7 @@ impl MoldClient {
                                 height: complete.height,
                                 frames,
                                 fps,
+                                pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
                                 thumbnail,
                                 gif_preview,
                                 has_audio: complete.video_has_audio,
@@ -558,6 +560,7 @@ impl MoldClient {
                             height: complete.height,
                             frames: complete.frames,
                             fps: complete.fps,
+                            pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
                             thumbnail,
                             gif_preview,
                             has_audio: complete.has_audio,
@@ -1200,6 +1203,7 @@ struct VideoMeta {
     fps: u32,
     width: Option<u32>,
     height: Option<u32>,
+    pipeline: Option<crate::Ltx2PipelineMode>,
     has_audio: bool,
     duration_ms: Option<u64>,
     audio_sample_rate: Option<u32>,
@@ -1226,6 +1230,10 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         .get("x-mold-video-height")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let pipeline = headers
+        .get("x-mold-video-pipeline")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|value| serde_json::from_value(serde_json::Value::String(value.into())).ok());
     let has_audio = headers
         .get("x-mold-video-has-audio")
         .and_then(|v| v.to_str().ok())
@@ -1249,6 +1257,7 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         fps,
         width,
         height,
+        pipeline,
         has_audio,
         duration_ms,
         audio_sample_rate,
@@ -1916,12 +1925,14 @@ mod tests {
         headers.insert("x-mold-video-fps", "12".parse().unwrap());
         headers.insert("x-mold-video-width", "832".parse().unwrap());
         headers.insert("x-mold-video-height", "480".parse().unwrap());
+        headers.insert("x-mold-video-pipeline", "two-stage".parse().unwrap());
 
         let meta = parse_video_headers(&headers).expect("should detect video");
         assert_eq!(meta.frames, 33);
         assert_eq!(meta.fps, 12);
         assert_eq!(meta.width, Some(832));
         assert_eq!(meta.height, Some(480));
+        assert_eq!(meta.pipeline, Some(crate::Ltx2PipelineMode::TwoStage));
         assert!(!meta.has_audio);
         assert!(meta.duration_ms.is_none());
     }

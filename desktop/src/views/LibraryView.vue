@@ -287,6 +287,8 @@ async function editSequence(entry: MergedPrint) {
 function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
+  const selectedForBulkDelete =
+    selectMode.value && bulkSelection.value.has(item.filename) && bulkSelection.value.size > 1;
   return [
     ...(isSequencePrint(entry)
       ? [
@@ -351,9 +353,12 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     { separator: true },
     {
-      label: "Delete",
+      label: selectedForBulkDelete ? `Delete ${bulkSelection.value.size} selected` : "Delete",
       danger: true,
-      action: () => deletePrint(entry),
+      action: () => {
+        if (selectedForBulkDelete) void deleteSelectedPrints();
+        else deletePrint(entry);
+      },
     },
   ];
 }
@@ -736,10 +741,10 @@ watch(
   { immediate: true },
 );
 
-// Deep link: /library?print=<filename> (a ⌘K library result) reveals that
-// print — filters reset so it can't be hidden, then selection + lightbox
-// open once the buckets deliver it. One-shot: the param drops after use so
-// closing the lightbox doesn't re-open it.
+// Deep link: /library?print=<filename> (a ⌘K result or native notification)
+// reveals that print — filters reset so it can't be hidden, then selection +
+// lightbox open once the buckets deliver it. One-shot: the param drops after
+// use so closing the lightbox doesn't re-open it.
 watch(
   [() => route.query.print, () => gallery.merged.length],
   ([print]) => {

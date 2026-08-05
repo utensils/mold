@@ -100,6 +100,27 @@ describe("Lightbox (desktop two-pane)", () => {
     expect(writeText).toHaveBeenNthCalledWith(2, "4242");
   });
 
+  it("shows the recorded runtime pipeline for an LTX video", () => {
+    const wrapper = mountWide({
+      item: {
+        ...item,
+        filename: "ltx-print.mp4",
+        format: "mp4",
+        metadata: {
+          ...item.metadata,
+          model: "ltx-2.3-22b-dev:fp8",
+          frames: 97,
+          fps: 24,
+          pipeline: "two-stage",
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-test='lightbox-pipeline']").text()).toContain(
+      "two-stage",
+    );
+  });
+
   it("navigates with arrow keys and closes on Escape", async () => {
     const wrapper = mountWide();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));

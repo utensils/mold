@@ -25,27 +25,36 @@ export function appIsBackground(): boolean {
   return document.hidden || !document.hasFocus();
 }
 
-async function notify(title: string, body?: string): Promise<void> {
+export interface NotificationAction {
+  kind: "gallery";
+  filename: string;
+}
+
+async function notify(title: string, body?: string, action?: NotificationAction): Promise<void> {
   if (!appIsBackground()) return;
   try {
     if (!useAppPrefsStore().notifications) return;
   } catch {
     /* store not ready (early boot) — default on */
   }
-  if (await ipc.sendNativeNotification(title, body)) return;
+  if (await ipc.sendNativeNotification(title, body, action)) return;
   if (!(await ensurePermission())) return;
   const { sendNotification } = await import("@tauri-apps/plugin-notification");
   sendNotification(body != null ? { title, body } : { title });
 }
 
-function dispatchNotification(title: string, body?: string): void {
-  void notify(title, body).catch(() => {
+function dispatchNotification(title: string, body?: string, action?: NotificationAction): void {
+  void notify(title, body, action).catch(() => {
     /* notifications are best effort */
   });
 }
 
-export function notifyGenerated(prompt: string): void {
-  dispatchNotification(`Generated — ${prompt.trim().slice(0, 40)}`);
+export function notifyGenerated(prompt: string, filename?: string | null): void {
+  dispatchNotification(
+    `Generated — ${prompt.trim().slice(0, 40)}`,
+    undefined,
+    filename ? { kind: "gallery", filename } : undefined,
+  );
 }
 export function notifyGenerationFailed(message: string): void {
   dispatchNotification("Generation failed", message.slice(0, 80));

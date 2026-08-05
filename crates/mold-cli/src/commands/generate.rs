@@ -2702,6 +2702,7 @@ mod tests {
                 height: 512,
                 frames: 9,
                 fps: 24,
+                pipeline: None,
                 thumbnail: Vec::new(),
                 gif_preview: Vec::new(),
                 has_audio: false,

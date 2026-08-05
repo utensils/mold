@@ -120,6 +120,7 @@ describe("Lightbox metadata panel", () => {
       cfg_plus: true,
       frames: 121,
       fps: 30,
+      pipeline: "two-stage-hq",
       loras: [
         { path: "detail.safetensors", scale: 0.8 },
         { path: "grain.safetensors", scale: 0.5 },
@@ -130,7 +131,7 @@ describe("Lightbox metadata panel", () => {
   };
 
   it("renders the full embedded field set when present", () => {
-    const wrapper = mountLightbox(richItem);
+    const wrapper = mountLightbox(richItem, true);
     const text = wrapper.get("aside").text();
 
     expect(wrapper.get("[data-test='lightbox-negative']").text()).toContain("calm seas");
@@ -142,6 +143,7 @@ describe("Lightbox metadata panel", () => {
     expect(wrapper.get("[data-test='lightbox-strength']").text()).toContain("0.60");
     expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("121");
     expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("30 fps");
+    expect(wrapper.get("[data-test='lightbox-pipeline']").text()).toContain("two-stage-hq");
     expect(wrapper.get("[data-test='lightbox-file-size']").text()).toContain("12.5 MB");
     expect(wrapper.get("[data-test='lightbox-format']").text()).toContain("MP4");
     const loras = wrapper.findAll("[data-test='lightbox-lora']");
@@ -161,6 +163,7 @@ describe("Lightbox metadata panel", () => {
       "lightbox-cfg-plus",
       "lightbox-strength",
       "lightbox-video",
+      "lightbox-pipeline",
       "lightbox-format",
       "lightbox-lora",
       "lightbox-version",

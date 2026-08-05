@@ -30,12 +30,13 @@ describe("desktop notifications", () => {
   it("uses the native notification path when it handles the app icon", async () => {
     sendNativeNotification.mockResolvedValue(true);
 
-    notifyGenerated("a deer at sunrise");
+    notifyGenerated("a deer at sunrise", "mold-deer-42.png");
 
     await vi.waitFor(() =>
       expect(sendNativeNotification).toHaveBeenCalledWith(
         "Generated — a deer at sunrise",
         undefined,
+        { kind: "gallery", filename: "mold-deer-42.png" },
       ),
     );
     expect(sendNotification).not.toHaveBeenCalled();
@@ -44,7 +45,7 @@ describe("desktop notifications", () => {
   it("falls back to the Tauri plugin when the native path is unavailable", async () => {
     sendNativeNotification.mockResolvedValue(false);
 
-    notifyGenerated("a deer at sunrise");
+    notifyGenerated("a deer at sunrise", "mold-deer-42.png");
 
     await vi.waitFor(() =>
       expect(sendNotification).toHaveBeenCalledWith({ title: "Generated — a deer at sunrise" }),
@@ -60,6 +61,7 @@ describe("desktop notifications", () => {
       expect(sendNativeNotification).toHaveBeenCalledWith(
         "Mold 0.18.0 is available",
         "Open Mold to update and restart.",
+        undefined,
       ),
     );
   });

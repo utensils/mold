@@ -61,6 +61,7 @@ const loadError = ref("");
 const mediaLoadKey = ref(0);
 const video = computed(() => isVideoItem(props.item));
 const audio = computed(() => isAudioItem(props.item));
+const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(
   () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
 );
@@ -457,6 +458,9 @@ onBeforeUnmount(() => {
         <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{ preparedPosition }}</span>
         <span>Prompt</span>
         <p data-selectable>{{ item.metadata.prompt || "No prompt saved with this print." }}</p>
+        <p v-if="pipeline" data-test="gallery-viewer-pipeline" data-selectable>
+          <span>Pipeline</span> {{ pipeline }}
+        </p>
         <template v-if="originalPrompt">
           <span>Source prompt</span>
           <p data-test="gallery-viewer-original-prompt" data-selectable>{{ originalPrompt }}</p>

@@ -443,7 +443,8 @@ export const useGenerationStore = defineStore("generation", {
       const settled = runWithConcurrency(tasks, 2).then(() => {
         // Background notification (the view toasts in the foreground).
         const failed = jobs.find((s) => s.status === "error");
-        if (jobs.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
+        const completed = jobs.find((s) => s.status === "complete");
+        if (completed) notifyGenerated(completed.prompt, completed.result?.filename);
         else if (failed?.error && !failed.interrupted && !isCancelledError(failed.error)) {
           notifyGenerationFailed(describeTransportError(failed.error, failed.hostLabel));
         }

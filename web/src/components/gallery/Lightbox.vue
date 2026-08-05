@@ -156,6 +156,9 @@ const dimensions = computed(() =>
 const seed = computed(() => props.item?.metadata.seed ?? null);
 const steps = computed(() => props.item?.metadata.steps ?? null);
 const guidance = computed(() => props.item?.metadata.guidance ?? null);
+const pipeline = computed(() =>
+  isVideoFile.value ? (props.item?.metadata.pipeline ?? null) : null,
+);
 const scheduler = computed(() => {
   const value = props.item?.metadata.scheduler;
   if (!value) return "—";
@@ -455,6 +458,9 @@ function onDelete() {
               <span class="lb__rowk">Guidance</span
               ><span>{{ guidance ?? "—" }}</span>
             </div>
+            <div v-if="pipeline" class="lb__row" data-test="lightbox-pipeline">
+              <span class="lb__rowk">Pipeline</span><span>{{ pipeline }}</span>
+            </div>
             <div class="lb__row">
               <span class="lb__rowk">Scheduler</span
               ><span>{{ scheduler }}</span>
@@ -699,6 +705,13 @@ function onDelete() {
             <span class="lb__chip">{{ hostLabel }}</span>
             <span class="lb__chip">{{ steps ?? "—" }} steps</span>
             <span class="lb__chip">CFG {{ guidance ?? "—" }}</span>
+            <span
+              v-if="pipeline"
+              class="lb__chip"
+              data-test="lightbox-pipeline"
+            >
+              {{ pipeline }} pipeline
+            </span>
             <span class="lb__chip">{{ formatLabel }}</span>
           </div>
           <p v-if="originalPrompt" class="lb__mobile-meta">

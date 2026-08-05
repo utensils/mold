@@ -1185,6 +1185,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static("x-mold-video-fps"),
                     axum::http::header::HeaderName::from_static("x-mold-video-width"),
                     axum::http::header::HeaderName::from_static("x-mold-video-height"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-pipeline"),
                     axum::http::header::HeaderName::from_static("x-mold-video-has-audio"),
                     axum::http::header::HeaderName::from_static("x-mold-video-duration-ms"),
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-sample-rate"),

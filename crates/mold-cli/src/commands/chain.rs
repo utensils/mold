@@ -692,6 +692,7 @@ fn encode_local_frames(
         height,
         frames: frame_count,
         fps,
+        pipeline: None,
         thumbnail,
         gif_preview,
         has_audio,

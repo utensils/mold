@@ -1626,6 +1626,11 @@ pub(crate) fn apply_media_headers(
         if let Ok(v) = HeaderValue::from_str(&video.height.to_string()) {
             headers.insert("x-mold-video-height", v);
         }
+        if let Some(pipeline) = video.pipeline {
+            if let Ok(v) = HeaderValue::from_str(pipeline.as_str()) {
+                headers.insert("x-mold-video-pipeline", v);
+            }
+        }
         if video.has_audio {
             headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
         }
