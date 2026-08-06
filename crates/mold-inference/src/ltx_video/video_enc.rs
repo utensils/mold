@@ -25,6 +25,7 @@ impl VideoMetadata {
             prompt: self.prompt.clone(),
             negative_prompt: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,

@@ -694,6 +694,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
         original_prompt: row.get(10)?,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,

@@ -13,7 +13,8 @@ use tokenizers::Tokenizer;
 
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{
-    build_batch_messages_with_context_for_task, build_single_messages_for_task, format_chatml,
+    build_batch_messages_with_context_for_task, build_remix_messages_with_context_for_task,
+    build_single_messages_for_task, format_chatml,
 };
 
 use crate::device::{
@@ -690,7 +691,19 @@ impl PromptExpander for LocalExpander {
             let family_override = attempt_config
                 .family_overrides
                 .get(&attempt_config.model_family);
-            let messages = if attempt.total > 1 {
+            let messages = if attempt_config.operation == mold_core::PromptTransformOperation::Remix
+            {
+                build_remix_messages_with_context_for_task(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.variations,
+                    attempt_config.task,
+                    Some((attempt.start, attempt.total)),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                    &attempt_config.remix_dimensions,
+                )
+            } else if attempt.total > 1 {
                 build_batch_messages_with_context_for_task(
                     prompt,
                     &attempt_config.model_family,
@@ -715,11 +728,15 @@ impl PromptExpander for LocalExpander {
             let prompt_text = format_chatml(&messages, attempt_config.thinking);
             let output = self.generate_text(&prompt_text, attempt_config)?;
 
-            Ok(if attempt.total > 1 {
-                mold_core::expand::parse_variations_public(&output, attempt_config.variations)
-            } else {
-                vec![mold_core::expand::clean_expanded_prompt_public(&output)]
-            })
+            Ok(
+                if attempt_config.operation == mold_core::PromptTransformOperation::Remix
+                    || attempt.total > 1
+                {
+                    mold_core::expand::parse_variations_public(&output, attempt_config.variations)
+                } else {
+                    vec![mold_core::expand::clean_expanded_prompt_public(&output)]
+                },
+            )
         })
         .map_err(|error| {
             if error.to_string().contains("expected exactly") {

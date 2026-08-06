@@ -1023,6 +1023,21 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Generate subject-preserving prompt alternatives. A distinct endpoint is
+    /// intentional: older hosts return 404 instead of silently expanding.
+    pub async fn remix_prompt(&self, req: &crate::RemixRequest) -> Result<crate::RemixResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/remix", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<crate::RemixResponse>()
+            .await?;
+        Ok(resp)
+    }
+
     /// Upscale an image using a super-resolution model on the server.
     pub async fn upscale(&self, req: &crate::UpscaleRequest) -> Result<crate::UpscaleResponse> {
         let resp = self

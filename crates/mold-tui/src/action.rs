@@ -35,6 +35,8 @@ pub enum Action {
     RandomizeSeed,
     /// Expand the current prompt via LLM.
     ExpandPrompt,
+    /// Create subject-preserving prompt alternatives for review.
+    RemixPrompt,
     /// Save the current preview image to a file.
     SaveImage,
     /// Toggle between local and remote inference mode.

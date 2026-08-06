@@ -206,6 +206,7 @@ export interface DevicePlacement {
 // Wire shape — what we POST to /api/generate/stream. snake_case to match serde.
 export interface GenerateRequestWire {
   prompt: string;
+  prompt_transform?: PromptTransformProvenanceWire | null;
   negative_prompt?: string | null;
   model: string;
   width: number;
@@ -688,6 +689,40 @@ export interface ExpandResponseWire {
   expanded: string[];
 }
 
+export type RemixSourceKind = "original" | "current" | "direct";
+export type RemixDimension =
+  | "composition"
+  | "camera"
+  | "lighting"
+  | "setting"
+  | "mood"
+  | "movement"
+  | "style";
+export interface RemixRequestWire {
+  source_prompt: string;
+  root_prompt?: string;
+  source_kind: RemixSourceKind;
+  model_family: string;
+  variations?: number;
+  task: ExpandTask;
+  style?: string;
+  dimensions: RemixDimension[];
+}
+export interface RemixResponseWire {
+  source_prompt: string;
+  root_prompt?: string;
+  source_kind: RemixSourceKind;
+  variants: Array<{ prompt: string; dimensions: RemixDimension[] }>;
+}
+export interface PromptTransformProvenanceWire {
+  operation: "expand" | "remix";
+  root_prompt?: string;
+  source_prompt: string;
+  source_kind: RemixSourceKind;
+  task: ExpandTask;
+  dimensions: RemixDimension[];
+}
+
 // ── Client-side form shape (persisted in localStorage) ─────────────────────
 export interface SourceImageState {
   kind: "upload" | "gallery";
@@ -756,6 +791,8 @@ export type {
 export interface GenerateFormState {
   version: 3;
   prompt: string;
+  /** Root user-authored prompt retained across Expand/Remix and Gallery reuse. */
+  originalPrompt?: string | null;
   /** Active style preset id (see `lib/stylePresets`). `null` = no style. The
    * preset's extras are appended to the outgoing prompt at request time; the
    * textarea content (`prompt`) is never rewritten by the style row. */

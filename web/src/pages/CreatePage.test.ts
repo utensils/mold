@@ -15,6 +15,7 @@ import {
 } from "../lib/toasts";
 import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
+import { useHostRouting } from "../composables/useHostRouting";
 import {
   __testing__ as chainJobsTesting,
   useChainJobs,
@@ -1772,6 +1773,57 @@ describe("CreatePage layout and behavior", () => {
       instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
+  });
+
+  it("reuses a quick transformed prompt on a newly selected host without stale recovery", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        description: "Flux Dev",
+        size_gb: 4,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+        is_loaded: false,
+        hf_repo: "example/flux",
+        downloaded: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    useHostRouting().setTarget(ORIGIN_HOST_ID);
+    await nextTick();
+
+    expect(
+      wrapper.find("[data-test='web-quick-expansion-stale']").exists(),
+    ).toBe(false);
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      prompt: "storm light over the harbor",
+      original_prompt: "a lighthouse",
+    });
+    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
   });
 
   it("applies a clip expansion to the clip, never the composer's prompt or style", async () => {

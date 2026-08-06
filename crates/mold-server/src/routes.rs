@@ -195,6 +195,7 @@ use crate::queue::clean_error_message;
         generate_stream,
         generate_placement_preview,
         expand_prompt,
+        remix_prompt,
         list_models,
         crate::catalog_api::list_loras,
         load_model,
@@ -264,6 +265,10 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
+        mold_core::RemixRequest,
+        mold_core::RemixResponse,
+        mold_core::RemixVariant,
+        mold_core::RemixDimension,
         mold_core::ImageData,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
@@ -430,6 +435,7 @@ pub fn create_router(state: AppState) -> Router {
             post(crate::routes_chain_jobs::create_chain_job_stage_media_token),
         )
         .route("/api/expand", post(expand_prompt))
+        .route("/api/remix", post(remix_prompt))
         .route("/api/models", get(list_models))
         .route("/api/models/:model", delete(delete_model))
         .route("/api/models/:model/components", get(model_components))
@@ -1883,6 +1889,94 @@ async fn expand_prompt(
     Ok(Json(mold_core::ExpandResponse {
         original: req.prompt,
         expanded: result.expanded,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/remix",
+    tag = "generation",
+    request_body = mold_core::RemixRequest,
+    responses(
+        (status = 200, description = "Subject-preserving prompt alternatives", body = mold_core::RemixResponse),
+        (status = 422, description = "Invalid or conditioning-incompatible request"),
+        (status = 500, description = "Remix failed"),
+    )
+)]
+async fn remix_prompt(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::RemixRequest>,
+) -> Result<Json<mold_core::RemixResponse>, ApiError> {
+    validate_expand_variations(req.variations)?;
+    if req.source_prompt.trim().is_empty() {
+        return Err(ApiError::validation(
+            "source_prompt must not be empty".to_string(),
+        ));
+    }
+    let task = req
+        .task
+        .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
+    let dimensions = mold_core::expand::resolve_remix_dimensions(
+        &req.dimensions,
+        task,
+        req.style
+            .as_ref()
+            .is_some_and(|style| !style.trim().is_empty()),
+    )
+    .map_err(|error| ApiError::validation(error.to_string()))?;
+
+    let config = state.config.read().await;
+    let expand_settings = config.expand.clone().with_env_overrides();
+    let mut remix_config = expand_settings.to_expand_config(&req.model_family, req.variations);
+    remix_config.task = task;
+    remix_config.operation = mold_core::PromptTransformOperation::Remix;
+    remix_config.remix_dimensions = dimensions.clone();
+    remix_config.style = req.style.clone();
+    // Expansion template overrides are intentionally not Remix overrides.
+    remix_config.system_prompt = None;
+    remix_config.batch_prompt = None;
+    let prompt = req.source_prompt.clone();
+    let config_snapshot = config.clone();
+    drop(config);
+
+    let result = if state.gpu_pool.worker_count() > 0 && expand_settings.is_local() {
+        schedule_local_expansion(
+            &state,
+            config_snapshot,
+            expand_settings,
+            prompt,
+            remix_config,
+            None,
+        )
+        .await?
+    } else {
+        let expander = create_server_expander(
+            &config_snapshot,
+            &expand_settings,
+            active_gpu_selection(&state),
+            None,
+        )?;
+        tokio::task::spawn_blocking(move || expander.expand(&prompt, &remix_config))
+            .await
+            .map_err(|error| ApiError::internal(format!("remix task failed: {error}")))?
+            .map_err(|error| ApiError::internal(format!("prompt remix failed: {error}")))?
+    };
+
+    let variants = result
+        .expanded
+        .into_iter()
+        .enumerate()
+        .map(|(index, prompt)| mold_core::RemixVariant {
+            prompt,
+            dimensions: mold_core::expand::remix_dimensions_for_position(&dimensions, index + 1),
+        })
+        .collect();
+    Ok(Json(mold_core::RemixResponse {
+        source_prompt: req.source_prompt,
+        root_prompt: req.root_prompt,
+        source_kind: req.source_kind,
+        task,
+        variants,
     }))
 }
 
@@ -4415,12 +4509,14 @@ fn expand_capabilities(
             configured: cfg!(feature = "expand"),
             model_present: Some(model_present),
             backend: mold_core::ExpandBackend::Local,
+            remix: true,
         }
     } else {
         mold_core::ExpandCapabilities {
             configured: !settings.backend.trim().is_empty(),
             model_present: None,
             backend: mold_core::ExpandBackend::Api,
+            remix: true,
         }
     }
 }
@@ -7328,10 +7424,12 @@ mod tests {
         let present = expand_capabilities(&settings, true);
 
         assert_eq!(missing.backend, mold_core::ExpandBackend::Local);
+        assert!(missing.remix);
         assert_eq!(missing.configured, cfg!(feature = "expand"));
         assert_eq!(missing.model_present, Some(false));
         assert_eq!(present.configured, cfg!(feature = "expand"));
         assert_eq!(present.model_present, Some(true));
+        assert!(present.remix);
     }
 
     #[test]

@@ -3,7 +3,8 @@ use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
     validation::{MAX_STG_BLOCKS, MAX_STG_BLOCK_INDEX},
     Config, GenerateResponse, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
-    ModelInfoExtended, OutputFormat, Scheduler, ServerStatus, SseProgressEvent,
+    ModelInfoExtended, OutputFormat, PromptTransformOperation, RemixResponse, Scheduler,
+    ServerStatus, SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -18,6 +19,21 @@ use crate::event::map_event;
 use crate::model_info::capabilities_for_family;
 use crate::model_info::{capabilities_for_model, family_for_model, ModelCapabilities};
 use crate::ui::theme::Theme;
+
+/// Immutable semantic and routing authority captured when a prompt transform
+/// starts. Async results and prepared batches must never be reinterpreted from
+/// the live form after this point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptTransformSnapshot {
+    pub operation: PromptTransformOperation,
+    pub model: String,
+    pub target: crate::hosts::GenTarget,
+    pub task: mold_core::ExpandTask,
+    pub source_prompt: String,
+    pub current_prompt: String,
+    pub root_prompt: Option<String>,
+    pub source_kind: mold_core::RemixSourceKind,
+}
 
 /// Events sent from background tasks to the main TUI loop.
 pub enum BackgroundEvent {
@@ -36,6 +52,18 @@ pub enum BackgroundEvent {
     },
     /// Generation or background task failed.
     Error(String),
+    /// A reviewable prompt transform completed. The token fences late results
+    /// after the user edits or starts another request.
+    PromptTransformComplete {
+        token: u64,
+        operation: PromptTransformOperation,
+        snapshot: PromptTransformSnapshot,
+        response: RemixResponse,
+    },
+    PromptTransformFailed {
+        token: u64,
+        message: String,
+    },
     /// Merged all-hosts gallery scan completed.
     GalleryScanComplete(crate::gallery_scan::MergedScan),
     /// Model pull completed.
@@ -58,7 +86,10 @@ pub enum BackgroundEvent {
     /// Upscale download progress (model pull during upscale).
     UpscaleDownloadProgress(SseProgressEvent),
     /// Upscale tile progress update.
-    UpscaleProgress { tile: usize, total: usize },
+    UpscaleProgress {
+        tile: usize,
+        total: usize,
+    },
     /// Upscale completed successfully.
     UpscaleComplete {
         image_data: Vec<u8>,
@@ -564,6 +595,22 @@ pub struct GenerateParams {
     pub lora_path: Option<String>,
     pub lora_scale: f64,
     pub expand: bool,
+    /// Earliest known user idea retained across Expand/Remix.
+    pub original_prompt: Option<String>,
+    /// Structured provenance for the currently visible transformed prompt.
+    pub prompt_transform: Option<mold_core::PromptTransformProvenance>,
+    /// Frozen semantic authority for one applied variant. Its original host
+    /// is intentionally releasable after review.
+    pub quick_transform_snapshot: Option<PromptTransformSnapshot>,
+    /// Reviewed Remix siblings. Empty keeps the ordinary batch behavior.
+    pub prepared_prompts: Vec<String>,
+    pub prepared_prompt_transforms: Vec<mold_core::PromptTransformProvenance>,
+    /// Frozen route and semantic authority for reviewed Batch N work.
+    pub prepared_transform_snapshot: Option<PromptTransformSnapshot>,
+    /// Shared sibling identity and one-based position, populated at dispatch.
+    pub batch_id: Option<String>,
+    pub batch_index: Option<u32>,
+    pub batch_count: Option<u32>,
     pub offload: bool,
     /// Upscaler to run after generation (wired to the existing
     /// `GenerateRequest.upscale_model` field). `None` = off.
@@ -681,6 +728,15 @@ impl GenerateParams {
             lora_path: None,
             lora_scale: 1.0,
             expand: false,
+            original_prompt: None,
+            prompt_transform: None,
+            quick_transform_snapshot: None,
+            prepared_prompts: Vec::new(),
+            prepared_prompt_transforms: Vec::new(),
+            prepared_transform_snapshot: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             offload: false,
             upscale_model: None,
             source_image_path: None,
@@ -947,6 +1003,8 @@ pub struct GenerateState {
     /// strip's "done · saved to …" line. None when saving is disabled or
     /// the server kept the file.
     pub last_output_path: Option<std::path::PathBuf>,
+    /// Monotonic fence for async Expand/Remix results.
+    pub prompt_transform_token: u64,
 }
 
 impl GenerateState {
@@ -1375,6 +1433,17 @@ pub struct SettingsState {
 /// Active popup/overlay.
 pub enum Popup {
     Help,
+    PromptSourceChoice {
+        current_prompt: String,
+        root_prompt: String,
+        cursor: usize,
+    },
+    PromptAlternatives {
+        snapshot: PromptTransformSnapshot,
+        variants: Vec<mold_core::RemixVariant>,
+        selected: Vec<bool>,
+        cursor: usize,
+    },
     ModelSelector {
         filter: String,
         selected: usize,
@@ -1792,6 +1861,7 @@ impl App {
                 error_message: None,
                 model_description,
                 last_output_path: None,
+                prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -2624,6 +2694,11 @@ impl App {
                 if let CrosstermEvent::Key(key) = &event {
                     // Let certain keys bypass the textarea
                     match (key.code, key.modifiers) {
+                        (KeyCode::Char('e' | 'E'), modifiers)
+                            if modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            // Fall through to Expand/Remix action mapping.
+                        }
                         // TUI-global shortcuts that bypass the textarea.
                         // ^K deliberately no longer performs the emacs
                         // kill-to-end-of-line in prompt fields — it opens
@@ -2769,6 +2844,15 @@ impl App {
                                 _ => unreachable!(),
                             };
                             textarea.input(event);
+                            if self.generate.focus == GenerateFocus::Prompt {
+                                self.generate.prompt_transform_token =
+                                    self.generate.prompt_transform_token.wrapping_add(1);
+                                self.generate.params.prompt_transform = None;
+                                self.generate.params.quick_transform_snapshot = None;
+                                self.generate.params.prepared_prompts.clear();
+                                self.generate.params.prepared_prompt_transforms.clear();
+                                self.generate.params.prepared_transform_snapshot = None;
+                            }
                             // Reset history navigation when user types
                             self.history.reset_cursor();
                             return;
@@ -2803,6 +2887,160 @@ impl App {
 
     fn handle_popup_event(&mut self, event: CrosstermEvent) {
         if let CrosstermEvent::Key(key) = event {
+            if let Some(Popup::PromptSourceChoice {
+                current_prompt,
+                root_prompt,
+                cursor,
+            }) = &mut self.popup
+            {
+                match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => {
+                        *cursor = 1usize.saturating_sub(*cursor);
+                    }
+                    KeyCode::Char('o' | 'O') => {
+                        let source = root_prompt.clone();
+                        self.close_popup();
+                        self.start_prompt_transform_from(
+                            PromptTransformOperation::Remix,
+                            source,
+                            mold_core::RemixSourceKind::Original,
+                        );
+                    }
+                    KeyCode::Char('c' | 'C') => {
+                        let source = current_prompt.clone();
+                        self.close_popup();
+                        self.start_prompt_transform_from(
+                            PromptTransformOperation::Remix,
+                            source,
+                            mold_core::RemixSourceKind::Current,
+                        );
+                    }
+                    KeyCode::Enter => {
+                        let (source, kind) = if *cursor == 0 {
+                            (root_prompt.clone(), mold_core::RemixSourceKind::Original)
+                        } else {
+                            (current_prompt.clone(), mold_core::RemixSourceKind::Current)
+                        };
+                        self.close_popup();
+                        self.start_prompt_transform_from(
+                            PromptTransformOperation::Remix,
+                            source,
+                            kind,
+                        );
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            enum PromptAlternativeEffect {
+                None,
+                Close,
+                Apply {
+                    snapshot: PromptTransformSnapshot,
+                    variant: mold_core::RemixVariant,
+                },
+                Prepare {
+                    snapshot: PromptTransformSnapshot,
+                    variants: Vec<mold_core::RemixVariant>,
+                },
+                Retry(PromptTransformOperation),
+                Restore(String),
+            }
+            let handled_prompt_popup = matches!(self.popup, Some(Popup::PromptAlternatives { .. }));
+            let effect = if let Some(Popup::PromptAlternatives {
+                snapshot,
+                variants,
+                selected,
+                cursor,
+            }) = &mut self.popup
+            {
+                match key.code {
+                    KeyCode::Esc => PromptAlternativeEffect::Close,
+                    KeyCode::Up | KeyCode::Char('k') if *cursor > 0 => {
+                        *cursor -= 1;
+                        PromptAlternativeEffect::None
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if *cursor + 1 < variants.len() => {
+                        *cursor += 1;
+                        PromptAlternativeEffect::None
+                    }
+                    KeyCode::Char(' ') => {
+                        if let Some(value) = selected.get_mut(*cursor) {
+                            *value = !*value;
+                        }
+                        PromptAlternativeEffect::None
+                    }
+                    KeyCode::Enter => variants
+                        .get(*cursor)
+                        .cloned()
+                        .map(|variant| PromptAlternativeEffect::Apply {
+                            snapshot: snapshot.clone(),
+                            variant,
+                        })
+                        .unwrap_or(PromptAlternativeEffect::None),
+                    KeyCode::Char('b' | 'B') => {
+                        let variants = variants
+                            .iter()
+                            .zip(selected.iter())
+                            .filter_map(|(variant, selected)| selected.then_some(variant.clone()))
+                            .collect::<Vec<_>>();
+                        if variants.len() < 2 {
+                            PromptAlternativeEffect::None
+                        } else {
+                            PromptAlternativeEffect::Prepare {
+                                snapshot: snapshot.clone(),
+                                variants,
+                            }
+                        }
+                    }
+                    KeyCode::Char('r' | 'R') => PromptAlternativeEffect::Retry(snapshot.operation),
+                    KeyCode::Char('u' | 'U') => {
+                        PromptAlternativeEffect::Restore(snapshot.source_prompt.clone())
+                    }
+                    _ => PromptAlternativeEffect::None,
+                }
+            } else {
+                PromptAlternativeEffect::None
+            };
+            match effect {
+                PromptAlternativeEffect::None => {}
+                PromptAlternativeEffect::Close => self.close_popup(),
+                PromptAlternativeEffect::Apply { snapshot, variant } => {
+                    if let Some(message) = self.prompt_transform_staleness(&snapshot) {
+                        self.generate.error_message = Some(message);
+                        self.close_popup();
+                    } else {
+                        self.apply_prompt_variant(snapshot, variant);
+                        self.close_popup();
+                    }
+                }
+                PromptAlternativeEffect::Prepare { snapshot, variants } => {
+                    if let Some(message) = self.prompt_transform_staleness(&snapshot) {
+                        self.generate.error_message = Some(message);
+                        self.close_popup();
+                    } else {
+                        self.prepare_prompt_variants(snapshot, variants);
+                        self.close_popup();
+                    }
+                }
+                PromptAlternativeEffect::Retry(operation) => {
+                    self.close_popup();
+                    self.start_prompt_transform(operation);
+                }
+                PromptAlternativeEffect::Restore(source) => {
+                    self.set_prompt_text(&source);
+                    self.generate.params.prepared_prompts.clear();
+                    self.generate.params.prepared_prompt_transforms.clear();
+                    self.generate.params.prepared_transform_snapshot = None;
+                    self.generate.params.prompt_transform = None;
+                    self.generate.params.quick_transform_snapshot = None;
+                    self.close_popup();
+                }
+            }
+            if handled_prompt_popup {
+                return;
+            }
             match &mut self.popup {
                 Some(Popup::Help) => {
                     if matches!(
@@ -3086,6 +3324,9 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::PromptAlternatives { .. } | Popup::PromptSourceChoice { .. }) => {
+                    unreachable!("handled above")
+                }
                 None => {}
             }
         }
@@ -3653,6 +3894,12 @@ impl App {
                 {
                     self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
                 }
+            }
+            Action::ExpandPrompt if self.active_view == View::Create => {
+                self.start_prompt_transform(PromptTransformOperation::Expand);
+            }
+            Action::RemixPrompt if self.active_view == View::Create => {
+                self.start_prompt_transform(PromptTransformOperation::Remix);
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
@@ -5780,7 +6027,59 @@ impl App {
             return;
         }
 
-        // Route by the sticky Machines generation target. Auto keeps
+        let generation_target = if self.generate.params.prepared_prompts.is_empty() {
+            if let Some(snapshot) = self.generate.params.quick_transform_snapshot.as_ref() {
+                if let Some(reason) = self.quick_transform_staleness(snapshot) {
+                    self.generate.error_message = Some(format!(
+                            "Applied Remix is stale because the {reason}; remix again or restore the source prompt"
+                        ));
+                    return;
+                }
+            }
+            self.target.clone()
+        } else {
+            let Some(snapshot) = self.generate.params.prepared_transform_snapshot.as_ref() else {
+                self.generate.error_message =
+                    Some("Prepared Remix lost its frozen route; remix again".into());
+                return;
+            };
+            let stale_reason = if self.generate.params.model != snapshot.model {
+                Some("model changed")
+            } else if self.target != snapshot.target {
+                Some("generation target changed")
+            } else if self.prompt_transform_task() != snapshot.task {
+                Some("conditioning task changed")
+            } else if self.generate.params.prepared_prompts.len()
+                != self.generate.params.prepared_prompt_transforms.len()
+            {
+                Some("reviewed variation provenance changed")
+            } else if self
+                .generate
+                .params
+                .prepared_prompt_transforms
+                .iter()
+                .any(|provenance| {
+                    provenance.operation != snapshot.operation
+                        || provenance.source_prompt != snapshot.source_prompt
+                        || provenance.root_prompt != snapshot.root_prompt
+                        || provenance.source_kind != snapshot.source_kind
+                        || provenance.task != snapshot.task
+                })
+            {
+                Some("reviewed variation provenance changed")
+            } else {
+                None
+            };
+            if let Some(reason) = stale_reason {
+                self.generate.error_message = Some(format!(
+                    "Prepared Remix is stale because the {reason}; remix again"
+                ));
+                return;
+            }
+            snapshot.target.clone()
+        };
+
+        // Route by the frozen prepared target or the current sticky Machines target. Auto keeps
         // today's exact behavior; Local forces the in-process engine; a
         // Host target pins the run to that registry entry with its API
         // key and no silent fallback. Routing runs before any state
@@ -5790,7 +6089,7 @@ impl App {
         let mut route_host = None;
         let mut route_name = None;
         let mut api_key = None;
-        match &self.target {
+        match &generation_target {
             GenTarget::Auto => {}
             GenTarget::Local => route_mode = Some(InferenceMode::Local),
             GenTarget::Host(id) => match self.machines.registry.get(id) {
@@ -5865,11 +6164,297 @@ impl App {
         });
     }
 
+    fn set_prompt_text(&mut self, prompt: &str) {
+        self.generate.prompt = TextArea::new(prompt.lines().map(String::from).collect());
+        self.generate
+            .prompt
+            .set_cursor_line_style(ratatui::style::Style::default());
+        self.generate.focus = GenerateFocus::Prompt;
+    }
+
+    fn prompt_transform_task(&self) -> mold_core::ExpandTask {
+        let family = family_for_model(&self.generate.params.model, &self.config);
+        mold_core::ExpandTask::for_conditioning(
+            &family,
+            None,
+            self.generate.params.source_image_path.is_some(),
+            false,
+            false,
+            0,
+            false,
+        )
+    }
+
+    fn start_prompt_transform(&mut self, operation: PromptTransformOperation) {
+        let current = self.generate.prompt.lines().join("\n").trim().to_string();
+        if current.is_empty() {
+            self.generate.error_message = Some("Prompt is empty".to_string());
+            return;
+        }
+        let root = self
+            .generate
+            .params
+            .original_prompt
+            .clone()
+            .filter(|root| !root.trim().is_empty());
+        if operation == PromptTransformOperation::Remix
+            && root.as_deref().is_some_and(|root| root.trim() != current)
+        {
+            self.popup = Some(Popup::PromptSourceChoice {
+                current_prompt: current,
+                root_prompt: root.expect("checked above"),
+                cursor: 0,
+            });
+            return;
+        }
+        let source_kind = if operation == PromptTransformOperation::Expand {
+            mold_core::RemixSourceKind::Current
+        } else if root.is_some() {
+            mold_core::RemixSourceKind::Original
+        } else {
+            mold_core::RemixSourceKind::Direct
+        };
+        let source_prompt = match source_kind {
+            mold_core::RemixSourceKind::Original => root.clone().unwrap_or(current),
+            mold_core::RemixSourceKind::Current | mold_core::RemixSourceKind::Direct => current,
+        };
+        self.start_prompt_transform_from(operation, source_prompt, source_kind);
+    }
+
+    fn start_prompt_transform_from(
+        &mut self,
+        operation: PromptTransformOperation,
+        source_prompt: String,
+        source_kind: mold_core::RemixSourceKind,
+    ) {
+        let current_prompt = self.generate.prompt.lines().join("\n").trim().to_string();
+        let root = self
+            .generate
+            .params
+            .original_prompt
+            .clone()
+            .filter(|root| !root.trim().is_empty());
+        let family = family_for_model(&self.generate.params.model, &self.config);
+        let task = self.prompt_transform_task();
+        let snapshot = PromptTransformSnapshot {
+            operation,
+            model: self.generate.params.model.clone(),
+            target: self.target.clone(),
+            task,
+            source_prompt: source_prompt.clone(),
+            current_prompt,
+            root_prompt: root.clone(),
+            source_kind,
+        };
+        let request = mold_core::RemixRequest {
+            source_prompt,
+            root_prompt: root,
+            source_kind,
+            model_family: family,
+            variations: if operation == PromptTransformOperation::Remix {
+                3
+            } else {
+                1
+            },
+            style: None,
+            task: Some(task),
+            dimensions: Vec::new(),
+        };
+
+        use crate::hosts::GenTarget;
+        let (url, api_key) = match &self.target {
+            GenTarget::Host(id) => match self.machines.registry.get(id) {
+                Some(entry) => (Some(entry.url.clone()), crate::hosts::api_key_for(id)),
+                None => {
+                    self.generate.error_message = Some(format!(
+                        "Machine '{id}' is no longer saved. Pick a target in Machines (4)."
+                    ));
+                    return;
+                }
+            },
+            GenTarget::Local => (None, None),
+            GenTarget::Auto => (self.server_url.clone(), None),
+        };
+        self.generate.prompt_transform_token = self.generate.prompt_transform_token.wrapping_add(1);
+        let token = self.generate.prompt_transform_token;
+        self.generate.error_message = None;
+        let tx = self.bg_tx.clone();
+        self.tokio_handle.spawn(async move {
+            crate::backend::run_prompt_transform(
+                url, api_key, operation, request, snapshot, token, tx,
+            )
+            .await;
+        });
+    }
+
+    fn prompt_provenance(
+        snapshot: &PromptTransformSnapshot,
+        dimensions: Vec<mold_core::RemixDimension>,
+    ) -> mold_core::PromptTransformProvenance {
+        mold_core::PromptTransformProvenance {
+            operation: snapshot.operation,
+            root_prompt: snapshot.root_prompt.clone(),
+            source_prompt: snapshot.source_prompt.clone(),
+            source_kind: snapshot.source_kind,
+            task: snapshot.task,
+            dimensions,
+        }
+    }
+
+    fn prompt_transform_staleness(&self, snapshot: &PromptTransformSnapshot) -> Option<String> {
+        if self.generate.params.model != snapshot.model {
+            return Some("Remix is stale because the model changed; remix again".into());
+        }
+        if self.target != snapshot.target {
+            return Some(
+                "Remix is stale because the generation target changed; remix again".into(),
+            );
+        }
+        if self.prompt_transform_task() != snapshot.task {
+            return Some(
+                "Remix is stale because the conditioning task changed; remix again".into(),
+            );
+        }
+        let current = self.generate.prompt.lines().join("\n").trim().to_string();
+        if current != snapshot.current_prompt {
+            return Some("Remix is stale because the current prompt changed; remix again".into());
+        }
+        if self.generate.params.original_prompt.as_deref() != snapshot.root_prompt.as_deref() {
+            return Some("Remix is stale because the original prompt changed; remix again".into());
+        }
+        None
+    }
+
+    /// Validate reviewed Batch-1 semantics while deliberately ignoring the
+    /// snapshotted host. Quick work may be submitted on the current target;
+    /// prepared Batch N remains route-frozen in `start_generation`.
+    fn quick_transform_staleness(
+        &self,
+        snapshot: &PromptTransformSnapshot,
+    ) -> Option<&'static str> {
+        if self.generate.params.model != snapshot.model {
+            return Some("model changed");
+        }
+        if self.prompt_transform_task() != snapshot.task {
+            return Some("conditioning task changed");
+        }
+        let current = self.generate.prompt.lines().join("\n").trim().to_string();
+        if current != snapshot.current_prompt {
+            return Some("reviewed prompt changed");
+        }
+        let Some(provenance) = self.generate.params.prompt_transform.as_ref() else {
+            return Some("transform provenance changed");
+        };
+        if provenance.operation != snapshot.operation
+            || provenance.source_prompt != snapshot.source_prompt
+            || provenance.root_prompt != snapshot.root_prompt
+            || provenance.source_kind != snapshot.source_kind
+            || provenance.task != snapshot.task
+        {
+            return Some("transform provenance changed");
+        }
+        None
+    }
+
+    fn response_matches_snapshot(
+        snapshot: &PromptTransformSnapshot,
+        response: &RemixResponse,
+    ) -> bool {
+        response.source_prompt == snapshot.source_prompt
+            && response.root_prompt == snapshot.root_prompt
+            && response.source_kind == snapshot.source_kind
+            && response.task == snapshot.task
+    }
+
+    fn apply_prompt_variant(
+        &mut self,
+        snapshot: PromptTransformSnapshot,
+        variant: mold_core::RemixVariant,
+    ) {
+        self.generate.params.original_prompt = Some(
+            snapshot
+                .root_prompt
+                .clone()
+                .unwrap_or_else(|| snapshot.source_prompt.clone()),
+        );
+        self.generate.params.prompt_transform =
+            Some(Self::prompt_provenance(&snapshot, variant.dimensions));
+        let mut applied_snapshot = snapshot;
+        applied_snapshot.current_prompt = variant.prompt.clone();
+        self.generate.params.quick_transform_snapshot = Some(applied_snapshot);
+        self.generate.params.prepared_prompts.clear();
+        self.generate.params.prepared_prompt_transforms.clear();
+        self.generate.params.prepared_transform_snapshot = None;
+        self.set_prompt_text(&variant.prompt);
+    }
+
+    fn prepare_prompt_variants(
+        &mut self,
+        snapshot: PromptTransformSnapshot,
+        variants: Vec<mold_core::RemixVariant>,
+    ) {
+        self.generate.params.original_prompt = Some(
+            snapshot
+                .root_prompt
+                .clone()
+                .unwrap_or_else(|| snapshot.source_prompt.clone()),
+        );
+        self.generate.params.prepared_prompts = variants
+            .iter()
+            .map(|variant| variant.prompt.clone())
+            .collect();
+        self.generate.params.prepared_prompt_transforms = variants
+            .iter()
+            .map(|variant| Self::prompt_provenance(&snapshot, variant.dimensions.clone()))
+            .collect();
+        self.generate.params.quick_transform_snapshot = None;
+        self.generate.params.prepared_transform_snapshot = Some(snapshot);
+        self.generate.params.batch = variants.len() as u32;
+        if let Some(first) = variants.first() {
+            self.set_prompt_text(&first.prompt);
+        }
+    }
+
     /// Drain and process all pending background events.
     pub fn process_background_events(&mut self) {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
                 BackgroundEvent::Progress(sse) => self.handle_progress(sse),
+                BackgroundEvent::PromptTransformComplete {
+                    token,
+                    operation,
+                    snapshot,
+                    response,
+                } => {
+                    if token != self.generate.prompt_transform_token {
+                        continue;
+                    }
+                    if operation != snapshot.operation
+                        || !Self::response_matches_snapshot(&snapshot, &response)
+                    {
+                        self.generate.error_message = Some(
+                            "Prompt transform response did not match its frozen request; remix again"
+                                .into(),
+                        );
+                        continue;
+                    }
+                    if let Some(message) = self.prompt_transform_staleness(&snapshot) {
+                        self.generate.error_message = Some(message);
+                        continue;
+                    }
+                    let selected = vec![false; response.variants.len()];
+                    self.popup = Some(Popup::PromptAlternatives {
+                        snapshot,
+                        variants: response.variants,
+                        selected,
+                        cursor: 0,
+                    });
+                }
+                BackgroundEvent::PromptTransformFailed { token, message } => {
+                    if token == self.generate.prompt_transform_token {
+                        self.generate.error_message = Some(message);
+                    }
+                }
                 BackgroundEvent::GenerationComplete {
                     response,
                     from_local,
@@ -6109,10 +6694,11 @@ impl App {
                                 .into_option(),
                             prompt: prompt_text,
                             negative_prompt,
-                            original_prompt: None,
-                            batch_id: None,
-                            batch_index: None,
-                            batch_count: None,
+                            original_prompt: submitted_params.original_prompt.clone(),
+                            prompt_transform: submitted_params.prompt_transform.clone(),
+                            batch_id: submitted_params.batch_id.clone(),
+                            batch_index: submitted_params.batch_index,
+                            batch_count: submitted_params.batch_count,
                             model: actual_model,
                             seed: response.seed_used,
                             steps: submitted_params.steps,
@@ -6515,6 +7101,9 @@ impl App {
                         original_prompt: source_meta
                             .as_ref()
                             .and_then(|m| m.original_prompt.clone()),
+                        prompt_transform: source_meta
+                            .as_ref()
+                            .and_then(|m| m.prompt_transform.clone()),
                         batch_id: source_meta.as_ref().and_then(|m| m.batch_id.clone()),
                         batch_index: source_meta.as_ref().and_then(|m| m.batch_index),
                         batch_count: source_meta.as_ref().and_then(|m| m.batch_count),
@@ -7483,6 +8072,7 @@ mod tests {
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
+                prompt_transform: None,
                 batch_id: None,
                 batch_index: None,
                 batch_count: None,
@@ -7543,6 +8133,7 @@ mod tests {
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
+                prompt_transform: None,
                 batch_id: None,
                 batch_index: None,
                 batch_count: None,
@@ -7664,6 +8255,7 @@ mod tests {
             prompt: "a test prompt".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -7891,6 +8483,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 last_output_path: None,
+                prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -10602,6 +11195,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             last_output_path: None,
+            prompt_transform_token: 0,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -10661,6 +11255,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             last_output_path: None,
+            prompt_transform_token: 0,
         };
 
         // Simulate error mid-batch
@@ -10701,6 +11296,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             last_output_path: None,
+            prompt_transform_token: 0,
         };
 
         // Simulate setting batch to 4 and starting generation
@@ -13462,5 +14058,142 @@ mod tests {
         // Image families keep the prompt required even with a source image.
         params.model = "flux-dev:q4".to_string();
         assert!(prompt_required_for_params(&params, &config));
+    }
+
+    #[tokio::test]
+    async fn remix_with_existing_original_offers_current_source() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("current edited prompt");
+        app.generate.params.original_prompt = Some("original idea".into());
+
+        app.start_prompt_transform(PromptTransformOperation::Remix);
+
+        let Some(Popup::PromptSourceChoice {
+            current_prompt,
+            root_prompt,
+            ..
+        }) = &app.popup
+        else {
+            panic!("expected a source chooser");
+        };
+        assert_eq!(current_prompt, "current edited prompt");
+        assert_eq!(root_prompt, "original idea");
+    }
+
+    #[tokio::test]
+    async fn prepared_remix_rejects_named_route_staleness_without_erasing_work() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("source idea");
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Remix,
+            model: app.generate.params.model.clone(),
+            target: crate::hosts::GenTarget::Auto,
+            task: app.prompt_transform_task(),
+            source_prompt: "source idea".into(),
+            current_prompt: "source idea".into(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+        };
+        app.prepare_prompt_variants(
+            snapshot,
+            vec![
+                mold_core::RemixVariant {
+                    prompt: "variation one".into(),
+                    dimensions: vec![mold_core::RemixDimension::Camera],
+                },
+                mold_core::RemixVariant {
+                    prompt: "variation two".into(),
+                    dimensions: vec![mold_core::RemixDimension::Lighting],
+                },
+            ],
+        );
+        app.target = crate::hosts::GenTarget::Local;
+
+        app.start_generation();
+
+        assert!(!app.generate.generating);
+        assert_eq!(app.generate.params.prepared_prompts.len(), 2);
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("generation target changed")));
+    }
+
+    #[tokio::test]
+    async fn transform_snapshot_names_model_and_prompt_staleness() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("frozen prompt");
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Remix,
+            model: app.generate.params.model.clone(),
+            target: app.target.clone(),
+            task: app.prompt_transform_task(),
+            source_prompt: "frozen prompt".into(),
+            current_prompt: "frozen prompt".into(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+        };
+        app.generate.params.model = "different-model".into();
+        assert!(app
+            .prompt_transform_staleness(&snapshot)
+            .is_some_and(|message| message.contains("model changed")));
+
+        app.generate.params.model = snapshot.model.clone();
+        app.set_prompt_text("edited prompt");
+        assert!(app
+            .prompt_transform_staleness(&snapshot)
+            .is_some_and(|message| message.contains("current prompt changed")));
+    }
+
+    #[tokio::test]
+    async fn applied_single_remix_blocks_model_staleness_but_releases_host() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("source idea");
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Remix,
+            model: app.generate.params.model.clone(),
+            target: crate::hosts::GenTarget::Auto,
+            task: app.prompt_transform_task(),
+            source_prompt: "source idea".into(),
+            current_prompt: "source idea".into(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+        };
+        app.apply_prompt_variant(
+            snapshot,
+            mold_core::RemixVariant {
+                prompt: "reviewed variation".into(),
+                dimensions: vec![mold_core::RemixDimension::Composition],
+            },
+        );
+
+        let frozen = app
+            .generate
+            .params
+            .quick_transform_snapshot
+            .clone()
+            .expect("single apply must retain its semantic snapshot");
+        app.target = crate::hosts::GenTarget::Local;
+        assert_eq!(
+            app.quick_transform_staleness(&frozen),
+            None,
+            "quick Remix deliberately releases only its original host"
+        );
+
+        app.generate.params.model = "different-model".into();
+        app.start_generation();
+
+        assert!(!app.generate.generating);
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("model changed")));
+        assert_eq!(
+            app.generate.prompt.lines().join("\n"),
+            "reviewed variation",
+            "stale recovery must preserve reviewed text"
+        );
     }
 }

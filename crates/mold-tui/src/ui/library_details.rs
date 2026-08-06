@@ -200,6 +200,7 @@ mod tests {
             prompt: "a lighthouse at dusk".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,

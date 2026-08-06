@@ -48,6 +48,7 @@ const emit = defineEmits<{
   "update:stylePreset": [value: string | null];
   submit: [];
   expand: [];
+  remix: [];
   "undo-expand": [];
 }>();
 
@@ -212,6 +213,16 @@ watch(
       >
         <Icon name="sparkle" :size="15" />
         {{ expandLabel }}
+      </button>
+      <button
+        type="button"
+        class="composer__expand"
+        data-test="composer-remix"
+        :disabled="busy || !prompt.trim()"
+        @click="emit('remix')"
+      >
+        <Icon name="sparkle" :size="15" />
+        Remix
       </button>
       <button
         type="button"

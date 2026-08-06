@@ -101,6 +101,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         prompt: String::new(),
         negative_prompt: None,
         original_prompt: None,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,

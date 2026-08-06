@@ -1403,6 +1403,7 @@ fn build_generate_request(
         control_scale: 1.0,
         expand: args.expand,
         original_prompt: None,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,
