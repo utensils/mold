@@ -31,7 +31,7 @@ INCOMPATIBLE_RESULTS = {
 VERSION_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.version\b([^\r\n]*)")
 VERSION_OPERAND_RE = re.compile(rb"^[ \t]+[0-9]+\.[0-9]+[ \t]*$")
 TARGET_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.target[ \t]+([^\r\n]+)")
-TARGET_ARCHITECTURE_RE = re.compile(rb"sm_([0-9]+)")
+TARGET_ARCHITECTURE_RE = re.compile(rb"sm_([0-9]+)(?:[af])?")
 TARGET_PLATFORM_OPTIONS = {
     b"texmode_unified",
     b"texmode_independent",
@@ -94,7 +94,7 @@ def extract_elf_section(binary: Path, section: str, output: Path) -> bytes:
 
 
 def sealed_ptx_modules(
-    binary: Path, expected_target: str
+    binary: Path, compute_cap: str
 ) -> tuple[list[bytes], dict[str, object], str, str]:
     """Return only build-manifest ranges from the ELF `.rodata` section."""
 
@@ -119,10 +119,13 @@ def sealed_ptx_modules(
         fail(f"{MANIFEST_SECTION} must contain a JSON object")
     if manifest.get("schema_version") != MANIFEST_SCHEMA:
         fail(f"{MANIFEST_SECTION} has an unsupported schema")
-    if manifest.get("cuda_target") != expected_target:
+    manifest_target = manifest.get("cuda_target")
+    if not isinstance(manifest_target, str) or re.fullmatch(
+        rf"sm_{re.escape(compute_cap)}(?:[af])?", manifest_target
+    ) is None:
         fail(
-            f"{MANIFEST_SECTION} target is {manifest.get('cuda_target')!r}, "
-            f"expected {expected_target}"
+            f"{MANIFEST_SECTION} target is {manifest_target!r}, "
+            f"expected compute capability {compute_cap}"
         )
     raw_modules = manifest.get("modules")
     if not isinstance(raw_modules, list) or not raw_modules:
@@ -663,10 +666,10 @@ def main() -> int:
     if args.extract_only and args.expect_incompatible:
         fail("--extract-only and --expect-incompatible cannot be combined")
 
-    expected_target = f"sm_{args.compute_cap}"
     modules, manifest, manifest_sha256, artifact_sha256 = sealed_ptx_modules(
-        args.binary, expected_target
+        args.binary, args.compute_cap
     )
+    expected_target = str(manifest["cuda_target"])
     # NUL boundaries prevent parser state from flowing between independently
     # generated source modules while preserving every byte in each module.
     data = b"\0".join(modules)

@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::{GenericImage, Rgb, RgbImage};
 use mold_core::OutputFormat;
 use std::fs;
-use std::io::{Cursor, Read, Seek};
+use std::io::{BufReader, Cursor, Read, Seek};
 use std::path::Path;
 
 #[cfg(feature = "mp4")]
@@ -60,17 +60,16 @@ struct DecodedVideo {
     frames: Vec<RgbImage>,
 }
 
-fn read_mp4(input_video: &Path) -> Result<Mp4Reader<Cursor<Vec<u8>>>> {
-    let bytes = fs::read(input_video)
-        .with_context(|| format!("failed to read {}", input_video.display()))?;
-    Mp4Reader::read_header(Cursor::new(bytes), fs::metadata(input_video)?.len()).with_context(
-        || {
-            format!(
-                "failed to parse MP4 container from {}",
-                input_video.display()
-            )
-        },
-    )
+fn read_mp4(input_video: &Path) -> Result<Mp4Reader<BufReader<fs::File>>> {
+    let file = fs::File::open(input_video)
+        .with_context(|| format!("failed to open {}", input_video.display()))?;
+    let size = file.metadata()?.len();
+    Mp4Reader::read_header(BufReader::new(file), size).with_context(|| {
+        format!(
+            "failed to parse MP4 container from {}",
+            input_video.display()
+        )
+    })
 }
 
 fn read_mp4_slice(bytes: &[u8]) -> Result<Mp4Reader<Cursor<&[u8]>>> {
@@ -214,9 +213,76 @@ fn annex_b_convert_packet(
 }
 
 fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
+    decode_video_bounded(input_video, None, None, None)
+}
+
+const MAX_ANIMATION_EXPORT_RGB_BYTES: u64 = 256 * 1024 * 1024;
+
+fn export_dimensions(width: u32, height: u32, max_dimension: Option<u32>) -> (u32, u32) {
+    let Some(limit) = max_dimension else {
+        return (width, height);
+    };
+    let longest = width.max(height);
+    if longest <= limit {
+        return (width, height);
+    }
+    let scale = limit as f64 / longest as f64;
+    (
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    )
+}
+
+fn estimated_export_rgb_bytes(
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    source_fps: u32,
+    target_fps: u32,
+    max_dimension: Option<u32>,
+) -> u64 {
+    let (width, height) = export_dimensions(width, height, max_dimension);
+    let sampled_frames = u64::from(frame_count)
+        .saturating_mul(u64::from(target_fps))
+        .div_ceil(u64::from(source_fps.max(1)));
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(3)
+        .saturating_mul(sampled_frames)
+}
+
+fn should_sample_export_frame(frame_index: u32, source_fps: u32, target_fps: u32) -> bool {
+    if frame_index == 0 || target_fps >= source_fps {
+        return true;
+    }
+    let current = u64::from(frame_index) * u64::from(target_fps) / u64::from(source_fps);
+    let previous = u64::from(frame_index - 1) * u64::from(target_fps) / u64::from(source_fps);
+    current > previous
+}
+
+fn decode_video_bounded(
+    input_video: &Path,
+    target_fps: Option<u32>,
+    max_dimension: Option<u32>,
+    max_rgb_bytes: Option<u64>,
+) -> Result<DecodedVideo> {
     let mut reader = read_mp4(input_video)?;
     let video = find_video_track(&reader)?;
     let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
+    let export_fps = target_fps.unwrap_or(video.fps).min(video.fps).max(1);
+    if let (Some(limit), Some(frame_count)) = (max_rgb_bytes, video.frames) {
+        anyhow::ensure!(
+            estimated_export_rgb_bytes(
+                video.width,
+                video.height,
+                frame_count,
+                video.fps,
+                export_fps,
+                max_dimension,
+            ) <= limit,
+            "animation export exceeds the safe decoded-frame budget; choose a smaller size or frame rate"
+        );
+    }
 
     let track = reader
         .tracks()
@@ -252,7 +318,14 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
     .context("failed to create H.264 decoder for LTX-2 media output")?;
 
     let mut converted = Vec::new();
-    let mut frames = Vec::with_capacity(video.frames.unwrap_or_default() as usize);
+    let estimated_frames = video
+        .frames
+        .unwrap_or_default()
+        .saturating_mul(export_fps)
+        .div_ceil(video.fps.max(1)) as usize;
+    let mut frames = Vec::with_capacity(estimated_frames);
+    let mut decoded_index = 0_u32;
+    let mut retained_rgb_bytes = 0_u64;
     let mut new_idr = true;
     let mut sps_seen = false;
     let mut pps_seen = false;
@@ -279,12 +352,25 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
             .decode(&converted)
             .context("failed to decode H.264 frame from MP4")?
         {
-            let mut rgb = vec![0; image.rgb8_len()];
-            image.write_rgb8(&mut rgb);
-            let frame = RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
-                anyhow!("decoded H.264 frame size did not match track dimensions")
-            })?;
-            frames.push(frame);
+            if should_sample_export_frame(decoded_index, video.fps, export_fps) {
+                let mut rgb = vec![0; image.rgb8_len()];
+                image.write_rgb8(&mut rgb);
+                let frame =
+                    RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
+                        anyhow!("decoded H.264 frame size did not match track dimensions")
+                    })?;
+                let frame = resize_export_frame(frame, max_dimension);
+                retained_rgb_bytes = retained_rgb_bytes
+                    .saturating_add(u64::from(frame.width()) * u64::from(frame.height()) * 3);
+                if let Some(limit) = max_rgb_bytes {
+                    anyhow::ensure!(
+                        retained_rgb_bytes <= limit,
+                        "animation export exceeds the safe decoded-frame budget; choose a smaller size or frame rate"
+                    );
+                }
+                frames.push(frame);
+            }
+            decoded_index += 1;
         }
     }
 
@@ -292,11 +378,24 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
         .flush_remaining()
         .context("failed to flush delayed H.264 frames")?
     {
-        let mut rgb = vec![0; image.rgb8_len()];
-        image.write_rgb8(&mut rgb);
-        let frame = RgbImage::from_raw(video.width, video.height, rgb)
-            .ok_or_else(|| anyhow!("flushed H.264 frame size did not match track dimensions"))?;
-        frames.push(frame);
+        if should_sample_export_frame(decoded_index, video.fps, export_fps) {
+            let mut rgb = vec![0; image.rgb8_len()];
+            image.write_rgb8(&mut rgb);
+            let frame = RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
+                anyhow!("flushed H.264 frame size did not match track dimensions")
+            })?;
+            let frame = resize_export_frame(frame, max_dimension);
+            retained_rgb_bytes = retained_rgb_bytes
+                .saturating_add(u64::from(frame.width()) * u64::from(frame.height()) * 3);
+            if let Some(limit) = max_rgb_bytes {
+                anyhow::ensure!(
+                    retained_rgb_bytes <= limit,
+                    "animation export exceeds the safe decoded-frame budget; choose a smaller size or frame rate"
+                );
+            }
+            frames.push(frame);
+        }
+        decoded_index += 1;
     }
 
     if frames.is_empty() {
@@ -308,9 +407,9 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
 
     Ok(DecodedVideo {
         metadata: ProbeMetadata {
-            width: video.width,
-            height: video.height,
-            fps: video.fps,
+            width: frames[0].width(),
+            height: frames[0].height(),
+            fps: export_fps,
             frames: Some(frames.len() as u32),
             duration_ms: video.duration_ms,
             has_audio,
@@ -319,6 +418,14 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
         },
         frames,
     })
+}
+
+fn resize_export_frame(frame: RgbImage, max_dimension: Option<u32>) -> RgbImage {
+    let (width, height) = export_dimensions(frame.width(), frame.height(), max_dimension);
+    if (width, height) == (frame.width(), frame.height()) {
+        return frame;
+    }
+    image::imageops::resize(&frame, width, height, image::imageops::FilterType::Triangle)
 }
 
 pub(crate) fn decode_video_frames(input_video: &Path) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
@@ -552,6 +659,56 @@ pub(crate) fn transcode_output(
         other => bail!("{other:?} is not supported for LTX-2 video output"),
     }
     Ok(())
+}
+
+/// Convert an existing gallery MP4 into a browser-friendly animation.
+///
+/// This is intentionally independent from generation: callers can create
+/// multiple exports without mutating the authoritative gallery print.
+pub fn export_animation(
+    input_mp4: &Path,
+    output_format: OutputFormat,
+    gif_bounce: bool,
+    gif_repeat_forever: bool,
+    target_fps: Option<u32>,
+    max_dimension: Option<u32>,
+) -> Result<Vec<u8>> {
+    let video = decode_video_bounded(
+        input_mp4,
+        target_fps,
+        max_dimension,
+        Some(MAX_ANIMATION_EXPORT_RGB_BYTES),
+    )?;
+    match output_format {
+        OutputFormat::Gif => video_enc::encode_gif_with_options(
+            &video.frames,
+            video.metadata.fps,
+            gif_bounce,
+            gif_repeat_forever,
+        ),
+        OutputFormat::Apng => {
+            anyhow::ensure!(
+                !gif_bounce,
+                "bounce playback is only supported for GIF exports"
+            );
+            video_enc::encode_apng(&video.frames, video.metadata.fps, None)
+        }
+        OutputFormat::Webp => {
+            anyhow::ensure!(
+                !gif_bounce,
+                "bounce playback is only supported for GIF exports"
+            );
+            #[cfg(feature = "webp")]
+            {
+                video_enc::encode_webp(&video.frames, video.metadata.fps)
+            }
+            #[cfg(not(feature = "webp"))]
+            {
+                bail!("WebP export requires a mold build with the webp feature")
+            }
+        }
+        other => bail!("{other:?} is not a supported animation export format"),
+    }
 }
 
 #[allow(dead_code)]
@@ -869,6 +1026,30 @@ mod tests {
     };
     #[cfg(feature = "mp4")]
     use tempfile::tempdir;
+
+    #[test]
+    fn export_sampling_preserves_requested_non_divisible_frame_rates() {
+        assert_eq!(
+            (0..30)
+                .filter(|index| should_sample_export_frame(*index, 30, 24))
+                .count(),
+            24
+        );
+        assert_eq!(
+            (0..60)
+                .filter(|index| should_sample_export_frame(*index, 60, 24))
+                .count(),
+            24
+        );
+    }
+
+    #[test]
+    fn export_budget_rejects_unsafe_original_but_allows_bounded_default() {
+        let original = estimated_export_rgb_bytes(1920, 1088, 417, 24, 24, None);
+        let bounded = estimated_export_rgb_bytes(1920, 1088, 417, 24, 12, Some(720));
+        assert!(original > MAX_ANIMATION_EXPORT_RGB_BYTES);
+        assert!(bounded <= MAX_ANIMATION_EXPORT_RGB_BYTES);
+    }
 
     #[cfg(feature = "mp4")]
     use crate::ltx_video::video_enc;

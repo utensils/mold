@@ -6,9 +6,10 @@ const { streamableMediaUrl, evictMedia } = vi.hoisted(() => ({
   streamableMediaUrl: vi.fn(),
   evictMedia: vi.fn(),
 }));
-const { invoke, apiFetchTo } = vi.hoisted(() => ({
+const { invoke, apiFetchTo, apiJsonTo } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
+  apiJsonTo: vi.fn(),
 }));
 
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
@@ -20,6 +21,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiFetchTo,
+  apiJsonTo,
 }));
 
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
@@ -72,6 +74,11 @@ beforeEach(() => {
   apiFetchTo.mockReset().mockResolvedValue({
     blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])])),
   } as Response);
+  apiJsonTo.mockReset().mockResolvedValue({
+    formats: ["gif", "apng", "webp"],
+    gif_playback: ["loop", "bounce"],
+    gif_repeat: ["forever", "once"],
+  });
 });
 
 afterEach(() => {
@@ -234,6 +241,35 @@ describe("MobileGalleryViewer", () => {
 
     await view.get("dialog").trigger("cancel");
     expect(view.emitted("close")).toHaveLength(1);
+  });
+
+  it("opens video export options for an MP4", async () => {
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery/export-options");
+    expect(view.get("[data-test='video-export-dialog']").text()).toContain("Bounce");
+    expect(view.get("[data-test='video-export-dialog']").text()).toContain("WEBP");
+  });
+
+  it("fails closed when the generated video's exact host is unavailable", async () => {
+    wrapper = mount(MobileGalleryViewer, {
+      attachTo: document.body,
+      props: {
+        item: { ...image, filename: "remote-result.mp4", format: "mp4" },
+        target: { baseUrl: "", apiKey: null },
+        cacheKey: "missing-origin",
+        hostName: "Unavailable host",
+        thumbnailUrl: "blob:generated-video",
+        mediaUrlOverride: "blob:generated-video",
+        exportEnabled: false,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer-export']").exists()).toBe(false);
   });
 
   it("shows a retryable error when full media cannot be fetched", async () => {

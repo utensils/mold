@@ -202,6 +202,8 @@ use crate::queue::clean_error_message;
         unload_model,
         delete_model,
         create_gallery_media_token,
+        gallery_export_options,
+        export_gallery_video,
         create_pairing_session,
         claim_pairing_session,
         list_paired_clients,
@@ -334,6 +336,11 @@ use crate::queue::clean_error_message;
         crate::chain_limits::ChainLimits,
         GalleryMediaTokenRequest,
         GalleryMediaTokenResponse,
+        GalleryExportRequest,
+        GalleryExportOptionsResponse,
+        GalleryExportFormat,
+        GalleryGifPlayback,
+        GalleryGifRepeat,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -432,6 +439,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route("/api/gallery/media-token", post(create_gallery_media_token))
+        .route("/api/gallery/export-options", get(gallery_export_options))
+        .route("/api/gallery/export/:filename", post(export_gallery_video))
         .route("/api/pairing/sessions", post(create_pairing_session))
         .route("/api/pairing/claim", post(claim_pairing_session))
         .route("/api/pairing/clients", get(list_paired_clients))
@@ -5172,6 +5181,70 @@ pub(crate) struct GalleryMediaTokenResponse {
     pub(crate) auth_required: bool,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GalleryExportFormat {
+    Gif,
+    Apng,
+    Webp,
+}
+
+impl GalleryExportFormat {
+    fn output_format(self) -> mold_core::OutputFormat {
+        match self {
+            Self::Gif => mold_core::OutputFormat::Gif,
+            Self::Apng => mold_core::OutputFormat::Apng,
+            Self::Webp => mold_core::OutputFormat::Webp,
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Gif => "gif",
+            Self::Apng => "png",
+            Self::Webp => "webp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GalleryGifPlayback {
+    #[default]
+    Loop,
+    Bounce,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GalleryGifRepeat {
+    #[default]
+    Forever,
+    Once,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(crate) struct GalleryExportRequest {
+    pub(crate) format: GalleryExportFormat,
+    #[serde(default)]
+    pub(crate) playback: GalleryGifPlayback,
+    #[serde(default)]
+    pub(crate) repeat: GalleryGifRepeat,
+    /// Optional decoded-frame cap. The longest side is resized to this many
+    /// pixels while decoding, before frames enter the animation buffer.
+    pub(crate) max_dimension: Option<u32>,
+    /// Optional target frame rate. The decoder samples without retaining
+    /// skipped full-resolution frames.
+    pub(crate) fps: Option<u32>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct GalleryExportOptionsResponse {
+    pub(crate) formats: Vec<&'static str>,
+    pub(crate) gif_playback: [&'static str; 2],
+    pub(crate) gif_repeat: [&'static str; 2],
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct PairingSessionResponse {
     pub(crate) token: Option<String>,
@@ -5489,6 +5562,143 @@ async fn create_gallery_media_token(
             auth_required,
         }),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/gallery/export-options",
+    tag = "server",
+    responses((status = 200, description = "Available gallery video export formats", body = GalleryExportOptionsResponse))
+)]
+async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
+    let formats = if cfg!(feature = "webp") {
+        vec!["gif", "apng", "webp"]
+    } else {
+        vec!["gif", "apng"]
+    };
+    Json(GalleryExportOptionsResponse {
+        formats,
+        gif_playback: ["loop", "bounce"],
+        gif_repeat: ["forever", "once"],
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/gallery/export/{filename}",
+    tag = "server",
+    params(("filename" = String, Path, description = "Gallery MP4 filename")),
+    request_body = GalleryExportRequest,
+    responses(
+        (status = 200, description = "Converted animation bytes"),
+        (status = 404, description = "Gallery video not found"),
+        (status = 422, description = "Unsupported source or export options")
+    )
+)]
+async fn export_gallery_video(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+    Json(request): Json<GalleryExportRequest>,
+) -> Result<Response, ApiError> {
+    // Decoding/quantizing a long animation is CPU and memory intensive. Keep
+    // one export in flight per server process so concurrent clients cannot
+    // multiply the bounded frame buffer into host-wide memory pressure.
+    static EXPORT_PERMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _export_permit = EXPORT_PERMIT
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal("video export service is unavailable"))?;
+    let _gallery_reader = state.gallery_publication_gate.read().await;
+    let config = state.config.read().await;
+    if state.is_output_disabled(&config) {
+        return Err(ApiError::not_found("video output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+    if !std::path::Path::new(&clean_name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+    {
+        return Err(ApiError::validation(
+            "only MP4 gallery videos can be exported",
+        ));
+    }
+
+    let source = output_dir.join(&clean_name);
+    if !tokio::fs::metadata(&source)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(ApiError::not_found("gallery video not found"));
+    }
+
+    let output_format = request.format.output_format();
+    let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
+    if bounce && !matches!(request.format, GalleryExportFormat::Gif) {
+        return Err(ApiError::validation(
+            "bounce playback is only supported for GIF exports",
+        ));
+    }
+    let repeat_forever = matches!(request.repeat, GalleryGifRepeat::Forever);
+    if request
+        .max_dimension
+        .is_some_and(|dimension| !(240..=2160).contains(&dimension))
+    {
+        return Err(ApiError::validation(
+            "max_dimension must be between 240 and 2160 pixels",
+        ));
+    }
+    if request.fps.is_some_and(|fps| !(1..=60).contains(&fps)) {
+        return Err(ApiError::validation("fps must be between 1 and 60"));
+    }
+    let target_fps = request.fps;
+    let max_dimension = request.max_dimension;
+    let bytes = tokio::task::spawn_blocking(move || {
+        mold_inference::ltx2::media::export_animation(
+            &source,
+            output_format,
+            bounce,
+            repeat_forever,
+            target_fps,
+            max_dimension,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("video export task failed: {error}")))?
+    .map_err(|error| ApiError::inference(format!("video export failed: {error:#}")))?;
+
+    let stem = std::path::Path::new(&clean_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mold-video")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let download_name = format!("{stem}.{}", request.format.extension());
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, output_format.content_type())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{download_name}\""),
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(bytes))
+        .expect("static export response headers are valid"))
 }
 
 /// List gallery images from the server's output directory.

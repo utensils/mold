@@ -1033,9 +1033,12 @@ const generatedPreviewItem = computed<GalleryImage | null>(() => {
     },
   };
 });
-const generatedPreviewTarget = computed<ApiTarget>(() => {
+const generatedPreviewHost = computed(() => {
   const job = latestResultJob.value;
-  const host = hosts.value.find((candidate) => candidate.id === job?.hostId) ?? selectedHost.value;
+  return hosts.value.find((candidate) => candidate.id === job?.hostId) ?? null;
+});
+const generatedPreviewTarget = computed<ApiTarget>(() => {
+  const host = generatedPreviewHost.value;
   return host ? mobileHostTarget(host) : { baseUrl: "", apiKey: null };
 });
 const resultPreviewError = computed(() => {
@@ -4661,6 +4664,7 @@ onBeforeUnmount(() => {
       :host-name="latestResultJob?.hostLabel ?? selectedHost?.name ?? 'Mold host'"
       :thumbnail-url="resultUrl"
       :media-url-override="resultUrl"
+      :export-enabled="generatedPreviewHost !== null"
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"

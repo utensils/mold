@@ -106,6 +106,17 @@ describe("generation store multi-host routing", () => {
     expect(options.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
+  it("fails closed instead of falling back after a job target is released", async () => {
+    sseStream.mockResolvedValue(undefined);
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
+    await settled;
+
+    expect(store.targetForJob(jobs[0]!.clientId)).toEqual(halRoute.target);
+    store.resetJobs();
+    expect(store.targetForJob(jobs[0]!.clientId)).toBeNull();
+  });
+
   it("submits every per-item prompt through the one supplied route", async () => {
     sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();

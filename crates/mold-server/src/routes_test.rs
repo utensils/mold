@@ -7347,6 +7347,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_video_export_advertises_formats_and_converts_gif_bounce() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        std::fs::write(output_dir.path().join("rain dance.mp4"), mp4).unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = create_router(state);
+
+        let options = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/export-options")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(options.status(), StatusCode::OK);
+        let options = json_body(options).await;
+        assert_eq!(
+            options["gif_playback"],
+            serde_json::json!(["loop", "bounce"])
+        );
+        assert!(options["formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "gif"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gallery/export/rain%20dance.mp4")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"format":"gif","playback":"bounce","repeat":"once","max_dimension":480,"fps":12}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "image/gif"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_DISPOSITION],
+            "attachment; filename=\"rain_dance.gif\""
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..6], b"GIF89a");
+    }
+
+    #[tokio::test]
     async fn gallery_media_token_endpoint_reports_when_auth_is_disabled() {
         let app = app_with_auth(None);
         let response = app

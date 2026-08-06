@@ -14,6 +14,7 @@
  * the intent. Keyboard: ←/→ navigate, Esc closes.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import { imageUrl, thumbnailUrl } from "../../api";
 import { getHost } from "../../lib/hostRegistry";
 import {
@@ -27,6 +28,14 @@ import {
 import type { GalleryImage, ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
+import {
+  DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+  saveVideoExport,
+  videoExportFilename,
+  videoExportPath,
+  type VideoExportCapabilities,
+  type VideoExportOptions,
+} from "@studio/lib/videoExport";
 
 const props = defineProps<{
   item: GalleryImage | null;
@@ -56,12 +65,22 @@ const emit = defineEmits<{
 }>();
 
 const menuOpen = ref(false);
+const exportOpen = ref(false);
+const exportBusy = ref(false);
+const exportError = ref("");
+const exportCapabilities = ref<VideoExportCapabilities>(
+  DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+);
 
 const kind = computed(() =>
   props.item ? mediaKind(props.item.format, props.item.filename) : "image",
 );
 const isVideoFile = computed(() => kind.value === "video");
 const isAudioFile = computed(() => kind.value === "audio");
+const canExportVideo = computed(
+  () =>
+    isVideoFile.value && props.item?.filename.toLowerCase().endsWith(".mp4"),
+);
 
 /*
  * Full-size media is addressed on the host that owns the print. Keyless hosts
@@ -281,6 +300,79 @@ function onUpscale() {
 function onDelete() {
   menuOpen.value = false;
   if (props.item) emit("delete", props.item);
+}
+
+function exportHost() {
+  return (
+    hostEntry.value ?? {
+      id: "origin",
+      name: "this server",
+      url: typeof window === "undefined" ? "" : window.location.origin,
+    }
+  );
+}
+
+async function exportFetch(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const host = exportHost();
+  const headers = new Headers(init.headers);
+  if (host.apiKey) headers.set("x-api-key", host.apiKey);
+  const response = await fetch(
+    `${host.id === "origin" ? "" : host.url.replace(/\/$/, "")}${path}`,
+    {
+      ...init,
+      headers,
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(
+      payload?.error ?? `Video export failed (${response.status})`,
+    );
+  }
+  return response;
+}
+
+async function openVideoExport() {
+  exportOpen.value = true;
+  exportError.value = "";
+  try {
+    exportCapabilities.value = (await (
+      await exportFetch("/api/gallery/export-options")
+    ).json()) as VideoExportCapabilities;
+  } catch (error) {
+    exportCapabilities.value = DEFAULT_VIDEO_EXPORT_CAPABILITIES;
+    exportError.value =
+      error instanceof Error
+        ? error.message
+        : "Couldn’t read export options from this host.";
+  }
+}
+
+async function performVideoExport(options: VideoExportOptions) {
+  if (!props.item || exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const response = await exportFetch(videoExportPath(props.item.filename), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    await saveVideoExport(
+      await response.blob(),
+      videoExportFilename(props.item.filename, options.format),
+    );
+    exportOpen.value = false;
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
 }
 </script>
 
@@ -536,6 +628,14 @@ function onDelete() {
             </a>
             <span v-else class="lb__quiet lb__quiet--off">Download</span>
           </div>
+          <button
+            v-if="canExportVideo"
+            class="lb__quiet lb__export"
+            data-test="export-video"
+            @click="openVideoExport"
+          >
+            Export format…
+          </button>
         </div>
       </div>
 
@@ -771,8 +871,26 @@ function onDelete() {
             </a>
             <span v-else class="lb__quiet lb__quiet--off">Save</span>
           </div>
+          <button
+            v-if="canExportVideo"
+            class="lb__quiet lb__export"
+            data-test="export-video"
+            @click="openVideoExport"
+          >
+            Export format…
+          </button>
         </div>
       </div>
+      <VideoExportDialog
+        v-if="item"
+        :open="exportOpen"
+        :filename="item.filename"
+        :formats="exportCapabilities.formats"
+        :busy="exportBusy"
+        :error="exportError"
+        @close="exportOpen = false"
+        @export="performVideoExport"
+      />
     </div>
   </Transition>
 </template>
@@ -1119,6 +1237,10 @@ function onDelete() {
 .lb__pair {
   display: flex;
   gap: 9px;
+}
+.lb__export {
+  width: 100%;
+  margin-top: 10px;
 }
 .lb__quiet {
   flex: 1;
