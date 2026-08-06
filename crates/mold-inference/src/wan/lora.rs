@@ -197,6 +197,37 @@ impl WanLoraRegistry {
             }
         }
 
+        // A low-rank patch is `B @ A`; half of one is not a weaker adapter, it
+        // is no adapter at all for that module. A truncated download or a
+        // partial export therefore has to be refused rather than applied to
+        // whichever modules survived — at four steps a half-distilled model
+        // renders noise, not a slightly worse video. Both directions are
+        // checked: an orphan `lora_up` is the same defect seen from the other
+        // side, and the old `continue` saw neither.
+        let mut orphans: Vec<String> = down
+            .keys()
+            .filter(|stem| !up.contains_key(*stem))
+            .chain(up.keys().filter(|stem| !down.contains_key(*stem)))
+            .cloned()
+            .collect();
+        if !orphans.is_empty() {
+            orphans.sort_unstable();
+            let shown = orphans.iter().take(3).cloned().collect::<Vec<_>>();
+            bail!(
+                "{} has {} LoRA tensor(s) without their matching half — {}{}. Every low-rank \
+                 patch needs both `lora_down` and `lora_up`; applying the modules that are \
+                 complete would leave the adapter partially merged.",
+                path.display(),
+                orphans.len(),
+                shown.join(", "),
+                if orphans.len() > shown.len() {
+                    format!(", and {} more", orphans.len() - shown.len())
+                } else {
+                    String::new()
+                }
+            );
+        }
+
         let mut paired = 0usize;
         for (stem, a) in down {
             let Some(b) = up.get(&stem) else { continue };
@@ -592,6 +623,94 @@ mod tests {
         assert!(error.contains("2.1-era"), "{error}");
         assert!(error.contains("full-weight"), "{error}");
         assert!(error.contains('2'), "the count must be named: {error}");
+    }
+
+    /// A half-written adapter must be refused, not partially applied.
+    ///
+    /// This is the renders-noise-at-four-steps class: with one valid pair
+    /// present the old `paired > 0` check reported success, so a truncated
+    /// download merged into whichever modules happened to survive and the
+    /// distill was silently incomplete. Both orphan directions are the same
+    /// defect and both are named.
+    #[test]
+    fn an_adapter_with_a_half_written_pair_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let orphan_down = dir.path().join("orphan_down.safetensors");
+        write_tensors(
+            &orphan_down,
+            &[
+                // One complete pair, so the "no pairs at all" guard cannot be
+                // what catches this.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+                    SafeDtype::F32,
+                    vec![2, 4],
+                    f32_bytes(&[0.0; 8]),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+                    SafeDtype::F32,
+                    vec![4, 2],
+                    f32_bytes(&[0.0; 8]),
+                ),
+                // ... and one module whose `lora_up` never arrived.
+                (
+                    "diffusion_model.blocks.1.ffn.0.lora_down.weight",
+                    SafeDtype::F32,
+                    vec![2, 4],
+                    f32_bytes(&[0.0; 8]),
+                ),
+            ],
+        );
+        let error = WanLoraRegistry::load(&[lora(&orphan_down, 1.0)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocks.1.ffn.0"), "{error}");
+        assert!(error.contains("without their matching half"), "{error}");
+
+        // The mirror image: an `lora_up` with no `lora_down`.
+        let orphan_up = dir.path().join("orphan_up.safetensors");
+        write_tensors(
+            &orphan_up,
+            &[
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+                    SafeDtype::F32,
+                    vec![2, 4],
+                    f32_bytes(&[0.0; 8]),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+                    SafeDtype::F32,
+                    vec![4, 2],
+                    f32_bytes(&[0.0; 8]),
+                ),
+                (
+                    "diffusion_model.blocks.2.cross_attn.k.lora_up.weight",
+                    SafeDtype::F32,
+                    vec![4, 2],
+                    f32_bytes(&[0.0; 8]),
+                ),
+            ],
+        );
+        let error = WanLoraRegistry::load(&[lora(&orphan_up, 1.0)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocks.2.cross_attn.k"), "{error}");
+
+        // A complete adapter is unaffected.
+        let complete = dir.path().join("complete.safetensors");
+        write_wan_lora(
+            &complete,
+            Some((SafeDtype::I64, 8i64.to_le_bytes().to_vec())),
+        );
+        assert_eq!(
+            WanLoraRegistry::load(&[lora(&complete, 1.0)])
+                .unwrap()
+                .tensor_count(),
+            1
+        );
     }
 
     #[test]

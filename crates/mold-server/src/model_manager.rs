@@ -1178,6 +1178,13 @@ fn component_status_from_paths(
     for shard in &paths.transformer_shards {
         push_path("transformer", "transformer shard", shard);
     }
+    // The low-noise expert is not read until the schedule crosses the expert
+    // boundary, so without its own row a deleted one is invisible to the
+    // placement preview: the model reports complete and fails mid-generation
+    // with nothing named for repair.
+    if let Some(path) = &paths.low_noise_transformer {
+        push_path("transformer", "low-noise transformer", path);
+    }
     push_path("vae", "vae", &paths.vae);
     if let Some(path) = &paths.spatial_upscaler {
         push_path("spatial_upscaler", "spatial upscaler", path);
@@ -1187,6 +1194,9 @@ fn component_status_from_paths(
     }
     if let Some(path) = &paths.distilled_lora {
         push_path("distilled_lora", "distilled lora", path);
+    }
+    if let Some(path) = &paths.low_noise_distilled_lora {
+        push_path("distilled_lora", "low-noise distilled lora", path);
     }
     if let Some(path) = &paths.t5_encoder {
         push_path("text_encoder", "t5 encoder", path);
@@ -2133,6 +2143,88 @@ mod tests {
             .iter()
             .any(|component| component.path.as_deref() == vae.to_str()));
         assert!(status.components.iter().all(|component| component.present));
+    }
+
+    /// A deleted low-noise expert has to be reported, and reported as missing.
+    ///
+    /// Nothing opens that file until the schedule crosses the expert boundary,
+    /// so if it has no status row the model reports complete, the placement
+    /// preview has nothing to offer for repair, and the failure surfaces
+    /// mid-generation with no file named.
+    #[test]
+    fn component_status_names_both_experts_and_both_distills() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name);
+        let write = |name: &str| {
+            let path = at(name);
+            std::fs::write(&path, b"weights").unwrap();
+            path
+        };
+        let high = write("high-noise.gguf");
+        let vae = write("vae.safetensors");
+        let high_distill = write("high-distill.safetensors");
+        let low_distill = write("low-distill.safetensors");
+        // The low-noise expert is the one that never arrived.
+        let low = at("low-noise.gguf");
+
+        let paths = ModelPaths {
+            low_noise_transformer: Some(low.clone()),
+            low_noise_distilled_lora: Some(low_distill.clone()),
+            transformer: high.clone(),
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: Some(high_distill.clone()),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        let components =
+            component_status_from_paths(&Config::default(), "wan22-t2v-a14b:q5", &paths);
+        let row = |path: &std::path::Path| {
+            components
+                .iter()
+                .find(|component| component.path.as_deref() == path.to_str())
+                .unwrap_or_else(|| panic!("no status row for {}", path.display()))
+        };
+
+        assert!(row(&high).present);
+        assert!(
+            !row(&low).present,
+            "the missing low-noise expert must report absent"
+        );
+        assert_eq!(row(&low).name, "low-noise transformer");
+        assert_eq!(row(&low).kind, "transformer");
+        assert_eq!(
+            row(&low).repair_model.as_deref(),
+            Some("wan22-t2v-a14b:q5"),
+            "the row must say which model to repair"
+        );
+
+        // Both distills get their own rows; one cannot stand in for the other.
+        assert_eq!(row(&high_distill).name, "distilled lora");
+        assert_eq!(row(&low_distill).name, "low-noise distilled lora");
+        assert!(row(&high_distill).present && row(&low_distill).present);
+
+        // A single-expert model gains no extra rows.
+        let single = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            ..paths
+        };
+        let components =
+            component_status_from_paths(&Config::default(), "wan22-ti2v-5b:fp16", &single);
+        assert!(!components
+            .iter()
+            .any(|component| component.name.starts_with("low-noise")));
     }
 
     struct IsolatedModelEnvironment {
