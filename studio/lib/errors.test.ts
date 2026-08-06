@@ -69,4 +69,16 @@ describe("describeTransportError", () => {
       describeTransportError("Model download was cancelled", "plato"),
     ).toBe("Model download was cancelled");
   });
+
+  it("extracts native bridge messages without leaking object coercion", () => {
+    expect(
+      describeTransportError({ message: "Camera access was denied" }),
+    ).toBe("Camera access was denied");
+    expect(describeTransportError({ error: "Scanner unavailable" })).toBe(
+      "Scanner unavailable",
+    );
+    expect(describeTransportError({})).toBe(
+      "Something went wrong talking to the host.",
+    );
+  });
 });
