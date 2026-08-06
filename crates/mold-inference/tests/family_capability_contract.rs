@@ -274,7 +274,7 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             false,
             MediaKind::Video,
             WorkflowCapabilities {
-                source: false,
+                source: true,
                 edit_references: false,
                 lora: false,
                 generated_audio: false,

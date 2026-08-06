@@ -1,9 +1,19 @@
-//! Wan 2.1 / 2.2 text-to-video engine.
+//! Wan 2.1 / 2.2 video engine.
 //!
-//! Ties the four Wan layers together: UMT5-XXL prompt encoding, the DiT, the
-//! FlowUniPC sampler, and the causal 3-D VAE. Text-to-video only — image and
-//! video conditioning (I2V, TI2V) arrive in a later layer and are rejected
-//! here rather than silently ignored.
+//! Ties the Wan layers together: UMT5-XXL prompt encoding, the DiT, the
+//! FlowUniPC sampler, the causal 3-D VAE, and the image-conditioning assembly.
+//!
+//! Three conditioning modes, chosen from the checkpoint's own shapes rather
+//! than its name:
+//!
+//! - **Text-to-video** — no source image.
+//! - **Latent inpaint** (TI2V-5B) — the source image is encoded to one latent
+//!   frame, pinned at frame 0, and its tokens carry timestep 0 so the DiT sees
+//!   them as already clean.
+//! - **Channel concat** (I2V checkpoints, `in_dim = 2*z + 4`) — a 20-channel
+//!   mask-plus-image block rides alongside the noise every step.
+//!
+//! Video-to-video and keyframes are still refused rather than silently ignored.
 //!
 //! Like the other video families this engine is *sequential by construction*:
 //! every component is loaded inside `generate` and dropped as soon as it is
@@ -17,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use candle_core::{safetensors::MmapedSafetensors, DType, IndexOp, Tensor};
+use candle_core::{safetensors::MmapedSafetensors, DType, Device, IndexOp, Tensor};
 use mold_core::{GenerateRequest, GenerateResponse, ModelPaths, OutputFormat, VideoData};
 
 use crate::engine::{gpu_dtype, rand_seed, seeded_randn, LoadStrategy};
@@ -25,6 +35,9 @@ use crate::engine_base::EngineBase;
 use crate::ltx_video::video_enc;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressPhase};
 use crate::shared_pool::SharedPool;
+use crate::wan::conditioning::{
+    build_a14b_conditioning, WanImageAnchors, WanLatentGeometry, WanTi2vInpaint,
+};
 use crate::wan::model::transformer::{WanTransformer, WanTransformerConfig};
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
 use crate::wan::sampler::{apply_cfg, FlowUniPc, WanSchedule, WanScheduleConfig};
@@ -241,10 +254,6 @@ fn resolve_flow_shift() -> Result<f64> {
 fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
     let unsupported = [
         (
-            req.source_image.is_some() || req.source_image_name.is_some(),
-            "source_image",
-        ),
-        (
             req.source_video.is_some() || req.source_video_path.is_some(),
             "source_video",
         ),
@@ -257,12 +266,59 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
     for (present, field) in unsupported {
         if present {
             bail!(
-                "{field} is not yet supported for Wan — this layer ships text-to-video only; \
-                 image and video conditioning land with I2V/TI2V support"
+                "{field} is not yet supported for Wan — the family ships text-to-video and \
+                 single-image conditioning; video-to-video and keyframes land later"
             );
         }
     }
     Ok(())
+}
+
+/// How a checkpoint expects its conditioning to arrive, derived from the ratio
+/// between the DiT's input channels and the VAE's latent channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WanConditioningShape {
+    /// `in_dim == z_dim` — the DiT consumes latents directly. Every T2V
+    /// checkpoint, plus TI2V-5B, whose image conditioning happens by inpainting
+    /// latent frame 0 rather than by widening the input.
+    Plain,
+    /// `in_dim == 2 * z_dim + 4` — the DiT consumes
+    /// `cat([noise(z), mask(4), image(z)])`. Wan 2.1 I2V-14B and Wan 2.2
+    /// I2V-A14B both declare 36 channels against the 16-channel 2.1 VAE.
+    ChannelConcat,
+}
+
+pub(crate) fn conditioning_shape(in_dim: usize, z_dim: usize) -> Result<WanConditioningShape> {
+    if in_dim == z_dim {
+        return Ok(WanConditioningShape::Plain);
+    }
+    if in_dim == 2 * z_dim + 4 {
+        return Ok(WanConditioningShape::ChannelConcat);
+    }
+    bail!(
+        "Wan: a transformer with {in_dim} input channels does not pair with a {z_dim}-channel \
+         VAE — expected {z_dim} (plain) or {} (image concat)",
+        2 * z_dim + 4
+    )
+}
+
+/// The conditioning a request resolved to, carrying whatever tensors the
+/// denoise loop needs.
+enum WanImageConditioning {
+    None,
+    /// TI2V-5B: latent frame 0 is pinned to the encoded image and the timestep
+    /// vector goes per-token so that frame reports as clean.
+    LatentInpaint {
+        inpaint: WanTi2vInpaint,
+        /// `[1, z, latent_frames, h, w]` — the encoded image broadcast over the
+        /// frame axis. Only frame 0 survives the blend.
+        condition: Tensor,
+    },
+    /// I2V checkpoints: a 20-channel `cat([mask, image_latent])` block that
+    /// rides alongside the noise every step.
+    ChannelConcat {
+        conditioning: Tensor,
+    },
 }
 
 /// Whether a request needs the unconditional pass.
@@ -272,6 +328,105 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
 /// Lightning recipe fast.
 pub(crate) fn needs_cfg_pass(guidance: f64) -> bool {
     guidance > 1.0
+}
+
+/// Everything one denoise run needs. Bundled because the loop is shared
+/// between `generate` and the CPU smoke tests, and a dozen positional
+/// parameters is worse than a struct.
+struct DenoiseInputs<'a> {
+    transformer: &'a WanTransformer,
+    conditioning: &'a WanImageConditioning,
+    schedule: &'a WanSchedule,
+    solver: &'a mut FlowUniPc,
+    latents: Tensor,
+    cond_embeds: &'a Tensor,
+    uncond_embeds: Option<&'a Tensor>,
+    guidance: f64,
+    /// DiT spatial patch size, needed to size the per-token timestep vector.
+    patch: usize,
+    rope: &'a (Tensor, Tensor),
+    device: &'a Device,
+    dtype: DType,
+    progress: &'a crate::progress::ProgressReporter,
+}
+
+/// The sampling loop for all three conditioning modes.
+///
+/// Extracted so the CPU smoke tests drive the real branching rather than a
+/// copy of it — the conditioning mode decides what the DiT sees and how the
+/// timestep is expressed, and those are exactly the parts worth testing.
+fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
+    let DenoiseInputs {
+        transformer,
+        conditioning,
+        schedule,
+        solver,
+        mut latents,
+        cond_embeds,
+        uncond_embeds,
+        guidance,
+        patch,
+        rope,
+        device,
+        dtype,
+        progress,
+    } = inputs;
+
+    let total = schedule.timesteps.len();
+    for (index, timestep) in schedule.timesteps.iter().enumerate() {
+        progress.checkpoint()?;
+        let step_start = Instant::now();
+
+        // Each conditioning mode decides what the DiT sees and how the
+        // timestep is expressed. The solver always steps on `latents`.
+        let scalar_timestep =
+            || Tensor::from_vec(vec![*timestep as f32], 1, device)?.to_dtype(dtype);
+        let (model_input, timestep_tensor) = match conditioning {
+            WanImageConditioning::None => (latents.clone(), scalar_timestep()?),
+            WanImageConditioning::LatentInpaint { inpaint, condition } => {
+                // Frame 0 is the clean encoded image; its tokens carry timestep
+                // 0 so the DiT treats them as already denoised.
+                let blended = inpaint.blend(condition, &latents)?;
+                let per_token =
+                    inpaint.per_token_timesteps(*timestep as f64, patch, None, device, dtype)?;
+                (blended, per_token)
+            }
+            WanImageConditioning::ChannelConcat { conditioning } => (
+                Tensor::cat(&[&latents, conditioning], 1)?,
+                scalar_timestep()?,
+            ),
+        };
+
+        let cond =
+            transformer.forward_with_rope(&model_input, &timestep_tensor, cond_embeds, rope)?;
+        let velocity = match uncond_embeds {
+            Some(uncond_embeds) => {
+                let uncond = transformer.forward_with_rope(
+                    &model_input,
+                    &timestep_tensor,
+                    uncond_embeds,
+                    rope,
+                )?;
+                apply_cfg(&cond, &uncond, guidance)?
+            }
+            None => cond,
+        };
+        latents = solver.step(&velocity, index, &latents)?;
+
+        // Re-impose the clean frame after the step (Wan-native
+        // `textimage2video.py:598`). Without this the final latent carries a
+        // drifted frame 0 even though every model input was blended.
+        if let WanImageConditioning::LatentInpaint { inpaint, condition } = conditioning {
+            latents = inpaint.reimpose_clean_frame(condition, &latents)?;
+        }
+
+        progress.emit(ProgressEvent::DenoiseStep {
+            step: index + 1,
+            total,
+            elapsed: step_start.elapsed(),
+        });
+    }
+    Ok(latents)
 }
 
 pub struct WanEngine {
@@ -322,6 +477,116 @@ impl WanEngine {
             .ok_or_else(|| anyhow::anyhow!("Wan: no UMT5 tokenizer configured for this model"))
     }
 
+    /// Decode the source image, encode it with the VAE, and assemble whatever
+    /// the checkpoint's conditioning shape needs. The VAE is loaded and dropped
+    /// here so it never coexists with the text encoder or the transformer.
+    ///
+    /// `WanVideoVae::encode` already returns the posterior mean with the
+    /// per-channel normalization applied, which is exactly diffusers'
+    /// `retrieve_latents(..., sample_mode="argmax")` followed by
+    /// `(latent - mean) / std`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_image_conditioning(
+        &self,
+        req: &GenerateRequest,
+        shape: WanConditioningShape,
+        vae_generation: WanVaeGeneration,
+        geometry: WanLatentGeometry,
+        pixel_frames: usize,
+        width: u32,
+        height: u32,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<WanImageConditioning> {
+        let Some(bytes) = req.source_image.as_ref() else {
+            if shape == WanConditioningShape::ChannelConcat {
+                bail!(
+                    "this Wan checkpoint is image-to-video (it declares {} input channels) and \
+                     needs a source image",
+                    2 * vae_generation.config().z_dim + 4
+                );
+            }
+            return Ok(WanImageConditioning::None);
+        };
+
+        if shape == WanConditioningShape::Plain && vae_generation != WanVaeGeneration::V2_2 {
+            bail!(
+                "this Wan checkpoint is text-to-video only and has no image conditioning path — \
+                 use wan22-ti2v-5b, or an I2V checkpoint, for source images"
+            );
+        }
+
+        progress.stage_start("Encoding source image");
+        let encode_start = Instant::now();
+        // Fit to the requested frame, matching every other mold engine's source
+        // convention. mold deliberately does NOT run upstream's area bucketing,
+        // which would silently resize; see `wan::conditioning`.
+        let image = crate::img_utils::decode_source_image(
+            bytes,
+            width,
+            height,
+            crate::img_utils::NormalizeRange::MinusOneToOne,
+            device,
+            dtype,
+        )?;
+
+        let vae = WanVideoVae::from_safetensors(
+            &self.base.paths.vae,
+            vae_generation.config(),
+            device,
+            dtype,
+        )?;
+
+        let conditioning = match shape {
+            WanConditioningShape::Plain => {
+                // TI2V encodes the bare image: one pixel frame in, one latent
+                // frame out, broadcast across the clip by the blend.
+                let single = image.unsqueeze(2)?;
+                let encoded = vae.encode(&single)?;
+                let condition = encoded.broadcast_as((
+                    1,
+                    encoded.dim(1)?,
+                    geometry.latent_frames,
+                    geometry.latent_height,
+                    geometry.latent_width,
+                ))?;
+                let inpaint = WanTi2vInpaint::new(geometry, device, dtype)?;
+                WanImageConditioning::LatentInpaint {
+                    inpaint,
+                    condition: condition.contiguous()?,
+                }
+            }
+            WanConditioningShape::ChannelConcat => {
+                // I2V encodes the image followed by a black canvas, so the
+                // conditioning latent spans the whole clip.
+                let canvas = Tensor::zeros(
+                    (1, 3, pixel_frames - 1, height as usize, width as usize),
+                    dtype,
+                    device,
+                )?;
+                let video = Tensor::cat(&[&image.unsqueeze(2)?, &canvas], 2)?;
+                let encoded = vae.encode(&video)?;
+                WanImageConditioning::ChannelConcat {
+                    conditioning: build_a14b_conditioning(
+                        &encoded,
+                        pixel_frames,
+                        WanImageAnchors::FirstFrame,
+                        VAE_TEMPORAL_COMPRESSION,
+                    )?,
+                }
+            }
+        };
+        drop(vae);
+        device.synchronize()?;
+        progress.phase_done(
+            ProgressPhase::Vae,
+            "Encoding source image",
+            encode_start.elapsed(),
+        );
+        Ok(conditioning)
+    }
+
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let start = Instant::now();
         reject_unsupported_conditioning(req)?;
@@ -335,14 +600,7 @@ impl WanEngine {
         let vae_generation = detect_vae_generation(&paths.vae)?;
         let vae_config = vae_generation.config();
         let transformer_config = detect_transformer_config(&paths.transformer)?;
-        if transformer_config.in_dim != vae_config.z_dim {
-            bail!(
-                "Wan: the transformer expects {} latent channels but the VAE produces {} — the \
-                 checkpoint and VAE generations do not match",
-                transformer_config.in_dim,
-                vae_config.z_dim
-            );
-        }
+        let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
 
         let (default_frames, default_fps) = vae_generation.default_timing();
         let num_frames = req.frames.unwrap_or(default_frames);
@@ -386,7 +644,29 @@ impl WanEngine {
         }
 
         // ------------------------------------------------------------------
-        // 1. Prompt encoding, then drop the encoder before denoise
+        // 1. Image conditioning, first so the VAE never shares VRAM with the
+        //    11 GB text encoder.
+        // ------------------------------------------------------------------
+        let geometry = WanLatentGeometry {
+            latent_frames,
+            latent_height: latent_h,
+            latent_width: latent_w,
+        };
+        let conditioning = self.build_image_conditioning(
+            req,
+            shape,
+            vae_generation,
+            geometry,
+            num_frames as usize,
+            width,
+            height,
+            &device,
+            dtype,
+            progress,
+        )?;
+
+        // ------------------------------------------------------------------
+        // 2. Prompt encoding, then drop the encoder before denoise
         // ------------------------------------------------------------------
         progress.stage_start("Loading UMT5-XXL encoder");
         let encoder_start = Instant::now();
@@ -469,7 +749,7 @@ impl WanEngine {
 
         let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, shift))?;
         let mut solver = FlowUniPc::new(schedule.clone());
-        let mut latents = seeded_randn(
+        let latents = seeded_randn(
             seed,
             &[1, vae_config.z_dim, latent_frames, latent_h, latent_w],
             &device,
@@ -477,39 +757,38 @@ impl WanEngine {
         )?
         .to_dtype(dtype)?;
 
-        // Hoisted: the rotation tables depend only on the latent grid, which
-        // is fixed for the whole run.
-        let rope = transformer.rope_freqs_for(&latents)?;
+        // Hoisted: the rotation tables depend only on the latent grid, which is
+        // fixed for the whole run. Probe with the *model input* channel count,
+        // not the latent's — the concat path widens it to `in_dim` and
+        // `rope_freqs_for` validates that against the config.
+        let rope = transformer.rope_freqs_for(&Tensor::zeros(
+            (
+                1,
+                transformer_config.in_dim,
+                latent_frames,
+                latent_h,
+                latent_w,
+            ),
+            dtype,
+            &device,
+        )?)?;
 
         progress.stage_start("Denoising");
-        for (index, timestep) in schedule.timesteps.iter().enumerate() {
-            progress.checkpoint()?;
-            let step_start = Instant::now();
-            let timestep_tensor =
-                Tensor::from_vec(vec![*timestep as f32], 1, &device)?.to_dtype(dtype)?;
-
-            let cond =
-                transformer.forward_with_rope(&latents, &timestep_tensor, &cond_embeds, &rope)?;
-            let velocity = match &uncond_embeds {
-                Some(uncond_embeds) => {
-                    let uncond = transformer.forward_with_rope(
-                        &latents,
-                        &timestep_tensor,
-                        uncond_embeds,
-                        &rope,
-                    )?;
-                    apply_cfg(&cond, &uncond, guidance)?
-                }
-                None => cond,
-            };
-            latents = solver.step(&velocity, index, &latents)?;
-
-            progress.emit(ProgressEvent::DenoiseStep {
-                step: index + 1,
-                total: steps as usize,
-                elapsed: step_start.elapsed(),
-            });
-        }
+        let latents = run_denoise_loop(DenoiseInputs {
+            transformer: &transformer,
+            conditioning: &conditioning,
+            schedule: &schedule,
+            solver: &mut solver,
+            latents,
+            cond_embeds: &cond_embeds,
+            uncond_embeds: uncond_embeds.as_ref(),
+            guidance,
+            patch: transformer_config.patch_size.1,
+            rope: &rope,
+            device: &device,
+            dtype,
+            progress,
+        })?;
         progress.checkpoint()?;
         drop(transformer);
         device.synchronize()?;
@@ -712,7 +991,6 @@ impl crate::engine::InferenceEngine for WanEngine {
 mod tests {
     use super::*;
     use crate::engine::InferenceEngine;
-    use candle_core::Device;
     use candle_nn::{VarBuilder, VarMap};
     use std::collections::HashMap;
 
@@ -831,29 +1109,67 @@ mod tests {
     }
 
     #[test]
-    fn conditioning_inputs_are_rejected_with_a_clear_message() {
+    fn video_conditioning_is_rejected_but_images_are_accepted() {
         for mutate in [
-            (|req: &mut GenerateRequest| req.source_image = Some(vec![1, 2, 3])) as fn(&mut _),
-            |req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3]),
+            (|req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3])) as fn(&mut _),
             |req: &mut GenerateRequest| req.extend_video = Some(vec![1, 2, 3]),
-            |req: &mut GenerateRequest| req.source_image_name = Some("cat.png".into()),
+            |req: &mut GenerateRequest| req.source_video_path = Some("clip.mp4".into()),
+            |req: &mut GenerateRequest| req.keyframes = Some(Vec::new()),
         ] {
             let mut req = request();
             mutate(&mut req);
             let error = reject_unsupported_conditioning(&req)
-                .expect_err("conditioning must be refused")
+                .expect_err("video conditioning must be refused")
                 .to_string();
             assert!(
                 error.contains("not yet supported for Wan"),
                 "unexpected error: {error}"
             );
             assert!(
-                error.contains("text-to-video only"),
+                error.contains("single-image conditioning"),
                 "the error must say what the engine does support: {error}"
             );
         }
-        // A plain text-to-video request passes.
+
+        // Images are no longer refused at the request boundary.
+        let mut req = request();
+        req.source_image = Some(vec![1, 2, 3]);
+        req.source_image_name = Some("cat.png".into());
+        reject_unsupported_conditioning(&req).unwrap();
         reject_unsupported_conditioning(&request()).unwrap();
+    }
+
+    /// The conditioning shape is derived from the checkpoint's channel ratio,
+    /// never from its name.
+    #[test]
+    fn conditioning_shape_comes_from_the_channel_ratio() {
+        // T2V-1.3B / T2V-14B against the 16-channel 2.1 VAE.
+        assert_eq!(
+            conditioning_shape(16, 16).unwrap(),
+            WanConditioningShape::Plain
+        );
+        // TI2V-5B against the 48-channel 2.2 VAE.
+        assert_eq!(
+            conditioning_shape(48, 48).unwrap(),
+            WanConditioningShape::Plain
+        );
+        // I2V-14B / I2V-A14B: 16 noise + 4 mask + 16 image.
+        assert_eq!(
+            conditioning_shape(36, 16).unwrap(),
+            WanConditioningShape::ChannelConcat
+        );
+        // A 2.2-VAE image checkpoint would be 48 + 4 + 48.
+        assert_eq!(
+            conditioning_shape(100, 48).unwrap(),
+            WanConditioningShape::ChannelConcat
+        );
+        // Mismatched pairings are refused rather than silently mis-shaped.
+        for (in_dim, z_dim) in [(36, 48), (16, 48), (48, 16), (20, 16)] {
+            assert!(
+                conditioning_shape(in_dim, z_dim).is_err(),
+                "in_dim {in_dim} against z_dim {z_dim} must not resolve"
+            );
+        }
     }
 
     /// The Lightning recipe runs at guidance 1.0 and must not pay for a second
@@ -1165,5 +1481,307 @@ mod tests {
         let frames = tiny_engine_run(1.0, 4);
         assert_eq!(frames.len(), 5);
         assert_eq!(frames[0].dimensions(), (32, 32));
+    }
+
+    /// Build a tiny model pair and drive the *real* denoise loop for one
+    /// conditioning mode. Returns the final latents plus the decoded frames, so
+    /// tests can assert both the latent invariant and the pixel outcome.
+    fn tiny_i2v_runs(
+        shape: WanConditioningShape,
+        source_seeds: &[u64],
+        guidance: f64,
+    ) -> Vec<(Tensor, Tensor, Vec<image::RgbImage>)> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let (pixel_frames, width, height) = (5usize, 32u32, 32u32);
+
+        let vae_config = WanVaeConfig::tiny_v2_1();
+        let vae_map = VarMap::new();
+        let vae = WanVideoVae::from_var_builder(
+            VarBuilder::from_varmap(&vae_map, dtype, &device),
+            vae_config.clone(),
+            &device,
+            dtype,
+        )
+        .unwrap();
+
+        let z = vae_config.z_dim;
+        let in_dim = match shape {
+            WanConditioningShape::Plain => z,
+            WanConditioningShape::ChannelConcat => 2 * z + 4,
+        };
+        assert_eq!(conditioning_shape(in_dim, z).unwrap(), shape);
+
+        let transformer_config = WanTransformerConfig {
+            in_dim,
+            out_dim: z,
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let transformer_map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&transformer_map, dtype, &device),
+            transformer_config.clone(),
+        )
+        .unwrap();
+
+        let latent_frames = (pixel_frames - 1) / VAE_TEMPORAL_COMPRESSION + 1;
+        let latent_h = height as usize / vae_config.spatial_compression();
+        let latent_w = width as usize / vae_config.spatial_compression();
+        let geometry = WanLatentGeometry {
+            latent_frames,
+            latent_height: latent_h,
+            latent_width: latent_w,
+        };
+
+        // One model, many source images: the differential test must vary only
+        // the image, and a fresh `VarMap` per call would vary every weight too.
+        let mut outcomes = Vec::with_capacity(source_seeds.len());
+        for source_seed in source_seeds.iter().copied() {
+            // A deterministic "source image" in [-1, 1].
+            let image = seeded_randn(
+                source_seed,
+                &[1, 3, height as usize, width as usize],
+                &device,
+                dtype,
+            )
+            .unwrap()
+            .clamp(-1f32, 1f32)
+            .unwrap();
+
+            let conditioning = match shape {
+                WanConditioningShape::Plain => {
+                    let encoded = vae.encode(&image.unsqueeze(2).unwrap()).unwrap();
+                    let condition = encoded
+                        .broadcast_as((1, z, latent_frames, latent_h, latent_w))
+                        .unwrap()
+                        .contiguous()
+                        .unwrap();
+                    WanImageConditioning::LatentInpaint {
+                        inpaint: WanTi2vInpaint::new(geometry, &device, dtype).unwrap(),
+                        condition,
+                    }
+                }
+                WanConditioningShape::ChannelConcat => {
+                    let canvas = Tensor::zeros(
+                        (1, 3, pixel_frames - 1, height as usize, width as usize),
+                        dtype,
+                        &device,
+                    )
+                    .unwrap();
+                    let video = Tensor::cat(&[&image.unsqueeze(2).unwrap(), &canvas], 2).unwrap();
+                    let encoded = vae.encode(&video).unwrap();
+                    WanImageConditioning::ChannelConcat {
+                        conditioning: build_a14b_conditioning(
+                            &encoded,
+                            pixel_frames,
+                            WanImageAnchors::FirstFrame,
+                            VAE_TEMPORAL_COMPRESSION,
+                        )
+                        .unwrap(),
+                    }
+                }
+            };
+
+            let context = Tensor::zeros((1, 6, 32), dtype, &device).unwrap();
+            let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
+            // A fresh solver per source: `FlowUniPc` carries multistep history.
+            let mut solver = FlowUniPc::new(schedule.clone());
+            let latents = seeded_randn(
+                7,
+                &[1, z, latent_frames, latent_h, latent_w],
+                &device,
+                dtype,
+            )
+            .unwrap();
+            let rope = transformer
+                .rope_freqs_for(
+                    &Tensor::zeros(
+                        (1, in_dim, latent_frames, latent_h, latent_w),
+                        dtype,
+                        &device,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let progress = crate::progress::ProgressReporter::default();
+
+            let final_latents = run_denoise_loop(DenoiseInputs {
+                transformer: &transformer,
+                conditioning: &conditioning,
+                schedule: &schedule,
+                solver: &mut solver,
+                latents,
+                cond_embeds: &context,
+                uncond_embeds: None,
+                guidance,
+                patch: transformer_config.patch_size.1,
+                rope: &rope,
+                device: &device,
+                dtype,
+                progress: &progress,
+            })
+            .unwrap();
+
+            let condition_tensor = match &conditioning {
+                WanImageConditioning::LatentInpaint { condition, .. } => condition.clone(),
+                WanImageConditioning::ChannelConcat { conditioning } => conditioning.clone(),
+                WanImageConditioning::None => unreachable!(),
+            };
+            let video = vae.decode(&final_latents).unwrap();
+            let frames = video_frames_to_images(&video, width, height).unwrap();
+            outcomes.push((final_latents, condition_tensor, frames));
+        }
+        outcomes
+    }
+
+    fn tiny_i2v_run(
+        shape: WanConditioningShape,
+        source_seed: u64,
+        guidance: f64,
+    ) -> (Tensor, Tensor, Vec<image::RgbImage>) {
+        tiny_i2v_runs(shape, &[source_seed], guidance)
+            .pop()
+            .expect("one source seed yields one outcome")
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// TI2V end to end: the loop runs, the clip decodes, and — the load-bearing
+    /// part — latent frame 0 comes out bit-identical to the encoded image.
+    /// That is the re-imposition contract; without it frame 0 drifts.
+    #[test]
+    fn tiny_ti2v_run_pins_latent_frame_zero_to_the_source() {
+        let (latents, condition, frames) = tiny_i2v_run(WanConditioningShape::Plain, 11, 1.0);
+        assert_eq!(latents.dims(), &[1, 4, 2, 4, 4]);
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[0].dimensions(), (32, 32));
+
+        let got = flat(&latents.narrow(2, 0, 1).unwrap().contiguous().unwrap());
+        let want = flat(&condition.narrow(2, 0, 1).unwrap().contiguous().unwrap());
+        assert_eq!(
+            got, want,
+            "latent frame 0 must survive every step untouched"
+        );
+
+        // And frame 1 must NOT equal the condition, or the loop denoised
+        // nothing at all.
+        let later = flat(&latents.narrow(2, 1, 1).unwrap().contiguous().unwrap());
+        assert_ne!(later, want, "frames after the first must actually denoise");
+        assert!(flat(&latents).iter().all(|v| v.is_finite()));
+    }
+
+    /// The source image must control latent frame 0 *exactly*, and must reach
+    /// the decoded pixels.
+    ///
+    /// Note what this does NOT assert. The intuitive check — "decoded frame 0
+    /// resembles the source more than later frames do" — carries no signal at
+    /// tiny scale, and measurably runs the other way: swapping the source moves
+    /// pixel frame 0 by ~26 and the last frame by ~39. Two reasons, both
+    /// structural rather than bugs. The causal VAE decodes pixel frames 1..4
+    /// from latent frames 0 *and* 1, so they inherit frame 0's change on top of
+    /// their own; and a random-weight DiT amplifies the perturbation it sees
+    /// into latent frame 1 instead of attenuating it. With trained weights the
+    /// intuition would hold, but a test may not depend on that.
+    ///
+    /// The latent-space statement is exact and holds regardless of weights.
+    #[test]
+    fn tiny_ti2v_source_image_controls_frame_zero() {
+        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 29], 1.0);
+        let frame_zero = |t: &Tensor| flat(&t.narrow(2, 0, 1).unwrap().contiguous().unwrap());
+        let l1 = frame_zero(&runs[0].0);
+        let l2 = frame_zero(&runs[1].0);
+        let c1 = frame_zero(&runs[0].1);
+        let c2 = frame_zero(&runs[1].1);
+
+        // Latent frame 0 differs between the runs by exactly what the encoded
+        // conditions differ by — element for element, not merely in aggregate.
+        assert_eq!(l1.len(), c1.len());
+        for (index, (((a, b), c), d)) in l1.iter().zip(&l2).zip(&c1).zip(&c2).enumerate() {
+            assert_eq!(a - b, c - d, "element {index}");
+        }
+        let delta: f64 = l1
+            .iter()
+            .zip(&l2)
+            .map(|(a, b)| (f64::from(*a) - f64::from(*b)).abs())
+            .sum();
+        assert!(delta > 0.0, "the two source images must actually differ");
+
+        // And the change survives the decode into pixels.
+        let (a, b) = (&runs[0].2, &runs[1].2);
+        let pixel_delta: u64 = a[0]
+            .as_raw()
+            .iter()
+            .zip(b[0].as_raw())
+            .map(|(x, y)| u64::from(x.abs_diff(*y)))
+            .sum();
+        assert!(
+            pixel_delta > 0,
+            "swapping the source image left decoded frame 0 untouched"
+        );
+    }
+
+    /// The same source image must reproduce the same clip — the conditioning
+    /// path introduces no nondeterminism of its own.
+    #[test]
+    fn tiny_ti2v_is_deterministic_for_one_source() {
+        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 11], 1.0);
+        assert_eq!(flat(&runs[0].0), flat(&runs[1].0), "latents must match");
+        for (left, right) in runs[0].2.iter().zip(&runs[1].2) {
+            assert_eq!(left.as_raw(), right.as_raw(), "frames must match");
+        }
+    }
+
+    /// The 36-channel concat path runs end to end. No manifest ships an I2V
+    /// checkpoint yet, so the tiny config is the only coverage it has until
+    /// layer 6 lands one.
+    #[test]
+    fn tiny_channel_concat_i2v_runs_end_to_end() {
+        let (latents, conditioning, frames) =
+            tiny_i2v_run(WanConditioningShape::ChannelConcat, 11, 1.0);
+        // The DiT still emits z_dim channels even though it consumed 2z + 4.
+        assert_eq!(latents.dims(), &[1, 4, 2, 4, 4]);
+        // 4 mask channels + 4 latent channels for the tiny z_dim.
+        assert_eq!(conditioning.dims(), &[1, 8, 2, 4, 4]);
+        assert_eq!(frames.len(), 5);
+        assert!(flat(&latents).iter().all(|v| v.is_finite()));
+
+        // The mask half must be the first-frame pattern, not the latent.
+        let mask = flat(&conditioning.narrow(1, 0, 4).unwrap().contiguous().unwrap());
+        let per_frame = 4 * 4;
+        for channel in 0..4 {
+            assert_eq!(
+                mask[(channel * 2) * per_frame],
+                1.0,
+                "channel {channel} frame 0"
+            );
+            assert_eq!(
+                mask[(channel * 2 + 1) * per_frame],
+                0.0,
+                "channel {channel} frame 1"
+            );
+        }
+    }
+
+    /// Swapping the source image must change the concat conditioning too —
+    /// proof the image actually reaches the block rather than only the mask.
+    #[test]
+    fn channel_concat_conditioning_depends_on_the_source_image() {
+        let runs = tiny_i2v_runs(WanConditioningShape::ChannelConcat, &[11, 29], 1.0);
+        let (a, b) = (&runs[0].1, &runs[1].1);
+        // Mask halves identical, latent halves different.
+        let mask_a = flat(&a.narrow(1, 0, 4).unwrap().contiguous().unwrap());
+        let mask_b = flat(&b.narrow(1, 0, 4).unwrap().contiguous().unwrap());
+        assert_eq!(mask_a, mask_b, "the mask does not depend on the image");
+        let latent_a = flat(&a.narrow(1, 4, 4).unwrap().contiguous().unwrap());
+        let latent_b = flat(&b.narrow(1, 4, 4).unwrap().contiguous().unwrap());
+        assert_ne!(
+            latent_a, latent_b,
+            "the image latent must vary with the image"
+        );
     }
 }
