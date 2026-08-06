@@ -33,6 +33,13 @@ require_text "$ci" \
 require_text "$ci" \
   "cargo clippy -p mold-ai --features flash-attn -- -D warnings" \
   "the flash-attn binary wiring is only typechecked"
+flash_filter="$(sed -n '/^            flash:/,/^            website:/p' "$ci")"
+if grep -Fq ".github/workflows/ci.yml" <<< "$flash_filter"; then
+  fail "unrelated root CI edits still trigger the hour-long FlashAttention kernel build on PRs"
+fi
+require_text "$ci" \
+  "if: github.event_name == 'push' || needs.changes.outputs.flash == 'true'" \
+  "FlashAttention is not covered by every main push after narrowing its PR paths"
 require_text "$ci" \
   "if: github.event_name == 'push' && needs.changes.outputs.rust == 'true'" \
   "coverage is not deferred to the post-merge main run"

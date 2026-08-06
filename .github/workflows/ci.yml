@@ -81,7 +81,6 @@ jobs:
               - 'crates/mold-inference/src/attention.rs'
               - 'crates/mold-inference/Cargo.toml'
               - 'crates/mold-cli/Cargo.toml'
-              - '.github/workflows/ci.yml'
             website:
               - 'website/**'
               - '.github/workflows/ci.yml'
@@ -320,7 +319,9 @@ jobs:
   #
   # It runs on main (keeping the kernel cache warm — GitHub evicts caches after
   # 7 idle days, and a cold run costs ~an hour) and on PRs that touch the
-  # attention dispatcher or the feature wiring.
+  # attention dispatcher or Cargo feature wiring. Workflow-only edits get
+  # their proof on the mandatory main run instead of blocking the PR for the
+  # 79-minute cold build.
   flash-attn-check:
     name: FlashAttention feature typecheck
     needs: changes
