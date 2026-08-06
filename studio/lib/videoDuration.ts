@@ -14,9 +14,31 @@ export interface VideoFrameContract {
 const LEGACY_FRAME_STEP = 8;
 const LEGACY_MAX_FRAMES = 257;
 
+/**
+ * Frame grid per family, mirroring `frame_step_for_family` in
+ * `crates/mold-core/src/validation.rs`. Valid counts are `k * step + 1`.
+ *
+ * This is the fallback for a model row that names its family but not its
+ * `frame_step`. It matters because the legacy default is 8 and Wan's grid is
+ * 4: without the family arm a Wan row snaps 81 to 81 but 49 to 41, and any
+ * count the user lands on that is `4k+1` but not `8k+1` is rewritten to a
+ * neighbouring value or rejected outright by the server's validator.
+ */
+const FAMILY_FRAME_STEP: ReadonlyMap<string, number> = new Map([
+  ["ltx2", 8],
+  ["ltx-2", 8],
+  ["ltx-video", 8],
+  ["wan", 4],
+]);
+
 export function videoFrameStep(model?: VideoFrameContract | null): number {
-  const step = Math.round(model?.frame_step ?? LEGACY_FRAME_STEP);
-  return step > 0 ? step : LEGACY_FRAME_STEP;
+  const advertised = model?.frame_step;
+  if (advertised != null) {
+    const step = Math.round(advertised);
+    if (step > 0) return step;
+  }
+  const family = (model?.family ?? "").trim().toLowerCase();
+  return FAMILY_FRAME_STEP.get(family) ?? LEGACY_FRAME_STEP;
 }
 
 /** Snap a frame count onto the server's `k * step + 1` request grid. */

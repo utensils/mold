@@ -27,6 +27,28 @@ describe("baseGenerationCapabilities", () => {
     }
   });
 
+  it("treats wan as video without audio or a bespoke advanced panel", () => {
+    // The three flags are independent and wan sits differently on each. Video:
+    // yes. Audio: no — wan checkpoints ship no audio VAE and no vocoder, so an
+    // audio toggle would offer a request the server rejects before denoising.
+    // Advanced panel: no — wan needs only the generic steps/guidance/negative
+    // controls, unlike LTX-2's guidance overrides and spatial rungs.
+    expect(baseGenerationCapabilities("wan")).toMatchObject({
+      supportsVideo: true,
+      supportsAudio: false,
+    });
+    expect(isAdvancedVideoFamily("wan")).toBe(false);
+  });
+
+  it("offers wan the LoRA control its engine supports", () => {
+    // Mirrors `workflows.lora: true` for the wan family in
+    // `crates/mold-inference/src/batch.rs`. Without wan in
+    // LORA_CAPABLE_FAMILIES the control is hidden on every surface even
+    // though the server would accept the request — which is how the A14B
+    // fast tier's four-step distill would become unreachable from the UI.
+    expect(baseGenerationCapabilities("wan").supportsLora).toBe(true);
+  });
+
   it("returns independent scheduler option lists", () => {
     const first = baseGenerationCapabilities("sdxl").schedulerOptions;
     first.pop();

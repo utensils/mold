@@ -51,13 +51,35 @@ const SCHEDULER_FAMILIES = new Set([
 ]);
 
 const CFG_PLUS_FAMILIES = new Set(["sd3", "sd3.5"]);
-const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2"]);
+const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2", "wan"]);
+/**
+ * Generated audio is LTX-2's alone. Wan is a video family with no audio
+ * branch at all — its checkpoints ship no audio VAE and no vocoder — so it
+ * belongs in `VIDEO_FAMILIES` and emphatically not here. Listing it would
+ * surface an audio toggle whose request the server rejects before denoising.
+ */
 const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
+/**
+ * The families with a bespoke advanced-controls panel (LTX-2's guidance
+ * overrides, STG, spatial/temporal rungs). Wan needs only the generic video
+ * controls — steps, guidance, negative — so it stays out.
+ */
 const ADVANCED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2"]);
 const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
 export const MAX_LORA_STACK = 4;
 
+/**
+ * Families whose engines can merge an adapter. Mirrors the `workflows.lora`
+ * flag each family declares in `crates/mold-inference/src/batch.rs`; a family
+ * missing here has its LoRA control hidden on every surface even though the
+ * server would accept the request.
+ *
+ * Wan reaches its adapters two different ways depending on the checkpoint's
+ * container — merged into the weights for bf16/fp8 safetensors, applied as a
+ * parallel low-rank branch for GGUF — but that is invisible from here: the
+ * request shape is identical either way.
+ */
 export const LORA_CAPABLE_FAMILIES = [
   "flux",
   "flux2",
@@ -67,6 +89,7 @@ export const LORA_CAPABLE_FAMILIES = [
   "sdxl",
   "qwen-image",
   "qwen-image-edit",
+  "wan",
   "z-image",
 ] as const;
 

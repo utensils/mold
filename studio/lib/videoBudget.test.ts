@@ -51,6 +51,27 @@ describe("maxFramesForFamilyAtFps", () => {
     expect(maxFramesForFamilyAtFps("ltx-video", 30)).toBe(MAX_FRAMES_GLOBAL);
   });
 
+  it("gives wan a flat ceiling that does not move with fps", () => {
+    // Mirrors `"wan" => Some(MAX_FRAMES_GLOBAL)` in
+    // `max_frames_for_family_at_fps`. Wan's temporal RoPE indexes latent
+    // frames against a 1024-entry table, so 257 pixel frames is nowhere near
+    // binding and memory is the real limit — unlike LTX-2, whose ceiling is a
+    // duration and therefore fps-dependent.
+    for (const fps of [6, 16, 24, 30, 60]) {
+      expect(maxFramesForFamilyAtFps("wan", fps), `${fps} fps`).toBe(
+        MAX_FRAMES_GLOBAL,
+      );
+    }
+    expect(maxFramesForFamilyAtFps("WAN", 16)).toBe(MAX_FRAMES_GLOBAL);
+  });
+
+  it("advertises a wan ceiling that sits on wan's own 4n+1 grid", () => {
+    // A cap a client clamps to must itself be submittable; the LTX-2 arm
+    // needed grid-snapping for exactly this reason.
+    const cap = maxFramesForFamilyAtFps("wan", 16)!;
+    expect((cap - 1) % 4).toBe(0);
+  });
+
   it("returns null for families that publish no frame ceiling", () => {
     expect(maxFramesForFamilyAtFps("flux", 24)).toBeNull();
     expect(maxFramesForFamilyAtFps("", 24)).toBeNull();

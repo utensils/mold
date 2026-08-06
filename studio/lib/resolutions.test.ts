@@ -29,6 +29,7 @@ describe("shared resolution contract", () => {
       "wuerstchen",
       "ltx-video",
       "ltx2",
+      "wan",
     ]) {
       // Both the ceiling and the grid are family-specific: LTX-2 renders on
       // a /32 grid up to its own raised limit, everything else on /16 up to
@@ -74,6 +75,45 @@ describe("shared resolution contract", () => {
       },
     ]);
     expect(megapixelLabel(1328, 1328)).toBe("1.8 MP");
+  });
+
+  it("offers wan video buckets rather than falling through to square FLUX ones", () => {
+    // Wan had no entry, so `presetsForFamily` returned the FLUX list: a video
+    // family offered 1024x1024 image buckets on any host that does not
+    // advertise `recommended_dimensions`. These mirror `WAN_DIMS` in
+    // crates/mold-core/src/validation.rs.
+    const wan = presetsForFamily("wan").map((preset) => [
+      preset.width,
+      preset.height,
+    ]);
+    expect(wan).toEqual([
+      [832, 480],
+      [480, 832],
+      [1280, 720],
+      [720, 1280],
+      [1280, 704],
+      [704, 1280],
+    ]);
+    expect(wan).not.toContainEqual([1024, 1024]);
+  });
+
+  it("keeps wan's family fallback a union no single checkpoint has to satisfy", () => {
+    // The family list unions 2.1/A14B's 16px-grid buckets with TI2V-5B's
+    // 1280x704 on its 2.2 VAE's 32px grid. That is deliberate: the server
+    // narrows it per model via `wan_recommended_dimensions`, and a client
+    // that only has the family string should offer the superset rather than
+    // guess which checkpoint it is talking to.
+    const wan = presetsForFamily("wan");
+    expect(wan.some((preset) => preset.width % 32 !== 0)).toBe(true);
+    expect(wan.some((preset) => preset.width % 32 === 0)).toBe(true);
+    // The per-model path still wins outright when the host advertises.
+    expect(
+      presetsForModel({
+        family: "wan",
+        dimension_alignment: 32,
+        recommended_dimensions: [{ width: 1280, height: 704 }],
+      }).map((preset) => [preset.width, preset.height]),
+    ).toEqual([[1280, 704]]);
   });
 
   it("keeps the runnable LTX-2 landscape bucket shared by every client", () => {

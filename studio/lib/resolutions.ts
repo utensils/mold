@@ -235,6 +235,27 @@ const LTX2_VIDEO = [
   p(1088, 1920, "9:16"),
 ];
 
+/**
+ * Wan's family-wide buckets, mirroring `WAN_DIMS` in
+ * `crates/mold-core/src/validation.rs`.
+ *
+ * Deliberately a union no single checkpoint supports: 2.1 and the A14B pair
+ * are 480p/720p on a 16px grid, while TI2V-5B's native pair is 1280x704 on
+ * its 2.2 VAE's 32px grid. `/api/models` resolves the real list per model via
+ * `wan_recommended_dimensions`, so this fallback only serves a host that
+ * predates that field — and it is a strict improvement on what wan got
+ * before, which was `FLUX`: square 1024x1024 image buckets offered for a
+ * video family.
+ */
+const WAN_VIDEO = [
+  p(832, 480, "16:9"),
+  p(480, 832, "9:16"),
+  p(1280, 720, "16:9"),
+  p(720, 1280, "9:16"),
+  p(1280, 704, "16:9"),
+  p(704, 1280, "9:16"),
+];
+
 const BY_FAMILY: Record<string, ResolutionPreset[]> = {
   sd15: SD15,
   sdxl: SDXL,
@@ -248,6 +269,7 @@ const BY_FAMILY: Record<string, ResolutionPreset[]> = {
   wuerstchen: [p(1024, 1024)],
   "ltx-video": VIDEO,
   ltx2: LTX2_VIDEO,
+  wan: WAN_VIDEO,
 };
 
 export function presetsForFamily(family: string): ResolutionPreset[] {
