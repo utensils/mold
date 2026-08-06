@@ -6,12 +6,13 @@ aimed at synchronized MP4 output and the upstream two-stage / distilled
 pipelines.
 
 ::: tip Current status
-LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the supported
-backend for real local generation, CPU is a correctness-oriented fallback, and
-Metal is explicitly unsupported for this family. The native CUDA workflow
-matrix is validated across 19B/22B text+audio-video, image-to-video,
-audio-to-video, keyframe, retake, lip dub, public IC-LoRA, spatial upscale
-(`x1.5` / `x2` where published), and temporal upscale (`x2`).
+LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the performance-
+qualified backend; CPU and Apple Metal are correctness-oriented paths. Metal
+uses BF16 transformer compute, fused SDPA, streamed FP8 widening, and temporal
+VAE chunks, but checkpoint-backed end-to-end qualification remains pending. The
+native CUDA workflow matrix is validated across 19B/22B text+audio-video,
+image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
+spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
 :::
 
 ## Supported Models

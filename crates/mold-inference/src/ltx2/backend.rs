@@ -1,4 +1,5 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
+use candle_core::{DType, Device};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ltx2Backend {
@@ -32,13 +33,33 @@ impl Ltx2Backend {
     }
 
     pub(crate) fn ensure_supported(self) -> Result<()> {
-        if self == Self::Metal {
-            bail!(
-                "LTX-2 / LTX-2.3 is not supported on Metal yet; use CUDA for real inference or set MOLD_DEVICE=cpu for correctness-only fallback"
-            );
-        }
         Ok(())
     }
+
+    pub(crate) const fn compute_dtype(self) -> DType {
+        match self {
+            Self::Cuda | Self::Metal => DType::BF16,
+            Self::Cpu => DType::F32,
+        }
+    }
+}
+
+/// LTX-2 uses a family-specific Metal precision policy.
+///
+/// The general image-family policy keeps Metal in F32 because older diffusion
+/// paths accumulate visible BF16 error. The official LTX-2 Apple path instead
+/// runs the transformer in BF16 and keeps numerically sensitive components,
+/// such as the vocoder, in explicit F32 islands. Applying that policy only
+/// here avoids doubling a 22B transformer's working set on unified memory.
+pub(crate) fn compute_dtype(device: &Device) -> DType {
+    let backend = if device.is_cuda() {
+        Ltx2Backend::Cuda
+    } else if device.is_metal() {
+        Ltx2Backend::Metal
+    } else {
+        Ltx2Backend::Cpu
+    };
+    backend.compute_dtype()
 }
 
 #[cfg(test)]
@@ -70,8 +91,14 @@ mod tests {
     }
 
     #[test]
-    fn metal_backend_returns_clear_error() {
-        let err = Ltx2Backend::Metal.ensure_supported().unwrap_err();
-        assert!(err.to_string().contains("not supported on Metal"));
+    fn metal_backend_is_available_for_correctness_inference() {
+        Ltx2Backend::Metal.ensure_supported().unwrap();
+    }
+
+    #[test]
+    fn accelerator_backends_use_bf16_compute() {
+        assert_eq!(Ltx2Backend::Cuda.compute_dtype(), candle_core::DType::BF16);
+        assert_eq!(Ltx2Backend::Metal.compute_dtype(), candle_core::DType::BF16);
+        assert_eq!(Ltx2Backend::Cpu.compute_dtype(), candle_core::DType::F32);
     }
 }

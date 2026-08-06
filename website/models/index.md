@@ -165,9 +165,10 @@ for more options.
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.
 
-::: warning Backend compatibility
-All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. **LTX-2 /
-LTX-2.3 and Wan are CUDA-only for real generation** — their CPU paths exist for
-correctness-oriented coverage and can be extremely slow, and Metal is not
-supported for these families in this release.
+::: warning Backend qualification
+All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
+LTX-2.3 is performance-qualified on CUDA; its CPU and Apple Metal paths are
+correctness-oriented and can be extremely slow. Metal checkpoint-backed UAT
+remains pending. Wan is CUDA-only for real generation; its CPU path is
+correctness-oriented and Metal is unsupported.
 :::
