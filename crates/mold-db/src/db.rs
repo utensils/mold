@@ -843,6 +843,7 @@ mod tests {
             prompt: "a cat".into(),
             negative_prompt: Some("blurry".into()),
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,

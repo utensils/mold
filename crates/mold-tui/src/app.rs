@@ -6031,8 +6031,8 @@ impl App {
             if let Some(snapshot) = self.generate.params.quick_transform_snapshot.as_ref() {
                 if let Some(reason) = self.quick_transform_staleness(snapshot) {
                     self.generate.error_message = Some(format!(
-                            "Applied Remix is stale because the {reason}; remix again or restore the source prompt"
-                        ));
+                        "Applied Remix is stale because the {reason}; remix again or restore the source prompt"
+                    ));
                     return;
                 }
             }
@@ -6051,20 +6051,18 @@ impl App {
                 Some("conditioning task changed")
             } else if self.generate.params.prepared_prompts.len()
                 != self.generate.params.prepared_prompt_transforms.len()
-            {
-                Some("reviewed variation provenance changed")
-            } else if self
-                .generate
-                .params
-                .prepared_prompt_transforms
-                .iter()
-                .any(|provenance| {
-                    provenance.operation != snapshot.operation
-                        || provenance.source_prompt != snapshot.source_prompt
-                        || provenance.root_prompt != snapshot.root_prompt
-                        || provenance.source_kind != snapshot.source_kind
-                        || provenance.task != snapshot.task
-                })
+                || self
+                    .generate
+                    .params
+                    .prepared_prompt_transforms
+                    .iter()
+                    .any(|provenance| {
+                        provenance.operation != snapshot.operation
+                            || provenance.source_prompt != snapshot.source_prompt
+                            || provenance.root_prompt != snapshot.root_prompt
+                            || provenance.source_kind != snapshot.source_kind
+                            || provenance.task != snapshot.task
+                    })
             {
                 Some("reviewed variation provenance changed")
             } else {

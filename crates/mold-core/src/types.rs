@@ -6659,7 +6659,8 @@ mod server_event_tests {
             serde_json::json!({
                 "configured": true,
                 "model_present": false,
-                "backend": "local"
+                "backend": "local",
+                "remix": true
             })
         );
         assert_eq!(
@@ -6667,7 +6668,8 @@ mod server_event_tests {
             serde_json::json!({
                 "configured": true,
                 "model_present": null,
-                "backend": "api"
+                "backend": "api",
+                "remix": true
             })
         );
     }
