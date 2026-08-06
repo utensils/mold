@@ -5169,7 +5169,17 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             is_schnell: false,
             scheduler: None,
             negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
-            frames: Some(81),
+            // Default clip lengths are the measured 24 GB envelope, not the
+            // checkpoint's trained 81: on an RTX 4090 the Q5 pair peaks at
+            // 23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at
+            // 23.0 GB and then OOM'd), and the Q8 pair's ~4.6 GB larger
+            // resident expert moves its edge to ~33 frames by the same
+            // activation arithmetic. 53 is also the reference space's own
+            // default duration. Larger cards can simply pass --frames 81.
+            frames: Some(match tier {
+                A14bTier::Fast => 53,
+                A14bTier::Quality => 33,
+            }),
             fps: Some(16),
         },
         hidden: false,
@@ -6575,7 +6585,18 @@ mod tests {
             }
 
             let defaults = &manifest.defaults;
-            assert_eq!(defaults.frames, Some(81));
+            // Defaults are the measured RTX 4090 envelope, not the trained
+            // 81: the Q5 pair peaks at 23,975 MiB rendering 53 frames at
+            // 832x480 (81 OOM'd at a 23.0 GB peak), and the Q8 pair's larger
+            // resident expert moves its edge to ~33. Both stay on the 4n+1
+            // grid; bigger cards pass --frames 81 explicitly.
+            let expected_frames = if name.ends_with(":q5") { 53 } else { 33 };
+            assert_eq!(defaults.frames, Some(expected_frames), "{name}");
+            assert_eq!(
+                (expected_frames - 1) % 4,
+                0,
+                "{name}: envelope default must sit on the 4n+1 grid"
+            );
             assert_eq!(defaults.fps, Some(16));
             assert!(defaults.negative_prompt.is_some());
 
