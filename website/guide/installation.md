@@ -187,7 +187,7 @@ cargo build --release -p mold-ai --features metal
 
 :::
 
-Requires Rust 1.85+ and CUDA toolkit (Linux) or Xcode (macOS).
+Requires Rust 1.93+ and CUDA toolkit (Linux) or Xcode (macOS).
 
 Optional features can be added to the same build, for example
 `--features cuda,preview,expand,discord,tui` or
