@@ -17,6 +17,7 @@ export interface ActiveWorkSnapshot {
   instance_id: string;
   observed_at_unix_ms: number;
   items: ActiveWorkItem[];
+  unavailable_kinds?: string[];
 }
 
 export interface ActivityHostRoute {
@@ -31,6 +32,7 @@ export interface ActivityHostSnapshot extends ActivityHostRoute {
   instanceId: string | null;
   observedAtUnixMs: number | null;
   items: ActiveWorkItem[];
+  unavailableKinds: string[];
   stale: boolean;
   error: string | null;
 }
@@ -64,10 +66,16 @@ export function parseActiveWorkSnapshot(value: unknown): ActiveWorkSnapshot {
     }
     return { can_cancel: false, ...raw } as ActiveWorkItem;
   });
+  const unavailable = Array.isArray(value.unavailable_kinds)
+    ? value.unavailable_kinds.filter(
+        (kind): kind is string => typeof kind === "string",
+      )
+    : [];
   return {
     instance_id: value.instance_id,
     observed_at_unix_ms: value.observed_at_unix_ms as number,
     items,
+    unavailable_kinds: unavailable,
   };
 }
 
@@ -105,16 +113,25 @@ export function reconcileActivityHost(
       instanceId: previous?.instanceId ?? null,
       observedAtUnixMs: previous?.observedAtUnixMs ?? null,
       items: routeChanged ? [] : (previous?.items ?? []),
+      unavailableKinds: previous?.unavailableKinds ?? [],
       stale: true,
       error: result.message,
     };
   }
+  const unavailableKinds = result.unavailable_kinds ?? [];
+  const unavailable = new Set(unavailableKinds);
+  const retained =
+    previous?.items.filter((item) => unavailable.has(item.kind)) ?? [];
   return {
     ...route,
     routeUrl: route.target.baseUrl,
     instanceId: result.instance_id,
     observedAtUnixMs: result.observed_at_unix_ms,
-    items: result.items,
+    items: [
+      ...result.items.filter((item) => !unavailable.has(item.kind)),
+      ...retained,
+    ],
+    unavailableKinds,
     stale: false,
     error: null,
   };
@@ -139,8 +156,10 @@ export function mergeFleetActivity(
         key: `${host.hostId}:${item.kind}:${item.id}`,
         hostId: host.hostId,
         hostLabel: host.hostLabel,
-        stale: host.stale,
-        hostError: host.error,
+        stale: host.stale || host.unavailableKinds.includes(item.kind),
+        hostError: host.unavailableKinds.includes(item.kind)
+          ? `${item.kind.replaceAll("_", " ")} status is temporarily unavailable`
+          : host.error,
       });
     }
   }

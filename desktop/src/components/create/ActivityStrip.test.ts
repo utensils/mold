@@ -55,6 +55,7 @@ describe("ActivityStrip", () => {
             can_cancel: false,
           },
         ],
+        unavailableKinds: [],
       },
     };
     const wrapper = mount(ActivityStrip);

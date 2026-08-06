@@ -3,7 +3,6 @@ use mold_core::{ActiveWorkItem, ActiveWorkSnapshot, QueueActivityPhase};
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::routes::ApiError;
 use crate::state::AppState;
 
 fn now_ms() -> u64 {
@@ -94,13 +93,12 @@ fn scheduler_activity(state: &AppState) -> HashMap<String, SchedulerActivity> {
     tag = "activity",
     responses((status = 200, description = "Active work snapshot", body = ActiveWorkSnapshot))
 )]
-pub async fn list_active_work(
-    State(state): State<AppState>,
-) -> Result<Json<ActiveWorkSnapshot>, ApiError> {
+pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkSnapshot> {
     let observed_at_unix_ms = now_ms();
     let queue = state.job_registry.snapshot();
     let mut items = Vec::new();
     let mut represented = HashSet::new();
+    let mut unavailable_kinds = Vec::new();
     let scheduler = scheduler_activity(&state);
 
     for entry in queue.entries {
@@ -131,9 +129,14 @@ pub async fn list_active_work(
     }
 
     if let Some(db) = state.metadata_db.as_ref().as_ref() {
-        let rows = mold_db::chain_jobs::list_jobs(db).map_err(|error| {
-            ApiError::internal(format!("failed to list active chains: {error:#}"))
-        })?;
+        let rows = match mold_db::chain_jobs::list_jobs(db) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read active sequence work");
+                unavailable_kinds.push("sequence".to_string());
+                Vec::new()
+            }
+        };
         for row in rows.into_iter().filter(|row| {
             matches!(
                 row.state,
@@ -224,9 +227,10 @@ pub async fn list_active_work(
     }
 
     items.sort_by_key(|item| (item.position.unwrap_or(usize::MAX), item.created_at_unix_ms));
-    Ok(Json(ActiveWorkSnapshot {
+    Json(ActiveWorkSnapshot {
         instance_id: state.instance_id.as_ref().clone(),
         observed_at_unix_ms,
         items,
-    }))
+        unavailable_kinds,
+    })
 }

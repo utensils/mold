@@ -18,6 +18,7 @@ function load(): Record<string, ActivityHostSnapshot> {
     for (const snapshot of Object.values(saved)) {
       snapshot.routeUrl ??= snapshot.target?.baseUrl ?? "";
       snapshot.instanceId ??= null;
+      snapshot.unavailableKinds ??= [];
       snapshot.stale = true;
       snapshot.error ??= "Waiting to reconnect";
     }

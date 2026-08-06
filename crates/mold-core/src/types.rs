@@ -2276,6 +2276,11 @@ pub struct ActiveWorkSnapshot {
     pub observed_at_unix_ms: u64,
     #[serde(default)]
     pub items: Vec<ActiveWorkItem>,
+    /// Work kinds whose backing authority could not be read. Clients retain
+    /// only the last verified rows of these kinds while replacing healthy
+    /// kinds from this snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_kinds: Vec<String>,
 }
 
 impl QueueListingWire {
