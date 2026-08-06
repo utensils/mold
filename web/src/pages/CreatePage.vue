@@ -15,6 +15,8 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
+import { useLiveActivity } from "../composables/useLiveActivity";
+import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import { projectResolution } from "../components/create/resolutionProjection";
@@ -175,6 +177,7 @@ const router = useRouter();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
+const liveActivity = useLiveActivity(routing);
 // The model list follows the routing target: a pinned machine shows its own
 // models, Auto / Most capable show the union across ready machines. Single-host
 // installs collapse to exactly the origin's `/api/models`, as before.
@@ -568,6 +571,27 @@ const sequenceVMs = computed<ActivityJobVM[]>(() => {
   }
   return out;
 });
+
+const sharedActivityRows = computed(() =>
+  liveActivity.rows.value.filter((row) => {
+    if (row.kind === "generation") {
+      return !stream.jobs.value.some(
+        (job) =>
+          job.serverId === row.id &&
+          (job.hostId ?? ORIGIN_HOST_ID) === row.hostId,
+      );
+    }
+    if (row.kind === "sequence") {
+      return !sequenceVMs.value.some(
+        (job) =>
+          job.kind === "sequence" &&
+          job.jobId === row.id &&
+          job.hostId === row.hostId,
+      );
+    }
+    return true;
+  }),
+);
 
 // The watched job's progress renders in the canvas region (the old
 // ChainJobCard's job): stage/step readout plus the latest stage preview.
@@ -2943,6 +2967,7 @@ function openAdvanced() {
 }
 
 onMounted(async () => {
+  liveActivity.start();
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
@@ -2968,6 +2993,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  liveActivity.stop();
   stopAutoRefresh();
   clearSequencePreviews();
   phoneQuery?.removeEventListener?.("change", syncPhone);
@@ -2999,6 +3025,7 @@ onBeforeUnmount(() => {
         <ActivityStrip
           :jobs="stream.jobs.value"
           :sequences="sequenceVMs"
+          :shared="sharedActivityRows"
           @cancel="stream.cancel"
           @dismiss="stream.remove"
           @open="openJob"

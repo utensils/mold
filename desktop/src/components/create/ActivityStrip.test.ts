@@ -6,6 +6,7 @@ import { useChainJobsStore } from "../../stores/chainJobs";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
 import { useRunPodStore } from "../../stores/runpod";
+import { useLiveActivityStore } from "../../stores/liveActivity";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 import type { Job } from "../../stores/generation";
 
@@ -32,6 +33,36 @@ function baseJob(): Job {
 }
 
 describe("ActivityStrip", () => {
+  it("shows shared work from another client with explicit host and stale state", () => {
+    useLiveActivityStore().hosts = {
+      render: {
+        hostId: "render",
+        hostLabel: "Render box",
+        target: { baseUrl: "http://render", apiKey: null },
+        routeUrl: "http://render",
+        instanceId: "render-instance",
+        observedAtUnixMs: 2,
+        stale: true,
+        error: "offline",
+        items: [
+          {
+            id: "foreign",
+            kind: "generation",
+            phase: "running",
+            model: "flux-dev",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: false,
+          },
+        ],
+        unavailableKinds: [],
+      },
+    };
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='shared-live-activity']").text()).toContain("Render box");
+    expect(wrapper.text()).toContain("Last seen active · offline");
+  });
+
   it("is hidden when nothing is in flight", () => {
     const wrapper = mount(ActivityStrip);
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);

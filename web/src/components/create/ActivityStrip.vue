@@ -12,6 +12,8 @@
 import { computed, reactive } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
+import LiveActivityList from "@ui/components/LiveActivityList.vue";
+import type { FleetActiveWork } from "@studio/api/activity";
 import {
   activityDigestLabel,
   mergeActivity,
@@ -28,8 +30,9 @@ const props = withDefaults(
     /** Durable sequence jobs merged into the same strip (mockup 1c: the
      * chain Jobs list merges with the activity strip). */
     sequences?: ActivityJobVM[];
+    shared?: FleetActiveWork[];
   }>(),
-  { sequences: () => [] },
+  { sequences: () => [], shared: () => [] },
 );
 
 /** Which machine a job is running on — omitted when it's this server, so the
@@ -157,6 +160,7 @@ const active = computed(
     running.value.length > 0 ||
     queued.value.length > 0 ||
     partition.value.active.length > 0 ||
+    props.shared.length > 0 ||
     partition.value.attention.length > 0 ||
     digest.value !== null,
 );
@@ -177,6 +181,8 @@ const active = computed(
         {{ digest }}
       </button>
     </div>
+
+    <LiveActivityList :rows="shared" />
 
     <div v-for="job in running" :key="job.id" class="activity__running">
       <button

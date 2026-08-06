@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watchEffect } from "vue";
 import { useRouter } from "vue-router";
 import ProgressBar from "@ui/components/ProgressBar.vue";
+import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
 import {
   activityDigestLabel,
@@ -23,6 +24,7 @@ import { useRunPodStore } from "../../stores/runpod";
 import { useToastStore } from "../../stores/toasts";
 import { useComposerStore } from "../../stores/composer";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useLiveActivityStore } from "../../stores/liveActivity";
 
 /**
  * Create activity strip (Mold Studio) — present tense only.
@@ -45,6 +47,7 @@ const runpod = useRunPodStore();
 const toasts = useToastStore();
 const composer = useComposerStore();
 const draft = useSequenceDraftStore();
+const liveActivity = useLiveActivityStore();
 
 function selectPrint(job: Job) {
   generation.select(job.clientId);
@@ -133,6 +136,17 @@ const sequenceVMs = computed<ActivityJobVM[]>(() =>
   }),
 );
 
+const sharedRows = computed(() => {
+  const primaryId = hosts.primaryHost?.id ?? "local";
+  const local = new Set(
+    generation.jobs.flatMap((job) =>
+      job.id ? [`${job.hostId ?? primaryId}:generation:${job.id}`] : [],
+    ),
+  );
+  for (const { hostId, job } of chains.allJobs) local.add(`${hostId}:sequence:${job.id}`);
+  return liveActivity.rows.filter((row) => !local.has(row.key));
+});
+
 /** Session-only dismissals keyed by VM key. Deliberately NOT persisted: the
  *  5-minute age rule reads server timestamps and already survives a restart,
  *  and a second retention mechanism could disagree with the first. reactive()
@@ -184,6 +198,7 @@ const show = computed(
     !!running.value ||
     queued.value.length > 0 ||
     sequenceRows.value.length > 0 ||
+    sharedRows.value.length > 0 ||
     partition.value.attention.length > 0 ||
     digest.value !== null,
 );
@@ -285,6 +300,8 @@ function deleteConfirmed() {
         {{ digest }}
       </button>
     </div>
+
+    <LiveActivityList :rows="sharedRows" />
 
     <!-- In-flight sequence rows (merged jobs surface) -->
     <SequenceJobRow

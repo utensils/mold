@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { router } from "./router";
+
+// Router behavior is the authority under test. Keep the large Create module's
+// transform cost outside the navigation timeout; its own suites cover the
+// view and its stores directly.
+vi.mock("./views/GenerateView.vue", () => ({ default: { template: "<div />" } }));
 
 describe("router — five-destination IA", () => {
   it("serves the five workspaces with their titlebar names", () => {

@@ -249,6 +249,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::chain_job_stage_preview,
         crate::routes_chain_jobs::chain_job_stage_media,
         crate::routes_chain_jobs::create_chain_job_stage_media_token,
+        crate::routes_activity::list_active_work,
     ),
     components(schemas(
         mold_core::GenerateRequest,
@@ -284,6 +285,8 @@ use crate::queue::clean_error_message;
         mold_core::DeviceMemoryInfo,
         mold_core::DeviceTelemetry,
         mold_core::DiskUsage,
+        mold_core::ActiveWorkItem,
+        mold_core::ActiveWorkSnapshot,
         mold_core::DiscoveryPeer,
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
@@ -502,6 +505,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/devices", get(list_devices))
         .route("/api/devices/:id", patch(patch_device))
         .route("/api/queue", get(list_queue).delete(cancel_all_queue))
+        .route(
+            "/api/activity",
+            get(crate::routes_activity::list_active_work),
+        )
         .route("/api/queue/pause", post(pause_queue))
         .route("/api/queue/resume", post(resume_queue))
         .route(

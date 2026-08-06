@@ -34,6 +34,7 @@ pub mod rate_limit;
 pub mod request_id;
 pub mod resources;
 pub mod routes;
+pub mod routes_activity;
 pub mod routes_chain;
 pub mod routes_chain_jobs;
 pub mod routes_config;

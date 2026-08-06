@@ -43,6 +43,12 @@ import {
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
 import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
+import {
+  mergeFleetActivity,
+  listActiveWork,
+  reconcileActivityHost,
+  type ActivityHostSnapshot,
+} from "@studio/api/activity";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
@@ -50,6 +56,7 @@ import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceR
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { upscaleImage } from "../lib/api/upscale";
 import {
@@ -263,6 +270,7 @@ const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
 const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
+const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
@@ -282,6 +290,28 @@ const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
 const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current build");
 const hosts = ref<MobileHost[]>(loadHosts());
+function loadMobileActivity(): Record<string, ActivityHostSnapshot> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIVE_ACTIVITY_KEY) ?? "{}") as Record<
+      string,
+      ActivityHostSnapshot
+    >;
+    for (const snapshot of Object.values(saved)) {
+      snapshot.routeUrl ??= snapshot.target?.baseUrl ?? "";
+      snapshot.instanceId ??= null;
+      snapshot.unavailableKinds ??= [];
+      snapshot.stale = true;
+      snapshot.error ??= "Waiting to reconnect";
+    }
+    return saved;
+  } catch {
+    return {};
+  }
+}
+const liveActivityHosts = ref(loadMobileActivity());
+const liveActivityEpochs: Record<string, number> = {};
+let liveActivityTimer: ReturnType<typeof setInterval> | null = null;
+let liveActivityRefreshing = false;
 const connectedHosts = computed(() => hosts.value.filter((host) => host.connected !== false));
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? connectedHosts.value[0]?.id ?? "");
 const catalogHostId = ref(selectedHostId.value || connectedHosts.value[0]?.id || "");
@@ -891,6 +921,19 @@ const activityRows = computed<ActivityRow[]>(() =>
     return print ? [{ key: vm.key, sequence: null, print }] : [];
   }),
 );
+const sharedMobileActivity = computed(() => {
+  const local = new Set(
+    generation.jobs.flatMap((job) =>
+      job.id ? [`${job.hostId ?? selectedHostId.value}:generation:${job.id}`] : [],
+    ),
+  );
+  if (sequenceJob.value && sequenceRoute.value) {
+    local.add(`${sequenceRoute.value.hostId}:sequence:${sequenceJob.value.id}`);
+  }
+  return mergeFleetActivity(Object.values(liveActivityHosts.value)).filter(
+    (row) => !local.has(row.key),
+  );
+});
 const expandedQueueFailures = ref(new Set<string>());
 
 function toggleQueueFailure(key: string): void {
@@ -1334,6 +1377,62 @@ async function probeHost(host: MobileHost): Promise<void> {
 
 function probeHosts(): void {
   for (const host of connectedHosts.value) void probeHost(host);
+}
+
+function persistMobileActivity(): void {
+  // The route contains the Keychain-supplied API key at runtime. Persist only
+  // the safe snapshot/display fields; mobile API keys remain Keychain-only.
+  const safe = Object.fromEntries(
+    Object.entries(liveActivityHosts.value).map(([id, { target: _target, ...snapshot }]) => [
+      id,
+      snapshot,
+    ]),
+  );
+  localStorage.setItem(LIVE_ACTIVITY_KEY, JSON.stringify(safe));
+}
+
+async function refreshMobileActivity(): Promise<void> {
+  if (liveActivityRefreshing) return;
+  liveActivityRefreshing = true;
+  const configured = connectedHosts.value;
+  try {
+    await Promise.all(
+      configured.map(async (host) => {
+        const route = {
+          hostId: host.id,
+          hostLabel: host.name,
+          target: mobileHostTarget(host),
+        };
+        const epoch = (liveActivityEpochs[host.id] ?? 0) + 1;
+        liveActivityEpochs[host.id] = epoch;
+        const previous = liveActivityHosts.value[host.id];
+        let result;
+        try {
+          if (!host.online) throw new Error("Host is offline");
+          result = await listActiveWork(route.target);
+        } catch (error) {
+          result = error instanceof Error ? error : new Error(String(error));
+        }
+        if (liveActivityEpochs[host.id] !== epoch) return;
+        liveActivityHosts.value = {
+          ...liveActivityHosts.value,
+          [host.id]: reconcileActivityHost(route, previous, result),
+        };
+      }),
+    );
+    const ids = new Set(connectedHosts.value.map((host) => host.id));
+    liveActivityHosts.value = Object.fromEntries(
+      Object.entries(liveActivityHosts.value).filter(([id]) => ids.has(id)),
+    );
+    persistMobileActivity();
+  } finally {
+    liveActivityRefreshing = false;
+  }
+}
+
+async function pollMobileActivity(): Promise<void> {
+  await refreshMobileActivity();
+  if (!unmounted) liveActivityTimer = setTimeout(pollMobileActivity, 5_000);
 }
 
 function disconnectHost(id: string): void {
@@ -3473,6 +3572,7 @@ watch(
 function handleForegroundResume(): void {
   if (unmounted || document.visibilityState === "hidden") return;
   probeHosts();
+  void refreshMobileActivity();
   if (modelLoadError.value && !loadingModels.value) void refreshModels();
   renewGeneratedResult(false);
   if (tab.value === "gallery") void refreshGallery();
@@ -3506,6 +3606,7 @@ onMounted(async () => {
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
+  liveActivityTimer = setTimeout(pollMobileActivity, 0);
   document.addEventListener("visibilitychange", handleForegroundResume);
   window.addEventListener("pageshow", handleForegroundResume);
   if (selectedHost.value) {
@@ -3515,6 +3616,7 @@ onMounted(async () => {
         .filter((host) => host.id !== selectedHostId.value)
         .map((host) => probeHost(host)),
     ]);
+    void refreshMobileActivity();
   } else {
     tab.value = "hosts";
   }
@@ -3534,6 +3636,8 @@ onBeforeUnmount(() => {
   stopPairingDeepLinks = null;
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
+  if (liveActivityTimer) clearInterval(liveActivityTimer);
+  liveActivityTimer = null;
   gallerySentinelObserver?.disconnect();
   gallerySentinelObserver = null;
   stopSequenceTransport();
@@ -4116,7 +4220,7 @@ onBeforeUnmount(() => {
           <!-- ONE queue for both outputs: single prints and durable sequences
                land in the same list (mockup 1c). -->
           <section
-            v-if="activityRows.length"
+            v-if="activityRows.length || sharedMobileActivity.length"
             class="mobile-generation-queue"
             aria-label="Generation queue"
             data-test="mobile-generation-queue"
@@ -4221,6 +4325,7 @@ onBeforeUnmount(() => {
                 </template>
               </li>
             </ol>
+            <LiveActivityList :rows="sharedMobileActivity" />
           </section>
           <p
             v-if="sequenceError && sequenceRoute && !isSequence"

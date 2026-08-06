@@ -66,11 +66,55 @@ function makeSequenceVM(
 }
 
 describe("ActivityStrip", () => {
+  it("shows host-attributed shared work without importing it into session jobs", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [],
+        shared: [
+          {
+            key: "render:download:pull-1",
+            id: "pull-1",
+            kind: "download",
+            phase: "downloading",
+            model: "ltx-2",
+            hostId: "render",
+            hostLabel: "Render box",
+            stale: true,
+            hostError: "offline",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            current: 50,
+            total: 100,
+            can_cancel: false,
+          },
+        ],
+      },
+    });
+    expect(wrapper.get("[data-test='shared-live-activity']").text()).toContain(
+      "Render box",
+    );
+    expect(wrapper.text()).toContain("Last seen active · offline");
+    expect(wrapper.text()).toContain("50%");
+  });
+
   it("is hidden when nothing is in flight", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [makeJob({ state: "done" })] },
     });
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
+  });
+
+  it("keeps initiating-client history after the shared terminal snapshot disappears", () => {
+    const completed = makeSequenceVM({ state: "completed" });
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [], sequences: [completed], shared: [] },
+    });
+    expect(wrapper.find("[data-test='shared-live-activity']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.get("[data-test='activity-digest']").text()).toContain(
+      "1 settled sequence",
+    );
   });
 
   it("shows an active job with its prompt and percent", () => {
