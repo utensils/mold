@@ -29,7 +29,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/chain-jobs/:id/stages/:idx/media`       | Stream a completed stage MP4; HEAD and byte ranges are supported                                                  |
 | `POST`   | `/api/chain-jobs/:id/stages/:idx/media-token` | Mint a short-lived ticket scoped to that exact stage-media path                                                   |
 | `POST`   | `/api/expand`                                 | Expand a prompt using LLM, optionally absorbing a visual `style` directive                                        |
-| `POST`   | `/api/remix`                                  | Generate exact-count, subject-preserving prompt alternatives with structured provenance                          |
+| `POST`   | `/api/remix`                                  | Generate exact-count, subject-preserving prompt alternatives with structured provenance                           |
 | `GET`    | `/api/models`                                 | List available models                                                                                             |
 | `GET`    | `/api/models/:model/components`               | List required model component readiness and paths                                                                 |
 | `GET`    | `/api/loras`                                  | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
