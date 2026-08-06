@@ -121,6 +121,21 @@ pub(crate) fn detect_vae_generation(path: &Path) -> Result<WanVaeGeneration> {
     )
 }
 
+/// Dtype for the UMT5 encoder given where placement put it. candle's CPU
+/// backend has no BF16/F16 matmul, so a CPU-parked encoder — which is what
+/// placement chooses when the transformer needs the VRAM, e.g. TI2V-5B on a
+/// 24 GB card — must compute in F32. The embeddings are cast to the model
+/// dtype on their way to the execution device, so downstream is unaffected.
+/// (The 1.3B path masked this: its small transformer leaves room to keep the
+/// encoder on GPU, where BF16 matmul exists.)
+fn encoder_dtype_for(text_device: &Device, model_dtype: DType) -> DType {
+    if text_device.is_cpu() {
+        DType::F32
+    } else {
+        model_dtype
+    }
+}
+
 /// Resolve the unconditional prompt for CFG. Only *absence* falls back to
 /// the tuned default the checkpoints were trained against — an explicit
 /// value is authoritative, including the empty string `--no-negative`
@@ -690,7 +705,7 @@ impl WanEngine {
         let mut encoder = WanTextEncoder::load_with_tokenizer(
             &self.text_encoder_paths()?,
             &text_device,
-            dtype,
+            encoder_dtype_for(&text_device, dtype),
             tokenizer,
         )?;
         progress.phase_done(
@@ -1297,6 +1312,19 @@ mod tests {
 
         let config = detect_transformer_config(&path).unwrap();
         assert_eq!(config, WanTransformerConfig::t2v_1_3b());
+    }
+
+    /// A CPU-parked encoder must compute in F32 — candle's CPU backend has no
+    /// BF16/F16 matmul, and placement parks the encoder exactly when the big
+    /// transformer needs the VRAM (found by the first real TI2V-5B run).
+    #[test]
+    fn cpu_parked_encoder_coerces_to_f32() {
+        assert_eq!(encoder_dtype_for(&Device::Cpu, DType::BF16), DType::F32);
+        assert_eq!(encoder_dtype_for(&Device::Cpu, DType::F16), DType::F32);
+        // Non-CPU devices keep the model dtype; constructing a CUDA device in
+        // a CPU test is not possible, so pin the CPU half of the contract and
+        // the identity half via the function's own logic on Cpu+F32.
+        assert_eq!(encoder_dtype_for(&Device::Cpu, DType::F32), DType::F32);
     }
 
     /// Absence falls back to the tuned default; an explicit value — the empty
