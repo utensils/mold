@@ -7,6 +7,8 @@ use crate::app::{App, Popup};
 pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.popup {
         Some(Popup::Help) => render_help(frame, app),
+        Some(Popup::PromptSourceChoice { .. }) => render_prompt_source_choice(frame, app),
+        Some(Popup::PromptAlternatives { .. }) => render_prompt_alternatives(frame, app),
         Some(Popup::ModelSelector { .. }) => render_model_selector(frame, app),
         Some(Popup::MachineConnect { .. }) => render_machine_connect(frame, app),
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
@@ -81,6 +83,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  A                  Toggle the Advanced accordion"),
         Line::from("  Alt+N              Edit the negative prompt"),
         Line::from("  Ctrl+E             Expand prompt via LLM"),
+        Line::from("  Ctrl+Shift+E       Remix prompt alternatives"),
         Line::from("  Ctrl+S             Save current image"),
         Line::from("  Ctrl+R             Cycle seed mode"),
         Line::from("  Ctrl+M             Open model selector"),
@@ -146,6 +149,135 @@ fn render_help(frame: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
+}
+
+fn render_prompt_alternatives(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 78, 78);
+    frame.render_widget(Clear, area);
+    let Some(Popup::PromptAlternatives {
+        snapshot,
+        variants,
+        selected,
+        cursor,
+        ..
+    }) = &app.popup
+    else {
+        return;
+    };
+    let title = match snapshot.operation {
+        mold_core::PromptTransformOperation::Expand => " Prompt expansion ",
+        mold_core::PromptTransformOperation::Remix => " Prompt Remix ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(title)
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("Source: {}", snapshot.source_prompt))
+            .style(Style::default().fg(theme.text_dim))
+            .wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+    let items = variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| {
+            let mark = if selected.get(index).copied().unwrap_or(false) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let dims = variant
+                .dimensions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            ListItem::new(vec![
+                Line::from(format!("{mark} {}. {}", index + 1, variant.prompt)),
+                Line::styled(
+                    format!("    varies: {dims}"),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(*cursor));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(theme.list_selected())
+            .highlight_symbol("> "),
+        chunks[1],
+        &mut state,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Space select · Enter apply one · B prepare selected batch · R re-remix · Esc close",
+        )
+        .style(Style::default().fg(theme.text_dim)),
+        chunks[2],
+    );
+}
+
+fn render_prompt_source_choice(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 70, 42);
+    frame.render_widget(Clear, area);
+    let Some(Popup::PromptSourceChoice {
+        current_prompt,
+        root_prompt,
+        cursor,
+    }) = &app.popup
+    else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Remix source ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(4),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new("Choose the frozen source for this Remix request")
+            .style(Style::default().fg(theme.text_dim)),
+        chunks[0],
+    );
+    let items = [
+        ListItem::new(format!("Original: {root_prompt}")),
+        ListItem::new(format!("Current:  {current_prompt}")),
+    ];
+    let mut state = ListState::default().with_selected(Some(*cursor));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(theme.list_selected())
+            .highlight_symbol("> "),
+        chunks[1],
+        &mut state,
+    );
+    frame.render_widget(
+        Paragraph::new("O original · C current · Enter choose · Esc close")
+            .style(Style::default().fg(theme.text_dim)),
+        chunks[2],
+    );
 }
 
 /// Build a rich two-line ListItem for a model entry.
@@ -1020,6 +1152,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 last_output_path: None,
+                prompt_transform_token: 0,
             },
             gallery: crate::app::GalleryState::default(),
             models: crate::app::ModelsState {

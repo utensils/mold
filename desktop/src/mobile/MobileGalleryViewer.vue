@@ -15,12 +15,14 @@ import {
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  downloadVideoExport,
+  shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import { isNativeIOSRuntime } from "./platform";
 
 const props = withDefaults(
   defineProps<{
@@ -75,6 +77,7 @@ const audio = computed(() => isAudioItem(props.item));
 const canExportVideo = computed(
   () => props.exportEnabled && video.value && props.item.filename.toLowerCase().endsWith(".mp4"),
 );
+const canSaveVideo = computed(() => props.exportEnabled && video.value);
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(
   () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
@@ -104,7 +107,7 @@ const preparedPosition = computed(() => {
 const originalPrompt = computed(() => props.item.metadata.original_prompt?.trim() ?? "");
 const upscaled = computed(() => isUpscaledImage(props.item));
 const actionStatus = ref("");
-const actionBusy = ref<"copy" | "save" | null>(null);
+const actionBusy = ref<"copy" | "save" | "save-video" | null>(null);
 const exportOpen = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
@@ -311,6 +314,25 @@ async function performImageAction(action: "copy" | "save"): Promise<void> {
   }
 }
 
+async function performVideoSave(): Promise<void> {
+  if (!canSaveVideo.value || actionBusy.value) return;
+  actionBusy.value = "save-video";
+  actionStatus.value = "";
+  try {
+    const url = await streamableMediaUrl(galleryMediaPath(props.item.filename, "host"), {
+      target: props.target,
+      cacheKey: props.cacheKey,
+      allowLegacyBlob: false,
+    });
+    await invoke("save_video_to_photos", { url });
+    actionStatus.value = "Saved to Photos";
+  } catch (error) {
+    actionStatus.value = error instanceof Error ? error.message : "Couldn’t save this video.";
+  } finally {
+    actionBusy.value = null;
+  }
+}
+
 async function openVideoExport(): Promise<void> {
   exportOpen.value = true;
   exportError.value = "";
@@ -336,10 +358,12 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    const result = await saveVideoExport(
-      await response.blob(),
-      videoExportFilename(props.item.filename, options.format),
-    );
+    const blob = await response.blob();
+    const filename = videoExportFilename(props.item.filename, options.format);
+    const result = isNativeIOSRuntime()
+      ? await shareVideoExport(blob, filename)
+      : (downloadVideoExport(blob, filename), "saved");
+    if (result === "cancelled") return;
     exportOpen.value = false;
     actionStatus.value = result === "shared" ? "Export ready to share" : "Video exported";
   } catch (error) {
@@ -526,6 +550,16 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="gallery-viewer-actions">
+        <button
+          v-if="canSaveVideo"
+          class="secondary-button gallery-viewer-save"
+          type="button"
+          data-test="gallery-viewer-save-video"
+          :disabled="!!actionBusy || exportBusy"
+          @click="performVideoSave"
+        >
+          {{ actionBusy === "save-video" ? "Saving…" : "Save video" }}
+        </button>
         <button
           v-if="canExportVideo"
           class="secondary-button gallery-viewer-export"

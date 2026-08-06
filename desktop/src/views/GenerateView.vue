@@ -108,6 +108,13 @@ import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
+import { remixPrompt } from "../lib/api/remix";
+import {
+  conditioningFingerprint,
+  defaultRemixDimensions,
+  promptSource,
+  validateRemixVariants,
+} from "@studio/lib/promptTransform";
 import type { HostRoute } from "../stores/hosts";
 import {
   formatTemplateMediaReferences,
@@ -119,7 +126,7 @@ import { randomSeed } from "../stores/generation";
 import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  downloadVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -159,6 +166,7 @@ import {
   createPreparedExpansionBatch,
   preparedExpansionStaleReasons,
   quickExpansionStaleReasons,
+  quickExpansionRouteIsCurrent,
   validateExpandedPrompts,
   type PreparedExpansionBatch as PreparedExpansionBatchState,
   type PreparedExpansionInputs,
@@ -387,6 +395,7 @@ function clampBenchToViewport() {
   benchHeight.value = clampBenchHeight(benchHeight.value);
 }
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
+const remixSource = ref<"original" | "current">("original");
 const expansionRunning = ref(false);
 const expansionError = ref<string | null>(null);
 const expansionMissingModel = ref<{ model: string; route: HostRoute } | null>(null);
@@ -590,11 +599,28 @@ const expansionHostLabel = computed(() => currentExpansionRoute.value?.label ?? 
 const preparedStaleReasons = computed(() => {
   const batch = preparedBatch.value;
   if (!batch) return [];
+  const request = buildRequest(form);
+  const currentRemixSource =
+    batch.kind === "remix"
+      ? promptSource(form.prompt, form.originalPrompt, remixSource.value).prompt
+      : form.prompt.trim();
   return preparedExpansionStaleReasons(batch, {
-    sourcePrompt: form.prompt.trim(),
+    sourcePrompt: currentRemixSource,
     model: form.model,
     family: form.family,
-    task: expansionTaskForRequest(form.family, buildRequest(form)),
+    task: expansionTaskForRequest(form.family, request),
+    ...(batch.kind === "remix"
+      ? {
+          kind: "remix" as const,
+          ...(form.originalPrompt ? { rootPrompt: form.originalPrompt } : {}),
+          sourceKind: remixSource.value,
+          dimensions: defaultRemixDimensions(
+            expansionTaskForRequest(form.family, request),
+            Boolean(form.stylePreset),
+          ),
+          conditioningFingerprint: conditioningFingerprint(request),
+        }
+      : {}),
     requestedCount: effectiveBatchSize.value,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
@@ -633,6 +659,19 @@ const quickStaleReasons = computed(() => {
   const snapshot = quickExpansionSnapshot.value;
   if (!snapshot) return [];
   return quickExpansionStaleReasons(snapshot, {
+    expandedPrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    task: expansionTaskForRequest(form.family, buildRequest(form)),
+    selectedHostPolicy: stickyTarget.value,
+    modelLabels: modelLabels.value,
+    ...currentHostSnapshot(),
+  });
+});
+const quickRouteIsCurrent = computed(() => {
+  const snapshot = quickExpansionSnapshot.value;
+  if (!snapshot) return false;
+  return quickExpansionRouteIsCurrent(snapshot, {
     expandedPrompt: form.prompt.trim(),
     model: form.model,
     family: form.family,
@@ -1636,7 +1675,7 @@ async function exportGeneratedVideo(options: VideoExportOptions): Promise<void> 
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    await saveVideoExport(await response.blob(), videoExportFilename(filename, options.format));
+    downloadVideoExport(await response.blob(), videoExportFilename(filename, options.format));
     videoExportJob.value = null;
     toasts.push("Video exported");
   } catch (error) {
@@ -1657,6 +1696,83 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
   };
+}
+
+async function remixForCurrentPrompt(replacePrepared = false) {
+  if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
+  submissionGuard.invalidate();
+  const route = currentExpansionRoute.value;
+  if (!route) {
+    expansionError.value = unavailableExpansionHostMessage();
+    return;
+  }
+  const request = buildRequest(form);
+  const task = expansionTaskForRequest(form.family, request);
+  const source = promptSource(form.prompt, form.originalPrompt, remixSource.value);
+  const stylePreset = form.stylePreset || null;
+  const dimensions = defaultRemixDimensions(task, Boolean(stylePreset));
+  const token = preparationGuard.begin();
+  expansionRunning.value = true;
+  expansionError.value = null;
+  expansionAttemptHostLabel.value = route.label;
+  try {
+    const style = styleHint(stylePreset ?? "");
+    const response = await remixPrompt(
+      {
+        source_prompt: source.prompt,
+        ...(source.rootPrompt ? { root_prompt: source.rootPrompt } : {}),
+        source_kind: source.kind,
+        model_family: form.family,
+        variations: 3,
+        task,
+        ...(style ? { style } : {}),
+        dimensions,
+      },
+      route.target,
+    );
+    if (!preparationGuard.isCurrent(token)) return;
+    const variants = validateRemixVariants(response.variants, 3);
+    const currentRequest = buildRequest(form);
+    if (
+      form.model !== request.model ||
+      expansionTaskForRequest(form.family, currentRequest) !== task ||
+      conditioningFingerprint(currentRequest) !== conditioningFingerprint(request)
+    ) {
+      expansionError.value =
+        "The model or conditioning changed while Remix was running. Remix again.";
+      return;
+    }
+    form.batchSize = 3;
+    const batch = createPreparedExpansionBatch(
+      {
+        kind: "remix",
+        sourcePrompt: response.source_prompt,
+        ...(response.root_prompt ? { rootPrompt: response.root_prompt } : {}),
+        sourceKind: response.source_kind,
+        dimensions,
+        conditioningFingerprint: conditioningFingerprint(request),
+        model: form.model,
+        family: form.family,
+        task,
+        requestedCount: 3,
+        stylePreset,
+        selectedHostPolicy: stickyTarget.value,
+      },
+      route,
+      variants.map((variant) => variant.prompt),
+      token,
+    );
+    batch.prompts.forEach((prompt, index) => {
+      prompt.dimensions = variants[index]?.dimensions ?? [];
+    });
+    preparedBatch.value = batch;
+    if (replacePrepared) void nextTick(() => composerRef.value?.focus?.());
+  } catch (error) {
+    if (preparationGuard.isCurrent(token))
+      expansionError.value = describeExpansionError(error, route);
+  } finally {
+    if (preparationGuard.isCurrent(token)) expansionRunning.value = false;
+  }
 }
 
 function unavailableExpansionHostMessage(): string {
@@ -1899,6 +2015,41 @@ function collapsePreparedBatch(removedId: string) {
   form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
+  void nextTick(() => composerRef.value?.focus?.());
+}
+
+function applyPreparedRemix(id: string) {
+  const batch = preparedBatch.value;
+  const selected = batch?.prompts.find((prompt) => prompt.id === id);
+  if (!batch || batch.kind !== "remix" || !selected?.text.trim()) return;
+  preparationGuard.invalidate();
+  form.prompt = selected.text.trim();
+  form.originalPrompt = batch.rootPrompt ?? batch.sourcePrompt;
+  quickExpansionOriginal.value = batch.sourcePrompt;
+  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
+  form.stylePreset = "";
+  quickExpansionSnapshot.value = {
+    requestToken: preparationGuard.begin(),
+    originalPrompt: batch.rootPrompt ?? batch.sourcePrompt,
+    expandedPrompt: selected.text.trim(),
+    model: batch.model,
+    family: batch.family,
+    task: batch.task,
+    stylePreset: batch.stylePreset,
+    selectedHostPolicy: batch.selectedHostPolicy,
+    route: { ...batch.route, target: { ...batch.route.target } },
+    promptTransform: {
+      operation: "remix",
+      ...(batch.rootPrompt ? { root_prompt: batch.rootPrompt } : {}),
+      source_prompt: batch.sourcePrompt,
+      source_kind: batch.sourceKind ?? "direct",
+      task: batch.task,
+      dimensions: [...(selected.dimensions ?? batch.dimensions ?? [])],
+    },
+  };
+  form.batchSize = 1;
+  preparedBatch.value = null;
+  expansionError.value = null;
   void nextTick(() => composerRef.value?.focus?.());
 }
 
@@ -2165,7 +2316,29 @@ async function generate() {
         batch: prepared.prompts.length,
         promptIds: prepared.prompts.map((prompt) => prompt.id),
         prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
-        originalPrompt: prepared.sourcePrompt,
+        originalPrompt: prepared.rootPrompt ?? prepared.sourcePrompt,
+        promptTransform:
+          prepared.kind === "remix"
+            ? {
+                operation: "remix" as const,
+                ...(prepared.rootPrompt ? { root_prompt: prepared.rootPrompt } : {}),
+                source_prompt: prepared.sourcePrompt,
+                source_kind: prepared.sourceKind ?? "direct",
+                task: prepared.task,
+                dimensions: [...(prepared.dimensions ?? [])],
+              }
+            : undefined,
+        promptTransforms:
+          prepared.kind === "remix"
+            ? prepared.prompts.map((prompt) => ({
+                operation: "remix" as const,
+                ...(prepared.rootPrompt ? { root_prompt: prepared.rootPrompt } : {}),
+                source_prompt: prepared.sourcePrompt,
+                source_kind: prepared.sourceKind ?? "direct",
+                task: prepared.task,
+                dimensions: [...(prompt.dimensions ?? [])],
+              }))
+            : undefined,
         route: { ...prepared.route, target: { ...prepared.route.target } },
       }
     : null;
@@ -2173,10 +2346,12 @@ async function generate() {
     ? quickExpansionSnapshot.value
       ? {
           requestToken: quickExpansionSnapshot.value.requestToken,
-          route: {
-            ...quickExpansionSnapshot.value.route,
-            target: { ...quickExpansionSnapshot.value.route.target },
-          },
+          route: quickRouteIsCurrent.value
+            ? {
+                ...quickExpansionSnapshot.value.route,
+                target: { ...quickExpansionSnapshot.value.route.target },
+              }
+            : null,
         }
       : null
     : null;
@@ -2303,6 +2478,9 @@ async function generate() {
       }
     }
     const request = buildRequest(draft);
+    if (quickExpansionSnapshot.value?.promptTransform) {
+      request.prompt_transform = quickExpansionSnapshot.value.promptTransform;
+    }
     const chainRouting = decideGenerateRequestRouting(request, draft.family);
     if (chainRouting.kind === "reject") {
       toasts.push(chainRouting.reason, "error");
@@ -2355,6 +2533,12 @@ async function generate() {
           prompts: preparedSubmission.prompts,
           originalPrompt: preparedSubmission.originalPrompt,
           batchId: preparedSubmission.batchId,
+          ...(preparedSubmission.promptTransform
+            ? { promptTransform: preparedSubmission.promptTransform }
+            : {}),
+          ...(preparedSubmission.promptTransforms
+            ? { promptTransforms: preparedSubmission.promptTransforms }
+            : {}),
         }
       : {};
     const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
@@ -2780,12 +2964,21 @@ onBeforeUnmount(() => {
             @edit="editPreparedPrompt"
             @remove="removePreparedPrompt"
             @collapse="collapsePreparedBatch"
-            @regenerate="expandForCurrentBatch(true)"
-            @refresh="expandForCurrentBatch(true)"
+            @regenerate="
+              preparedBatch.kind === 'remix'
+                ? remixForCurrentPrompt(true)
+                : expandForCurrentBatch(true)
+            "
+            @refresh="
+              preparedBatch.kind === 'remix'
+                ? remixForCurrentPrompt(true)
+                : expandForCurrentBatch(true)
+            "
             @discard="discardPreparedBatch"
             @pull="pullExpansionModel"
             @retry-expansion="retryExpansionAfterPull"
             @generate="generate"
+            @apply="applyPreparedRemix"
           />
 
           <!-- Developing / result -->
@@ -3211,8 +3404,11 @@ onBeforeUnmount(() => {
             :estimate-target="estimateTarget"
             :preprocessing-status="preprocessingStatus"
             :history="promptHistory"
+            :remix-source="remixSource"
             @generate="generate"
             @expand="expandForCurrentBatch()"
+            @remix="remixForCurrentPrompt()"
+            @update:remix-source="remixSource = $event"
             @restore="restoreQuickExpansion"
           />
         </div>

@@ -52,6 +52,142 @@ button {
   padding-top: env(safe-area-inset-top);
 }
 
+html.mobile-surface:has(.mobile-shell.is-pair-scanning),
+html.mobile-surface:has(.mobile-shell.is-pair-scanning) body,
+html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
+.mobile-shell.is-pair-scanning {
+  background: transparent;
+}
+
+.mobile-shell.is-pair-scanning > :not(.mobile-pair-scanner) {
+  visibility: hidden;
+}
+
+.mobile-pair-scanner {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  color: #fff;
+  font-family: var(--font-body);
+}
+
+.mobile-pair-scanner-head,
+.mobile-pair-scanner-foot {
+  position: relative;
+  z-index: 2;
+  background: rgba(8, 8, 8, 0.82);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.mobile-pair-scanner-head {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: calc(12px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px
+    max(16px, env(safe-area-inset-left));
+}
+
+.mobile-pair-scanner-kicker {
+  display: block;
+  margin-bottom: 2px;
+  color: rgba(255, 255, 255, 0.66);
+  font-family: var(--font-utility);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mobile-pair-scanner-head h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.mobile-pair-scanner-cancel {
+  min-width: 72px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: var(--radius-control);
+  background: rgba(0, 0, 0, 0.36);
+  color: #fff;
+  font-weight: 700;
+}
+
+.mobile-pair-scanner-stage {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.mobile-pair-scanner-frame {
+  position: relative;
+  width: min(72vw, 360px);
+  aspect-ratio: 1;
+  border-radius: 20px;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.34);
+}
+
+.mobile-pair-scanner-corner {
+  position: absolute;
+  width: 42px;
+  height: 42px;
+  border-color: #fff;
+  border-style: solid;
+}
+
+.mobile-pair-scanner-corner.corner-top-left {
+  top: 0;
+  left: 0;
+  border-width: 4px 0 0 4px;
+  border-radius: 18px 0 0;
+}
+
+.mobile-pair-scanner-corner.corner-top-right {
+  top: 0;
+  right: 0;
+  border-width: 4px 4px 0 0;
+  border-radius: 0 18px 0 0;
+}
+
+.mobile-pair-scanner-corner.corner-bottom-left {
+  bottom: 0;
+  left: 0;
+  border-width: 0 0 4px 4px;
+  border-radius: 0 0 0 18px;
+}
+
+.mobile-pair-scanner-corner.corner-bottom-right {
+  right: 0;
+  bottom: 0;
+  border-width: 0 4px 4px 0;
+  border-radius: 0 0 18px;
+}
+
+.mobile-pair-scanner-foot {
+  display: grid;
+  gap: 5px;
+  padding: 18px max(20px, env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom))
+    max(20px, env(safe-area-inset-left));
+  text-align: center;
+}
+
+.mobile-pair-scanner-foot strong {
+  font-size: 1rem;
+}
+
+.mobile-pair-scanner-foot span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.875rem;
+}
+
 .mobile-header {
   min-height: 52px;
   display: flex;
@@ -1099,13 +1235,60 @@ textarea.control {
 
 .mobile-prompt-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
 }
 
 .mobile-prompt-actions .secondary-button {
   min-width: 0;
   padding-inline: 8px;
+}
+
+.mobile-remix-options {
+  margin-top: 8px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  padding: 0 10px 10px;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
+}
+
+.mobile-remix-options > summary {
+  min-height: 44px;
+  align-content: center;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.mobile-remix-source,
+.mobile-remix-dimensions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  border: 0;
+  padding: 0;
+}
+
+.mobile-remix-source legend,
+.mobile-remix-dimensions legend {
+  width: 100%;
+  margin-bottom: 2px;
+  color: var(--ink-3);
+}
+
+.mobile-remix-source label,
+.mobile-remix-dimensions label {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 7px;
+}
+
+.mobile-remix-source input,
+.mobile-remix-dimensions input {
+  width: 20px;
+  height: 20px;
 }
 
 .mobile-inline-panel,

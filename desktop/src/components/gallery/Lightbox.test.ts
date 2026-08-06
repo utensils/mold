@@ -4,7 +4,10 @@ import { createPinia, setActivePinia } from "pinia";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("../../lib/ipc", () => ({
-  ipc: { getOutputDir: vi.fn().mockResolvedValue(null), revealOutputFile: vi.fn() },
+  ipc: {
+    getOutputDir: vi.fn().mockResolvedValue(null),
+    revealOutputFile: vi.fn(),
+  },
 }));
 
 import Lightbox from "./Lightbox.vue";

@@ -90,7 +90,8 @@ pushed screen opened from the header.
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, swipes
   horizontally between prints, explicitly copies or saves full-resolution
-  stills through UIKit, restores recorded prompt settings, and can use a still
+  stills through UIKit, saves original videos to Photos through a streaming
+  native download, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail
   as a new draft (raising any clip duration the selected model's motion tail no
