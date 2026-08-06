@@ -7248,6 +7248,9 @@ fn should_use_ltx2_framewise_decode(
     if crate::runtime_env::value("MOLD_LTX2_VAE_FORCE_FRAMEWISE").is_some() {
         return Ok(true);
     }
+    if default_ltx2_framewise_decode(device) {
+        return Ok(true);
+    }
     if !device.is_cuda() {
         return Ok(false);
     }
@@ -7258,6 +7261,14 @@ fn should_use_ltx2_framewise_decode(
         return Ok(false);
     };
     Ok(projected.saturating_add(ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM) > free_vram)
+}
+
+fn default_ltx2_framewise_decode(device: &candle_core::Device) -> bool {
+    // Apple unified memory is shared with the application and window server;
+    // a full temporal decode can pressure the Metal driver even when tensor
+    // accounting looks flat. Bound the default to one temporal chunk, while
+    // retaining the explicit full-decode override for diagnostics.
+    device.is_metal()
 }
 
 fn projected_ltx2_vae_decode_workspace_bytes(
@@ -8097,6 +8108,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use candle_core::{DType, Device, Tensor};
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_defaults_to_framewise_vae_decode() {
+        let device = Device::new_metal(0).unwrap();
+        assert!(super::default_ltx2_framewise_decode(&device));
+        assert!(!super::default_ltx2_framewise_decode(&Device::Cpu));
+    }
     use candle_nn::VarBuilder;
     use mold_core::{
         GenerateRequest, LoraWeight, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat,

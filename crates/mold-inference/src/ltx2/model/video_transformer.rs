@@ -482,13 +482,32 @@ fn dequantize_fp8_weight_for_runtime(
     weight: &Tensor,
     weight_scale: Option<&Tensor>,
     runtime_dtype: DType,
+    runtime_device: &Device,
 ) -> Result<Tensor> {
-    let mut dequantized = weight.to_dtype(runtime_dtype)?;
+    // Candle stores F8E4M3 tensors on Metal but cannot cast them there yet.
+    // Bridge only the active output-row chunk through CPU, widen it, and move
+    // the BF16 result back. The surrounding streaming block still retains its
+    // compact FP8 storage and never expands the complete transformer.
+    let mut dequantized = if runtime_device.is_metal() && weight.dtype() == DType::F8E4M3 {
+        weight
+            .to_device(&Device::Cpu)?
+            .to_dtype(runtime_dtype)?
+            .to_device(runtime_device)?
+    } else if weight.device().same_device(runtime_device) {
+        weight.to_dtype(runtime_dtype)?
+    } else if weight.dtype() == DType::F8E4M3 {
+        weight
+            .to_device(&Device::Cpu)?
+            .to_dtype(runtime_dtype)?
+            .to_device(runtime_device)?
+    } else {
+        weight.to_device(runtime_device)?.to_dtype(runtime_dtype)?
+    };
     if let Some(scale) = weight_scale {
-        let scale = if scale.device().same_device(weight.device()) {
+        let scale = if scale.device().same_device(runtime_device) {
             scale.to_dtype(runtime_dtype)?
         } else {
-            scale.to_device(weight.device())?.to_dtype(runtime_dtype)?
+            scale.to_device(runtime_device)?.to_dtype(runtime_dtype)?
         };
         dequantized = dequantized.broadcast_mul(&scale)?;
     }
@@ -526,7 +545,7 @@ fn finish_output_chunks(dst: Option<Tensor>) -> Result<Tensor> {
 
 fn fp8_linear_output_chunk_size(weight: &Tensor) -> Result<usize> {
     let out_dim = weight.dim(0)?;
-    if !weight.device().is_cuda() {
+    if !weight.device().is_cuda() && !weight.device().is_metal() {
         return Ok(out_dim);
     }
     Ok(if out_dim >= 16_384 {
@@ -549,7 +568,8 @@ fn fp8_linear_forward_chunked(
 ) -> Result<Tensor> {
     let out_dim = weight.dim(0)?;
     if chunk_size >= out_dim {
-        let weight = dequantize_fp8_weight_for_runtime(weight, weight_scale, runtime_dtype)?;
+        let weight =
+            dequantize_fp8_weight_for_runtime(weight, weight_scale, runtime_dtype, xs.device())?;
         let weight_t = weight.t()?;
         return match *xs.dims() {
             [batch0, batch1, tokens, hidden] => xs
@@ -572,8 +592,12 @@ fn fp8_linear_forward_chunked(
             while offset < out_dim {
                 let rows = chunk_size.min(out_dim - offset);
                 let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
-                let weight_chunk =
-                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                let weight_chunk = dequantize_fp8_weight_for_runtime(
+                    &weight_chunk,
+                    weight_scale,
+                    runtime_dtype,
+                    xs.device(),
+                )?;
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch0, batch1, tokens, rows))?;
@@ -587,8 +611,12 @@ fn fp8_linear_forward_chunked(
             while offset < out_dim {
                 let rows = chunk_size.min(out_dim - offset);
                 let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
-                let weight_chunk =
-                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                let weight_chunk = dequantize_fp8_weight_for_runtime(
+                    &weight_chunk,
+                    weight_scale,
+                    runtime_dtype,
+                    xs.device(),
+                )?;
                 let chunk = xs_flat
                     .matmul(&weight_chunk.t()?)?
                     .reshape((batch, tokens, rows))?;
@@ -601,8 +629,12 @@ fn fp8_linear_forward_chunked(
             while offset < out_dim {
                 let rows = chunk_size.min(out_dim - offset);
                 let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
-                let weight_chunk =
-                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                let weight_chunk = dequantize_fp8_weight_for_runtime(
+                    &weight_chunk,
+                    weight_scale,
+                    runtime_dtype,
+                    xs.device(),
+                )?;
                 let chunk = xs.matmul(&weight_chunk.t()?)?;
                 write_output_chunk(&mut dst, &chunk, out_dim, offset)?;
                 offset += rows;
@@ -1738,38 +1770,50 @@ impl LtxAttention {
             let k = k.reshape((b, k_len, self.heads, self.head_dim))?;
 
             let scale = 1f32 / (self.head_dim as f32).sqrt();
-            let attn_mask_f32 = attn_mask
-                .as_ref()
-                .map(|mask| mask.to_dtype(DType::F32))
-                .transpose()?;
-            let out_f32 = if should_chunk_attention(
-                b,
-                self.heads,
-                q_len,
-                k_len,
-                dtype,
-                hidden_states.device(),
-            ) {
-                let q_t = q.transpose(1, 2)?;
-                let k_t = k.transpose(1, 2)?;
-                let v_t = v.transpose(1, 2)?;
-                let key_chunk = attention_key_chunk_size(k_len);
-                chunked_attention(
-                    &q_t,
-                    &k_t,
-                    &v_t,
-                    attn_mask_f32.as_ref(),
+            let device = hidden_states.device();
+            let mut out = if device.is_metal() {
+                // Candle's Metal SDPA reads Q/K/V strides directly. Force
+                // contiguous head-major inputs until upstream's non-contiguous
+                // correctness fix is part of our pinned release.
+                metal_fused_attention(
+                    &q.transpose(1, 2)?,
+                    &k.transpose(1, 2)?,
+                    &v.transpose(1, 2)?,
+                    attn_mask.as_ref(),
                     scale,
-                    attention_query_chunk_size(b, self.heads, q_len, key_chunk),
-                    key_chunk,
                 )?
             } else {
-                let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
+                let out_f32 = if should_chunk_attention(b, self.heads, q_len, k_len, dtype, device)
+                {
+                    let attn_mask_f32 = attn_mask
+                        .as_ref()
+                        .map(|mask| mask.to_dtype(DType::F32))
+                        .transpose()?;
+                    let q_t = q.transpose(1, 2)?;
+                    let k_t = k.transpose(1, 2)?;
+                    let v_t = v.transpose(1, 2)?;
+                    let key_chunk = attention_key_chunk_size(k_len);
+                    chunked_attention(
+                        &q_t,
+                        &k_t,
+                        &v_t,
+                        attn_mask_f32.as_ref(),
+                        scale,
+                        attention_query_chunk_size(b, self.heads, q_len, key_chunk),
+                        key_chunk,
+                    )?
+                } else {
+                    let attn_mask_f32 = attn_mask
+                        .as_ref()
+                        .map(|mask| mask.to_dtype(DType::F32))
+                        .transpose()?;
+                    let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                    let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                    let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                    full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
+                };
+                out_f32.to_dtype(dtype)?
             };
-            let mut out = out_f32.to_dtype(dtype)?;
             if let Some(mask) = perturbation_mask {
                 let mask = if mask.rank() == out.rank() {
                     mask.clone()
@@ -1906,6 +1950,28 @@ fn full_attention(
     let att = att.reshape((b_sz, h_sz, q_l, k_l))?;
 
     att.matmul(v)
+}
+
+/// Non-materializing attention for Apple unified memory.
+///
+/// LTX-2 stage-two self-attention reaches roughly 14k latent tokens. Building
+/// the complete score matrix is both slower and large enough to pressure the
+/// Metal driver allocator. Candle's fused SDPA mirrors the official LTX-2 MPS
+/// path while preserving the existing additive-mask semantics.
+fn metal_fused_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    scale: f32,
+) -> Result<Tensor> {
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let mask = attn_mask
+        .map(|mask| mask.to_dtype(q.dtype())?.contiguous())
+        .transpose()?;
+    nn::ops::sdpa(&q, &k, &v, mask.as_ref(), false, scale, 1.0)
 }
 
 fn chunked_attention(
@@ -5420,6 +5486,7 @@ pub(crate) mod tests {
                 super::Fp8WeightScaleMode::Apply => Some(&weight_scale),
             },
             DType::F32,
+            &device,
         )
         .unwrap();
         let expected = weight.to_dtype(DType::F32).unwrap();
@@ -5448,6 +5515,7 @@ pub(crate) mod tests {
                 super::Fp8WeightScaleMode::Apply => Some(&weight_scale),
             },
             DType::F32,
+            &device,
         )
         .unwrap();
         let expected = weight
@@ -5561,6 +5629,56 @@ pub(crate) mod tests {
         assert_tensors_close(&full, &chunked, 1e-5);
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn fp8_linear_streams_cast_weights_through_cpu_on_metal() {
+        let cpu = Device::Cpu;
+        let metal = Device::new_metal(0).unwrap();
+        let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &metal)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let weight_cpu = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &cpu)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight = weight_cpu.to_device(&metal).unwrap();
+        let weight_scale = Tensor::new(0.125f32, &metal).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight,
+            weight_scale: Some(weight_scale),
+            input_scale: None,
+            bias: None,
+            adapters: vec![],
+        };
+
+        let actual = linear
+            .forward(&xs)
+            .unwrap()
+            .to_device(&cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+        let expected_weight = weight_cpu
+            .to_dtype(DType::F32)
+            .unwrap()
+            .affine(0.125, 0.0)
+            .unwrap();
+        let expected = xs
+            .to_device(&cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .reshape((2, 2))
+            .unwrap()
+            .matmul(&expected_weight.t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
+            .unwrap();
+
+        assert_tensors_close(&actual, &expected, 2e-2);
+    }
+
     #[test]
     fn standard_linear_applies_lora_adapters_without_merging_base_weight() {
         let device = Device::Cpu;
@@ -5659,9 +5777,13 @@ pub(crate) mod tests {
             .unwrap();
         let weight_scale = Tensor::new(0.25f32, &device).unwrap();
 
-        let dequantized =
-            super::dequantize_fp8_weight_for_runtime(&weight, Some(&weight_scale), DType::F32)
-                .unwrap();
+        let dequantized = super::dequantize_fp8_weight_for_runtime(
+            &weight,
+            Some(&weight_scale),
+            DType::F32,
+            &device,
+        )
+        .unwrap();
         let expected = weight
             .to_dtype(DType::F32)
             .unwrap()
@@ -5812,6 +5934,47 @@ pub(crate) mod tests {
         let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
 
         assert_tensors_close(&full, &chunked, 1e-3);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_fused_attention_matches_f32_reference_with_mask() {
+        let device = Device::new_metal(0).unwrap();
+        let shape = (1, 2, 5, 64);
+        let q = Tensor::from_vec(patterned_values(640, 41), shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::from_vec(patterned_values(640, 43), shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::from_vec(patterned_values(640, 47), shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let mut mask_values = vec![0.0f32; 2 * 5 * 5];
+        for head in 0..2 {
+            mask_values[head * 25 + 4] = -10_000.0;
+        }
+        let mask = Tensor::from_vec(mask_values, (1, 2, 5, 5), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let scale = 1f32 / 8f32.sqrt();
+
+        let fused = super::metal_fused_attention(&q, &k, &v, Some(&mask), scale).unwrap();
+        let reference = super::full_attention(
+            &q.to_dtype(DType::F32).unwrap(),
+            &k.to_dtype(DType::F32).unwrap(),
+            &v.to_dtype(DType::F32).unwrap(),
+            Some(&mask.to_dtype(DType::F32).unwrap()),
+            scale,
+        )
+        .unwrap();
+
+        assert_eq!(fused.dtype(), DType::BF16);
+        assert_tensors_close(&fused.to_dtype(DType::F32).unwrap(), &reference, 2e-2);
     }
 
     #[test]
