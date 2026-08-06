@@ -316,6 +316,7 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 "z-image-te" => "z-image",
                 "flux2-vae" | "flux2-te" | "flux2-te-9b" => "flux2",
                 "ltx2-te" => "ltx2",
+                "wan-umt5" | "wan21-vae" | "wan22-vae" => "wan",
                 _ => "companion",
             };
             return PathBuf::from("shared")
@@ -1223,6 +1224,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(wuerstchen_manifests());
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
+    manifests.extend(wan_manifests());
     manifests.extend(ltx2_control_manifests());
     manifests.extend(ltx2_camera_control_manifests());
     manifests.extend(controlnet_manifests());
@@ -4768,6 +4770,136 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
 /// applicable) the unified `tokenizer.json`. Single-file engines
 /// only need the encoder weights and a tokenizer; richer A1111-style
 /// loaders that want config/vocab/merges files are a future extension.
+/// Upstream's default negative prompt, shared by every Wan variant
+/// (`Wan2.2/wan/configs/shared_config.py`). Applied when a request leaves
+/// `negative_prompt` unset: these checkpoints were tuned against it, and an
+/// empty uncond quietly degrades CFG quality.
+const WAN_DEFAULT_NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
+/// Shared Wan component files: the UMT5-XXL text encoder (identical across
+/// every Wan 2.1/2.2 variant — Comfy-Org's safetensors repack of upstream's
+/// `models_t5_umt5-xxl-enc-bf16.pth`) and its SentencePiece tokenizer in
+/// tokenizers-crate JSON form.
+fn shared_wan_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+            hf_filename: "split_files/text_encoders/umt5_xxl_fp16.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 11_366_399_385,
+            gated: false,
+            sha256: Some("7b8850f1961e1cf8a77cca4c964a358d303f490833c6c087d0cff4b2f99db2af"),
+        },
+        ModelFile {
+            hf_repo: "google/umt5-xxl".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 16_853_013,
+            gated: false,
+            sha256: Some("af904105ce1071b1202bba0059a841f4a7b85b48b6ec179c4948e3483476e0dd"),
+        },
+    ]
+}
+
+/// Wan 2.1/2.2 video manifests (ComfyUI-repack weight layout — the format the
+/// GGUF/LoRA ecosystem shares). Hidden until the Wan engine lands: the files
+/// are pullable and the contracts are advertised, but `mold run` has no
+/// factory arm yet, so listing them would offer a model that cannot load.
+fn wan_manifests() -> Vec<ModelManifest> {
+    let defaults_480p = ManifestDefaults {
+        // ComfyUI's proven Wan 2.1 recipe (30 steps, cfg 6, uni_pc); upstream
+        // defaults to 50 steps at cfg 5-6, which buys little at 1.3B scale.
+        steps: 30,
+        guidance: 6.0,
+        width: 832,
+        height: 480,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
+        frames: Some(81),
+        fps: Some(16),
+    };
+    let defaults_ti2v = ManifestDefaults {
+        // ComfyUI's TI2V-5B template: 20 steps, cfg 5, uni_pc, 121f @ 24 fps.
+        steps: 20,
+        guidance: 5.0,
+        width: 1280,
+        height: 704,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
+        frames: Some(121),
+        fps: Some(24),
+    };
+
+    vec![
+        ModelManifest {
+            name: "wan21-t2v-1.3b:bf16".to_string(),
+            family: "wan".to_string(),
+            description: "Wan 2.1 T2V 1.3B BF16 — 480p text-to-video".to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                    hf_filename: "split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 2_838_104_528,
+                    gated: false,
+                    sha256: Some(
+                        "6f999b0d6cb9a72b3d98ac386ed96f57f8cecae13994a69232514ea4974ad5fd",
+                    ),
+                });
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 253_815_318,
+                    gated: false,
+                    sha256: Some(
+                        "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+                    ),
+                });
+                files
+            },
+            defaults: defaults_480p,
+            hidden: true,
+        },
+        ModelManifest {
+            name: "wan22-ti2v-5b:fp16".to_string(),
+            family: "wan".to_string(),
+            description: "Wan 2.2 TI2V 5B FP16 — 720p24 text- and image-to-video".to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                    hf_filename: "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_999_658_848,
+                    gated: false,
+                    sha256: Some(
+                        "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e",
+                    ),
+                });
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan2.2_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 1_409_400_960,
+                    gated: false,
+                    sha256: Some(
+                        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+                    ),
+                });
+                files
+            },
+            defaults: defaults_ti2v,
+            hidden: true,
+        },
+    ]
+}
+
 fn companion_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 0,
@@ -4966,6 +5098,79 @@ fn companion_manifests() -> Vec<ModelManifest> {
                 sha256: Some(
                     "911d59bb4cb7708179c9a0045ea0fe41212ecfb77aed3a02702b7c0a8274911f",
                 ),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Wan UMT5-XXL — shared text encoder for every Wan 2.1/2.2 variant.
+        // Single-file catalog checkpoints (Civitai/HF transformer-only) pull
+        // this instead of bundling the 11 GB encoder in the checkpoint.
+        ModelManifest {
+            name: "wan-umt5".to_string(),
+            family: "companion".to_string(),
+            description: "Wan UMT5-XXL text encoder companion (single-file Wan checkpoints)"
+                .to_string(),
+            files: vec![
+                // TextEncoder (not Transformer) on purpose: like flux2-te,
+                // a pure text-encoder companion declares TextEncoder shards
+                // so `paths_from_downloads` falls back to them, and the
+                // shared-component storage path dedupes with the primary
+                // Wan manifests' own copy under `shared/wan/`.
+                ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                    hf_filename: "split_files/text_encoders/umt5_xxl_fp16.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 11_366_399_385,
+                    gated: false,
+                    sha256: Some(
+                        "7b8850f1961e1cf8a77cca4c964a358d303f490833c6c087d0cff4b2f99db2af",
+                    ),
+                },
+                // Tokenizer rides along so the catalog bridge's synthesized
+                // config gets a tokenizer path (same reason as t5-v1_1-xxl).
+                ModelFile {
+                    hf_repo: "google/umt5-xxl".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 16_853_013,
+                    gated: false,
+                    sha256: Some(
+                        "af904105ce1071b1202bba0059a841f4a7b85b48b6ec179c4948e3483476e0dd",
+                    ),
+                },
+            ],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Wan 2.1 VAE — used by every 1.3B/14B/A14B Wan model.
+        ModelManifest {
+            name: "wan21-vae".to_string(),
+            family: "companion".to_string(),
+            description: "Wan 2.1 video VAE companion (1.3B/14B/A14B checkpoints)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 253_815_318,
+                gated: false,
+                sha256: Some("2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Wan 2.2 VAE — TI2V-5B's higher-compression (16x16x4, 48ch) VAE.
+        ModelManifest {
+            name: "wan22-vae".to_string(),
+            family: "companion".to_string(),
+            description: "Wan 2.2 video VAE companion (TI2V-5B checkpoints)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                hf_filename: "split_files/vae/wan2.2_vae.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1_409_400_960,
+                gated: false,
+                sha256: Some("e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
             }],
             defaults: defaults.clone(),
             hidden: true,
@@ -5956,13 +6161,14 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 131
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 2 Wan + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 136
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
-        // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 131);
+        // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
+        // single-file Wan checkpoints.
+        assert_eq!(known_manifests().len(), 136);
     }
 
     #[test]
@@ -5978,6 +6184,100 @@ mod tests {
         assert!(find_manifest("ltx-video-0.9.8-2b-distilled:bf16").is_some());
         assert!(find_manifest("ltx-video-0.9.8-13b-dev:bf16").is_some());
         assert!(find_manifest("ltx-video-0.9.8-13b-distilled:bf16").is_some());
+    }
+
+    /// The Wan manifests are the contract every later stack layer builds on:
+    /// bare names resolve to the shipped tags, the component set is complete
+    /// (transformer + VAE + UMT5 + tokenizer), every payload carries a
+    /// SHA-256, and the entries stay hidden until the engine's factory arm
+    /// exists — a listed model that cannot load is worse than none.
+    #[test]
+    fn wan_manifests_resolve_and_carry_full_component_sets() {
+        assert_eq!(resolve_model_name("wan21-t2v-1.3b"), "wan21-t2v-1.3b:bf16");
+        assert_eq!(resolve_model_name("wan22-ti2v-5b"), "wan22-ti2v-5b:fp16");
+        // Legacy-dash form resolves like every other family's.
+        assert_eq!(
+            resolve_model_name("wan22-ti2v-5b-fp16"),
+            "wan22-ti2v-5b:fp16"
+        );
+
+        for name in ["wan21-t2v-1.3b:bf16", "wan22-ti2v-5b:fp16"] {
+            let manifest = find_manifest(name).unwrap_or_else(|| panic!("{name} must resolve"));
+            assert_eq!(manifest.family, "wan");
+            assert!(
+                manifest.hidden,
+                "{name} stays hidden until the engine lands"
+            );
+            for component in [
+                ModelComponent::Transformer,
+                ModelComponent::Vae,
+                ModelComponent::TextEncoder,
+                ModelComponent::TextTokenizer,
+            ] {
+                assert!(
+                    manifest.files.iter().any(|f| f.component == component),
+                    "{name} missing {component:?}"
+                );
+            }
+            for file in &manifest.files {
+                assert!(
+                    file.sha256.is_some(),
+                    "{name}: {} must carry a SHA-256",
+                    file.hf_filename
+                );
+            }
+            let defaults = &manifest.defaults;
+            assert!(defaults.frames.is_some() && defaults.fps.is_some());
+            assert!(
+                defaults.negative_prompt.is_some(),
+                "{name} must default to upstream's tuned negative prompt"
+            );
+        }
+
+        // The two VAE generations must not be conflated: 2.1 (16ch) for the
+        // 1.3B/14B family, 2.2 (48ch) for TI2V-5B.
+        let vae_file = |name: &str| {
+            find_manifest(name)
+                .unwrap()
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::Vae)
+                .unwrap()
+                .hf_filename
+                .clone()
+        };
+        assert!(vae_file("wan21-t2v-1.3b:bf16").contains("wan_2.1_vae"));
+        assert!(vae_file("wan22-ti2v-5b:fp16").contains("wan2.2_vae"));
+    }
+
+    /// The wan-umt5 companion and the primary Wan manifests must agree on
+    /// storage: the companion bridge routes its shared components into
+    /// `shared/wan/`, where the primary manifests already put the encoder and
+    /// tokenizer — so a companion pull and a primary pull dedupe to one
+    /// on-disk copy of the 11 GB encoder. (The VAE companions deliberately do
+    /// NOT dedupe: like ltx-video-vae/ltx2-vae they carry their payload as a
+    /// model-specific Transformer file the catalog bridge points at directly.)
+    #[test]
+    fn wan_umt5_companion_shares_storage_with_primary_manifests() {
+        let primary = find_manifest("wan21-t2v-1.3b:bf16").unwrap();
+        let umt5 = find_manifest("wan-umt5").unwrap();
+        for component in [ModelComponent::TextEncoder, ModelComponent::TextTokenizer] {
+            let companion_file = umt5
+                .files
+                .iter()
+                .find(|f| f.component == component)
+                .unwrap();
+            let primary_file = primary
+                .files
+                .iter()
+                .find(|f| f.component == component)
+                .unwrap();
+            assert_eq!(
+                storage_path(umt5, companion_file),
+                storage_path(primary, primary_file),
+                "companion {component:?} must land where the primary manifests put it"
+            );
+        }
     }
 
     #[test]
@@ -7259,14 +7559,14 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 19: 2 qwen3-expand variants + 17 catalog companions
+        // Currently 22: 2 qwen3-expand variants + 20 catalog companions
         // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
         // ltx-video-vae, ltx2-vae, ltx2.3-vae, ltx2.3-text-projection, flux2-te, flux2-te-9b,
-        // flux2-vae, z-image-te, ltx2-te, qwen-image-runtime,
-        // wuerstchen-runtime).
+        // flux2-vae, z-image-te, ltx2-te, wan-umt5, wan21-vae, wan22-vae,
+        // qwen-image-runtime, wuerstchen-runtime).
         assert_eq!(
-            utility_count, 19,
-            "expected exactly 19 utility models, got {utility_count}"
+            utility_count, 22,
+            "expected exactly 22 utility models, got {utility_count}"
         );
     }
 
@@ -7310,6 +7610,9 @@ mod tests {
         "ltx2.3-vae",
         "ltx2.3-text-projection",
         "ltx2-te",
+        "wan-umt5",
+        "wan21-vae",
+        "wan22-vae",
     ];
 
     #[test]
