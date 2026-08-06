@@ -87,10 +87,10 @@ fn take_cached_animation(reuse_key: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "ios")]
 fn cache_animation(reuse_key: String, path: std::path::PathBuf) {
-    if let Ok(mut cache) = animation_export_cache().lock() {
-        if let Some(replaced) = cache.replace(CachedAnimationExport { reuse_key, path }) {
-            let _ = std::fs::remove_file(replaced.path);
-        }
+    if let Ok(mut cache) = animation_export_cache().lock()
+        && let Some(replaced) = cache.replace(CachedAnimationExport { reuse_key, path })
+    {
+        let _ = std::fs::remove_file(replaced.path);
     }
 }
 
