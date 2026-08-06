@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-06
+
 ### Added
 
 - **The TUI can now choose source-free LTX-2 video pipelines.** Create's Advanced Video section exposes Auto, one-stage, two-stage, two-stage-hq, and distilled through the same absent-by-default request field as the CLI, web, desktop, and iPhone. Choosing a recipe selects a compatible MP4 output, updates CFG guidance and negative-prompt availability, survives keyboard row reflow, appears in the section summary and active-count badge, and resets or prunes with the rest of the family-gated video state. Conditioning-dependent and audio-only recipes remain out of the picker until the TUI can author and consume their required media end to end.
@@ -1513,7 +1515,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/utensils/mold/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
