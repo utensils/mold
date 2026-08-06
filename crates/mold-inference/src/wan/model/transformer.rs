@@ -117,14 +117,28 @@ impl<'a> WanWeights<'a> {
         }
     }
 
-    /// Model dtype. GGUF activations run in F32 — the quantized blocks carry
-    /// their own scales, and candle's `QMatMul` dequantizes into F32. The fp8
-    /// arm keeps the caller's dtype: that is the dtype its weights dequantize
-    /// *into*, so it is the activation dtype for the whole model.
+    /// Model dtype. The fp8 arm keeps the caller's dtype: that is the dtype
+    /// its weights dequantize *into*, so it is the activation dtype for the
+    /// whole model.
+    ///
+    /// The quantized arm runs BF16 activations on GPU: candle's `QMatMul`
+    /// dequantizes into F32 *inside* each linear, but carrying F32 between
+    /// ops was measured to OOM a 24 GB card — ~3.4 GB of activations at a
+    /// mere 4.7k tokens, extrapolating past the card at the 20k+ tokens a
+    /// 49-frame 480p render needs. Each quantized linear casts its own IO at
+    /// the boundary (see `CastBoundary`), so the F32 stays transient and
+    /// per-linear. CPU keeps F32 because candle's CPU backend has no BF16
+    /// matmul — the same constraint that moved the CPU-parked encoder to F32.
     fn dtype(&self) -> DType {
         match self {
             Self::Plain(vb) => vb.dtype(),
-            Self::Quantized { .. } => DType::F32,
+            Self::Quantized { vb, .. } => {
+                if vb.device().is_cpu() {
+                    DType::F32
+                } else {
+                    DType::BF16
+                }
+            }
             Self::Fp8 { vb, .. } => vb.dtype(),
         }
     }
@@ -140,12 +154,15 @@ impl<'a> WanWeights<'a> {
     fn linear(&self, in_dim: usize, out_dim: usize) -> Result<WanLinear> {
         match self {
             Self::Plain(vb) => Ok(Arc::new(candle_nn::linear(in_dim, out_dim, vb.clone())?)),
-            Self::Quantized { vb, loras } => crate::wan::lora::attach_quantized_branches(
-                loras,
-                &vb.key("weight"),
-                mold_candle::quantized_nn::linear(in_dim, out_dim, vb.clone())?,
-                vb.device(),
-            ),
+            Self::Quantized { vb, loras } => {
+                let inner = crate::wan::lora::attach_quantized_branches(
+                    loras,
+                    &vb.key("weight"),
+                    mold_candle::quantized_nn::linear(in_dim, out_dim, vb.clone())?,
+                    vb.device(),
+                )?;
+                Ok(CastBoundary::wrap(inner, self.dtype()))
+            }
             Self::Fp8 { vb, .. } => fp8::load_linear(vb, in_dim, out_dim, self.dtype()),
         }
     }
@@ -180,6 +197,35 @@ impl<'a> WanWeights<'a> {
                 loras.merge_into(&vb.key(name), tensor)
             }
         }
+    }
+}
+
+/// IO-dtype boundary around a quantized linear: the surrounding graph runs in
+/// the model dtype (BF16 on GPU), while `QMatMul` and the Lightning adapter
+/// branch compute in F32 internally. Casting at this boundary keeps every F32
+/// tensor transient and scoped to one linear call — carrying F32 *between*
+/// ops is what blew past 24 GB at 20k+ tokens (measured: ~3.4 GB of
+/// activations at 4.7k tokens on the 9-frame probe). A no-op when the model
+/// dtype is already F32 (CPU).
+struct CastBoundary {
+    inner: WanLinear,
+    io: DType,
+}
+
+impl CastBoundary {
+    fn wrap(inner: WanLinear, io: DType) -> WanLinear {
+        if io == DType::F32 {
+            return inner;
+        }
+        Arc::new(Self { inner, io })
+    }
+}
+
+impl Module for CastBoundary {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.inner
+            .forward(&xs.to_dtype(DType::F32)?)?
+            .to_dtype(self.io)
     }
 }
 
