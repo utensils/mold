@@ -31,6 +31,13 @@ pub(crate) fn family_config(family: &str) -> (u32, &'static str) {
              only the requested change and never restate source-visible or source-audible details. \
              Up to 150 words.",
         ),
+        "wan" | "wan2.1" | "wan2.2" => (
+            120,
+            "Wan uses UMT5-XXL (512 tokens) and understands natural-language shot direction. \
+             Lead with the main subject and action, then scene, lighting, and camera movement, \
+             in chronological order. For conditioned tasks, describe only the requested change \
+             and never restate source-visible details. Up to 120 words.",
+        ),
         // All flow-matching models with T5/Qwen3 encoders support longer prompts
         _ => (
             150,

@@ -165,6 +165,12 @@ pub fn snap_frames_to_8k1(frames: u32) -> u32 {
     frames - ((frames - 1) % LTX2_TEMPORAL_SCALE)
 }
 
+/// Wan's causal video VAE compresses time by 4: latent frame 0 covers one
+/// pixel frame and every later latent frame covers four, so a renderable
+/// pixel-frame count is always `4k + 1` (upstream enforces the same grid in
+/// `Wan2.1/generate.py`).
+pub const WAN_TEMPORAL_SCALE: u32 = 4;
+
 /// The frame count and rate a lip-dub render must use, plus anything the
 /// caller asked for that the reference video overrode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +284,11 @@ pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
         // to it produced a 422.
         "ltx2" => Some(ltx2_max_frames_on_grid_at_fps(fps)),
         "ltx-video" => Some(MAX_FRAMES_GLOBAL),
+        // Wan's temporal RoPE is indexed by latent frame against a 1024-entry
+        // table, so duration is nowhere near the binding limit — memory is.
+        // The flat global ceiling is the resource guard, and 257 sits on the
+        // `4k+1` grid, so the advertised maximum is itself submittable.
+        "wan" => Some(MAX_FRAMES_GLOBAL),
         _ => None,
     }
 }
@@ -302,7 +313,11 @@ pub fn max_frames_absolute_for_family(family: &str) -> Option<u32> {
 /// Frame-count grid for a family: valid counts are `k * step + 1`. The value
 /// `/api/models` advertises as `frame_step`; the validator consumes it.
 pub fn frame_step_for_family(family: &str) -> Option<u32> {
-    matches!(family, "ltx2" | "ltx-video").then_some(8)
+    match family {
+        "ltx2" | "ltx-video" => Some(LTX2_TEMPORAL_SCALE),
+        "wan" => Some(WAN_TEMPORAL_SCALE),
+        _ => None,
+    }
 }
 
 fn megapixel_limit_label_for(limit: u64) -> String {
@@ -1441,7 +1456,10 @@ pub fn validate_generate_request_with_family(
         if let Some(step) = family.and_then(frame_step_for_family) {
             if frames > 1 && (frames - 1) % step != 0 {
                 return Err(format!(
-                    "frames ({frames}) must be {step}n+1 for current LTX-Video / LTX-2 models (e.g. 9, 17, 25, 33, 41, 49, …)"
+                    "frames ({frames}) must be {step}n+1 for this model family (e.g. {}, {}, {}, …)",
+                    step + 1,
+                    2 * step + 1,
+                    3 * step + 1,
                 ));
             }
         }
@@ -1619,6 +1637,16 @@ pub fn validate_generate_request_with_family(
             return Err(
                 "ic_lora_control plus custom LoRAs exceeds the four-LoRA stack limit".to_string(),
             );
+        }
+    }
+
+    // Wan renders video only; without this gate, an explicit image format
+    // reaches the engine and fails after the model loads instead of at
+    // admission (Wan has no audio path, so `wav` is refused here too).
+    if family == Some("wan") {
+        match req.resolved_output_format() {
+            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {}
+            _ => return Err("Wan outputs must use mp4, gif, apng, or webp".to_string()),
         }
     }
 
@@ -1926,6 +1954,36 @@ const LTX2_DIMS: &[(u32, u32)] = &[
     (1088, 1920), // 9:16 1080p
 ];
 
+/// Wan 2.1/2.2 sample buckets. The 14B family trains at 480p and 720p on the
+/// shared 16px grid; 704x1280 is TI2V-5B's native bucket (also 32px-aligned,
+/// which its higher-compression 2.2 VAE requires).
+const WAN_DIMS: &[(u32, u32)] = &[
+    (832, 480),  // 16:9-class 480p (Wan's own default bucket)
+    (480, 832),  // portrait 480p
+    (1280, 720), // 720p
+    (720, 1280), // portrait 720p
+    (1280, 704), // TI2V-5B native (32px grid)
+    (704, 1280), // TI2V-5B portrait
+];
+
+/// Per-checkpoint recommended buckets for the Wan family.
+///
+/// The family-wide list unions buckets no single checkpoint supports —
+/// `wan21-t2v-1.3b` is 480p-only, and `wan22-ti2v-5b`'s native pair is
+/// 1280x704 on its 2.2 VAE's 32px grid — so `/api/models` resolves the
+/// advertisement per model. The family list remains the fallback for
+/// checkpoints this build has no manifest for (catalog `cv:`/`hf:` ids).
+pub fn wan_recommended_dimensions(model: &str) -> &'static [(u32, u32)] {
+    let canonical = crate::manifest::resolve_model_name(model);
+    if canonical.starts_with("wan21-t2v-1.3b") {
+        return &[(832, 480), (480, 832)];
+    }
+    if canonical.starts_with("wan22-ti2v-5b") {
+        return &[(1280, 704), (704, 1280)];
+    }
+    recommended_dimensions("wan")
+}
+
 /// Return the list of recommended (width, height) pairs for a model family.
 ///
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
@@ -1943,6 +2001,7 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "wuerstchen" => WUERSTCHEN_DIMS,
         "ltx-video" => LTX_VIDEO_DIMS,
         "ltx2" => LTX2_DIMS,
+        "wan" => WAN_DIMS,
         _ => &[],
     }
 }
@@ -3527,7 +3586,9 @@ mod tests {
         req.frames = Some(10);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("8n+1"), "got: {err}");
-        assert!(err.contains("LTX-Video / LTX-2"), "got: {err}");
+        // The message derives its examples from the family's own step so it
+        // stays correct now that more than one grid exists (LTX 8, Wan 4).
+        assert!(err.contains("9, 17, 25"), "got: {err}");
     }
 
     fn extend_req() -> GenerateRequest {
@@ -3753,6 +3814,123 @@ mod tests {
         req.frames = Some(249); // first 8n+1 value past the 244-frame cap
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains(&cap.to_string()), "got: {err}");
+    }
+
+    /// Wan advertises a flat frame guard on the `4k+1` grid; the advertised
+    /// values must agree with what the validator enforces (same drift-proofing
+    /// as the LTX contract above).
+    #[test]
+    fn wan_frame_contract_helpers() {
+        assert_eq!(frame_step_for_family("wan"), Some(WAN_TEMPORAL_SCALE));
+        assert_eq!(
+            max_frames_for_family_at_fps("wan", 16),
+            Some(MAX_FRAMES_GLOBAL)
+        );
+        assert_eq!(max_frames_for_family("wan"), Some(MAX_FRAMES_GLOBAL));
+        // Wan's ceiling is a flat resource guard, not a duration budget.
+        assert_eq!(max_runtime_seconds_for_family("wan"), None);
+        assert_eq!(max_frames_absolute_for_family("wan"), None);
+        // The advertised maximum must itself sit on the 4k+1 grid so a client
+        // that clamps a slider to it can actually submit.
+        assert_eq!((MAX_FRAMES_GLOBAL - 1) % WAN_TEMPORAL_SCALE, 0);
+    }
+
+    #[test]
+    fn wan_frames_grid_and_cap_enforced() {
+        // On-grid counts inside the guard are accepted (81 is Wan's default).
+        let mut req = valid_req();
+        req.model = "wan22-ti2v-5b:fp16".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(24);
+        req.frames = Some(81);
+        assert!(validate_generate_request(&req).is_ok());
+
+        // Off the 4k+1 grid is rejected, and the error names Wan's own step —
+        // not the LTX 8.
+        req.frames = Some(80);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("4n+1"), "got: {err}");
+
+        // One grid step past the flat guard is rejected with the same cap the
+        // wire advertises.
+        let cap = max_frames_for_family("wan").unwrap();
+        req.frames = Some(cap + WAN_TEMPORAL_SCALE);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains(&cap.to_string()), "got: {err}");
+    }
+
+    /// Wan is a video family in every consuming authority: the expansion
+    /// task resolver (twin: `studio/lib/expandTask.ts`) and the output-format
+    /// default + gate. A miss in either renders wan as an image model.
+    #[test]
+    fn wan_routes_through_the_video_authorities() {
+        use crate::ExpandTask;
+        assert_eq!(ExpandTask::for_family("wan"), ExpandTask::TextToVideo);
+        assert_eq!(
+            ExpandTask::for_conditioning("wan", None, true, false, false, 0, false),
+            ExpandTask::ImageToVideo
+        );
+        assert_eq!(
+            ExpandTask::for_conditioning("wan", None, false, false, false, 0, false),
+            ExpandTask::TextToVideo
+        );
+
+        let mut req = valid_req();
+        req.model = "wan22-ti2v-5b:fp16".to_string();
+        req.output_format = None;
+        req.normalise_output_format(Some("wan"));
+        assert_eq!(req.resolved_output_format(), OutputFormat::Mp4);
+
+        req.output_format = Some(OutputFormat::Png);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("mp4"), "got: {err}");
+    }
+
+    /// Buckets are advertised per checkpoint: the 480p-only 1.3B and the
+    /// 704-grid TI2V-5B must not inherit each other's sizes, while unknown
+    /// wan checkpoints keep the family fallback.
+    #[test]
+    fn wan_recommended_dimensions_are_per_checkpoint() {
+        assert_eq!(
+            wan_recommended_dimensions("wan21-t2v-1.3b"),
+            &[(832, 480), (480, 832)]
+        );
+        assert_eq!(
+            wan_recommended_dimensions("wan22-ti2v-5b:fp16"),
+            &[(1280, 704), (704, 1280)]
+        );
+        assert_eq!(
+            wan_recommended_dimensions("cv:someone/some-wan-finetune"),
+            recommended_dimensions("wan")
+        );
+        for model in ["wan21-t2v-1.3b", "wan22-ti2v-5b"] {
+            for (w, h) in wan_recommended_dimensions(model) {
+                assert!(
+                    validate_generation_dimensions(*w, *h, Some("wan")).is_ok(),
+                    "{model}: advertised {w}x{h} must pass the validator"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wan_recommended_dimensions_fit_their_own_contracts() {
+        let dims = recommended_dimensions("wan");
+        assert!(!dims.is_empty());
+        for (w, h) in dims {
+            assert!(
+                w.is_multiple_of(16) && h.is_multiple_of(16),
+                "{w}x{h} must sit on the family's 16px grid"
+            );
+            assert!(
+                u64::from(*w) * u64::from(*h) <= MAX_PIXELS,
+                "{w}x{h} must fit the generic pixel budget"
+            );
+            assert!(
+                validate_generation_dimensions(*w, *h, Some("wan")).is_ok(),
+                "{w}x{h} must pass the validator it is advertised against"
+            );
+        }
     }
 
     #[test]

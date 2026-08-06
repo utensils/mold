@@ -15,6 +15,13 @@ describe("expansionTaskForRequest", () => {
     ).toBe("image-to-video");
   });
 
+  it("classifies wan as a video family (twin of the Rust resolver)", () => {
+    expect(expansionTaskForRequest("wan", {})).toBe("text-to-video");
+    expect(
+      expansionTaskForRequest("wan", { source_image: "opening-frame" }),
+    ).toBe("image-to-video");
+  });
+
   it("prioritizes retake, keyframes, and audio conditioning", () => {
     expect(
       expansionTaskForRequest("ltx2", {
