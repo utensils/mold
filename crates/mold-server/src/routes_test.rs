@@ -2582,6 +2582,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_snapshot_marks_sequences_unavailable_without_metadata_db() {
+        let app = app_with_state(AppState::for_tests());
+        let response = app
+            .oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["unavailable_kinds"], serde_json::json!(["sequence"]));
+    }
+
+    #[tokio::test]
     async fn queue_v2_work_items_are_additive_and_legacy_patch_still_reorders_only_entries() {
         let state = AppState::for_tests();
         state.job_registry.register("ordinary-a", "flux");

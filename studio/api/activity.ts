@@ -120,8 +120,13 @@ export function reconcileActivityHost(
   }
   const unavailableKinds = result.unavailable_kinds ?? [];
   const unavailable = new Set(unavailableKinds);
+  const sameAuthority =
+    previous?.routeUrl === route.target.baseUrl &&
+    previous.instanceId === result.instance_id;
   const retained =
-    previous?.items.filter((item) => unavailable.has(item.kind)) ?? [];
+    (sameAuthority
+      ? previous?.items.filter((item) => unavailable.has(item.kind))
+      : undefined) ?? [];
   return {
     ...route,
     routeUrl: route.target.baseUrl,

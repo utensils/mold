@@ -184,6 +184,41 @@ describe("active work reconciliation", () => {
     expect(rows.find((row) => row.id === "download-a")?.stale).toBe(false);
   });
 
+  it("does not retain unavailable work across route or instance fences", () => {
+    const previous = reconcileActivityHost(route, undefined, {
+      instance_id: "instance-a",
+      observed_at_unix_ms: 10,
+      items: [
+        {
+          id: "sequence-a",
+          kind: "sequence",
+          phase: "running",
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 9,
+          can_cancel: true,
+        },
+      ],
+    });
+    const partial = {
+      instance_id: "instance-b",
+      observed_at_unix_ms: 11,
+      items: [],
+      unavailable_kinds: ["sequence"],
+    };
+
+    expect(reconcileActivityHost(route, previous, partial).items).toEqual([]);
+    expect(
+      reconcileActivityHost(
+        {
+          ...route,
+          target: { ...route.target, baseUrl: "http://replacement:7680" },
+        },
+        previous,
+        { ...partial, instance_id: "instance-a" },
+      ).items,
+    ).toEqual([]);
+  });
+
   it("keeps identical ids from different hosts as separate attributed rows", () => {
     const a = reconcileActivityHost(route, undefined, {
       instance_id: "instance-a",

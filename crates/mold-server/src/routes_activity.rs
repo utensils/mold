@@ -172,6 +172,11 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 can_cancel: true,
             });
         }
+    } else {
+        // A disabled or unresolved metadata database is not evidence that
+        // durable sequences have disappeared. Let clients retain their last
+        // verified sequence rows until this authority is available again.
+        unavailable_kinds.push("sequence".to_string());
     }
 
     // Scheduler-only work includes preparation/utility phases that never
