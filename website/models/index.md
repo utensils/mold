@@ -160,7 +160,7 @@ for more options.
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
 | [LTX-2](/models/ltx2)                 | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
-| [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE              |
+| [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.

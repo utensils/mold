@@ -253,6 +253,10 @@ mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 # Wan 2.2 5B at 720p24
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 
+# Wan 2.2 A14B, 4-step Lightning tier (two experts, one resident at a time)
+mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
+mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
+
 # WebP animated output
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```

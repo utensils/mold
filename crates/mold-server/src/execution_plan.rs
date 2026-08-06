@@ -3558,6 +3558,8 @@ mod tests {
         text_encoder_files: Vec<PathBuf>,
     ) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/models/transformer.safetensors"),
             transformer_shards,
             vae: PathBuf::from("/models/vae.safetensors"),
@@ -4252,6 +4254,8 @@ mod tests {
             std::fs::write(root.path().join(name), b"x").unwrap();
         }
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.path().join("transformer.safetensors"),
             transformer_shards: Vec::new(),
             vae: root.path().join("vae.safetensors"),

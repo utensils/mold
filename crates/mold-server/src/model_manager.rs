@@ -1116,11 +1116,13 @@ fn manifest_component_status(
 fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'static str {
     use mold_core::manifest::ModelComponent;
     match component {
-        ModelComponent::Transformer | ModelComponent::TransformerShard => "transformer",
+        ModelComponent::Transformer
+        | ModelComponent::TransformerShard
+        | ModelComponent::LowNoiseTransformer => "transformer",
         ModelComponent::Vae => "vae",
         ModelComponent::SpatialUpscaler => "spatial_upscaler",
         ModelComponent::TemporalUpscaler => "temporal_upscaler",
-        ModelComponent::DistilledLora => "distilled_lora",
+        ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora => "distilled_lora",
         ModelComponent::T5Encoder | ModelComponent::TextEncoder => "text_encoder",
         ModelComponent::ClipEncoder | ModelComponent::ClipEncoder2 => "clip",
         ModelComponent::T5Tokenizer
@@ -1137,10 +1139,12 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
     match component {
         ModelComponent::Transformer => "transformer",
         ModelComponent::TransformerShard => "transformer shard",
+        ModelComponent::LowNoiseTransformer => "low-noise transformer",
         ModelComponent::Vae => "vae",
         ModelComponent::SpatialUpscaler => "spatial upscaler",
         ModelComponent::TemporalUpscaler => "temporal upscaler",
         ModelComponent::DistilledLora => "distilled lora",
+        ModelComponent::LowNoiseDistilledLora => "low-noise distilled lora",
         ModelComponent::T5Encoder => "t5 encoder",
         ModelComponent::ClipEncoder => "clip encoder",
         ModelComponent::T5Tokenizer => "t5 tokenizer",
@@ -2310,6 +2314,8 @@ mod tests {
         f2.set_len(rest).expect("set vae len");
 
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,
@@ -2468,6 +2474,8 @@ mod tests {
         let t5 = mk("t5.safetensors", t5_gb);
         let clip = mk("clip.safetensors", clip_gb);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,
@@ -2629,6 +2637,8 @@ mod tests {
         let clip_l = mk("clip_l.safetensors", clip_l_gb);
         let clip_g = mk("clip_g.safetensors", clip_g_gb);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,
@@ -2706,6 +2716,8 @@ mod tests {
         let vae = mk("vae.safetensors", vae_gb);
         let text_encoder = mk("qwen3.safetensors", text_encoder_gb);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,
@@ -2808,6 +2820,8 @@ mod tests {
             p
         };
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: mk("z-image/civitai/2442439/zImageTurbo_turbo.safetensors", 12),
             transformer_shards: Vec::new(),
             vae: mk("z-image/civitai/2442439/ae_zimgturbo.safetensors", 1),
@@ -2875,6 +2889,8 @@ mod tests {
             18,
         );
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: transformer.clone(),
             transformer_shards: vec![transformer],
             vae: mk("flux2/civitai/2669986/flux2-vae.safetensors", 1),
@@ -2917,6 +2933,8 @@ mod tests {
             p
         };
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: mk(
                 "flux2/civitai/2669986/darkBeast_dbkBlitzV15.safetensors",
                 18,
@@ -3010,6 +3028,8 @@ mod tests {
             p
         };
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: mk(
                 "flux2/civitai/2759597/miracleinNSFWGeneration_10Nvfp4.safetensors",
                 18,
@@ -3060,6 +3080,8 @@ mod tests {
         let vae = mk("qwen-image-vae.safetensors", vae_gb);
         let text_encoder = mk("qwen2.5-vl.safetensors", text_encoder_gb);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,
@@ -3120,6 +3142,8 @@ mod tests {
         let shard_a = mk("qwen-image-bf16-00001.safetensors", 21);
         let shard_b = mk("qwen-image-bf16-00002.safetensors", 20);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: shard_a.clone(),
             transformer_shards: vec![shard_a, shard_b],
             vae: mk("qwen-image-vae.safetensors", 1),
@@ -3322,6 +3346,8 @@ mod tests {
         let te_c = mk("text_encoder-00003-of-00004.safetensors", 5);
         let te_d = mk("text_encoder-00004-of-00004.safetensors", 1);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: shard_a.clone(),
             transformer_shards: vec![shard_a, shard_b],
             vae,
@@ -3354,6 +3380,8 @@ mod tests {
         let vae = mk("flux2-vae.safetensors", 1);
         let qwen3_q3 = mk("qwen3-q3.gguf", 3);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: shard_a.clone(),
             transformer_shards: vec![shard_a, shard_b],
             vae,
@@ -3559,6 +3587,8 @@ mod tests {
         // convention). The peak estimator detects this and avoids
         // double-counting.
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: transformer.clone(),
             transformer_shards: Vec::new(),
             vae: transformer,
@@ -3615,6 +3645,8 @@ mod tests {
         };
         let transformer = mk("ltx2/civitai/2752735/ltx23_full.safetensors", 46);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: transformer.clone(),
             transformer_shards: Vec::new(),
             vae: transformer,
@@ -4650,6 +4682,8 @@ mod tests {
         let vae = mk("ltx-video-vae.safetensors", vae_gb);
         let t5 = mk("t5xxl_fp16.safetensors", t5_gb);
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae,

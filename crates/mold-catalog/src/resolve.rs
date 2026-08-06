@@ -525,6 +525,8 @@ mod tests {
 
     fn empty_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::new(),
             transformer_shards: Vec::new(),
             vae: PathBuf::new(),

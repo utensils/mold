@@ -276,7 +276,10 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             WorkflowCapabilities {
                 source: true,
                 edit_references: false,
-                lora: false,
+                // Merged at load on the safetensors paths, applied as a
+                // parallel low-rank branch on GGUF — which is what the A14B
+                // fast tier's four-step distill pair rides on.
+                lora: true,
                 generated_audio: false,
                 chain: false,
             },

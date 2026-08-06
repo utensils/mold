@@ -3094,6 +3094,8 @@ mod tests {
 
     fn dummy_paths(transformer: &str) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from(transformer),
             transformer_shards: Vec::new(),
             vae: PathBuf::from("ae.safetensors"),

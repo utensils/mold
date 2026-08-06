@@ -21,10 +21,24 @@ pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet", "ltx2-control", "ltx2-ca
 pub enum ModelComponent {
     Transformer,
     TransformerShard, // One shard of a multi-file transformer (Z-Image BF16)
+    /// The low-noise half of a two-expert checkpoint (Wan 2.2 A14B).
+    ///
+    /// Deliberately **not** a [`ModelComponent::TransformerShard`]: shards are
+    /// pieces of one network that a loader concatenates into a single
+    /// `VarBuilder`, while the two A14B experts are complete, independently
+    /// loadable transformers that the sampler switches between at a timestep
+    /// boundary. Filing them as shards would mmap 28 GB of weights as one model.
+    /// The high-noise expert occupies the ordinary `Transformer` slot because it
+    /// runs first.
+    LowNoiseTransformer,
     Vae,
     SpatialUpscaler, // LTX latent upsampler / spatial upscaler weights
     TemporalUpscaler,
     DistilledLora,
+    /// The distilled adapter belonging to [`ModelComponent::LowNoiseTransformer`].
+    /// Each A14B expert is distilled separately, so the pair is not
+    /// interchangeable.
+    LowNoiseDistilledLora,
     T5Encoder,
     ClipEncoder,
     T5Tokenizer,
@@ -156,6 +170,10 @@ impl ModelManifest {
                         .collect(),
                 )
             },
+            low_noise_transformer: paths
+                .low_noise_transformer
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             vae: Some(paths.vae.to_string_lossy().to_string()),
             spatial_upscaler: paths
                 .spatial_upscaler
@@ -167,6 +185,10 @@ impl ModelManifest {
                 .map(|p| p.to_string_lossy().to_string()),
             distilled_lora: paths
                 .distilled_lora
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            low_noise_distilled_lora: paths
+                .low_noise_distilled_lora
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             t5_encoder: paths
@@ -271,7 +293,9 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
         component,
         ModelComponent::Transformer
             | ModelComponent::TransformerShard
+            | ModelComponent::LowNoiseTransformer
             | ModelComponent::DistilledLora
+            | ModelComponent::LowNoiseDistilledLora
             | ModelComponent::Upscaler
     )
 }
@@ -3996,6 +4020,8 @@ pub fn paths_from_downloads(
     if UPSCALER_FAMILIES.contains(&family) {
         let transformer = find(ModelComponent::Upscaler)?;
         return Some(ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: Vec::new(),
             vae: PathBuf::new(),
@@ -4050,9 +4076,11 @@ pub fn paths_from_downloads(
         transformer,
         transformer_shards,
         vae,
+        low_noise_transformer: find(ModelComponent::LowNoiseTransformer),
         spatial_upscaler: find(ModelComponent::SpatialUpscaler),
         temporal_upscaler: find(ModelComponent::TemporalUpscaler),
         distilled_lora: find(ModelComponent::DistilledLora),
+        low_noise_distilled_lora: find(ModelComponent::LowNoiseDistilledLora),
         t5_encoder: find(ModelComponent::T5Encoder),
         clip_encoder: find(ModelComponent::ClipEncoder),
         t5_tokenizer: find(ModelComponent::T5Tokenizer),
@@ -4899,7 +4927,253 @@ fn wan_manifests() -> Vec<ModelManifest> {
             defaults: defaults_ti2v,
             hidden: false,
         },
+        a14b_manifest(A14bTier::Fast, A14bTask::T2v),
+        a14b_manifest(A14bTier::Quality, A14bTask::T2v),
+        a14b_manifest(A14bTier::Fast, A14bTask::I2v),
+        a14b_manifest(A14bTier::Quality, A14bTask::I2v),
     ]
+}
+
+/// Which A14B task a manifest is built for. The two differ only in the GGUF
+/// repository and the distill pair — the DiT is the same 40-block, 5120-wide
+/// network, with I2V declaring 36 input channels for the mask-plus-image
+/// concat.
+#[derive(Clone, Copy)]
+enum A14bTask {
+    T2v,
+    I2v,
+}
+
+impl A14bTask {
+    fn slug(self) -> &'static str {
+        match self {
+            Self::T2v => "t2v",
+            Self::I2v => "i2v",
+        }
+    }
+
+    fn gguf_repo(self) -> &'static str {
+        match self {
+            Self::T2v => "QuantStack/Wan2.2-T2V-A14B-GGUF",
+            Self::I2v => "QuantStack/Wan2.2-I2V-A14B-GGUF",
+        }
+    }
+}
+
+/// The two shipped A14B tiers. They are the same weights at different
+/// quantizations; what actually separates them is the four-step distill, which
+/// only the fast tier carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum A14bTier {
+    /// Q5_K_M plus the lightx2v four-step distill pair.
+    Fast,
+    /// Q8_0, no adapter, the family's ordinary step count.
+    Quality,
+}
+
+impl A14bTier {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Fast => "q5",
+            Self::Quality => "q8",
+        }
+    }
+
+    fn gguf_quant(self) -> &'static str {
+        match self {
+            Self::Fast => "Q5_K_M",
+            Self::Quality => "Q8_0",
+        }
+    }
+}
+
+/// `(size, sha256)` for one shipped A14B artifact, read from the Hugging Face
+/// API rather than from any local copy.
+type FileFacts = (u64, &'static str);
+
+fn a14b_expert_facts(task: A14bTask, tier: A14bTier, low_noise: bool) -> FileFacts {
+    match (task, tier, low_noise) {
+        (A14bTask::T2v, A14bTier::Fast, false) => (
+            10_790_416_896,
+            "fe704eb3541b09edb9cb675d58443bebccbabba0c9f5353305a6e01d9d9a2478",
+        ),
+        (A14bTask::T2v, A14bTier::Fast, true) => (
+            10_790_416_896,
+            "67242c61f055eb40c70fb421eb7dc1bdfde9c535f47c165fdfbf0b81b8b535dd",
+        ),
+        (A14bTask::T2v, A14bTier::Quality, false) => (
+            15_404_970_496,
+            "e15fecd4ce8f7effe1c4d9ab2c51d37b071bf3dd8b7f1b73e9fc27ac28f6820a",
+        ),
+        (A14bTask::T2v, A14bTier::Quality, true) => (
+            15_404_970_496,
+            "71574f62260f3ba305c31085c922a2b1b6672dbfdbe07717c066688ea56966fc",
+        ),
+        (A14bTask::I2v, A14bTier::Fast, false) => (
+            10_792_055_296,
+            "163e9e5ae7ff83a4598d55242c767384be8909749dc07240d388a24838e8bac6",
+        ),
+        (A14bTask::I2v, A14bTier::Fast, true) => (
+            10_792_055_296,
+            "c5affcba15576959fa6d63c18261275b6407c3edd5ad3d8ab1c420e96f9d05d0",
+        ),
+        (A14bTask::I2v, A14bTier::Quality, false) => (
+            15_406_608_896,
+            "619a66032c28e1b27882dfccc0bf93e51edb1491e8d4e4c6f291726abe4de8aa",
+        ),
+        (A14bTask::I2v, A14bTier::Quality, true) => (
+            15_406_608_896,
+            "029c7adc74de4f7804905c5e4fb9335d0862cd2fc37191df526aeac13b64425e",
+        ),
+    }
+}
+
+/// The four-step distill for one expert.
+///
+/// **Source matters here.** `lightx2v/Wan2.2-Distill-Loras` publishes files with
+/// the same names and the same advertised purpose, but its I2V pair is not the
+/// pure low-rank format: both halves carry hundreds of `.diff`/`.diff_b`
+/// full-weight deltas and the low-noise half additionally targets
+/// `cross_attn.{k,v,norm_k}_img` and `img_emb.proj.*` — the Wan 2.1 CLIP-vision
+/// branch that Wan 2.2's own I2V checkpoint does not contain (its GGUF has zero
+/// `_img` tensors). Kijai's `Wan22_Lightx2v` rank-64 I2V pair has the same
+/// problem. The Comfy-Org repack below is the one that is 400 clean low-rank
+/// pairs with an I64 alpha of 8 at rank 64 — headers parsed, not assumed.
+fn a14b_distill_facts(task: A14bTask, low_noise: bool) -> (&'static str, FileFacts) {
+    match (task, low_noise) {
+        (A14bTask::T2v, false) => (
+            "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+            (
+                1_226_977_424,
+                "698321cb86bd30c4af06c9b84e656a1048c8cb54e06d50694536fb5de37fde41",
+            ),
+        ),
+        (A14bTask::T2v, true) => (
+            "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+            (
+                1_226_977_424,
+                "ec95216e614b3c132c11bfb387b11feedf62163150ccc9068bca8a189771e75a",
+            ),
+        ),
+        (A14bTask::I2v, false) => (
+            "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+            (
+                1_226_977_424,
+                "d176c808d6fc461999b68e321efcb7501b20b8c3797523ed0df14f7d1deff11e",
+            ),
+        ),
+        (A14bTask::I2v, true) => (
+            "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+            (
+                1_226_977_424,
+                "024f21de095bc8fad9809ded3e9e49a2e170dcf27075da8145ba7d60d8aab7f9",
+            ),
+        ),
+    }
+}
+
+/// A Wan 2.2 A14B mixture-of-experts manifest.
+///
+/// Both experts ship as separate files and exactly one is GPU-resident at a
+/// time, so the VRAM demand is the max over the pair rather than their sum —
+/// 10.8 GB at `:q5`, 15.4 GB at `:q8`. Disk is the sum.
+///
+/// Resolution defaults to 480p because that is the acceptance target for this
+/// tier (#747: "81f 480p in ~1.5-3 min on a 4090"); 720p renders, but not in
+/// that budget.
+fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
+    let expert_file = |low_noise: bool| {
+        let (folder, noise) = if low_noise {
+            ("LowNoise", "LowNoise")
+        } else {
+            ("HighNoise", "HighNoise")
+        };
+        let (size_bytes, sha256) = a14b_expert_facts(task, tier, low_noise);
+        ModelFile {
+            hf_repo: task.gguf_repo().to_string(),
+            hf_filename: format!(
+                "{folder}/Wan2.2-{}-A14B-{noise}-{}.gguf",
+                task.slug().to_uppercase(),
+                tier.gguf_quant()
+            ),
+            component: if low_noise {
+                ModelComponent::LowNoiseTransformer
+            } else {
+                ModelComponent::Transformer
+            },
+            size_bytes,
+            gated: false,
+            sha256: Some(sha256),
+        }
+    };
+    let distill_file = |low_noise: bool| {
+        let (filename, (size_bytes, sha256)) = a14b_distill_facts(task, low_noise);
+        ModelFile {
+            hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+            hf_filename: format!("split_files/loras/{filename}"),
+            component: if low_noise {
+                ModelComponent::LowNoiseDistilledLora
+            } else {
+                ModelComponent::DistilledLora
+            },
+            size_bytes,
+            gated: false,
+            sha256: Some(sha256),
+        }
+    };
+
+    let mut files = shared_wan_files();
+    files.push(expert_file(false));
+    files.push(expert_file(true));
+    // A14B pairs with the 2.1 VAE, same file the 1.3B uses — it dedupes into
+    // `shared/wan/`.
+    files.push(ModelFile {
+        hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+        hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+        component: ModelComponent::Vae,
+        size_bytes: 253_815_318,
+        gated: false,
+        sha256: Some("2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
+    });
+    if tier == A14bTier::Fast {
+        files.push(distill_file(false));
+        files.push(distill_file(true));
+    }
+
+    let (steps, guidance, tier_note) = match tier {
+        // The lightx2v recipe. Guidance 1.0 is not a weak setting, it is the
+        // switch that drops the unconditional pass entirely — one forward per
+        // step, which is half of where the speed comes from.
+        A14bTier::Fast => (4, 1.0, "4-step Lightning distill"),
+        A14bTier::Quality => (20, 3.5, "20-step, no distill"),
+    };
+    let task_label = match task {
+        A14bTask::T2v => "text-to-video",
+        A14bTask::I2v => "image-to-video",
+    };
+
+    ModelManifest {
+        name: format!("wan22-{}-a14b:{}", task.slug(), tier.tag()),
+        family: "wan".to_string(),
+        description: format!(
+            "Wan 2.2 A14B {} {} — 480p16 {task_label}, two-expert MoE ({tier_note})",
+            task.slug().to_uppercase(),
+            tier.gguf_quant(),
+        ),
+        files,
+        defaults: ManifestDefaults {
+            steps,
+            guidance,
+            width: 832,
+            height: 480,
+            is_schnell: false,
+            scheduler: None,
+            negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
+            frames: Some(81),
+            fps: Some(16),
+        },
+        hidden: false,
+    }
 }
 
 fn companion_manifests() -> Vec<ModelManifest> {
@@ -6163,14 +6437,15 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 2 Wan + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 136
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 6 Wan + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 140
+        // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 136);
+        assert_eq!(known_manifests().len(), 140);
     }
 
     #[test]
@@ -6250,6 +6525,134 @@ mod tests {
         };
         assert!(vae_file("wan21-t2v-1.3b:bf16").contains("wan_2.1_vae"));
         assert!(vae_file("wan22-ti2v-5b:fp16").contains("wan2.2_vae"));
+    }
+
+    /// Every A14B tier ships a complete expert pair, and the fast tier ships a
+    /// distill for each expert. A manifest with one expert, or with one distill
+    /// applied to both, is not a smaller model — it is a broken one.
+    #[test]
+    fn a14b_manifests_carry_both_experts_and_a_distill_per_expert() {
+        // Bare names take the family's `:q8` default, which is the quality tier.
+        assert_eq!(resolve_model_name("wan22-t2v-a14b"), "wan22-t2v-a14b:q8");
+        assert_eq!(resolve_model_name("wan22-i2v-a14b"), "wan22-i2v-a14b:q8");
+
+        for name in [
+            "wan22-t2v-a14b:q5",
+            "wan22-t2v-a14b:q8",
+            "wan22-i2v-a14b:q5",
+            "wan22-i2v-a14b:q8",
+        ] {
+            let manifest = find_manifest(name).unwrap_or_else(|| panic!("{name} must resolve"));
+            assert_eq!(manifest.family, "wan");
+            assert!(!manifest.hidden);
+
+            let file = |component: ModelComponent| {
+                manifest
+                    .files
+                    .iter()
+                    .find(|f| f.component == component)
+                    .unwrap_or_else(|| panic!("{name} missing {component:?}"))
+            };
+            let high = file(ModelComponent::Transformer);
+            let low = file(ModelComponent::LowNoiseTransformer);
+            assert!(high.hf_filename.contains("HighNoise"), "{name}");
+            assert!(low.hf_filename.contains("LowNoise"), "{name}");
+            assert_ne!(
+                high.sha256, low.sha256,
+                "{name}: the two experts are different networks"
+            );
+            assert_eq!(high.hf_repo, low.hf_repo);
+
+            // The 2.1 VAE, byte-identical to the 1.3B's so it dedupes.
+            assert!(file(ModelComponent::Vae)
+                .hf_filename
+                .contains("wan_2.1_vae"));
+            for component in [ModelComponent::TextEncoder, ModelComponent::TextTokenizer] {
+                file(component);
+            }
+            for f in &manifest.files {
+                assert!(f.sha256.is_some(), "{name}: {} needs a SHA", f.hf_filename);
+            }
+
+            let defaults = &manifest.defaults;
+            assert_eq!(defaults.frames, Some(81));
+            assert_eq!(defaults.fps, Some(16));
+            assert!(defaults.negative_prompt.is_some());
+
+            let fast = name.ends_with(":q5");
+            let distills: Vec<_> = manifest
+                .files
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.component,
+                        ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora
+                    )
+                })
+                .collect();
+            if fast {
+                assert_eq!(distills.len(), 2, "{name}: one distill per expert");
+                assert_ne!(
+                    distills[0].sha256, distills[1].sha256,
+                    "{name}: each expert is distilled separately"
+                );
+                assert!(distills
+                    .iter()
+                    .any(|f| f.hf_filename.contains("high_noise")));
+                assert!(distills.iter().any(|f| f.hf_filename.contains("low_noise")));
+                // The lightx2v recipe: four steps, and guidance 1.0 so the
+                // unconditional pass is skipped rather than merely weakened.
+                assert_eq!(defaults.steps, 4);
+                assert_eq!(defaults.guidance, 1.0);
+            } else {
+                assert!(
+                    distills.is_empty(),
+                    "{name}: the quality tier has no distill"
+                );
+                assert_eq!(defaults.steps, 20);
+                assert_eq!(defaults.guidance, 3.5);
+            }
+        }
+
+        // The distill pairs must come from the Comfy-Org repack. The
+        // similarly-named `lightx2v/Wan2.2-Distill-Loras` I2V files carry
+        // `.diff`/`.diff_b` full-weight deltas and target the Wan 2.1 CLIP
+        // branch, which this family's checkpoints do not have.
+        for name in ["wan22-t2v-a14b:q5", "wan22-i2v-a14b:q5"] {
+            for file in find_manifest(name).unwrap().files.iter().filter(|f| {
+                matches!(
+                    f.component,
+                    ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora
+                )
+            }) {
+                assert_eq!(
+                    file.hf_repo, "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+                    "{name}"
+                );
+            }
+        }
+
+        // Both experts are model-specific, so neither lands in the shared pool
+        // where the other tier's same-named file would collide with it.
+        let manifest = find_manifest("wan22-t2v-a14b:q5").unwrap();
+        for component in [
+            ModelComponent::Transformer,
+            ModelComponent::LowNoiseTransformer,
+            ModelComponent::DistilledLora,
+            ModelComponent::LowNoiseDistilledLora,
+        ] {
+            let file = manifest
+                .files
+                .iter()
+                .find(|f| f.component == component)
+                .unwrap();
+            let path = storage_path(manifest, file);
+            assert!(
+                path.starts_with("wan22-t2v-a14b-q5"),
+                "{component:?} must be model-specific, got {}",
+                path.display()
+            );
+        }
     }
 
     /// The wan-umt5 companion and the primary Wan manifests must agree on

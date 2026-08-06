@@ -38,8 +38,11 @@ use crate::shared_pool::SharedPool;
 use crate::wan::conditioning::{
     build_a14b_conditioning, WanImageAnchors, WanLatentGeometry, WanTi2vInpaint,
 };
+use crate::wan::experts::{WanExpertPair, WanExpertSlot, WanExperts};
 use crate::wan::lora::WanLoraRegistry;
-use crate::wan::model::transformer::{WanTransformer, WanTransformerConfig};
+#[cfg(test)]
+use crate::wan::model::transformer::WanTransformer;
+use crate::wan::model::transformer::WanTransformerConfig;
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
 use crate::wan::sampler::{apply_cfg, FlowUniPc, WanSchedule, WanScheduleConfig};
 use crate::wan::text::umt5::WanTextEncoder;
@@ -84,8 +87,26 @@ impl WanVaeGeneration {
     }
 }
 
-/// Read a safetensors header without materializing any weights.
+/// Read a checkpoint's tensor names and shapes without materializing weights.
+///
+/// Both containers answer the same question, so every shape-driven probe in
+/// this module — config detection, the CLIP-branch refusal — works against
+/// GGUF experts without knowing they are GGUF. candle's reader already presents
+/// GGUF dimensions in torch order (`gguf_file.rs` reverses ggml's
+/// fastest-varying-first layout), so the two sources agree on shape as well as
+/// on name.
 fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
+    if crate::wan::experts::is_gguf(path) {
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("open Wan checkpoint at {}", path.display()))?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .with_context(|| format!("read the GGUF header of {}", path.display()))?;
+        return Ok(content
+            .tensor_infos
+            .into_iter()
+            .map(|(name, info)| (name, info.shape.dims().to_vec()))
+            .collect());
+    }
     let st = unsafe { MmapedSafetensors::new(path) }
         .with_context(|| format!("open Wan checkpoint at {}", path.display()))?;
     Ok(st
@@ -266,10 +287,26 @@ pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerCon
     Ok(config)
 }
 
+/// Flow shift for the A14B pair.
+///
+/// Upstream sets `sample_shift` per task and per resolution — 12.0 for T2V and
+/// 5.0 for I2V (`wan/configs/wan_{t2v,i2v}_A14B.py:34`) — but those pair with
+/// upstream's 720p default. mold's A14B manifests render 480p, where 5.0 is the
+/// value both upstream's own 480p path and the lightx2v four-step recipe use.
+const A14B_FLOW_SHIFT: f64 = 5.0;
+
 /// Resolve the flow shift, honouring `MOLD_WAN_SHIFT`.
-fn resolve_flow_shift() -> Result<f64> {
+///
+/// `two_expert` picks the A14B value: the pair is a different schedule shape
+/// from the single-expert checkpoints, not merely a bigger one.
+fn resolve_flow_shift(two_expert: bool) -> Result<f64> {
+    let default = if two_expert {
+        A14B_FLOW_SHIFT
+    } else {
+        DEFAULT_FLOW_SHIFT
+    };
     let Ok(raw) = std::env::var(FLOW_SHIFT_ENV) else {
-        return Ok(DEFAULT_FLOW_SHIFT);
+        return Ok(default);
     };
     let parsed: f64 = raw
         .trim()
@@ -327,13 +364,19 @@ pub(crate) enum WanConditioningShape {
     ChannelConcat,
 }
 
-/// Refuse the 36-channel checkpoints this engine cannot yet run correctly,
-/// naming what each is missing. Wan 2.1 I2V carries a CLIP-vision
-/// cross-attention branch (`k_img`/`v_img`) the transformer omits; a Wan 2.2
-/// A14B expert is architecturally a plain 36-channel DiT, but a real
-/// generation needs the high/low-noise expert pair switched at the sigma
-/// boundary, which this engine does not perform until the A14B layer lands.
-fn reject_unwired_channel_concat_checkpoint(transformer: &Path) -> Result<()> {
+/// Refuse the 36-channel checkpoints this engine cannot run correctly, naming
+/// what each is missing.
+///
+/// Two distinct checkpoints declare 36 input channels. Wan 2.1 I2V additionally
+/// carries a CLIP-vision cross-attention branch (`k_img`/`v_img`) the
+/// transformer omits, and no amount of pairing fixes that. Wan 2.2 I2V-A14B is
+/// architecturally a plain 36-channel DiT and runs correctly — but only as a
+/// pair. Given one expert alone, the schedule's late half would be denoised by
+/// the network trained for its early half, which renders rather than errors.
+fn reject_unwired_channel_concat_checkpoint(
+    transformer: &Path,
+    low_noise_expert: Option<&Path>,
+) -> Result<()> {
     let has_clip_branch = header_shapes(transformer)?.into_iter().any(|(name, _)| {
         name.trim_start_matches("model.diffusion_model.")
             .contains("cross_attn.k_img")
@@ -341,16 +384,22 @@ fn reject_unwired_channel_concat_checkpoint(transformer: &Path) -> Result<()> {
     if has_clip_branch {
         bail!(
             "{} is a Wan 2.1 image-to-video checkpoint, which needs the CLIP-vision \
-             cross-attention branch mold does not implement yet — use a Wan 2.2 checkpoint \
-             (wan22-ti2v-5b) for image conditioning",
+             cross-attention branch mold does not implement — use a Wan 2.2 checkpoint \
+             (wan22-i2v-a14b, or wan22-ti2v-5b) for image conditioning",
             transformer.display()
         );
     }
+    if low_noise_expert.is_some() {
+        return Ok(());
+    }
     bail!(
-        "{} looks like one Wan 2.2 A14B expert; A14B generation needs the high/low-noise \
-         expert pair switched at the sigma boundary, which lands with the A14B layer \
-         (issue #747) — until then use wan22-ti2v-5b",
-        transformer.display()
+        "{} is one half of a Wan 2.2 I2V-A14B expert pair, and A14B denoises with both: the \
+         high-noise expert down to timestep {}, the low-noise expert below it. Running one \
+         alone would render, wrongly. Pull `wan22-i2v-a14b:q5` (or `:q8`) so both experts \
+         resolve, or point `--transformer` at a single-expert checkpoint such as \
+         wan22-ti2v-5b.",
+        transformer.display(),
+        WanExpertPair::boundary_for(true),
     )
 }
 
@@ -400,7 +449,9 @@ pub(crate) fn needs_cfg_pass(guidance: f64) -> bool {
 /// between `generate` and the CPU smoke tests, and a dozen positional
 /// parameters is worse than a struct.
 struct DenoiseInputs<'a> {
-    transformer: &'a WanTransformer,
+    /// The weight source. For A14B this swaps experts mid-schedule; for every
+    /// other checkpoint it hands back the same transformer every step.
+    experts: &'a mut WanExperts,
     conditioning: &'a WanImageConditioning,
     schedule: &'a WanSchedule,
     solver: &'a mut FlowUniPc,
@@ -423,7 +474,7 @@ struct DenoiseInputs<'a> {
 /// timestep is expressed, and those are exactly the parts worth testing.
 fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     let DenoiseInputs {
-        transformer,
+        experts,
         conditioning,
         schedule,
         solver,
@@ -442,6 +493,9 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     for (index, timestep) in schedule.timesteps.iter().enumerate() {
         progress.checkpoint()?;
         let step_start = Instant::now();
+        // A14B switches experts here, once, when the schedule crosses the
+        // boundary. Every other checkpoint hands back the same transformer.
+        let transformer = experts.transformer_for(*timestep, progress)?;
 
         // Each conditioning mode decides what the DiT sees and how the
         // timestep is expressed. The solver always steps on `latents`.
@@ -653,6 +707,94 @@ impl WanEngine {
         Ok(conditioning)
     }
 
+    /// Build the denoise loop's weight source, loading the first expert.
+    ///
+    /// The manifest's distill (when the tier ships one) is stacked *under* the
+    /// request's own adapters at full strength, which is how every distilled
+    /// tier in mold behaves. The A14B distills are a pair — one per expert —
+    /// and they are not interchangeable, so each is bound to its own slot; a
+    /// user adapter has no expert affinity and applies to both.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_experts(
+        &self,
+        req: &GenerateRequest,
+        config: &WanTransformerConfig,
+        shape: WanConditioningShape,
+        low_noise_expert: Option<&Path>,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<WanExperts> {
+        let paths = &self.base.paths;
+        let user_loras = normalize_loras(req);
+        let stack = |distill: Option<&Path>| -> Result<WanLoraRegistry> {
+            let mut weights: Vec<mold_core::LoraWeight> = Vec::new();
+            if let Some(path) = distill {
+                weights.push(mold_core::LoraWeight {
+                    path: path.to_string_lossy().to_string(),
+                    scale: 1.0,
+                });
+            }
+            weights.extend(user_loras.iter().cloned());
+            WanLoraRegistry::load(&weights)
+        };
+
+        let Some(low_noise_path) = low_noise_expert else {
+            let loras = stack(paths.distilled_lora.as_deref())?;
+            if !loras.is_empty() {
+                progress.info(&format!(
+                    "Applying {} LoRA patch(es) across {} tensors",
+                    loras.patch_count(),
+                    loras.tensor_count()
+                ));
+            }
+            progress.stage_start("Loading Wan transformer");
+            let started = Instant::now();
+            let transformer = crate::wan::experts::load_transformer(
+                &paths.transformer,
+                config.clone(),
+                device,
+                dtype,
+                &loras,
+            )?;
+            progress.phase_done(
+                ProgressPhase::ModelLoad,
+                "Loading Wan transformer",
+                started.elapsed(),
+            );
+            if let Some(marker) = transformer.quantization() {
+                progress.info(&format!("fp8-scaled transformer ({marker})"));
+            }
+            return Ok(WanExperts::single(transformer));
+        };
+
+        // Both experts, and the boundary that separates them. The low-noise
+        // config is read from its own header so a mismatched pair fails before
+        // the first denoise step rather than at the swap.
+        let low_noise_config = detect_transformer_config(low_noise_path)?;
+        let pair = WanExpertPair {
+            high_noise: WanExpertSlot {
+                path: paths.transformer.clone(),
+                loras: stack(paths.distilled_lora.as_deref())?,
+            },
+            low_noise: WanExpertSlot {
+                path: low_noise_path.to_path_buf(),
+                loras: stack(paths.low_noise_distilled_lora.as_deref())?,
+            },
+            boundary_timestep: WanExpertPair::boundary_for(
+                shape == WanConditioningShape::ChannelConcat,
+            ),
+        };
+        progress.info(&format!(
+            "Wan A14B: two experts, switching at timestep {} ({} patch(es) on the high-noise \
+             expert, {} on the low-noise one); one is resident at a time",
+            pair.boundary_timestep,
+            pair.high_noise.loras.patch_count(),
+            pair.low_noise.loras.patch_count(),
+        ));
+        WanExperts::pair(pair, config.clone(), device, dtype, low_noise_config)
+    }
+
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let start = Instant::now();
         reject_unsupported_conditioning(req)?;
@@ -667,14 +809,11 @@ impl WanEngine {
         let vae_config = vae_generation.config();
         let transformer_config = detect_transformer_config(&paths.transformer)?;
         let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
-        // A 36-channel checkpoint is structurally incomplete on this engine:
-        // Wan 2.1 I2V additionally needs the CLIP-vision `k_img`/`v_img`
-        // branch the transformer omits, and Wan 2.2 I2V-A14B needs two-expert
-        // switching this engine does not perform yet. Accepting either would
-        // render — wrongly. The channel-concat *conditioning* stays live via
-        // the tiny-component test seam until the A14B layer wires experts.
+        let low_noise_expert = paths.low_noise_transformer.as_deref();
+        // Wan 2.1 I2V is refused outright — it needs a CLIP-vision branch the
+        // transformer omits. Wan 2.2 I2V-A14B runs, but only with both experts.
         if shape == WanConditioningShape::ChannelConcat {
-            reject_unwired_channel_concat_checkpoint(&paths.transformer)?;
+            reject_unwired_channel_concat_checkpoint(&paths.transformer, low_noise_expert)?;
         }
 
         let (default_frames, default_fps) = vae_generation.default_timing();
@@ -704,7 +843,7 @@ impl WanEngine {
         let latent_frames = (num_frames as usize - 1) / VAE_TEMPORAL_COMPRESSION + 1;
         let latent_h = height as usize / vae_config.spatial_compression();
         let latent_w = width as usize / vae_config.spatial_compression();
-        let shift = resolve_flow_shift()?;
+        let shift = resolve_flow_shift(low_noise_expert.is_some())?;
         let needs_cfg = needs_cfg_pass(guidance);
 
         let device = crate::device::create_device(self.base.gpu_ordinal, progress)?;
@@ -808,35 +947,17 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 2. Denoise
         // ------------------------------------------------------------------
-        progress.stage_start("Loading Wan transformer");
-        let transformer_start = Instant::now();
-        // LoRAs merge as the weights are read, so the merged tensor is the only
-        // copy that is ever resident.
-        let loras = WanLoraRegistry::load(&normalize_loras(req))?;
-        if !loras.is_empty() {
-            progress.info(&format!(
-                "Merging {} LoRA patch(es) across {} tensors",
-                loras.patch_count(),
-                loras.tensor_count()
-            ));
-        }
-        let transformer = WanTransformer::from_safetensors_with_loras(
-            std::slice::from_ref(&paths.transformer),
-            transformer_config.clone(),
+        let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, shift))?;
+        let mut experts = self.resolve_experts(
+            req,
+            &transformer_config,
+            shape,
+            low_noise_expert,
             &device,
             dtype,
-            &loras,
+            progress,
         )?;
-        progress.phase_done(
-            ProgressPhase::ModelLoad,
-            "Loading Wan transformer",
-            transformer_start.elapsed(),
-        );
-        if let Some(marker) = transformer.quantization() {
-            progress.info(&format!("fp8-scaled transformer ({marker})"));
-        }
 
-        let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, shift))?;
         let mut solver = FlowUniPc::new(schedule.clone());
         let latents = seeded_randn(
             seed,
@@ -847,24 +968,30 @@ impl WanEngine {
         .to_dtype(dtype)?;
 
         // Hoisted: the rotation tables depend only on the latent grid, which is
-        // fixed for the whole run. Probe with the *model input* channel count,
-        // not the latent's — the concat path widens it to `in_dim` and
+        // fixed for the whole run, and both A14B experts share an architecture
+        // so one table serves the pair. Probe with the *model input* channel
+        // count, not the latent's — the concat path widens it to `in_dim` and
         // `rope_freqs_for` validates that against the config.
-        let rope = transformer.rope_freqs_for(&Tensor::zeros(
-            (
-                1,
-                transformer_config.in_dim,
-                latent_frames,
-                latent_h,
-                latent_w,
-            ),
-            dtype,
-            &device,
-        )?)?;
+        let rope = experts
+            .transformer_for(
+                schedule.timesteps.first().copied().unwrap_or_default(),
+                progress,
+            )?
+            .rope_freqs_for(&Tensor::zeros(
+                (
+                    1,
+                    transformer_config.in_dim,
+                    latent_frames,
+                    latent_h,
+                    latent_w,
+                ),
+                dtype,
+                &device,
+            )?)?;
 
         progress.stage_start("Denoising");
         let latents = run_denoise_loop(DenoiseInputs {
-            transformer: &transformer,
+            experts: &mut experts,
             conditioning: &conditioning,
             schedule: &schedule,
             solver: &mut solver,
@@ -879,7 +1006,7 @@ impl WanEngine {
             progress,
         })?;
         progress.checkpoint()?;
-        drop(transformer);
+        drop(experts);
         device.synchronize()?;
 
         // ------------------------------------------------------------------
@@ -1085,6 +1212,8 @@ mod tests {
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/wan-transformer"),
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/wan-vae"),
@@ -1277,14 +1406,22 @@ mod tests {
         // The env var is process-global; this test owns it for its duration.
         let previous = std::env::var(FLOW_SHIFT_ENV).ok();
         unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
-        assert_eq!(resolve_flow_shift().unwrap(), DEFAULT_FLOW_SHIFT);
+        assert_eq!(resolve_flow_shift(false).unwrap(), DEFAULT_FLOW_SHIFT);
+        // The A14B pair is a different schedule shape, not a bigger one.
+        assert_eq!(resolve_flow_shift(true).unwrap(), A14B_FLOW_SHIFT);
+        assert_ne!(A14B_FLOW_SHIFT, DEFAULT_FLOW_SHIFT);
 
+        // An explicit override beats both defaults.
         unsafe { std::env::set_var(FLOW_SHIFT_ENV, "3.5") };
-        assert_eq!(resolve_flow_shift().unwrap(), 3.5);
+        assert_eq!(resolve_flow_shift(false).unwrap(), 3.5);
+        assert_eq!(resolve_flow_shift(true).unwrap(), 3.5);
 
         for bad in ["", "abc", "0", "-2", "inf"] {
             unsafe { std::env::set_var(FLOW_SHIFT_ENV, bad) };
-            assert!(resolve_flow_shift().is_err(), "{bad:?} must be rejected");
+            assert!(
+                resolve_flow_shift(false).is_err(),
+                "{bad:?} must be rejected"
+            );
         }
 
         match previous {
@@ -1340,6 +1477,63 @@ mod tests {
 
         let config = detect_transformer_config(&path).unwrap();
         assert_eq!(config, WanTransformerConfig::t2v_1_3b());
+    }
+
+    /// The same detection has to work on a GGUF expert, because that is the
+    /// only container the A14B tiers ship in.
+    ///
+    /// GGML stores dimensions fastest-varying-first and candle's reader
+    /// reverses them into torch order; a probe that reversed them again would
+    /// read this checkpoint as 13824 wide with 5120 FFN channels — a config
+    /// that loads, and is a transposed model.
+    #[test]
+    fn transformer_config_is_detected_from_a_gguf_expert() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("expert.gguf");
+        let device = Device::Cpu;
+
+        // The A14B geometry, 36-channel I2V: dim 5120, ffn 13824, 40 layers.
+        // Only the tensors detection reads, at their real shapes.
+        let mut shapes: Vec<(String, Vec<usize>)> = vec![
+            ("patch_embedding.weight".into(), vec![5120, 36, 1, 2, 2]),
+            ("blocks.0.ffn.0.weight".into(), vec![13824, 5120]),
+            ("text_embedding.0.weight".into(), vec![5120, 4096]),
+            ("time_embedding.0.weight".into(), vec![5120, 256]),
+            ("head.head.weight".into(), vec![64, 5120]),
+        ];
+        for layer in 0..40 {
+            shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 8]));
+        }
+
+        let quantized: Vec<(String, QTensor)> = shapes
+            .iter()
+            .map(|(name, shape)| {
+                let tensor = Tensor::zeros(shape.as_slice(), DType::F32, &device).unwrap();
+                (
+                    name.clone(),
+                    QTensor::quantize(&tensor, GgmlDType::F32).unwrap(),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let arch = gguf_file::Value::String("wan".to_string());
+        let mut file = std::fs::File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
+        drop(file);
+
+        let config = detect_transformer_config(&path).unwrap();
+        assert_eq!(config, WanTransformerConfig::i2v_14b());
+        // And the conditioning shape that follows from it, which is what routes
+        // the expert-pair check.
+        assert_eq!(
+            conditioning_shape(config.in_dim, 16).unwrap(),
+            WanConditioningShape::ChannelConcat
+        );
     }
 
     /// The shipped Comfy-Org repacks prefix every DiT key with
@@ -1414,18 +1608,34 @@ mod tests {
                 ("blocks.0.cross_attn.k_img.weight", &[5120, 1280][..]),
             ],
         );
-        let err = reject_unwired_channel_concat_checkpoint(&clip).unwrap_err();
-        assert!(err.to_string().contains("CLIP-vision"), "got: {err}");
+        // A Wan 2.1 I2V checkpoint is refused with or without a partner: no
+        // pairing supplies the CLIP-vision branch the transformer omits.
+        let partner = temp.path().join("a14b-low.safetensors");
+        write_header(
+            &partner,
+            &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
+        );
+        for low_noise in [None, Some(partner.as_path())] {
+            let err = reject_unwired_channel_concat_checkpoint(&clip, low_noise).unwrap_err();
+            assert!(err.to_string().contains("CLIP-vision"), "got: {err}");
+        }
 
-        // A14B expert: no k_img — refused for missing expert switching.
+        // A lone 2.2 A14B expert is refused, naming the boundary it would have
+        // switched at and what to pull instead.
         let expert = temp.path().join("a14b-high.safetensors");
         write_header(
             &expert,
             &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
         );
-        let err = reject_unwired_channel_concat_checkpoint(&expert).unwrap_err();
-        assert!(err.to_string().contains("expert"), "got: {err}");
-        assert!(err.to_string().contains("#747"), "got: {err}");
+        let err = reject_unwired_channel_concat_checkpoint(&expert, None).unwrap_err();
+        assert!(err.to_string().contains("expert pair"), "got: {err}");
+        assert!(err.to_string().contains("900"), "got: {err}");
+        assert!(err.to_string().contains("wan22-i2v-a14b"), "got: {err}");
+
+        // With both experts resolved it is accepted — this is the arm the A14B
+        // layer replaced.
+        reject_unwired_channel_concat_checkpoint(&expert, Some(&partner))
+            .expect("a complete A14B pair is runnable");
     }
 
     /// A CPU-parked encoder must compute in F32 — candle's CPU backend has no
@@ -1738,7 +1948,13 @@ mod tests {
                 dtype,
             )
             .unwrap();
-            let rope = transformer
+            let progress = crate::progress::ProgressReporter::default();
+            // `WanTransformer` is `Clone` over Arc-backed weights, so every
+            // source image runs against the same numbers, not a copy of them.
+            let mut experts = WanExperts::single(transformer.clone());
+            let rope = experts
+                .transformer_for(schedule.timesteps[0], &progress)
+                .unwrap()
                 .rope_freqs_for(
                     &Tensor::zeros(
                         (1, in_dim, latent_frames, latent_h, latent_w),
@@ -1748,10 +1964,8 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
-            let progress = crate::progress::ProgressReporter::default();
-
             let final_latents = run_denoise_loop(DenoiseInputs {
-                transformer: &transformer,
+                experts: &mut experts,
                 conditioning: &conditioning,
                 schedule: &schedule,
                 solver: &mut solver,

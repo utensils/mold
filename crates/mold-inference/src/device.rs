@@ -3772,6 +3772,8 @@ mod tests {
         let single = write_dummy_file(dir.path(), "single.safetensors", 44_000_000_000);
         let te = write_dummy_file(dir.path(), "te.safetensors", 24_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![],
             vae: single, // Same file as transformer — single-file path
@@ -3812,6 +3814,8 @@ mod tests {
         let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
         let te = write_dummy_file(dir.path(), "te.safetensors", 9_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: vec![],
             vae,
@@ -3847,6 +3851,8 @@ mod tests {
         let s2 = write_dummy_file(dir.path(), "tx-2.safetensors", 4_000_000_000);
         let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: s1.clone(), // primary shard
             transformer_shards: vec![s1, s2],
             vae,
@@ -3881,6 +3887,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![single.clone()],
             vae: single,
@@ -3915,6 +3923,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![],
             vae: single.clone(),

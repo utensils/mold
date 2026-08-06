@@ -3598,6 +3598,8 @@ mod tests {
         text_tokenizer: Option<PathBuf>,
     ) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards,
             vae,
@@ -3765,6 +3767,8 @@ mod tests {
         let engine = QwenImageEngine::new(
             "qwen-image:q4".to_string(),
             ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
                 transformer: PathBuf::from("/tmp/qwen-image-Q4_K_S.gguf"),
                 transformer_shards: vec![],
                 vae: PathBuf::from("/tmp/vae.safetensors"),
