@@ -24,6 +24,15 @@
 //! One thing makes it dangerous: the alpha is `I64`. See
 //! [`crate::flux::lora`]'s `read_alpha_scalar` — before that fix these
 //! adapters loaded at 8x strength with no error.
+//!
+//! An adapter reaches the weights two ways, decided by the checkpoint's
+//! container rather than by the adapter. Against bf16 or fp8 safetensors,
+//! [`WanLoraBackend`] merges `W + scale*(B @ A)` as each tensor is read, so the
+//! merged tensor is the only copy that is ever resident. Against GGUF, nothing
+//! merges: [`WanQuantizedLoraLinear`] hangs the same arithmetic off the
+//! projection as a parallel low-rank branch, because taking a delta into a
+//! quantized weight means requantizing it — minutes per expert, and most of the
+//! delta rounded away. That type carries the measurements.
 
 use std::collections::HashMap;
 
@@ -73,9 +82,53 @@ impl WanLoraRegistry {
         self.patches.is_empty()
     }
 
+    /// Fail if any patched tensor is absent from the checkpoint being loaded.
+    ///
+    /// The pairing check in [`Self::load`] only proves an adapter is *a* Wan
+    /// adapter. A 2.2 A14B distill against the 1.3B checkpoint pairs just as
+    /// cleanly — same key spelling, same module names — and then applies to the
+    /// 30 blocks that exist while 10 blocks of the distill are dropped. At four
+    /// steps a partially distilled model renders noise rather than a slightly
+    /// worse video, so this is worth an error instead of a warning.
+    ///
+    /// Both weight sources call this, so the safetensors backend (which only
+    /// ever sees the tensors the model asks for) and the GGUF path (which holds
+    /// the whole set) cannot disagree about what counts as applied.
+    pub fn ensure_targets_present(
+        &self,
+        contains: impl Fn(&str) -> bool,
+        checkpoint: &std::path::Path,
+    ) -> Result<()> {
+        let mut missing: Vec<&str> = self
+            .patches
+            .keys()
+            .filter(|name| !contains(name))
+            .map(String::as_str)
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        missing.sort_unstable();
+        bail!(
+            "this LoRA stack patches {} tensor(s) that {} does not have, starting with `{}` — \
+             the adapter was trained against a different Wan checkpoint, and applying only the \
+             part that matches would leave the model half-distilled",
+            missing.len(),
+            checkpoint.display(),
+            missing[0]
+        );
+    }
+
     /// Fold every patch for `name` into `base`. Deltas are accumulated in F32
     /// and cast back once, so a stack of adapters on a bf16 weight does not
     /// round between merges.
+    ///
+    /// The public name for the same operation, for weight sources outside this
+    /// module that hold an already-dequantized tensor.
+    pub fn merge_into(&self, name: &str, base: Tensor) -> candle_core::Result<Tensor> {
+        self.apply(name, base)
+    }
+
     fn apply(&self, name: &str, base: Tensor) -> candle_core::Result<Tensor> {
         let Some(patches) = self.patches.get(name) else {
             return Ok(base);
@@ -199,6 +252,100 @@ fn canonical_stem(stem: &str) -> Option<String> {
     recognized.then(|| stem.to_string())
 }
 
+/// One adapter's low-rank pair, resident on the execution device.
+///
+/// Kept separate from [`WanLoraPatch`], whose tensors stay on the host: the
+/// registry is built once per request and the branch is built once per module
+/// that the checkpoint actually has.
+struct WanLoraBranch {
+    /// `[rank, in_features]`.
+    a: Tensor,
+    /// `[out_features, rank]`.
+    b: Tensor,
+    scale: f64,
+}
+
+/// A quantized projection with its adapters applied as a parallel low-rank
+/// branch: `y = QMatMul(x) + scale * ((x @ A^T) @ B^T)`.
+///
+/// **Why a branch and not a merge.** The other two weight sources merge
+/// `W + scale*(B @ A)` into the weight as it is read, because they can: a bf16
+/// tensor takes the delta losslessly. A GGUF tensor cannot. Merging there means
+/// dequantize -> add -> **requantize**, and both halves of that are problems:
+///
+/// - *Cost.* Candle's k-quant `from_float` is scalar and single-threaded:
+///   measured 57 Mparam/s for Q5_K on this machine (dequantize is 641 Mparam/s).
+///   The Lightning distill targets all 400 block projections, which for A14B is
+///   14.0 B of the checkpoint's 14.3 B parameters — so a merge would requantize
+///   essentially the whole expert, ~250 s each, ~8 minutes for the pair, on
+///   every generation. The tier exists to render in ~90 s.
+/// - *Fidelity.* Q5_K resolves roughly 5 bits against each 32-value block's
+///   peak. A distill delta that is a few percent of the weight is exactly the
+///   magnitude that rounding discards, so the merge would pay those 8 minutes
+///   to apply a fraction of the adapter.
+///
+/// The branch has neither problem, and it is what the reference stack for these
+/// files does. ComfyUI-GGUF dequantizes each tensor per forward and applies the
+/// patch to the dequantized copy (`city96/ComfyUI-GGUF ops.py:176-190`) — it
+/// never requantizes either. Mold's `QMatMul` fuses dequantization into the
+/// kernel, so the patch cannot be intercepted there; adding it as a parallel
+/// branch is the same arithmetic in the other order.
+///
+/// The costs it does have, on an A14B expert with the rank-64 distill: ~1.2 GB
+/// of F32 adapter weights beside a ~10 GB Q5_K expert, and `rank/in + rank/out`
+/// extra FLOPs — 2.5 % of the projection's own matmul at 5120 wide.
+pub(crate) struct WanQuantizedLoraLinear {
+    base: mold_candle::quantized_nn::Linear,
+    branches: Vec<WanLoraBranch>,
+}
+
+impl candle_core::Module for WanQuantizedLoraLinear {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        let mut out = self.base.forward(x)?;
+        for branch in &self.branches {
+            // `x` is [batch, tokens, in] and the adapter is 2-D, so the
+            // broadcast form is the one that does not materialize a per-batch
+            // copy of the adapter.
+            let hidden = x.broadcast_matmul(&branch.a.t()?)?;
+            out = out.add(
+                &hidden
+                    .broadcast_matmul(&branch.b.t()?)?
+                    .affine(branch.scale, 0.0)?,
+            )?;
+        }
+        Ok(out)
+    }
+}
+
+/// Build the linear for `key`, attaching a low-rank branch per patch.
+///
+/// Returns the bare quantized linear untouched when nothing patches `key`,
+/// which is the case for every tensor outside the 400 the distills target.
+pub(crate) fn attach_quantized_branches(
+    registry: &WanLoraRegistry,
+    key: &str,
+    base: mold_candle::quantized_nn::Linear,
+    device: &Device,
+) -> candle_core::Result<std::sync::Arc<dyn candle_core::Module + Send + Sync>> {
+    let Some(patches) = registry.patches.get(key) else {
+        return Ok(std::sync::Arc::new(base));
+    };
+    let mut branches = Vec::with_capacity(patches.len());
+    for patch in patches {
+        branches.push(WanLoraBranch {
+            // The GGUF path computes in F32 (`QMatMul` dequantizes into it),
+            // so the adapter is staged at F32 once rather than cast per step.
+            a: patch.a.to_device(device)?.to_dtype(DType::F32)?,
+            b: patch.b.to_device(device)?.to_dtype(DType::F32)?,
+            scale: patch.scale,
+        });
+    }
+    Ok(std::sync::Arc::new(WanQuantizedLoraLinear {
+        base,
+        branches,
+    }))
+}
+
 /// A `SimpleBackend` over the base checkpoint that merges LoRA deltas as each
 /// tensor is read.
 ///
@@ -260,6 +407,16 @@ impl candle_nn::var_builder::SimpleBackend for WanLoraBackend {
 
     fn contains_tensor(&self, name: &str) -> bool {
         self.st.get(&format!("{}{name}", self.prefix)).is_ok()
+    }
+}
+
+impl WanLoraBackend {
+    /// Refuse an adapter that names tensors this checkpoint does not carry.
+    pub fn ensure_lora_targets_present(&self, checkpoint: &std::path::Path) -> Result<()> {
+        self.registry.ensure_targets_present(
+            |name| candle_nn::var_builder::SimpleBackend::contains_tensor(self, name),
+            checkpoint,
+        )
     }
 }
 
@@ -639,6 +796,358 @@ mod tests {
             expected_v[2], base_v[2],
             "untouched elements must be unchanged"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GGUF: adapters as parallel low-rank branches
+    // -----------------------------------------------------------------------
+
+    use crate::wan::model::transformer::{WanTransformer, WanTransformerConfig};
+    use candle_core::quantized::GgmlDType;
+    use candle_nn::{VarBuilder, VarMap};
+
+    /// Deterministic fill, so a failure is reproducible and the two checkpoints
+    /// under comparison hold identical numbers.
+    fn synth(seed: usize, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| 0.05 * (0.7 * (i + seed * 13) as f32).sin())
+            .collect()
+    }
+
+    /// Every projection the shipped distills target, for one block.
+    fn block_projections(
+        config: &WanTransformerConfig,
+        block: usize,
+    ) -> Vec<(String, usize, usize)> {
+        let dim = config.dim;
+        let mut modules = Vec::new();
+        for attn in ["self_attn", "cross_attn"] {
+            for leaf in ["q", "k", "v", "o"] {
+                modules.push((format!("blocks.{block}.{attn}.{leaf}"), dim, dim));
+            }
+        }
+        modules.push((format!("blocks.{block}.ffn.0"), config.ffn_dim, dim));
+        modules.push((format!("blocks.{block}.ffn.2"), dim, config.ffn_dim));
+        modules
+    }
+
+    /// Write a rank-`rank` adapter over `modules`, in the shipped 2.2 layout:
+    /// `diffusion_model.` prefix, `lora_down`/`lora_up`, I64 alpha.
+    fn write_block_lora(
+        path: &std::path::Path,
+        modules: &[(String, usize, usize)],
+        rank: usize,
+        alpha: i64,
+    ) {
+        let mut owned: Vec<(String, SafeDtype, Vec<usize>, Vec<u8>)> = Vec::new();
+        for (index, (stem, out_features, in_features)) in modules.iter().enumerate() {
+            owned.push((
+                format!("diffusion_model.{stem}.lora_down.weight"),
+                SafeDtype::F32,
+                vec![rank, *in_features],
+                f32_bytes(&synth(index * 2 + 1, rank * in_features)),
+            ));
+            owned.push((
+                format!("diffusion_model.{stem}.lora_up.weight"),
+                SafeDtype::F32,
+                vec![*out_features, rank],
+                f32_bytes(&synth(index * 2 + 2, out_features * rank)),
+            ));
+            owned.push((
+                format!("diffusion_model.{stem}.alpha"),
+                SafeDtype::I64,
+                vec![],
+                alpha.to_le_bytes().to_vec(),
+            ));
+        }
+        let borrowed: Vec<(&str, SafeDtype, Vec<usize>, Vec<u8>)> = owned
+            .iter()
+            .map(|(name, dtype, shape, data)| (name.as_str(), *dtype, shape.clone(), data.clone()))
+            .collect();
+        write_tensors(path, &borrowed);
+    }
+
+    /// Write every tensor in `varmap` to a GGUF, quantizing each with
+    /// `dtype_for`.
+    fn write_gguf(path: &std::path::Path, varmap: &VarMap, dtype_for: impl Fn(&str) -> GgmlDType) {
+        use candle_core::quantized::{gguf_file, QTensor};
+
+        let quantized: Vec<(String, QTensor)> = {
+            let data = varmap.data().lock().unwrap();
+            data.iter()
+                .map(|(name, var)| {
+                    (
+                        name.clone(),
+                        QTensor::quantize(var.as_tensor(), dtype_for(name)).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let arch = gguf_file::Value::String("wan".to_string());
+        let mut file = std::fs::File::create(path).unwrap();
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        let a: Vec<f32> = a.flatten_all().unwrap().to_vec1().unwrap();
+        let b: Vec<f32> = b.flatten_all().unwrap().to_vec1().unwrap();
+        a.iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    }
+
+    /// The GGUF path applies the adapter as `y = Wx + scale*(B@(A@x))` while
+    /// the safetensors path applies it as `y = (W + scale*(B@A))x`. Those are
+    /// the same function, and at a lossless F32 GGUF quantization the two
+    /// loaders must agree to f32 round-off — no quantization tolerance.
+    #[test]
+    fn a_gguf_low_rank_branch_equals_the_merged_safetensors_forward() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let safetensors_path = dir.path().join("tiny.safetensors");
+        varmap.save(&safetensors_path).unwrap();
+        let gguf_path = dir.path().join("tiny.gguf");
+        write_gguf(&gguf_path, &varmap, |_| GgmlDType::F32);
+
+        // All twenty projections of both blocks, exactly the set the shipped
+        // distills touch.
+        let mut modules = block_projections(&config, 0);
+        modules.extend(block_projections(&config, 1));
+        let adapter = dir.path().join("adapter.safetensors");
+        write_block_lora(&adapter, &modules, 4, 8);
+        let registry = WanLoraRegistry::load(&[lora(&adapter, 1.0)]).unwrap();
+        assert_eq!(registry.tensor_count(), 20);
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+        let run = |model: &WanTransformer| model.forward(&x, &timestep, &context).unwrap();
+
+        let merged = run(&WanTransformer::from_safetensors_with_loras(
+            &[safetensors_path],
+            config.clone(),
+            &device,
+            dtype,
+            &registry,
+        )
+        .unwrap());
+        let branched = run(&WanTransformer::from_gguf_with_loras(
+            &gguf_path,
+            config.clone(),
+            &device,
+            &registry,
+        )
+        .unwrap());
+        let bare = run(&WanTransformer::from_gguf(&gguf_path, config, &device).unwrap());
+
+        let err = max_abs_diff(&branched, &merged);
+        assert!(
+            err < 1e-4,
+            "the branch and the merge must be the same function, diverged by {err:e}"
+        );
+        // Otherwise the agreement above would also hold for a loader that
+        // ignored the adapter entirely.
+        assert!(
+            max_abs_diff(&branched, &bare) > 1e-3,
+            "the adapter must actually reach the GGUF forward"
+        );
+    }
+
+    /// The same equivalence on a genuinely lossy checkpoint, quantized the way
+    /// the QuantStack A14B files are: Q5_K for q/k/o and `ffn.0`, Q6_K for v
+    /// and `ffn.2`, everything else unquantized. Here the two paths cannot
+    /// agree exactly — the bases differ — but the *adapter's contribution*
+    /// must be the same to within the base's own error.
+    #[test]
+    fn a_k_quantized_gguf_receives_the_adapter_at_full_precision() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+
+        // 256 wide so the k-quant super-block (256 values) divides every
+        // projection's inner dimension; `patch_embedding` stays F32 because its
+        // 5-D shape ends in the 2-wide patch axis, which is also why the real
+        // files leave it alone.
+        let config = WanTransformerConfig::tiny(256, 2, 1);
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let gguf_path = dir.path().join("kquant.gguf");
+        write_gguf(&gguf_path, &varmap, |name| {
+            if !name.starts_with("blocks.") || !name.ends_with(".weight") || name.contains("norm") {
+                return GgmlDType::F32;
+            }
+            if name.ends_with(".v.weight") || name.ends_with("ffn.2.weight") {
+                GgmlDType::Q6K
+            } else {
+                GgmlDType::Q5K
+            }
+        });
+
+        let modules = block_projections(&config, 0);
+        let adapter = dir.path().join("adapter.safetensors");
+        write_block_lora(&adapter, &modules, 8, 8);
+        let registry = WanLoraRegistry::load(&[lora(&adapter, 1.0)]).unwrap();
+        assert_eq!(registry.tensor_count(), 10);
+
+        // Deterministic inputs: this test bounds a ratio between two error
+        // magnitudes, and a random draw would make that bound flaky rather than
+        // strict.
+        let latent_len = config.in_dim * 16;
+        let x = Tensor::from_vec(synth(101, latent_len), (1, config.in_dim, 1, 4, 4), &device)
+            .unwrap()
+            .affine(20.0, 0.0)
+            .unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::from_vec(
+            synth(202, 4 * config.text_dim),
+            (1, 4, config.text_dim),
+            &device,
+        )
+        .unwrap()
+        .affine(20.0, 0.0)
+        .unwrap();
+        let run = |model: &WanTransformer| model.forward(&x, &timestep, &context).unwrap();
+
+        let quantized_bare =
+            run(&WanTransformer::from_gguf(&gguf_path, config.clone(), &device).unwrap());
+        let quantized_branched = run(&WanTransformer::from_gguf_with_loras(
+            &gguf_path,
+            config.clone(),
+            &device,
+            &registry,
+        )
+        .unwrap());
+
+        // The plain-weight pair, for the contribution the adapter is supposed
+        // to make.
+        let plain_path = dir.path().join("plain.safetensors");
+        varmap.save(&plain_path).unwrap();
+        let plain_bare = run(&WanTransformer::from_safetensors(
+            std::slice::from_ref(&plain_path),
+            config.clone(),
+            &device,
+            dtype,
+        )
+        .unwrap());
+        let plain_merged = run(&WanTransformer::from_safetensors_with_loras(
+            &[plain_path],
+            config,
+            &device,
+            dtype,
+            &registry,
+        )
+        .unwrap());
+
+        let peak = |t: &Tensor| {
+            t.abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+        let quantized_effect = peak(&(quantized_branched - &quantized_bare).unwrap());
+        let plain_effect = peak(&(plain_merged - &plain_bare).unwrap());
+        let base_error = max_abs_diff(&quantized_bare, &plain_bare);
+
+        assert!(
+            plain_effect > 1e-3,
+            "the fixture's adapter must move the output; it moved it by {plain_effect:e}"
+        );
+        // The sharp assertion. The adapter's contribution rides on a quantized
+        // base and travels through the block's non-linearities, so it cannot be
+        // compared exactly — but it must arrive at full strength. An attenuated
+        // contribution is precisely what merge-and-requantize produces, and
+        // because the base's own quantization error (3.09e-1 here) is larger
+        // than the adapter's effect, an absolute-error bound would pass on a
+        // loader that dropped the adapter outright — it did, until this was
+        // mutation-tested. Measured on this fixture: plain 1.73e-1, quantized
+        // 2.24e-1, ratio 1.30; the spread over 1.0 is the base error and the
+        // block's non-linearities, not attenuation.
+        let ratio = quantized_effect / plain_effect;
+        assert!(
+            (0.5..2.0).contains(&ratio),
+            "the adapter moved the quantized forward by {quantized_effect:e} against \
+             {plain_effect:e} on the plain one (ratio {ratio}) — it is arriving attenuated \
+             or not at all, with the base's own error at {base_error:e}"
+        );
+    }
+
+    /// An adapter naming tensors the checkpoint lacks — a 2.2 A14B distill
+    /// pointed at a 30-block checkpoint, say — must fail on both weight
+    /// sources, not apply to the blocks that happen to exist.
+    #[test]
+    fn an_adapter_naming_absent_tensors_is_refused_by_both_weight_sources() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        let safetensors_path = dir.path().join("two_blocks.safetensors");
+        varmap.save(&safetensors_path).unwrap();
+        let gguf_path = dir.path().join("two_blocks.gguf");
+        write_gguf(&gguf_path, &varmap, |_| GgmlDType::F32);
+
+        // Block 0 exists; block 7 does not.
+        let mut modules = block_projections(&config, 0);
+        modules.extend(block_projections(&config, 7));
+        let adapter = dir.path().join("too_deep.safetensors");
+        write_block_lora(&adapter, &modules, 4, 8);
+        let registry = WanLoraRegistry::load(&[lora(&adapter, 1.0)]).unwrap();
+
+        for error in [
+            WanTransformer::from_safetensors_with_loras(
+                &[safetensors_path],
+                config.clone(),
+                &device,
+                dtype,
+                &registry,
+            )
+            .err(),
+            WanTransformer::from_gguf_with_loras(&gguf_path, config, &device, &registry).err(),
+        ] {
+            let error = error
+                .expect("an adapter for a deeper checkpoint must not load")
+                .to_string();
+            assert!(error.contains("10 tensor(s)"), "{error}");
+            assert!(error.contains("blocks.7."), "{error}");
+        }
     }
 
     #[test]

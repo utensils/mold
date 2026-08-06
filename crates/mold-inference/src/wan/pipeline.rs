@@ -832,6 +832,9 @@ impl WanEngine {
             "Loading Wan transformer",
             transformer_start.elapsed(),
         );
+        if let Some(marker) = transformer.quantization() {
+            progress.info(&format!("fp8-scaled transformer ({marker})"));
+        }
 
         let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, shift))?;
         let mut solver = FlowUniPc::new(schedule.clone());
