@@ -6,4 +6,5 @@
 //! <https://github.com/Wan-Video/Wan2.1> and <https://github.com/Wan-Video/Wan2.2>
 //! (cloned under gitignored `tmp/`).
 
+pub(crate) mod model;
 pub(crate) mod text;
