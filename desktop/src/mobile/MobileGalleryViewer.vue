@@ -15,7 +15,7 @@ import {
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -336,10 +336,11 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    const result = await saveVideoExport(
+    const result = await shareVideoExport(
       await response.blob(),
       videoExportFilename(props.item.filename, options.format),
     );
+    if (result === "cancelled") return;
     exportOpen.value = false;
     actionStatus.value = result === "shared" ? "Export ready to share" : "Video exported";
   } catch (error) {

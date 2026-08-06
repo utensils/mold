@@ -119,7 +119,7 @@ import { randomSeed } from "../stores/generation";
 import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  downloadVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -1636,7 +1636,7 @@ async function exportGeneratedVideo(options: VideoExportOptions): Promise<void> 
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    await saveVideoExport(await response.blob(), videoExportFilename(filename, options.format));
+    downloadVideoExport(await response.blob(), videoExportFilename(filename, options.format));
     videoExportJob.value = null;
     toasts.push("Video exported");
   } catch (error) {

@@ -30,7 +30,7 @@ import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  downloadVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -363,7 +363,7 @@ async function performVideoExport(options: VideoExportOptions) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    await saveVideoExport(
+    downloadVideoExport(
       await response.blob(),
       videoExportFilename(props.item.filename, options.format),
     );

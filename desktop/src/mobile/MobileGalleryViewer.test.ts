@@ -72,7 +72,7 @@ beforeEach(() => {
   evictMedia.mockReset();
   invoke.mockReset().mockResolvedValue(undefined);
   apiFetchTo.mockReset().mockResolvedValue({
-    blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])])),
+    blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "image/gif" })),
   } as Response);
   apiJsonTo.mockReset().mockResolvedValue({
     formats: ["gif", "apng", "webp"],
@@ -85,6 +85,8 @@ afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
+  Reflect.deleteProperty(navigator, "share");
+  Reflect.deleteProperty(navigator, "canShare");
 });
 
 describe("MobileGalleryViewer", () => {
@@ -252,6 +254,54 @@ describe("MobileGalleryViewer", () => {
     expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery/export-options");
     expect(view.get("[data-test='video-export-dialog']").text()).toContain("Bounce");
     expect(view.get("[data-test='video-export-dialog']").text()).toContain("WEBP");
+  });
+
+  it("opens the iOS share sheet with the exported image file", async () => {
+    const share = vi.fn(async () => undefined);
+    const canShare = vi.fn(() => true);
+    Object.defineProperty(navigator, "share", { value: share, configurable: true });
+    Object.defineProperty(navigator, "canShare", { value: canShare, configurable: true });
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(canShare).toHaveBeenCalledWith({
+      files: [expect.objectContaining({ name: "developed clip.gif", type: "image/gif" })],
+    });
+    expect(share).toHaveBeenCalledWith({
+      files: [expect.objectContaining({ name: "developed clip.gif", type: "image/gif" })],
+      title: "developed clip.gif",
+    });
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
+  });
+
+  it("keeps export options retryable when the iOS share sheet is dismissed", async () => {
+    Object.defineProperty(navigator, "share", {
+      value: vi.fn(async () => {
+        throw new DOMException("Share cancelled", "AbortError");
+      }),
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "canShare", {
+      value: vi.fn(() => true),
+      configurable: true,
+    });
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(view.get("[data-test='video-export-dialog']").isVisible()).toBe(true);
+    expect(view.find("[role='alert']").exists()).toBe(false);
   });
 
   it("fails closed when the generated video's exact host is unavailable", async () => {
