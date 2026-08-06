@@ -34,10 +34,14 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
             Some(family),
             composition,
         ),
-        recommended_dimensions: crate::validation::recommended_dimensions_composed(
-            family,
-            composition,
-        )
+        recommended_dimensions: if family == "wan" {
+            // Wan buckets are per checkpoint (480p-only 1.3B vs 704-grid
+            // TI2V-5B); the family list would advertise sizes the selected
+            // model does not support.
+            crate::validation::wan_recommended_dimensions(model).to_vec()
+        } else {
+            crate::validation::recommended_dimensions_composed(family, composition)
+        }
         .into_iter()
         .map(|(width, height)| RecommendedDimensions { width, height })
         .collect(),

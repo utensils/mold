@@ -1,0 +1,2034 @@
+//! Wan causal 3-D video VAE (2.1 and 2.2).
+//!
+//! Ports two upstream reference implementations:
+//!
+//! - Wan 2.1 — `Wan2.1/wan/modules/vae.py` (4x temporal, 8x8 spatial, z=16,
+//!   `dim=96`). Used by T2V-1.3B/14B, I2V-14B, and both Wan 2.2 A14B experts.
+//!   `Wan2.2/wan/modules/vae2_1.py` is the same file with the class renamed.
+//! - Wan 2.2 — `Wan2.2/wan/modules/vae2_2.py` (4x temporal, 16x16 spatial,
+//!   z=48, encoder `dim=160` / decoder `dim=256`). Used by TI2V-5B only.
+//!
+//! Both are *streaming* autoencoders: every convolution is causal on the time
+//! axis and carries a two-frame tail from the previous chunk in a flat cache
+//! indexed by conv-visit order. Encode walks the pixel clip in chunks of 1,
+//! then 4, 4, 4, ...; decode feeds exactly one latent frame per iteration. The
+//! visit order is what binds a cache slot to a convolution, so any divergence
+//! in the module walk silently desynchronizes every downstream causal conv —
+//! [`tests::wan21_encode_is_chunk_plan_invariant`] and its siblings exist to
+//! catch precisely that.
+//!
+//! candle has no cuDNN conv3d, so [`WanCausalConv3d`] decomposes each 3-D
+//! kernel into `kt` `Conv2d` slices summed over the temporal taps, the same
+//! strategy as [`crate::ltx2::model::video_vae::Ltx2VideoCausalConv3d`].
+
+use candle_core::{bail, DType, Device, IndexOp, Result, Tensor};
+use candle_nn::{ops, Conv2d, Conv2dConfig, Init, VarBuilder};
+use std::path::Path;
+
+/// Trailing frames each causal conv keeps from the previous chunk
+/// (`vae.py:14`, `vae2_2.py:14`).
+const CACHE_T: usize = 2;
+
+/// Pixel frames per encode chunk after the leading single frame
+/// (`vae.py:519-534`, `vae2_2.py:786-802`).
+const ENCODE_CHUNK_FRAMES: usize = 4;
+
+/// Weight init used when a [`VarBuilder`] has nothing on disk (tests over a
+/// `VarMap`). File-backed builders ignore these entirely.
+const TEST_WEIGHT_INIT: Init = Init::Randn {
+    mean: 0.0,
+    stdev: 0.05,
+};
+
+// ---------------------------------------------------------------------------
+// small tensor helpers
+// ---------------------------------------------------------------------------
+
+fn cat2(a: &Tensor, b: &Tensor, dim: usize) -> Result<Tensor> {
+    Tensor::cat(&[a, b], dim)
+}
+
+fn cat_all(xs: &[Tensor], dim: usize) -> Result<Tensor> {
+    let refs = xs.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, dim)
+}
+
+/// `x[:, :, -n:]` on a `[b, c, t, h, w]` tensor, clamped to what exists.
+fn tail_frames(x: &Tensor, n: usize) -> Result<Tensor> {
+    let t = x.dim(2)?;
+    let n = n.min(t);
+    x.narrow(2, t - n, n)?.contiguous()
+}
+
+/// `x[:, :, -1:]` on a `[b, c, t, h, w]` tensor.
+fn last_frame(x: &Tensor) -> Result<Tensor> {
+    tail_frames(x, 1)
+}
+
+/// Apply a 2-D op to every frame of a `[b, c, t, h, w]` tensor.
+///
+/// Upstream writes this as `rearrange(x, 'b c t h w -> (b t) c h w')`, which is
+/// equivalent because the op is independent per sample and per frame. Slicing
+/// frame by frame keeps the transient copy at 1/t of the activation, which
+/// matters: the decoder's last spatial upsample runs at full output resolution.
+fn map_frames<F>(x: &Tensor, mut f: F) -> Result<Tensor>
+where
+    F: FnMut(&Tensor) -> Result<Tensor>,
+{
+    let t = x.dim(2)?;
+    let mut out = Vec::with_capacity(t);
+    for ti in 0..t {
+        let frame = x.narrow(2, ti, 1)?.squeeze(2)?.contiguous()?;
+        out.push(f(&frame)?.unsqueeze(2)?);
+    }
+    cat_all(&out, 2)
+}
+
+/// `repeat_interleave(x, repeats, dim=1)` — each channel duplicated in place.
+fn repeat_interleave_channels(x: &Tensor, repeats: usize) -> Result<Tensor> {
+    if repeats == 1 {
+        return x.contiguous();
+    }
+    let (b, c, t, h, w) = x.dims5()?;
+    x.unsqueeze(2)?
+        .broadcast_as(&[b, c, repeats, t, h, w])?
+        .contiguous()?
+        .reshape(&[b, c * repeats, t, h, w])
+}
+
+// ---------------------------------------------------------------------------
+// configuration
+// ---------------------------------------------------------------------------
+
+/// Which upstream VAE a config describes. The variant selects both the block
+/// topology (2.2 wraps every stage in an average-pool / duplicate shortcut) and
+/// the checkpoint key layout (2.2 nests `downsamples.{stage}.downsamples.{j}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WanVaeVariant {
+    /// `Wan2.1/wan/modules/vae.py`
+    V2_1,
+    /// `Wan2.2/wan/modules/vae2_2.py`
+    V2_2,
+}
+
+/// Per-channel latent statistics, `vae.py:629-639`.
+const WAN21_LATENT_MEAN: [f32; 16] = [
+    -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715, 0.5517,
+    -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
+];
+const WAN21_LATENT_STD: [f32; 16] = [
+    2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652, 1.5579,
+    1.6382, 1.1253, 2.8251, 1.916,
+];
+
+/// Per-channel latent statistics, `vae2_2.py:904-1011`.
+const WAN22_LATENT_MEAN: [f32; 48] = [
+    -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557, -0.1382, 0.0542, 0.2813,
+    0.0891, 0.157, -0.0098, 0.0375, -0.1825, -0.2246, -0.1207, -0.0698, 0.5109, 0.2665, -0.2108,
+    -0.2158, 0.2502, -0.2055, -0.0322, 0.1109, 0.1567, -0.0729, 0.0899, -0.2799, -0.123, -0.0313,
+    -0.1649, 0.0117, 0.0723, -0.2839, -0.2083, -0.052, 0.3748, 0.0152, 0.1957, 0.1433, -0.2944,
+    0.3573, -0.0548, -0.1681, -0.0667,
+];
+const WAN22_LATENT_STD: [f32; 48] = [
+    0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.499, 0.4818, 0.5013, 0.8158, 1.0344, 0.5894, 1.0901,
+    0.6885, 0.6165, 0.8454, 0.4978, 0.5759, 0.3523, 0.7135, 0.6804, 0.5833, 1.4146, 0.8986, 0.5659,
+    0.7069, 0.5338, 0.4889, 0.4917, 0.4069, 0.4999, 0.6866, 0.4093, 0.5709, 0.6065, 0.6415, 0.4944,
+    0.5726, 1.2042, 0.5458, 1.6887, 0.3971, 1.06, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
+];
+
+#[derive(Clone, Debug)]
+pub(crate) struct WanVaeConfig {
+    pub variant: WanVaeVariant,
+    /// Encoder base width. 2.2's decoder is wider than its encoder.
+    pub encoder_dim: usize,
+    pub decoder_dim: usize,
+    pub z_dim: usize,
+    pub dim_mult: Vec<usize>,
+    pub num_res_blocks: usize,
+    /// One flag per downsampling stage, so `dim_mult.len() - 1` entries. The
+    /// decoder's temporal upsample flags are this list reversed
+    /// (`vae.py:500`).
+    pub temporal_downsample: Vec<bool>,
+    /// Pixel-space patchify factor applied before the encoder: 1 for 2.1,
+    /// 2 for 2.2 (`vae2_2.py:280-299`).
+    pub patch_size: usize,
+    pub latent_mean: Vec<f32>,
+    pub latent_std: Vec<f32>,
+}
+
+impl WanVaeConfig {
+    /// The released `Wan2.1_VAE.pth` / `wan_2.1_vae.safetensors`
+    /// (`vae.py:592-616`, `vae.py:621-639`).
+    pub fn v2_1() -> Self {
+        Self {
+            variant: WanVaeVariant::V2_1,
+            encoder_dim: 96,
+            decoder_dim: 96,
+            z_dim: 16,
+            dim_mult: vec![1, 2, 4, 4],
+            num_res_blocks: 2,
+            temporal_downsample: vec![false, true, true],
+            patch_size: 1,
+            latent_mean: WAN21_LATENT_MEAN.to_vec(),
+            latent_std: WAN21_LATENT_STD.to_vec(),
+        }
+    }
+
+    /// The released `Wan2.2_VAE.pth` / `wan2.2_vae.safetensors`
+    /// (`vae2_2.py:863-885`, `vae2_2.py:888-1012`; note `dec_dim` is not
+    /// forwarded by `_video_vae`, so the decoder keeps `WanVAE_`'s 256).
+    pub fn v2_2() -> Self {
+        Self {
+            variant: WanVaeVariant::V2_2,
+            encoder_dim: 160,
+            decoder_dim: 256,
+            z_dim: 48,
+            dim_mult: vec![1, 2, 4, 4],
+            num_res_blocks: 2,
+            temporal_downsample: vec![false, true, true],
+            patch_size: 2,
+            latent_mean: WAN22_LATENT_MEAN.to_vec(),
+            latent_std: WAN22_LATENT_STD.to_vec(),
+        }
+    }
+
+    /// The 2.1 topology at `dim=8`, `z=4`. Same stage/key layout as
+    /// [`Self::v2_1`] — only the widths shrink — so tests exercise the real
+    /// module walk and the real checkpoint key indices.
+    pub fn tiny_v2_1() -> Self {
+        let mut cfg = Self::v2_1();
+        cfg.encoder_dim = 8;
+        cfg.decoder_dim = 8;
+        cfg.z_dim = 4;
+        cfg.latent_mean = WAN21_LATENT_MEAN[..4].to_vec();
+        cfg.latent_std = WAN21_LATENT_STD[..4].to_vec();
+        cfg
+    }
+
+    /// The 2.2 topology at `dim=8`, `z=4`, keeping patchify and the
+    /// average-pool / duplicate shortcuts.
+    pub fn tiny_v2_2() -> Self {
+        let mut cfg = Self::v2_2();
+        cfg.encoder_dim = 8;
+        cfg.decoder_dim = 8;
+        cfg.z_dim = 4;
+        cfg.latent_mean = WAN22_LATENT_MEAN[..4].to_vec();
+        cfg.latent_std = WAN22_LATENT_STD[..4].to_vec();
+        cfg
+    }
+
+    /// Pixel channels the encoder's `conv1` sees: 3 for 2.1, 12 for 2.2.
+    pub fn encoder_in_channels(&self) -> usize {
+        3 * self.patch_size * self.patch_size
+    }
+
+    /// `2^(temporal downsample stages)` — 4 for every shipped config.
+    pub fn temporal_compression(&self) -> usize {
+        1 << self.temporal_downsample.iter().filter(|d| **d).count()
+    }
+
+    /// Patchify factor times one halving per resampling stage: 8 for 2.1,
+    /// 16 for 2.2.
+    pub fn spatial_compression(&self) -> usize {
+        self.patch_size * (1 << (self.dim_mult.len() - 1))
+    }
+
+    /// Encoder widths, `[dim * u for u in [1] + dim_mult]` (`vae.py:284`).
+    pub fn encoder_dims(&self) -> Vec<usize> {
+        std::iter::once(1)
+            .chain(self.dim_mult.iter().copied())
+            .map(|u| self.encoder_dim * u)
+            .collect()
+    }
+
+    /// Decoder widths, `[dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]`
+    /// (`vae.py:388`).
+    pub fn decoder_dims(&self) -> Vec<usize> {
+        std::iter::once(self.dim_mult[self.dim_mult.len() - 1])
+            .chain(self.dim_mult.iter().rev().copied())
+            .map(|u| self.decoder_dim * u)
+            .collect()
+    }
+
+    /// Decoder temporal upsample flags — the downsample flags reversed
+    /// (`vae.py:500`).
+    fn temporal_upsample(&self) -> Vec<bool> {
+        self.temporal_downsample.iter().rev().copied().collect()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.dim_mult.len() < 2 {
+            bail!("Wan VAE: dim_mult needs at least two stages");
+        }
+        if self.temporal_downsample.len() != self.dim_mult.len() - 1 {
+            bail!(
+                "Wan VAE: temporal_downsample must carry one flag per resampling stage ({} \
+                 expected, got {})",
+                self.dim_mult.len() - 1,
+                self.temporal_downsample.len()
+            );
+        }
+        if self.latent_mean.len() != self.z_dim || self.latent_std.len() != self.z_dim {
+            bail!(
+                "Wan VAE: latent statistics must cover every latent channel (z_dim={}, mean={}, \
+                 std={})",
+                self.z_dim,
+                self.latent_mean.len(),
+                self.latent_std.len()
+            );
+        }
+        if self.patch_size == 0 {
+            bail!("Wan VAE: patch_size must be positive");
+        }
+        if self.variant == WanVaeVariant::V2_2 {
+            // `Down_ResidualBlock`'s final stage keeps its width because its
+            // AvgDown3D has factor 1 (`vae2_2.py:332`); a dim_mult that grows
+            // at the last stage would trip upstream's own assert.
+            let mult = &self.dim_mult;
+            if mult[mult.len() - 1] != mult[mult.len() - 2] {
+                bail!(
+                    "Wan 2.2 VAE: the last two dim_mult entries must match so the final \
+                     AvgDown3D stays width-preserving, got {:?}",
+                    mult
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// feature cache
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum FeatCacheEntry {
+    /// First-decode-chunk sentinel for `upsample3d`: there is no temporal
+    /// history yet, so the next chunk runs its time conv zero-filled rather
+    /// than cache-filled (`vae.py:104-132`).
+    Rep,
+    Frames(Tensor),
+}
+
+/// The flat `feat_cache` / `feat_idx` pair upstream threads through the whole
+/// module tree (`vae.py:475-480`, `582-589`). The slot for a convolution is its
+/// position in the forward walk, so `rewind` must be called once per chunk and
+/// the walk must be identical on every chunk.
+#[derive(Debug, Default)]
+struct FeatCache {
+    slots: Vec<Option<FeatCacheEntry>>,
+    idx: usize,
+}
+
+impl FeatCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// `feat_idx = [0]` before each chunk.
+    fn rewind(&mut self) {
+        self.idx = 0;
+    }
+
+    fn next_idx(&mut self) -> usize {
+        let idx = self.idx;
+        self.idx += 1;
+        if self.slots.len() <= idx {
+            self.slots.resize(idx + 1, None);
+        }
+        idx
+    }
+
+    fn get(&self, idx: usize) -> Option<&FeatCacheEntry> {
+        self.slots[idx].as_ref()
+    }
+
+    fn set(&mut self, idx: usize, entry: FeatCacheEntry) {
+        self.slots[idx] = Some(entry);
+    }
+
+    /// The cache/update dance every plain `CausalConv3d` call site repeats
+    /// (`vae.py:202-220`, `318-331`, `350-365`): hand the previous chunk's tail
+    /// to the conv, then store this chunk's tail — topped up from the previous
+    /// slot when this chunk is a single frame.
+    fn causal_conv(&mut self, conv: &WanCausalConv3d, x: &Tensor) -> Result<Tensor> {
+        let idx = self.next_idx();
+        let prev = match self.get(idx) {
+            None => None,
+            Some(FeatCacheEntry::Frames(prev)) => Some(prev.clone()),
+            Some(FeatCacheEntry::Rep) => bail!(
+                "Wan VAE: cache slot {idx} holds the upsample3d 'Rep' sentinel but a plain causal \
+                 conv is reading it — the feat-cache visit order desynchronized"
+            ),
+        };
+        let mut cache_x = tail_frames(x, CACHE_T)?;
+        if cache_x.dim(2)? < CACHE_T {
+            if let Some(prev) = prev.as_ref() {
+                cache_x = cat2(&last_frame(prev)?, &cache_x, 2)?;
+            }
+        }
+        let y = conv.forward(x, prev.as_ref())?;
+        self.set(idx, FeatCacheEntry::Frames(cache_x));
+        Ok(y)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// primitives
+// ---------------------------------------------------------------------------
+
+/// `nn.Conv3d` with left-only temporal padding (`vae.py:17-36`).
+///
+/// The temporal pad is `2 * padding[0]` frames in front and none behind, so the
+/// output never sees the future. When the previous chunk's tail is supplied it
+/// is prepended and the zero pad shrinks by that many frames, which makes a
+/// chunked walk identical to one pass over the zero-padded clip.
+#[derive(Debug, Clone)]
+struct WanCausalConv3d {
+    kt: usize,
+    stride_t: usize,
+    front_pad: usize,
+    pad_h: usize,
+    pad_w: usize,
+    /// One `Conv2d` per temporal tap — candle has no conv3d.
+    slices: Vec<Conv2d>,
+    bias: Tensor,
+}
+
+impl WanCausalConv3d {
+    fn load(
+        vb: VarBuilder,
+        in_channels: usize,
+        out_channels: usize,
+        kernel: (usize, usize, usize),
+        stride: (usize, usize, usize),
+        padding: (usize, usize, usize),
+    ) -> Result<Self> {
+        let (kt, kh, kw) = kernel;
+        let (stride_t, stride_h, stride_w) = stride;
+        if stride_h != stride_w {
+            bail!("Wan VAE: asymmetric spatial stride ({stride_h}, {stride_w}) is unsupported");
+        }
+        let weight = vb.get_with_hints(
+            (out_channels, in_channels, kt, kh, kw),
+            "weight",
+            TEST_WEIGHT_INIT,
+        )?;
+        let bias = vb.get_with_hints(out_channels, "bias", Init::Const(0.0))?;
+
+        let cfg = Conv2dConfig {
+            stride: stride_h,
+            ..Default::default()
+        };
+        let mut slices = Vec::with_capacity(kt);
+        for ti in 0..kt {
+            let weight2d = weight.i((.., .., ti, .., ..))?.contiguous()?;
+            slices.push(Conv2d::new(weight2d, None, cfg));
+        }
+
+        Ok(Self {
+            kt,
+            stride_t,
+            front_pad: 2 * padding.0,
+            pad_h: padding.1,
+            pad_w: padding.2,
+            slices,
+            bias,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, cache: Option<&Tensor>) -> Result<Tensor> {
+        let mut x = x.clone();
+        let mut front = self.front_pad;
+        // Upstream ignores the cache when the conv has no temporal padding
+        // (`vae.py:30`); `downsample3d` relies on that and splices its own.
+        if let Some(cache) = cache {
+            if front > 0 {
+                let carried = cache.dim(2)?;
+                if carried > front {
+                    bail!(
+                        "Wan VAE: causal cache carries {carried} frames but the conv only pads \
+                         {front}"
+                    );
+                }
+                x = cat2(cache, &x, 2)?;
+                front -= carried;
+            }
+        }
+        if front > 0 {
+            x = x.pad_with_zeros(2, front, 0)?;
+        }
+        if self.pad_h > 0 {
+            x = x.pad_with_zeros(3, self.pad_h, self.pad_h)?;
+        }
+        if self.pad_w > 0 {
+            x = x.pad_with_zeros(4, self.pad_w, self.pad_w)?;
+        }
+
+        let t_pad = x.dim(2)?;
+        if t_pad < self.kt {
+            bail!(
+                "Wan VAE: {t_pad} frames after causal padding is short of the {} needed",
+                self.kt
+            );
+        }
+        let t_out = (t_pad - self.kt) / self.stride_t + 1;
+
+        let mut ys = Vec::with_capacity(t_out);
+        for oi in 0..t_out {
+            let base = oi * self.stride_t;
+            let mut acc: Option<Tensor> = None;
+            for ki in 0..self.kt {
+                let frame = x.i((.., .., base + ki, .., ..))?.contiguous()?;
+                let y = frame.apply(&self.slices[ki])?;
+                acc = Some(match acc {
+                    None => y,
+                    Some(prev) => prev.add(&y)?,
+                });
+            }
+            ys.push(acc.expect("temporal kernel is non-empty").unsqueeze(2)?);
+        }
+
+        let y = cat_all(&ys, 2)?;
+        let bias = self.bias.reshape((1, self.bias.dim(0)?, 1, 1, 1))?;
+        y.broadcast_add(&bias)
+    }
+}
+
+/// `RMS_norm` (`vae.py:39-54`): `F.normalize(x, dim=1) * sqrt(dim) * gamma`.
+///
+/// `F.normalize` is an L2 normalize with the denominator clamped at 1e-12, so
+/// this is RMS-norm over the channel axis with no epsilon inside the mean.
+#[derive(Debug, Clone)]
+struct WanRmsNorm {
+    /// Flattened to `[dim]`; reshaped per call to match the input rank.
+    gamma: Tensor,
+    scale: f64,
+}
+
+impl WanRmsNorm {
+    /// `images` selects the on-disk gamma shape: `[dim, 1, 1]` for the 4-D
+    /// per-frame attention norm, `[dim, 1, 1, 1]` for the 5-D video norms
+    /// (`vae.py:41-48`).
+    fn load(vb: VarBuilder, dim: usize, images: bool) -> Result<Self> {
+        let gamma = if images {
+            vb.get_with_hints((dim, 1, 1), "gamma", Init::Const(1.0))?
+        } else {
+            vb.get_with_hints((dim, 1, 1, 1), "gamma", Init::Const(1.0))?
+        };
+        Ok(Self {
+            gamma: gamma.reshape(dim)?,
+            scale: (dim as f64).sqrt(),
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let dtype = x.dtype();
+        let x32 = x.to_dtype(DType::F32)?;
+        // 1e-24 under the sqrt is F.normalize's 1e-12 floor on the norm.
+        let norm = x32.sqr()?.sum_keepdim(1)?.affine(1.0, 1e-24)?.sqrt()?;
+        let mut shape = vec![1usize; x.rank()];
+        shape[1] = self.gamma.dim(0)?;
+        let gamma = self.gamma.to_dtype(DType::F32)?.reshape(shape)?;
+        x32.broadcast_div(&norm)?
+            .affine(self.scale, 0.0)?
+            .broadcast_mul(&gamma)?
+            .to_dtype(dtype)
+    }
+}
+
+/// Single-head 2-D self-attention run independently per frame
+/// (`vae.py:223-262`).
+#[derive(Debug, Clone)]
+struct WanAttentionBlock {
+    norm: WanRmsNorm,
+    to_qkv: Conv2d,
+    proj: Conv2d,
+}
+
+impl WanAttentionBlock {
+    fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+        let cfg = Conv2dConfig::default();
+        Ok(Self {
+            norm: WanRmsNorm::load(vb.pp("norm"), dim, true)?,
+            to_qkv: candle_nn::conv2d(dim, dim * 3, 1, cfg, vb.pp("to_qkv"))?,
+            proj: candle_nn::conv2d(dim, dim, 1, cfg, vb.pp("proj"))?,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let projected = map_frames(x, |frame| {
+            let (b, c, h, w) = frame.dims4()?;
+            let normed = self.norm.forward(frame)?;
+            // [b, 3c, h, w] -> [b, hw, 3c], then split q|k|v along the channel
+            // thirds, matching upstream's reshape/permute/chunk.
+            let qkv = normed
+                .apply(&self.to_qkv)?
+                .reshape((b, 3 * c, h * w))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let head = |offset: usize| -> Result<Tensor> {
+                qkv.narrow(2, offset, c)?.unsqueeze(1)?.contiguous()
+            };
+            // `math_attention` deliberately, not `attention`: routing the VAE
+            // through the FlashAttention backend would make reconstruction
+            // depend on how the binary was built.
+            let attn = crate::attention::math_attention(
+                &head(0)?,
+                &head(c)?,
+                &head(2 * c)?,
+                1.0 / (c as f32).sqrt(),
+            )?;
+            attn.squeeze(1)?
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((b, c, h, w))?
+                .apply(&self.proj)
+        })?;
+        projected.add(x)
+    }
+}
+
+/// `ResidualBlock` (`vae.py:186-220`). The two cached convs are `residual.2`
+/// and `residual.6`; the 1x1x1 shortcut is called outside the cache walk and
+/// consumes no slot (`vae.py:203`).
+#[derive(Debug, Clone)]
+struct WanResidualBlock {
+    norm1: WanRmsNorm,
+    conv1: WanCausalConv3d,
+    norm2: WanRmsNorm,
+    conv2: WanCausalConv3d,
+    shortcut: Option<WanCausalConv3d>,
+}
+
+impl WanResidualBlock {
+    fn load(vb: VarBuilder, in_dim: usize, out_dim: usize) -> Result<Self> {
+        let residual = vb.pp("residual");
+        let shortcut = if in_dim != out_dim {
+            Some(WanCausalConv3d::load(
+                vb.pp("shortcut"),
+                in_dim,
+                out_dim,
+                (1, 1, 1),
+                (1, 1, 1),
+                (0, 0, 0),
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            norm1: WanRmsNorm::load(residual.pp("0"), in_dim, false)?,
+            conv1: WanCausalConv3d::load(
+                residual.pp("2"),
+                in_dim,
+                out_dim,
+                (3, 3, 3),
+                (1, 1, 1),
+                (1, 1, 1),
+            )?,
+            norm2: WanRmsNorm::load(residual.pp("3"), out_dim, false)?,
+            conv2: WanCausalConv3d::load(
+                residual.pp("6"),
+                out_dim,
+                out_dim,
+                (3, 3, 3),
+                (1, 1, 1),
+                (1, 1, 1),
+            )?,
+            shortcut,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        let identity = match &self.shortcut {
+            Some(conv) => conv.forward(x, None)?,
+            None => x.clone(),
+        };
+        let h = ops::silu(&self.norm1.forward(x)?)?;
+        let h = cache.causal_conv(&self.conv1, &h)?;
+        let h = ops::silu(&self.norm2.forward(&h)?)?;
+        let h = cache.causal_conv(&self.conv2, &h)?;
+        h.add(&identity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResampleMode {
+    Upsample2d,
+    Upsample3d,
+    Downsample2d,
+    Downsample3d,
+}
+
+/// `Resample` (`vae.py:66-160`, `vae2_2.py:71-169`). `resample.1` is the
+/// Conv2d; index 0 of the Sequential is a parameter-free `Upsample` or
+/// `ZeroPad2d`.
+#[derive(Debug, Clone)]
+struct WanResample {
+    mode: ResampleMode,
+    conv: Conv2d,
+    time_conv: Option<WanCausalConv3d>,
+}
+
+impl WanResample {
+    fn load(
+        vb: VarBuilder,
+        dim: usize,
+        mode: ResampleMode,
+        variant: WanVaeVariant,
+    ) -> Result<Self> {
+        let (conv, time_conv) = match mode {
+            ResampleMode::Upsample2d | ResampleMode::Upsample3d => {
+                // 2.1 halves the width on the way up (`vae.py:79,83`); 2.2
+                // keeps it (`vae2_2.py:89,94`). Downsample convs are
+                // width-preserving in both.
+                let out = match variant {
+                    WanVaeVariant::V2_1 => dim / 2,
+                    WanVaeVariant::V2_2 => dim,
+                };
+                let cfg = Conv2dConfig {
+                    padding: 1,
+                    ..Default::default()
+                };
+                let conv = candle_nn::conv2d(dim, out, 3, cfg, vb.pp("resample").pp("1"))?;
+                let time_conv = if mode == ResampleMode::Upsample3d {
+                    Some(WanCausalConv3d::load(
+                        vb.pp("time_conv"),
+                        dim,
+                        dim * 2,
+                        (3, 1, 1),
+                        (1, 1, 1),
+                        (1, 0, 0),
+                    )?)
+                } else {
+                    None
+                };
+                (conv, time_conv)
+            }
+            ResampleMode::Downsample2d | ResampleMode::Downsample3d => {
+                let cfg = Conv2dConfig {
+                    stride: 2,
+                    ..Default::default()
+                };
+                let conv = candle_nn::conv2d(dim, dim, 3, cfg, vb.pp("resample").pp("1"))?;
+                let time_conv = if mode == ResampleMode::Downsample3d {
+                    Some(WanCausalConv3d::load(
+                        vb.pp("time_conv"),
+                        dim,
+                        dim,
+                        (3, 1, 1),
+                        (2, 1, 1),
+                        (0, 0, 0),
+                    )?)
+                } else {
+                    None
+                };
+                (conv, time_conv)
+            }
+        };
+        Ok(Self {
+            mode,
+            conv,
+            time_conv,
+        })
+    }
+
+    fn time_conv(&self) -> Result<&WanCausalConv3d> {
+        self.time_conv
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::msg("Wan VAE: 3-D resample without a time conv"))
+    }
+
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        let (b, c, t, h, w) = x.dims5()?;
+        let mut x = x.clone();
+
+        if self.mode == ResampleMode::Upsample3d {
+            let idx = cache.next_idx();
+            match cache.get(idx).cloned() {
+                // First decode chunk: no temporal history, so the time conv is
+                // skipped entirely and T is *not* doubled (`vae.py:106-108`).
+                // This is why one latent frame decodes to one pixel frame and
+                // every later frame decodes to four.
+                None => cache.set(idx, FeatCacheEntry::Rep),
+                Some(entry) => {
+                    let mut cache_x = tail_frames(&x, CACHE_T)?;
+                    if cache_x.dim(2)? < CACHE_T {
+                        cache_x = match &entry {
+                            FeatCacheEntry::Frames(prev) => cat2(&last_frame(prev)?, &cache_x, 2)?,
+                            FeatCacheEntry::Rep => cat2(&cache_x.zeros_like()?, &cache_x, 2)?,
+                        };
+                    }
+                    x = match &entry {
+                        FeatCacheEntry::Rep => self.time_conv()?.forward(&x, None)?,
+                        FeatCacheEntry::Frames(prev) => {
+                            self.time_conv()?.forward(&x, Some(prev))?
+                        }
+                    };
+                    cache.set(idx, FeatCacheEntry::Frames(cache_x));
+                    // [b, 2c, t, h, w] -> interleaved [b, c, 2t, h, w]
+                    // (`vae.py:134-137`).
+                    let split = x.reshape((b, 2, c, t, h, w))?;
+                    let even = split.i((.., 0))?.contiguous()?;
+                    let odd = split.i((.., 1))?.contiguous()?;
+                    x = Tensor::stack(&[&even, &odd], 3)?.reshape((b, c, t * 2, h, w))?;
+                }
+            }
+        }
+
+        x = map_frames(&x, |frame| match self.mode {
+            ResampleMode::Upsample2d | ResampleMode::Upsample3d => {
+                let (_, _, fh, fw) = frame.dims4()?;
+                // `nearest-exact` and `nearest` agree exactly at an integer
+                // scale factor of 2, so candle's nearest resize is the same op.
+                frame.upsample_nearest2d(fh * 2, fw * 2)?.apply(&self.conv)
+            }
+            // `nn.ZeroPad2d((0, 1, 0, 1))` then a stride-2 unpadded conv.
+            ResampleMode::Downsample2d | ResampleMode::Downsample3d => frame
+                .pad_with_zeros(2, 0, 1)?
+                .pad_with_zeros(3, 0, 1)?
+                .apply(&self.conv),
+        })?;
+
+        if self.mode == ResampleMode::Downsample3d {
+            let idx = cache.next_idx();
+            match cache.get(idx).cloned() {
+                // First encode chunk passes through untouched; the layer caches
+                // the whole (single-frame) output (`vae.py:146-148`).
+                None => cache.set(idx, FeatCacheEntry::Frames(x.clone())),
+                Some(FeatCacheEntry::Frames(prev)) => {
+                    let cache_x = last_frame(&x)?;
+                    // The time conv is unpadded, so upstream splices the carry
+                    // frame itself rather than routing it through the cache arg
+                    // (`vae.py:156-157`).
+                    let joined = cat2(&last_frame(&prev)?, &x, 2)?;
+                    x = self.time_conv()?.forward(&joined, None)?;
+                    cache.set(idx, FeatCacheEntry::Frames(cache_x));
+                }
+                Some(FeatCacheEntry::Rep) => bail!(
+                    "Wan VAE: downsample3d cache slot {idx} holds the upsample 'Rep' sentinel — \
+                     the feat-cache visit order desynchronized"
+                ),
+            }
+        }
+
+        Ok(x)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2.2-only parameter-free shortcuts
+// ---------------------------------------------------------------------------
+
+/// `AvgDown3D` (`vae2_2.py:316-367`): space/time-to-channel folding followed by
+/// a group mean. Parameter-free, so it contributes no checkpoint keys.
+#[derive(Debug, Clone, Copy)]
+struct AvgDown3d {
+    out_channels: usize,
+    factor_t: usize,
+    factor_s: usize,
+    group_size: usize,
+}
+
+impl AvgDown3d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        factor_t: usize,
+        factor_s: usize,
+    ) -> Result<Self> {
+        let factor = factor_t * factor_s * factor_s;
+        if !(in_channels * factor).is_multiple_of(out_channels) {
+            bail!(
+                "Wan 2.2 VAE: AvgDown3D needs out_channels to divide in_channels*factor \
+                 ({in_channels}*{factor} % {out_channels} != 0)"
+            );
+        }
+        Ok(Self {
+            out_channels,
+            factor_t,
+            factor_s,
+            group_size: in_channels * factor / out_channels,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Front-pad the time axis up to a whole factor, so a leading 1-frame
+        // chunk averages against a zero frame (`vae2_2.py:336-338`).
+        let pad_t = (self.factor_t - x.dim(2)? % self.factor_t) % self.factor_t;
+        let x = if pad_t > 0 {
+            x.pad_with_zeros(2, pad_t, 0)?
+        } else {
+            x.clone()
+        };
+        let (b, c, t, h, w) = x.dims5()?;
+        let (ft, fs) = (self.factor_t, self.factor_s);
+        let (tn, hn, wn) = (t / ft, h / fs, w / fs);
+        x.reshape(&[b, c, tn, ft, hn, fs, wn, fs])?
+            .permute(vec![0, 1, 3, 5, 7, 2, 4, 6])?
+            .contiguous()?
+            .reshape(&[b, c * ft * fs * fs, tn, hn, wn])?
+            .reshape(&[b, self.out_channels, self.group_size, tn, hn, wn])?
+            .mean(2)
+    }
+}
+
+/// `DupUp3D` (`vae2_2.py:370-412`): channel-to-space/time duplication.
+#[derive(Debug, Clone, Copy)]
+struct DupUp3d {
+    out_channels: usize,
+    factor_t: usize,
+    factor_s: usize,
+    repeats: usize,
+}
+
+impl DupUp3d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        factor_t: usize,
+        factor_s: usize,
+    ) -> Result<Self> {
+        let factor = factor_t * factor_s * factor_s;
+        if !(out_channels * factor).is_multiple_of(in_channels) {
+            bail!(
+                "Wan 2.2 VAE: DupUp3D needs in_channels to divide out_channels*factor \
+                 ({out_channels}*{factor} % {in_channels} != 0)"
+            );
+        }
+        Ok(Self {
+            out_channels,
+            factor_t,
+            factor_s,
+            repeats: out_channels * factor / in_channels,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, first_chunk: bool) -> Result<Tensor> {
+        let (b, _, t, h, w) = x.dims5()?;
+        let (ft, fs) = (self.factor_t, self.factor_s);
+        let repeated = repeat_interleave_channels(x, self.repeats)?;
+        let y = repeated
+            .reshape(&[b, self.out_channels, ft, fs, fs, t, h, w])?
+            .permute(vec![0, 1, 5, 2, 6, 3, 7, 4])?
+            .contiguous()?
+            .reshape(&[b, self.out_channels, t * ft, h * fs, w * fs])?;
+        if first_chunk {
+            // The first latent frame decodes to one pixel frame, so the
+            // duplicate shortcut drops its leading `factor_t - 1`
+            // (`vae2_2.py:410-411`) to match the main path's undoubled output.
+            let total = t * ft;
+            y.narrow(2, ft - 1, total - (ft - 1))?.contiguous()
+        } else {
+            Ok(y)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stage assembly
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum StageBlock {
+    Residual(WanResidualBlock),
+    Resample(WanResample),
+}
+
+impl StageBlock {
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        match self {
+            StageBlock::Residual(block) => block.forward(x, cache),
+            StageBlock::Resample(resample) => resample.forward(x, cache),
+        }
+    }
+}
+
+/// `Down_ResidualBlock` (`vae2_2.py:415-452`).
+#[derive(Debug, Clone)]
+struct WanDownResidualBlock {
+    avg_shortcut: AvgDown3d,
+    blocks: Vec<StageBlock>,
+}
+
+impl WanDownResidualBlock {
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        let shortcut = self.avg_shortcut.forward(x)?;
+        let mut h = x.clone();
+        for block in &self.blocks {
+            h = block.forward(&h, cache)?;
+        }
+        h.add(&shortcut)
+    }
+}
+
+/// `Up_ResidualBlock` (`vae2_2.py:455-497`).
+#[derive(Debug, Clone)]
+struct WanUpResidualBlock {
+    avg_shortcut: Option<DupUp3d>,
+    blocks: Vec<StageBlock>,
+}
+
+impl WanUpResidualBlock {
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache, first_chunk: bool) -> Result<Tensor> {
+        let mut h = x.clone();
+        for block in &self.blocks {
+            h = block.forward(&h, cache)?;
+        }
+        match &self.avg_shortcut {
+            Some(shortcut) => h.add(&shortcut.forward(x, first_chunk)?),
+            None => Ok(h),
+        }
+    }
+}
+
+/// One entry of `encoder.downsamples`: a flat Sequential element for 2.1, a
+/// whole nested stage for 2.2.
+#[derive(Debug, Clone)]
+enum DownLevel {
+    Flat(StageBlock),
+    Nested(WanDownResidualBlock),
+}
+
+impl DownLevel {
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        match self {
+            DownLevel::Flat(block) => block.forward(x, cache),
+            DownLevel::Nested(stage) => stage.forward(x, cache),
+        }
+    }
+}
+
+/// One entry of `decoder.upsamples`.
+#[derive(Debug, Clone)]
+enum UpLevel {
+    Flat(StageBlock),
+    Nested(WanUpResidualBlock),
+}
+
+impl UpLevel {
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache, first_chunk: bool) -> Result<Tensor> {
+        match self {
+            UpLevel::Flat(block) => block.forward(x, cache),
+            UpLevel::Nested(stage) => stage.forward(x, cache, first_chunk),
+        }
+    }
+}
+
+/// `middle = Sequential(ResidualBlock, AttentionBlock, ResidualBlock)`.
+#[derive(Debug, Clone)]
+struct WanMiddleBlock {
+    first: WanResidualBlock,
+    attention: WanAttentionBlock,
+    second: WanResidualBlock,
+}
+
+impl WanMiddleBlock {
+    fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+        Ok(Self {
+            first: WanResidualBlock::load(vb.pp("0"), dim, dim)?,
+            attention: WanAttentionBlock::load(vb.pp("1"), dim)?,
+            second: WanResidualBlock::load(vb.pp("2"), dim, dim)?,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        let h = self.first.forward(x, cache)?;
+        // The attention block holds no causal conv, so it consumes no cache
+        // slot (`vae.py:344-347`).
+        let h = self.attention.forward(&h)?;
+        self.second.forward(&h, cache)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// encoder / decoder
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct WanEncoder3d {
+    conv1: WanCausalConv3d,
+    downsamples: Vec<DownLevel>,
+    middle: WanMiddleBlock,
+    head_norm: WanRmsNorm,
+    head_conv: WanCausalConv3d,
+}
+
+impl WanEncoder3d {
+    fn load(vb: VarBuilder, cfg: &WanVaeConfig) -> Result<Self> {
+        let dims = cfg.encoder_dims();
+        let stages = cfg.dim_mult.len();
+        let conv1 = WanCausalConv3d::load(
+            vb.pp("conv1"),
+            cfg.encoder_in_channels(),
+            dims[0],
+            (3, 3, 3),
+            (1, 1, 1),
+            (1, 1, 1),
+        )?;
+
+        let vb_down = vb.pp("downsamples");
+        let mut downsamples = Vec::new();
+        match cfg.variant {
+            WanVaeVariant::V2_1 => {
+                // Flat `nn.Sequential` (`vae.py:291-306`), so the checkpoint
+                // index counts every residual block *and* every resample.
+                let mut flat = 0usize;
+                for i in 0..stages {
+                    let mut in_dim = dims[i];
+                    let out_dim = dims[i + 1];
+                    for _ in 0..cfg.num_res_blocks {
+                        downsamples.push(DownLevel::Flat(StageBlock::Residual(
+                            WanResidualBlock::load(vb_down.pp(flat.to_string()), in_dim, out_dim)?,
+                        )));
+                        flat += 1;
+                        in_dim = out_dim;
+                    }
+                    if i != stages - 1 {
+                        let mode = if cfg.temporal_downsample[i] {
+                            ResampleMode::Downsample3d
+                        } else {
+                            ResampleMode::Downsample2d
+                        };
+                        downsamples.push(DownLevel::Flat(StageBlock::Resample(WanResample::load(
+                            vb_down.pp(flat.to_string()),
+                            out_dim,
+                            mode,
+                            cfg.variant,
+                        )?)));
+                        flat += 1;
+                    }
+                }
+            }
+            WanVaeVariant::V2_2 => {
+                // One `Down_ResidualBlock` per stage, its own Sequential nested
+                // under `downsamples.{stage}.downsamples.{j}`
+                // (`vae2_2.py:529-543`).
+                for i in 0..stages {
+                    let stage_vb = vb_down.pp(i.to_string()).pp("downsamples");
+                    let mut in_dim = dims[i];
+                    let out_dim = dims[i + 1];
+                    let down_flag = i != stages - 1;
+                    let temporal = cfg.temporal_downsample.get(i).copied().unwrap_or(false);
+                    let avg_shortcut = AvgDown3d::new(
+                        dims[i],
+                        out_dim,
+                        if temporal { 2 } else { 1 },
+                        if down_flag { 2 } else { 1 },
+                    )?;
+                    let mut blocks = Vec::new();
+                    for j in 0..cfg.num_res_blocks {
+                        blocks.push(StageBlock::Residual(WanResidualBlock::load(
+                            stage_vb.pp(j.to_string()),
+                            in_dim,
+                            out_dim,
+                        )?));
+                        in_dim = out_dim;
+                    }
+                    if down_flag {
+                        let mode = if temporal {
+                            ResampleMode::Downsample3d
+                        } else {
+                            ResampleMode::Downsample2d
+                        };
+                        blocks.push(StageBlock::Resample(WanResample::load(
+                            stage_vb.pp(cfg.num_res_blocks.to_string()),
+                            out_dim,
+                            mode,
+                            cfg.variant,
+                        )?));
+                    }
+                    downsamples.push(DownLevel::Nested(WanDownResidualBlock {
+                        avg_shortcut,
+                        blocks,
+                    }));
+                }
+            }
+        }
+
+        let bottleneck = dims[stages];
+        Ok(Self {
+            conv1,
+            downsamples,
+            middle: WanMiddleBlock::load(vb.pp("middle"), bottleneck)?,
+            head_norm: WanRmsNorm::load(vb.pp("head").pp("0"), bottleneck, false)?,
+            head_conv: WanCausalConv3d::load(
+                vb.pp("head").pp("2"),
+                bottleneck,
+                cfg.z_dim * 2,
+                (3, 3, 3),
+                (1, 1, 1),
+                (1, 1, 1),
+            )?,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
+        let mut h = cache.causal_conv(&self.conv1, x)?;
+        for level in &self.downsamples {
+            h = level.forward(&h, cache)?;
+        }
+        h = self.middle.forward(&h, cache)?;
+        h = ops::silu(&self.head_norm.forward(&h)?)?;
+        cache.causal_conv(&self.head_conv, &h)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WanDecoder3d {
+    conv1: WanCausalConv3d,
+    middle: WanMiddleBlock,
+    upsamples: Vec<UpLevel>,
+    head_norm: WanRmsNorm,
+    head_conv: WanCausalConv3d,
+}
+
+impl WanDecoder3d {
+    fn load(vb: VarBuilder, cfg: &WanVaeConfig) -> Result<Self> {
+        let dims = cfg.decoder_dims();
+        let stages = cfg.dim_mult.len();
+        let temporal_upsample = cfg.temporal_upsample();
+        let conv1 = WanCausalConv3d::load(
+            vb.pp("conv1"),
+            cfg.z_dim,
+            dims[0],
+            (3, 3, 3),
+            (1, 1, 1),
+            (1, 1, 1),
+        )?;
+        let middle = WanMiddleBlock::load(vb.pp("middle"), dims[0])?;
+
+        let vb_up = vb.pp("upsamples");
+        let mut upsamples = Vec::new();
+        match cfg.variant {
+            WanVaeVariant::V2_1 => {
+                let mut flat = 0usize;
+                for i in 0..stages {
+                    // Every stage after the first is fed by an upsample whose
+                    // conv halved the width (`vae.py:403-404`).
+                    let mut in_dim = if i >= 1 { dims[i] / 2 } else { dims[i] };
+                    let out_dim = dims[i + 1];
+                    for _ in 0..(cfg.num_res_blocks + 1) {
+                        upsamples.push(UpLevel::Flat(StageBlock::Residual(
+                            WanResidualBlock::load(vb_up.pp(flat.to_string()), in_dim, out_dim)?,
+                        )));
+                        flat += 1;
+                        in_dim = out_dim;
+                    }
+                    if i != stages - 1 {
+                        let mode = if temporal_upsample[i] {
+                            ResampleMode::Upsample3d
+                        } else {
+                            ResampleMode::Upsample2d
+                        };
+                        upsamples.push(UpLevel::Flat(StageBlock::Resample(WanResample::load(
+                            vb_up.pp(flat.to_string()),
+                            out_dim,
+                            mode,
+                            cfg.variant,
+                        )?)));
+                        flat += 1;
+                    }
+                }
+            }
+            WanVaeVariant::V2_2 => {
+                for i in 0..stages {
+                    let stage_vb = vb_up.pp(i.to_string()).pp("upsamples");
+                    let mut in_dim = dims[i];
+                    let out_dim = dims[i + 1];
+                    let up_flag = i != stages - 1;
+                    let temporal = temporal_upsample.get(i).copied().unwrap_or(false);
+                    let avg_shortcut = if up_flag {
+                        Some(DupUp3d::new(
+                            dims[i],
+                            out_dim,
+                            if temporal { 2 } else { 1 },
+                            2,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let mut blocks = Vec::new();
+                    for j in 0..(cfg.num_res_blocks + 1) {
+                        blocks.push(StageBlock::Residual(WanResidualBlock::load(
+                            stage_vb.pp(j.to_string()),
+                            in_dim,
+                            out_dim,
+                        )?));
+                        in_dim = out_dim;
+                    }
+                    if up_flag {
+                        let mode = if temporal {
+                            ResampleMode::Upsample3d
+                        } else {
+                            ResampleMode::Upsample2d
+                        };
+                        blocks.push(StageBlock::Resample(WanResample::load(
+                            stage_vb.pp((cfg.num_res_blocks + 1).to_string()),
+                            out_dim,
+                            mode,
+                            cfg.variant,
+                        )?));
+                    }
+                    upsamples.push(UpLevel::Nested(WanUpResidualBlock {
+                        avg_shortcut,
+                        blocks,
+                    }));
+                }
+            }
+        }
+
+        let out_dim = dims[stages];
+        Ok(Self {
+            conv1,
+            middle,
+            upsamples,
+            head_norm: WanRmsNorm::load(vb.pp("head").pp("0"), out_dim, false)?,
+            head_conv: WanCausalConv3d::load(
+                vb.pp("head").pp("2"),
+                out_dim,
+                cfg.encoder_in_channels(),
+                (3, 3, 3),
+                (1, 1, 1),
+                (1, 1, 1),
+            )?,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, cache: &mut FeatCache, first_chunk: bool) -> Result<Tensor> {
+        let mut h = cache.causal_conv(&self.conv1, x)?;
+        h = self.middle.forward(&h, cache)?;
+        for level in &self.upsamples {
+            h = level.forward(&h, cache, first_chunk)?;
+        }
+        h = ops::silu(&self.head_norm.forward(&h)?)?;
+        cache.causal_conv(&self.head_conv, &h)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// public surface
+// ---------------------------------------------------------------------------
+
+/// The full Wan video VAE. Both directions stream internally with a fresh
+/// feature cache per call, so `&self` is enough and calls are independent.
+#[derive(Debug, Clone)]
+pub(crate) struct WanVideoVae {
+    config: WanVaeConfig,
+    encoder: WanEncoder3d,
+    decoder: WanDecoder3d,
+    /// 1x1x1 over the encoder head's `2*z` output (`vae.py:505`).
+    conv1: WanCausalConv3d,
+    /// 1x1x1 over the incoming latent (`vae.py:506`).
+    conv2: WanCausalConv3d,
+    latent_mean: Tensor,
+    latent_std: Tensor,
+    dtype: DType,
+}
+
+impl WanVideoVae {
+    /// Load from a Comfy-Org repack (`wan_2.1_vae.safetensors`,
+    /// `wan2.2_vae.safetensors`), which keeps the original checkpoint's bare
+    /// `encoder.*` / `decoder.*` / `conv1` / `conv2` layout. A full-checkpoint
+    /// `vae.` prefix is also accepted.
+    pub fn from_safetensors(
+        path: &Path,
+        config: WanVaeConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], dtype, device)? };
+        let vb = if vb.contains_tensor("encoder.conv1.weight") {
+            vb
+        } else {
+            vb.pp("vae")
+        };
+        Self::from_var_builder(vb, config, device, dtype)
+    }
+
+    /// Build from a `VarBuilder` rooted at the checkpoint layout. Split out so
+    /// tests can materialize tiny models from a `VarMap`.
+    pub fn from_var_builder(
+        vb: VarBuilder,
+        config: WanVaeConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        config.validate()?;
+        let encoder = WanEncoder3d::load(vb.pp("encoder"), &config)?;
+        let decoder = WanDecoder3d::load(vb.pp("decoder"), &config)?;
+        let conv1 = WanCausalConv3d::load(
+            vb.pp("conv1"),
+            config.z_dim * 2,
+            config.z_dim * 2,
+            (1, 1, 1),
+            (1, 1, 1),
+            (0, 0, 0),
+        )?;
+        let conv2 = WanCausalConv3d::load(
+            vb.pp("conv2"),
+            config.z_dim,
+            config.z_dim,
+            (1, 1, 1),
+            (1, 1, 1),
+            (0, 0, 0),
+        )?;
+        let stat = |values: &[f32]| -> Result<Tensor> {
+            Tensor::from_slice(values, (1, values.len(), 1, 1, 1), device)?.to_dtype(dtype)
+        };
+        let latent_mean = stat(&config.latent_mean)?;
+        let latent_std = stat(&config.latent_std)?;
+        Ok(Self {
+            config,
+            encoder,
+            decoder,
+            conv1,
+            conv2,
+            latent_mean,
+            latent_std,
+            dtype,
+        })
+    }
+
+    pub fn config(&self) -> &WanVaeConfig {
+        &self.config
+    }
+
+    /// Encode `[b, 3, f, h, w]` pixels in `[-1, 1]` to normalized latents
+    /// `[b, z, (f - 1) / 4 + 1, h / 8, w / 8]` (`/16` for 2.2).
+    ///
+    /// Returns the posterior *mean*; upstream never samples here
+    /// (`vae.py:535-542`).
+    pub fn encode(&self, video: &Tensor) -> Result<Tensor> {
+        let (_, channels, frames, height, width) = video.dims5()?;
+        if channels != 3 {
+            bail!("Wan VAE: encode expects 3 pixel channels, got {channels}");
+        }
+        if frames == 0 || (frames - 1) % ENCODE_CHUNK_FRAMES != 0 {
+            // Upstream would silently drop the ragged tail
+            // (`vae.py:520-534`); refuse instead.
+            bail!(
+                "Wan VAE: encode needs 4k+1 frames so the causal chunking covers the clip, got \
+                 {frames}"
+            );
+        }
+        let spatial = self.config.spatial_compression();
+        if height % spatial != 0 || width % spatial != 0 {
+            bail!("Wan VAE: {height}x{width} is not a multiple of the {spatial}x spatial stride");
+        }
+
+        let x = patchify(&video.to_dtype(self.dtype)?, self.config.patch_size)?;
+        let out = self.encode_stream(&x, &encode_chunk_plan(frames))?;
+        let mu = self
+            .conv1
+            .forward(&out, None)?
+            .narrow(1, 0, self.config.z_dim)?;
+        mu.broadcast_sub(&self.latent_mean)?
+            .broadcast_div(&self.latent_std)
+    }
+
+    /// Decode normalized latents back to `[b, 3, f, h, w]` pixels in `[-1, 1]`.
+    pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
+        let channels = latents.dim(1)?;
+        if channels != self.config.z_dim {
+            bail!(
+                "Wan VAE: decode expects {} latent channels, got {channels}",
+                self.config.z_dim
+            );
+        }
+        let z = latents
+            .to_dtype(self.dtype)?
+            .broadcast_mul(&self.latent_std)?
+            .broadcast_add(&self.latent_mean)?;
+        let x = self.conv2.forward(&z, None)?;
+        let plan = vec![1usize; x.dim(2)?];
+        let out = self.decode_stream(&x, &plan)?;
+        unpatchify(&out, self.config.patch_size)?.clamp(-1.0, 1.0)
+    }
+
+    /// Walk the encoder over an explicit chunk plan. Causal padding makes the
+    /// result independent of how the clip is split (after the mandatory leading
+    /// single frame), which is what the equivalence tests assert.
+    fn encode_stream(&self, patched: &Tensor, plan: &[usize]) -> Result<Tensor> {
+        let mut cache = FeatCache::new();
+        let mut outputs = Vec::with_capacity(plan.len());
+        let mut start = 0usize;
+        for len in plan {
+            cache.rewind();
+            let chunk = patched.narrow(2, start, *len)?.contiguous()?;
+            outputs.push(self.encoder.forward(&chunk, &mut cache)?);
+            start += len;
+        }
+        cat_all(&outputs, 2)
+    }
+
+    /// Walk the decoder over an explicit latent-frame plan. The first entry
+    /// must be 1: the leading chunk is what primes every `upsample3d` slot with
+    /// its `Rep` sentinel and, for 2.2, what sets `first_chunk`.
+    fn decode_stream(&self, x: &Tensor, plan: &[usize]) -> Result<Tensor> {
+        if plan.first() != Some(&1) {
+            bail!("Wan VAE: the first decode chunk must be exactly one latent frame");
+        }
+        let mut cache = FeatCache::new();
+        let mut outputs = Vec::with_capacity(plan.len());
+        let mut start = 0usize;
+        for (i, len) in plan.iter().enumerate() {
+            cache.rewind();
+            let chunk = x.narrow(2, start, *len)?.contiguous()?;
+            outputs.push(self.decoder.forward(&chunk, &mut cache, i == 0)?);
+            start += len;
+        }
+        cat_all(&outputs, 2)
+    }
+}
+
+/// `1, 4, 4, 4, ...` over the pixel frame axis (`vae.py:519-534`).
+fn encode_chunk_plan(frames: usize) -> Vec<usize> {
+    let mut plan = vec![1usize];
+    let mut remaining = frames - 1;
+    while remaining > 0 {
+        let len = remaining.min(ENCODE_CHUNK_FRAMES);
+        plan.push(len);
+        remaining -= len;
+    }
+    plan
+}
+
+/// `patchify` (`vae2_2.py:280-296`): `b c f (h q) (w r) -> b (c r q) f h w`.
+fn patchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
+    if patch_size == 1 {
+        return x.contiguous();
+    }
+    let (b, c, f, h, w) = x.dims5()?;
+    let p = patch_size;
+    x.reshape(&[b, c, f, h / p, p, w / p, p])?
+        .permute(vec![0, 1, 6, 4, 2, 3, 5])?
+        .contiguous()?
+        .reshape(&[b, c * p * p, f, h / p, w / p])
+}
+
+/// `unpatchify` (`vae2_2.py:299-313`): `b (c r q) f h w -> b c f (h q) (w r)`.
+fn unpatchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
+    if patch_size == 1 {
+        return x.contiguous();
+    }
+    let (b, c_packed, f, h, w) = x.dims5()?;
+    let p = patch_size;
+    let c = c_packed / (p * p);
+    x.reshape(&[b, c, p, p, f, h, w])?
+        .permute(vec![0, 1, 4, 5, 3, 6, 2])?
+        .contiguous()?
+        .reshape(&[b, c, f, h * p, w * p])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_nn::VarMap;
+
+    fn build(config: WanVaeConfig) -> (WanVideoVae, VarMap) {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let vae = WanVideoVae::from_var_builder(vb, config, &device, DType::F32)
+            .expect("tiny Wan VAE constructs from a VarMap");
+        (vae, varmap)
+    }
+
+    fn randn(shape: &[usize]) -> Tensor {
+        Tensor::randn(0f32, 1f32, shape, &Device::Cpu).expect("random tensor")
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        assert_eq!(a.dims(), b.dims(), "shape mismatch");
+        a.sub(b)
+            .expect("subtract")
+            .abs()
+            .expect("abs")
+            .flatten_all()
+            .expect("flatten")
+            .max(0)
+            .expect("max")
+            .to_scalar::<f32>()
+            .expect("scalar")
+    }
+
+    /// The `Conv2d`-slice decomposition must equal a literal 3-D convolution
+    /// with left-only temporal padding. Computed here by hand from the raw
+    /// weight so nothing about the port is assumed.
+    #[test]
+    fn causal_conv3d_matches_a_hand_rolled_reference() {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let (cin, cout, kt, kh, kw) = (2usize, 3usize, 3usize, 3usize, 3usize);
+        let conv = WanCausalConv3d::load(vb.pp("c"), cin, cout, (kt, kh, kw), (1, 1, 1), (1, 1, 1))
+            .unwrap();
+
+        let (t, h, w) = (4usize, 5usize, 4usize);
+        let x = randn(&[1, cin, t, h, w]);
+        let got = conv.forward(&x, None).unwrap();
+        assert_eq!(got.dims(), &[1, cout, t, h, w]);
+
+        let (weight, bias) = {
+            let data = varmap.data().lock().unwrap();
+            (
+                data["c.weight"]
+                    .as_tensor()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+                data["c.bias"].as_tensor().to_vec1::<f32>().unwrap(),
+            )
+        };
+        let xv = x.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let at_x = |c: usize, ti: isize, hi: isize, wi: isize| -> f32 {
+            // Zero outside the clip: two frames in front (2 * padding[0]) and
+            // one row/column of spatial zero padding on each side.
+            if ti < 0 || hi < 0 || wi < 0 || hi >= h as isize || wi >= w as isize {
+                return 0.0;
+            }
+            if ti >= t as isize {
+                return 0.0;
+            }
+            xv[((c * t + ti as usize) * h + hi as usize) * w + wi as usize]
+        };
+        let at_wt = |co: usize, ci: usize, kti: usize, khi: usize, kwi: usize| -> f32 {
+            weight[(((co * cin + ci) * kt + kti) * kh + khi) * kw + kwi]
+        };
+
+        let mut want = vec![0f32; cout * t * h * w];
+        for co in 0..cout {
+            for to in 0..t {
+                for ho in 0..h {
+                    for wo in 0..w {
+                        let mut acc = bias[co];
+                        for ci in 0..cin {
+                            for kti in 0..kt {
+                                // Two frames of causal front padding shift the
+                                // window back by (kt - 1).
+                                let ti = to as isize + kti as isize - (kt as isize - 1);
+                                for khi in 0..kh {
+                                    let hi = ho as isize + khi as isize - 1;
+                                    for kwi in 0..kw {
+                                        let wi = wo as isize + kwi as isize - 1;
+                                        acc += at_wt(co, ci, kti, khi, kwi) * at_x(ci, ti, hi, wi);
+                                    }
+                                }
+                            }
+                        }
+                        want[((co * t + to) * h + ho) * w + wo] = acc;
+                    }
+                }
+            }
+        }
+        let want = Tensor::from_vec(want, (1, cout, t, h, w), &device).unwrap();
+        assert!(max_abs_diff(&got, &want) < 1e-4);
+    }
+
+    /// A causal conv fed the previous chunk's tail must equal one pass over the
+    /// whole zero-padded clip.
+    #[test]
+    fn causal_conv3d_streaming_equals_one_pass() {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let conv =
+            WanCausalConv3d::load(vb.pp("c"), 2, 2, (3, 3, 3), (1, 1, 1), (1, 1, 1)).unwrap();
+
+        let x = randn(&[1, 2, 7, 4, 4]);
+        let full = conv.forward(&x, None).unwrap();
+
+        let head = x.narrow(2, 0, 1).unwrap().contiguous().unwrap();
+        let tail = x.narrow(2, 1, 6).unwrap().contiguous().unwrap();
+        let a = conv.forward(&head, None).unwrap();
+        let b = conv
+            .forward(&tail, Some(&tail_frames(&head, CACHE_T).unwrap()))
+            .unwrap();
+        let streamed = Tensor::cat(&[&a, &b], 2).unwrap();
+        assert!(max_abs_diff(&full, &streamed) < 1e-5);
+    }
+
+    /// `RMS_norm` must be `x / ||x||_2 * sqrt(dim) * gamma` over the channel
+    /// axis.
+    #[test]
+    fn rms_norm_matches_l2_normalize() {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let norm = WanRmsNorm::load(vb.pp("n"), 4, false).unwrap();
+
+        let x = Tensor::from_vec(
+            vec![3f32, 4.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            (1, 4, 2, 1, 1),
+            &device,
+        )
+        .unwrap();
+        let got = norm
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        // gamma initializes to 1, so the expectation is x / ||x|| * 2.
+        // Position 0 has channels (3, 0, 1, 1) -> norm sqrt(11);
+        // position 1 has (4, 0, 1, 1) -> norm sqrt(18).
+        let s = 2.0f32;
+        let n0 = 11f32.sqrt();
+        let n1 = 18f32.sqrt();
+        let want = [
+            3.0 / n0 * s,
+            4.0 / n1 * s,
+            0.0,
+            0.0,
+            1.0 / n0 * s,
+            1.0 / n1 * s,
+            1.0 / n0 * s,
+            1.0 / n1 * s,
+        ];
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert!((g - w).abs() < 1e-5, "got {g}, want {w}");
+        }
+    }
+
+    /// Encoding is a causal stream, so how the clip is chunked past the leading
+    /// single frame must not change the latents. A wrong cache index, a wrong
+    /// tail length, or a wrong padding reduction all break this.
+    #[test]
+    fn wan21_encode_is_chunk_plan_invariant() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let video = randn(&[1, 3, 13, 32, 32]);
+        let patched = patchify(&video, 1).unwrap();
+        let reference = vae.encode_stream(&patched, &[1, 4, 4, 4]).unwrap();
+        assert_eq!(reference.dims(), &[1, 8, 4, 4, 4]);
+        for plan in [vec![1, 8, 4], vec![1, 4, 8], vec![1, 12]] {
+            let other = vae.encode_stream(&patched, &plan).unwrap();
+            assert!(
+                max_abs_diff(&reference, &other) < 1e-4,
+                "encode plan {plan:?} diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn wan21_decode_is_chunk_plan_invariant() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let latents = randn(&[1, 4, 4, 4, 4]);
+        let x = vae.conv2.forward(&latents, None).unwrap();
+        let reference = vae.decode_stream(&x, &[1, 1, 1, 1]).unwrap();
+        assert_eq!(reference.dims(), &[1, 3, 13, 32, 32]);
+        for plan in [vec![1, 3], vec![1, 2, 1], vec![1, 1, 2]] {
+            let other = vae.decode_stream(&x, &plan).unwrap();
+            assert!(
+                max_abs_diff(&reference, &other) < 1e-4,
+                "decode plan {plan:?} diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn wan22_encode_is_chunk_plan_invariant() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_2());
+        let video = randn(&[1, 3, 13, 32, 32]);
+        let patched = patchify(&video, 2).unwrap();
+        let reference = vae.encode_stream(&patched, &[1, 4, 4, 4]).unwrap();
+        assert_eq!(reference.dims(), &[1, 8, 4, 2, 2]);
+        for plan in [vec![1, 8, 4], vec![1, 4, 8], vec![1, 12]] {
+            let other = vae.encode_stream(&patched, &plan).unwrap();
+            assert!(
+                max_abs_diff(&reference, &other) < 1e-4,
+                "encode plan {plan:?} diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn wan22_decode_is_chunk_plan_invariant() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_2());
+        let latents = randn(&[1, 4, 4, 2, 2]);
+        let x = vae.conv2.forward(&latents, None).unwrap();
+        let reference = vae.decode_stream(&x, &[1, 1, 1, 1]).unwrap();
+        // Still packed: 12 channels that unpatchify to 3 at 2x the spatial size.
+        assert_eq!(reference.dims(), &[1, 12, 13, 16, 16]);
+        for plan in [vec![1, 3], vec![1, 2, 1], vec![1, 1, 2]] {
+            let other = vae.decode_stream(&x, &plan).unwrap();
+            assert!(
+                max_abs_diff(&reference, &other) < 1e-4,
+                "decode plan {plan:?} diverged"
+            );
+        }
+    }
+
+    /// Causality means a prefix of the clip encodes to a prefix of the latents.
+    #[test]
+    fn wan21_encode_prefix_is_stable() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let long = randn(&[1, 3, 13, 32, 32]);
+        let short = long.narrow(2, 0, 5).unwrap().contiguous().unwrap();
+        let z_long = vae.encode(&long).unwrap();
+        let z_short = vae.encode(&short).unwrap();
+        assert_eq!(z_long.dims(), &[1, 4, 4, 4, 4]);
+        assert_eq!(z_short.dims(), &[1, 4, 2, 4, 4]);
+        let prefix = z_long.narrow(2, 0, 2).unwrap().contiguous().unwrap();
+        assert!(max_abs_diff(&prefix, &z_short) < 1e-4);
+    }
+
+    #[test]
+    fn wan21_shape_contract() {
+        let cfg = WanVaeConfig::tiny_v2_1();
+        assert_eq!(cfg.temporal_compression(), 4);
+        assert_eq!(cfg.spatial_compression(), 8);
+        let (vae, _map) = build(cfg);
+        for frames in [1usize, 5, 9, 13] {
+            let video = randn(&[1, 3, frames, 32, 24]);
+            let latents = vae.encode(&video).unwrap();
+            assert_eq!(latents.dims(), &[1, 4, (frames - 1) / 4 + 1, 4, 3]);
+            let decoded = vae.decode(&latents).unwrap();
+            assert_eq!(decoded.dims(), &[1, 3, frames, 32, 24]);
+        }
+    }
+
+    #[test]
+    fn wan22_shape_contract() {
+        let cfg = WanVaeConfig::tiny_v2_2();
+        assert_eq!(cfg.temporal_compression(), 4);
+        assert_eq!(cfg.spatial_compression(), 16);
+        assert_eq!(cfg.encoder_in_channels(), 12);
+        let (vae, _map) = build(cfg);
+        for frames in [1usize, 5, 9] {
+            let video = randn(&[1, 3, frames, 32, 16]);
+            let latents = vae.encode(&video).unwrap();
+            assert_eq!(latents.dims(), &[1, 4, (frames - 1) / 4 + 1, 2, 1]);
+            let decoded = vae.decode(&latents).unwrap();
+            assert_eq!(decoded.dims(), &[1, 3, frames, 32, 16]);
+        }
+    }
+
+    /// Decode output must be clamped into the pixel range upstream promises.
+    #[test]
+    fn decode_clamps_to_unit_range() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let latents = randn(&[1, 4, 3, 4, 4]).affine(50.0, 0.0).unwrap();
+        let decoded = vae.decode(&latents).unwrap();
+        let flat = decoded.flatten_all().unwrap();
+        let lo = flat.min(0).unwrap().to_scalar::<f32>().unwrap();
+        let hi = flat.max(0).unwrap().to_scalar::<f32>().unwrap();
+        assert!(lo >= -1.0 && hi <= 1.0, "range [{lo}, {hi}]");
+    }
+
+    /// `patchify`/`unpatchify` must be exact inverses, including the channel
+    /// ordering upstream's einops pattern implies.
+    #[test]
+    fn patchify_round_trips() {
+        let x = randn(&[2, 3, 5, 8, 6]);
+        let packed = patchify(&x, 2).unwrap();
+        assert_eq!(packed.dims(), &[2, 12, 5, 4, 3]);
+        let back = unpatchify(&packed, 2).unwrap();
+        assert_eq!(max_abs_diff(&x, &back), 0.0);
+    }
+
+    /// A round trip cannot tell one packing convention from another, so pin the
+    /// exact channel order `b c f (h q) (w r) -> b (c r q) f h w` implies:
+    /// channel `r * 2 + q` carries the sub-pixel at row `q`, column `r`.
+    #[test]
+    fn patchify_channel_order_matches_einops() {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![0f32, 1.0, 2.0, 3.0], (1, 1, 1, 2, 2), &device).unwrap();
+        let packed = patchify(&x, 2).unwrap();
+        assert_eq!(packed.dims(), &[1, 4, 1, 1, 1]);
+        assert_eq!(
+            packed.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.0, 2.0, 1.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn encode_chunk_plan_matches_upstream() {
+        assert_eq!(encode_chunk_plan(1), vec![1]);
+        assert_eq!(encode_chunk_plan(5), vec![1, 4]);
+        assert_eq!(encode_chunk_plan(13), vec![1, 4, 4, 4]);
+        // The shipped 81-frame default: one leading frame then twenty quads.
+        let mut want = vec![1usize];
+        want.extend(std::iter::repeat_n(4, 20));
+        assert_eq!(encode_chunk_plan(81), want);
+    }
+
+    #[test]
+    fn encode_rejects_ragged_frame_counts() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let err = vae
+            .encode(&randn(&[1, 3, 6, 32, 32]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("4k+1"), "unexpected error: {err}");
+    }
+
+    /// The per-channel latent tables are hardcoded, so pin their length and
+    /// their endpoints against the Python sources.
+    #[test]
+    fn latent_statistics_match_upstream() {
+        let v21 = WanVaeConfig::v2_1();
+        assert_eq!(v21.latent_mean.len(), 16);
+        assert_eq!(v21.latent_std.len(), 16);
+        // vae.py:629-636
+        assert_eq!(v21.latent_mean[0], -0.7571);
+        assert_eq!(v21.latent_mean[15], -0.2921);
+        assert_eq!(v21.latent_std[0], 2.8184);
+        assert_eq!(v21.latent_std[15], 1.916);
+
+        let v22 = WanVaeConfig::v2_2();
+        assert_eq!(v22.latent_mean.len(), 48);
+        assert_eq!(v22.latent_std.len(), 48);
+        // vae2_2.py:904-1011
+        assert_eq!(v22.latent_mean[0], -0.2289);
+        assert_eq!(v22.latent_mean[47], -0.0667);
+        assert_eq!(v22.latent_std[0], 0.4765);
+        assert_eq!(v22.latent_std[47], 0.7744);
+        // A middle sample from each table, so a truncated paste is caught.
+        assert_eq!(v22.latent_mean[19], 0.5109);
+        assert_eq!(v22.latent_std[39], 1.6887);
+    }
+
+    /// The production stage widths and the parameter-free 2.2 shortcut factors
+    /// are pure config arithmetic; pin them rather than materializing 127 M
+    /// (2.1) and 705 M (2.2) parameters in a unit test.
+    #[test]
+    fn production_stage_widths_match_upstream() {
+        let v21 = WanVaeConfig::v2_1();
+        v21.validate().unwrap();
+        assert_eq!(v21.encoder_dims(), vec![96, 96, 192, 384, 384]);
+        assert_eq!(v21.decoder_dims(), vec![384, 384, 384, 192, 96]);
+        assert_eq!(v21.temporal_upsample(), vec![true, true, false]);
+        assert_eq!(v21.encoder_in_channels(), 3);
+        assert_eq!(v21.temporal_compression(), 4);
+        assert_eq!(v21.spatial_compression(), 8);
+
+        let v22 = WanVaeConfig::v2_2();
+        v22.validate().unwrap();
+        assert_eq!(v22.encoder_dims(), vec![160, 160, 320, 640, 640]);
+        assert_eq!(v22.decoder_dims(), vec![1024, 1024, 1024, 512, 256]);
+        assert_eq!(v22.encoder_in_channels(), 12);
+        assert_eq!(v22.temporal_compression(), 4);
+        assert_eq!(v22.spatial_compression(), 16);
+
+        // Every 2.2 stage's shortcut must satisfy upstream's divisibility
+        // asserts at production widths (vae2_2.py:332, 387).
+        let enc = v22.encoder_dims();
+        let temporal = &v22.temporal_downsample;
+        for i in 0..v22.dim_mult.len() {
+            let down = i != v22.dim_mult.len() - 1;
+            AvgDown3d::new(
+                enc[i],
+                enc[i + 1],
+                if temporal.get(i).copied().unwrap_or(false) {
+                    2
+                } else {
+                    1
+                },
+                if down { 2 } else { 1 },
+            )
+            .unwrap();
+        }
+        let dec = v22.decoder_dims();
+        let up = v22.temporal_upsample();
+        for i in 0..(v22.dim_mult.len() - 1) {
+            DupUp3d::new(dec[i], dec[i + 1], if up[i] { 2 } else { 1 }, 2).unwrap();
+        }
+    }
+
+    fn key_set(varmap: &VarMap) -> Vec<String> {
+        let mut keys: Vec<String> = varmap.data().lock().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    /// The tiny configs carry the production topology, so the `VarMap` they
+    /// materialize is the production checkpoint key layout. Pin the indices
+    /// that the flat/nested Sequential arithmetic produces.
+    #[test]
+    fn wan21_key_layout_matches_the_checkpoint() {
+        let (_vae, varmap) = build(WanVaeConfig::tiny_v2_1());
+        let keys = key_set(&varmap);
+        let has = |k: &str| keys.iter().any(|s| s == k);
+        for key in [
+            "conv1.weight",
+            "conv2.weight",
+            "encoder.conv1.weight",
+            // stage 0: two residual blocks then a spatial-only downsample
+            "encoder.downsamples.0.residual.0.gamma",
+            "encoder.downsamples.0.residual.2.weight",
+            "encoder.downsamples.0.residual.3.gamma",
+            "encoder.downsamples.0.residual.6.weight",
+            "encoder.downsamples.2.resample.1.weight",
+            // stage 1 widens, so its first block owns a shortcut
+            "encoder.downsamples.3.shortcut.weight",
+            "encoder.downsamples.5.time_conv.weight",
+            "encoder.downsamples.8.time_conv.weight",
+            "encoder.downsamples.10.residual.6.weight",
+            "encoder.middle.0.residual.0.gamma",
+            "encoder.middle.1.to_qkv.weight",
+            "encoder.middle.1.proj.bias",
+            "encoder.middle.2.residual.6.weight",
+            "encoder.head.0.gamma",
+            "encoder.head.2.weight",
+            "decoder.conv1.weight",
+            "decoder.middle.1.norm.gamma",
+            "decoder.upsamples.3.time_conv.weight",
+            "decoder.upsamples.7.time_conv.weight",
+            "decoder.upsamples.11.resample.1.weight",
+            "decoder.upsamples.14.residual.6.weight",
+            "decoder.head.2.bias",
+        ] {
+            assert!(has(key), "missing {key}");
+        }
+        // Flat indices stop at 10 / 14 (vae.py:291-306, 400-416).
+        assert!(!has("encoder.downsamples.11.residual.0.gamma"));
+        assert!(!has("decoder.upsamples.15.residual.0.gamma"));
+        // upsample2d has no time conv.
+        assert!(!has("decoder.upsamples.11.time_conv.weight"));
+        // The 2.2 nesting must not appear.
+        assert!(!keys.iter().any(|k| k.contains("downsamples.0.downsamples")));
+    }
+
+    #[test]
+    fn wan22_key_layout_matches_the_checkpoint() {
+        let (_vae, varmap) = build(WanVaeConfig::tiny_v2_2());
+        let keys = key_set(&varmap);
+        let has = |k: &str| keys.iter().any(|s| s == k);
+        for key in [
+            "encoder.downsamples.0.downsamples.0.residual.2.weight",
+            "encoder.downsamples.0.downsamples.2.resample.1.weight",
+            "encoder.downsamples.1.downsamples.2.time_conv.weight",
+            "encoder.downsamples.2.downsamples.2.time_conv.weight",
+            "encoder.downsamples.3.downsamples.1.residual.6.weight",
+            // ComfyUI's 2.2 detection probe (report-comfyui.md 1.3).
+            "decoder.upsamples.0.upsamples.0.residual.2.weight",
+            "decoder.upsamples.0.upsamples.3.time_conv.weight",
+            "decoder.upsamples.1.upsamples.3.time_conv.weight",
+            "decoder.upsamples.2.upsamples.3.resample.1.weight",
+            "decoder.upsamples.3.upsamples.2.residual.6.weight",
+            "decoder.middle.0.residual.0.gamma",
+        ] {
+            assert!(has(key), "missing {key}");
+        }
+        // The last decoder stage has no resample and no shortcut parameters.
+        assert!(!has("decoder.upsamples.3.upsamples.3.resample.1.weight"));
+        // Spatial-only stage 0 has no time conv.
+        assert!(!has("encoder.downsamples.0.downsamples.2.time_conv.weight"));
+        // The average-pool / duplicate shortcuts are parameter-free.
+        assert!(!keys.iter().any(|k| k.contains("avg_shortcut")));
+    }
+
+    #[test]
+    fn config_validation_rejects_mismatched_tables() {
+        let mut cfg = WanVaeConfig::v2_1();
+        cfg.latent_std.pop();
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = WanVaeConfig::v2_1();
+        cfg.temporal_downsample = vec![true, true];
+        assert!(cfg.validate().is_err());
+    }
+}

@@ -16,7 +16,10 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .setup(|_app| {
             #[cfg(target_os = "ios")]
-            _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
+            {
+                media::cleanup_stale_animation_exports();
+                _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -28,6 +31,7 @@ pub fn run() {
             media::copy_image_to_clipboard,
             media::save_image_to_photos,
             media::save_video_to_photos,
+            media::share_exported_animation,
         ])
         .run(app_context())
         .expect("error while running mold-mobile");

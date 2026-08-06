@@ -96,7 +96,7 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 
 **Quirks:**
 
-- **LTX-2 is CUDA-only** for real generation (CPU correctness-only, Metal unsupported). Has its own MP4+AAC media pipeline. Camera-control LoRA presets currently resolve only Lightricks LTX-2 19B (LTX-2.3 needs explicit .safetensors).
+- **LTX-2 is performance-qualified on CUDA** with CPU and Metal correctness-only. Metal checkpoint-backed UAT remains pending. The family has its own MP4+AAC media pipeline. Camera-control LoRA presets currently resolve only Lightricks LTX-2 19B (LTX-2.3 needs explicit .safetensors).
 - Video families: `ltx-video`, `ltx2`. Audio: `ltx2` only (mp4 only).
 - **LTX-2 img2video:** `source_image` is staged as frame-0 conditioning with `strength`; the desktop shows the single source well (no mask — pad-repaint isn't offered, a mask-dependent fit policy coerces to crop-fill). Plain `ltx-video` has no img2vid path in the engine, so the well never renders for it.
 - Z-Image has a bespoke quantized transformer (GGUF naming differs from BF16).

@@ -36,6 +36,11 @@ pub mod sdxl;
 pub mod shared_pool;
 pub mod upscaler;
 pub mod vae_tiling;
+// The T2V engine is live, but the family ships in layers: the 14B/A14B and
+// I2V configs, the diffusers-format rename table, and several accessors are
+// built and tested here ahead of the layers that consume them.
+#[allow(dead_code)]
+pub(crate) mod wan;
 pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;

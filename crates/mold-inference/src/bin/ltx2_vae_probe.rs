@@ -86,10 +86,7 @@ fn roundtrip_vae(
     }
 
     let device = create_device(&ProgressReporter::default())?;
-    if device.is_metal() {
-        bail!("Metal is not supported for native LTX-2 VAE probing");
-    }
-    let dtype = if device.is_cuda() {
+    let dtype = if device.is_cuda() || device.is_metal() {
         DType::BF16
     } else {
         DType::F32

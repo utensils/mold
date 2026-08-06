@@ -1,6 +1,7 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::expand::ExpandSettings;
@@ -695,6 +696,8 @@ fn default_model() -> String {
 fn default_models_dir() -> String {
     if let Ok(home) = std::env::var("MOLD_HOME") {
         format!("{home}/models")
+    } else if let Some(home) = Config::saved_mold_dir() {
+        home.join("models").to_string_lossy().into_owned()
     } else {
         "~/.mold/models".to_string()
     }
@@ -870,17 +873,111 @@ impl Config {
         fresh
     }
 
-    /// The root mold directory.
-    /// Resolution: `MOLD_HOME` env var → `~/.mold/` → `./.mold` (if HOME unset).
+    /// The root Mold directory shared by every local surface.
+    /// Resolution: `MOLD_HOME` env var → saved bootstrap selection →
+    /// `~/.mold/` → `./.mold` (if HOME unset).
     pub fn mold_dir() -> Option<PathBuf> {
         if let Ok(home) = std::env::var("MOLD_HOME") {
             return Some(PathBuf::from(home));
+        }
+        if let Some(home) = Self::saved_mold_dir() {
+            return Some(home);
         }
         Some(
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".mold"),
         )
+    }
+
+    /// Location of the tiny bootstrap pointer used to find a non-default
+    /// Mold home before config.toml or mold.db can be opened.
+    pub fn mold_home_pointer_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("MOLD_HOME_POINTER_PATH") {
+            return Some(PathBuf::from(path));
+        }
+        dirs::config_dir().map(|dir| dir.join("mold").join("home"))
+    }
+
+    pub fn saved_mold_dir() -> Option<PathBuf> {
+        Self::read_saved_mold_dir().ok().flatten()
+    }
+
+    /// Read the bootstrap pointer without treating corruption like absence.
+    /// `NotFound` means the default root is still authoritative; every other
+    /// malformed/unreadable state must fail closed at process startup.
+    pub fn read_saved_mold_dir() -> std::io::Result<Option<PathBuf>> {
+        let Some(pointer) = Self::mold_home_pointer_path() else {
+            return Ok(None);
+        };
+        let raw = match std::fs::read_to_string(&pointer) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is empty", pointer.display()),
+            ));
+        }
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} does not contain an absolute path", pointer.display()),
+            ));
+        }
+        Ok(Some(path))
+    }
+
+    /// Refuse to initialize a missing saved root. A saved selection is only
+    /// written after Desktop has created or validated it, so disappearance
+    /// means an external drive is unavailable rather than a new root that a
+    /// CLI/server process should recreate. Explicit `MOLD_HOME` remains
+    /// allowed to name a directory that the invoking process intends to make.
+    pub fn ensure_saved_mold_dir_available() -> anyhow::Result<()> {
+        if std::env::var_os("MOLD_HOME").is_some() {
+            return Ok(());
+        }
+        let saved = Self::read_saved_mold_dir().with_context(|| {
+            "the saved Mold home selection is unreadable or invalid; repair it in Mold Desktop Settings"
+        })?;
+        if let Some(path) = saved.filter(|path| !path.is_dir()) {
+            anyhow::bail!(
+                "the saved Mold home at {} is unavailable; reconnect its drive or change the location in Mold Desktop Settings",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Atomically save the shared local Mold-home selection. Environment
+    /// `MOLD_HOME` remains the highest-precedence, process-scoped override.
+    pub fn save_mold_dir(path: &Path) -> std::io::Result<()> {
+        let pointer = Self::mold_home_pointer_path().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not resolve the Mold home bootstrap location",
+            )
+        })?;
+        if let Some(parent) = pointer.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temp = pointer.with_extension("tmp");
+        std::fs::write(&temp, path.to_string_lossy().as_bytes())?;
+        match std::fs::rename(&temp, &pointer) {
+            Ok(()) => Ok(()),
+            Err(_error) if pointer.exists() => {
+                // Windows does not replace an existing destination with
+                // rename. The temp file is already complete, so use the
+                // narrow non-atomic fallback required by that platform.
+                std::fs::remove_file(&pointer)?;
+                std::fs::rename(temp, pointer)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn config_path() -> Option<PathBuf> {
@@ -897,6 +994,10 @@ impl Config {
         }
         if let Ok(env_dir) = std::env::var("MOLD_MODELS_DIR") {
             PathBuf::from(env_dir)
+        } else if self.models_dir == "~/.mold/models" {
+            Self::mold_dir()
+                .unwrap_or_else(|| PathBuf::from(".mold"))
+                .join("models")
         } else {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
             let expanded = self.models_dir.replace("~", &home.to_string_lossy());

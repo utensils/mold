@@ -10,8 +10,8 @@
 //! without recompiling Rust — resolution order:
 //!
 //! 1. `$MOLD_WEB_DIR` env var (filesystem)
-//! 2. `$XDG_DATA_HOME/mold/web` (or `~/.local/share/mold/web`)
-//! 3. `~/.mold/web`
+//! 2. Shared Mold home (`$MOLD_HOME/web` or the saved desktop selection)
+//! 3. `$XDG_DATA_HOME/mold/web` (or `~/.local/share/mold/web`)
 //! 4. `<binary dir>/web` or `<binary>/../share/mold/web` (legacy layouts)
 //! 5. `./web/dist` (for `cargo run` in the repo)
 //! 6. **Embedded bundle** baked in at compile time (always present).
@@ -218,6 +218,10 @@ fn resolve_web_dir() -> Option<PathBuf> {
         candidates.push(PathBuf::from(dir));
     }
 
+    if let Some(home) = mold_core::Config::mold_dir() {
+        candidates.push(home.join("web"));
+    }
+
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         candidates.push(PathBuf::from(xdg).join("mold").join("web"));
     } else if let Ok(home) = std::env::var("HOME") {
@@ -228,10 +232,6 @@ fn resolve_web_dir() -> Option<PathBuf> {
                 .join("mold")
                 .join("web"),
         );
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join(".mold").join("web"));
     }
 
     if let Ok(exe) = std::env::current_exe() {

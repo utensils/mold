@@ -28,6 +28,7 @@ features today?
 | Qwen-Image-Edit | No      | No         | Yes              |
 | LTX Video       | Not yet | Not yet    | Not yet          |
 | LTX-2           | Yes     | No         | Keyframes        |
+| Wan Video       | Not yet | Not yet    | Not yet          |
 
 ## Control and Adapters
 
@@ -44,6 +45,7 @@ features today?
 | Z-Image         | z-image         | No         | Yes  |
 | Wuerstchen v2   | wuerstchen      | No         | No   |
 | LTX Video       | ltx-video       | No         | No   |
+| Wan Video       | wan             | No         | No   |
 
 ## Prompt Conditioning
 
@@ -66,6 +68,7 @@ features today?
 | ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ------- | ----------- |
 | LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
 | LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes     | Yes         |
+| Wan Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
 | All others | No      | No      | No        | No       | No     | No      | No      | No          |
 
 LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 defaults to MP4 so
@@ -81,23 +84,23 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA | Metal       | CPU              |
-| --------------- | ---- | ----------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes  | Yes         | Yes (slow)       |
-| SDXL / SD 1.5   | Yes  | Yes         | Yes              |
-| SD 3.5          | Yes  | Yes         | Yes              |
-| Z-Image         | Yes  | Yes         | Yes              |
-| Wuerstchen v2   | Yes  | Yes         | Yes              |
-| Qwen-Image      | Yes  | Yes         | Yes              |
-| Qwen-Image-Edit | Yes  | Yes         | Yes              |
-| LTX Video       | Yes  | Yes         | Yes              |
-| **LTX-2**       | Yes  | **Not yet** | Correctness-only |
+| Family          | CUDA | Metal            | CPU              |
+| --------------- | ---- | ---------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes  | Yes              | Yes (slow)       |
+| SDXL / SD 1.5   | Yes  | Yes              | Yes              |
+| SD 3.5          | Yes  | Yes              | Yes              |
+| Z-Image         | Yes  | Yes              | Yes              |
+| Wuerstchen v2   | Yes  | Yes              | Yes              |
+| Qwen-Image      | Yes  | Yes              | Yes              |
+| Qwen-Image-Edit | Yes  | Yes              | Yes              |
+| LTX Video       | Yes  | Yes              | Yes              |
+| **LTX-2**       | Yes  | Correctness-only | Correctness-only |
 
-::: warning LTX-2 is CUDA-only for real generation
-LTX-2 / LTX-2.3 does **not** support Apple Metal in this release. The native
-runtime runs on CUDA; the CPU path exists for correctness-oriented coverage and
-can be extremely slow. On macOS you can still use every other family through
-the Metal backend — LTX-2 is the only family that is currently CUDA-gated.
+::: warning LTX-2 Metal qualification
+LTX-2 / LTX-2.3 uses a correctness-oriented Apple Metal path with BF16
+transformer compute, fused attention, streamed FP8 widening, and temporal VAE
+chunks. Checkpoint-backed end-to-end Metal qualification remains pending; CUDA
+is still the performance-qualified backend.
 :::
 
 ## Native app surfaces
@@ -164,8 +167,8 @@ complete workflows.
   the requested Auto/explicit choice. Server, CLI, and TUI saves preserve that
   response in gallery metadata, and web, desktop, iPhone, and TUI Library
   details show it when present; older and non-LTX prints simply omit the row.
-- LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
-  not supported in this release.
+- LTX-2 is performance-qualified on CUDA; CPU and Metal are correctness-only,
+  with checkpoint-backed Metal UAT still pending.
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).

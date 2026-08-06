@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::Manager;
 
 use crate::connection::{normalize_host_url, Conn, ConnectionInfo};
+use crate::mold_home::{self, MoldHomeInfo};
 use crate::server;
 use crate::settings::{self, AppSettings, SavedHost};
 
@@ -121,6 +122,82 @@ pub async fn get_connection(state: tauri::State<'_, AppState>) -> Result<Connect
     Ok(state.conn.lock().await.info(&state.local_api_key))
 }
 
+#[tauri::command]
+pub fn get_mold_home() -> Result<MoldHomeInfo, String> {
+    mold_home::info().map_err(|error| format!("{error:#}"))
+}
+
+/// Validate and optionally copy the complete shared Mold root, persist the
+/// desktop bootstrap override, then relaunch so every subsystem binds to the
+/// same directory from process start.
+#[tauri::command]
+pub async fn change_mold_home(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+    path: String,
+    migrate: bool,
+) -> Result<(), String> {
+    if std::env::var_os("MOLD_HOME").is_some() {
+        return Err(
+            "MOLD_HOME is set by the environment. Unset it before changing the saved Mold home."
+                .to_string(),
+        );
+    }
+    let source = mold_core::Config::mold_dir()
+        .ok_or_else(|| "Could not resolve the current Mold home directory.".to_string())?;
+    let destination = mold_home::prepare_destination(&path).map_err(|e| format!("{e:#}"))?;
+    let source_for_preflight = source.clone();
+    let destination_for_preflight = destination.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        mold_home::preflight(&source_for_preflight, &destination_for_preflight, migrate)
+    })
+    .await
+    .map_err(|e| format!("Mold home validation was interrupted: {e}"))?
+    .map_err(|e| format!("{e:#}"))?;
+
+    let (was_embedded, was_off) = {
+        let local = state.local_server.lock().await;
+        match &*local {
+            LocalServer::External { .. } => {
+                return Err("This Mac is using a separately run mold serve process. Stop it before changing Mold home so its database and gallery cannot be copied while live.".into());
+            }
+            LocalServer::Embedded(_) => (true, false),
+            LocalServer::Off => (false, true),
+        }
+    };
+    if was_off {
+        let well_known = format!("http://127.0.0.1:{}", server::WELL_KNOWN_PORT);
+        if server::is_mold_server(&well_known).await {
+            return Err("A separately run mold serve process is active on this Mac. Stop it before changing Mold home so its database and gallery cannot be copied while live.".into());
+        }
+    }
+    stop_local_engine_inner(&state, Duration::from_secs(10)).await?;
+
+    let source_for_copy = source.clone();
+    let destination_for_copy = destination.clone();
+    let copy_result = tauri::async_runtime::spawn_blocking(move || {
+        mold_home::validate_or_migrate(&source_for_copy, &destination_for_copy, migrate)
+    })
+    .await;
+    let change_result = match copy_result {
+        Ok(Ok(())) => mold_home::persist_destination(&destination),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(anyhow::anyhow!("Mold home change was interrupted: {error}")),
+    };
+    if let Err(error) = change_result {
+        if was_embedded {
+            if let Err(restart_error) = ensure_local_server_inner(&app, &state, &store).await {
+                return Err(format!(
+                    "{error:#}\n\nThis Mac could not restart on the original Mold home: {restart_error}"
+                ));
+            }
+        }
+        return Err(format!("{error:#}"));
+    }
+    app.restart();
+}
+
 /// Where this Mac writes gallery files. Remote engine selection does not
 /// hide the local gallery from the user.
 #[tauri::command]
@@ -204,6 +281,12 @@ async fn ensure_local_server_inner(
         return Ok(local.info(&state.local_api_key).expect("external info"));
     }
 
+    if let Err(error) = mold_core::Config::ensure_saved_mold_dir_available() {
+        return Err(format!(
+            "{error:#}. Reconnect its drive or choose another folder in Settings before starting This Mac."
+        ));
+    }
+
     let config = mold_core::Config::load_or_default();
     let models_dir = config.resolved_models_dir();
     let gpu_selection = config.gpu_selection();
@@ -236,11 +319,11 @@ async fn ensure_local_server_inner(
         .await
         {
             return Err(
-                "The engine didn't become healthy and did not stop; gallery authority remains with the server. Check the logs (~/.mold/logs)."
+                "The engine didn't become healthy and did not stop; gallery authority remains with the server. Check the Mold home logs folder."
                     .into(),
             );
         }
-        return Err("The engine didn't start. Check the logs (~/.mold/logs).".into());
+        return Err("The engine didn't start. Check the Mold home logs folder.".into());
     }
     *local = LocalServer::Embedded(engine);
     Ok(local.info(&state.local_api_key).expect("embedded info"))

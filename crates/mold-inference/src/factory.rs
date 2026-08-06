@@ -13,6 +13,7 @@ use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
 use crate::shared_pool::SharedPool;
+use crate::wan::pipeline::WanEngine;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
@@ -608,6 +609,15 @@ pub fn create_engine_with_frozen_config(
                 )))
             }
         }
+        // Wan resolves its geometry from the checkpoint's own tensor shapes at
+        // load time, so one arm serves 2.1 and 2.2 and any future width.
+        "wan" => Ok(boxed_inference_engine(WanEngine::new(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            shared_pool,
+        ))),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
@@ -616,7 +626,7 @@ pub fn create_engine_with_frozen_config(
             shared_pool,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wan, wuerstchen",
             other,
             model_name
         ),
@@ -811,6 +821,7 @@ mod tests {
             "qwen-image-edit",
             "ltx-video",
             "ltx2",
+            "wan",
             "wuerstchen",
         ] {
             let mut config = Config::default();
@@ -925,6 +936,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("ltx-video"));
         assert!(message.contains("ltx2"));
+        assert!(message.contains("wan"));
     }
 
     #[test]

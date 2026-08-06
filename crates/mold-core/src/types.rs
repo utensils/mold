@@ -196,7 +196,7 @@ impl ExpandTask {
     /// Backward-compatible policy for callers that only send a family.
     pub fn for_family(family: &str) -> Self {
         match family.trim().to_ascii_lowercase().as_str() {
-            "ltx2" | "ltx-2" | "ltx-video" => Self::TextToVideo,
+            "ltx2" | "ltx-2" | "ltx-video" | "wan" | "wan2.1" | "wan2.2" => Self::TextToVideo,
             _ => Self::TextToImage,
         }
     }
@@ -242,7 +242,7 @@ impl ExpandTask {
     ) -> Self {
         if !matches!(
             family.trim().to_ascii_lowercase().as_str(),
-            "ltx2" | "ltx-2" | "ltx-video"
+            "ltx2" | "ltx-2" | "ltx-video" | "wan" | "wan2.1" | "wan2.2"
         ) {
             return Self::TextToImage;
         }
@@ -797,7 +797,7 @@ impl GenerateRequest {
             return self;
         }
         self.output_format = Some(match family {
-            Some("ltx2") | Some("ltx-video") => OutputFormat::Mp4,
+            Some("ltx2") | Some("ltx-video") | Some("wan") => OutputFormat::Mp4,
             _ => OutputFormat::Png,
         });
         self

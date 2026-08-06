@@ -37,7 +37,11 @@ export function expansionTaskForRequest(
   request: ExpansionTaskRequest,
 ): ExpandTask {
   const normalized = (family ?? "").trim().toLowerCase();
-  if (!["ltx2", "ltx-2", "ltx-video"].includes(normalized)) {
+  if (
+    !["ltx2", "ltx-2", "ltx-video", "wan", "wan2.1", "wan2.2"].includes(
+      normalized,
+    )
+  ) {
     return "text-to-image";
   }
   switch (request.pipeline) {

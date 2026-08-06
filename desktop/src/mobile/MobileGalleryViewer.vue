@@ -16,7 +16,6 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   downloadVideoExport,
-  shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -353,19 +352,29 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
   exportBusy.value = true;
   exportError.value = "";
   try {
-    const response = await apiFetchTo(props.target, videoExportPath(props.item.filename), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(options),
-    });
-    const blob = await response.blob();
+    const path = videoExportPath(props.item.filename);
     const filename = videoExportFilename(props.item.filename, options.format);
-    const result = isNativeIOSRuntime()
-      ? await shareVideoExport(blob, filename)
-      : (downloadVideoExport(blob, filename), "saved");
-    if (result === "cancelled") return;
+    const native = isNativeIOSRuntime();
+    if (native) {
+      const outcome = await invoke<"shared" | "cancelled">("share_exported_animation", {
+        url: `${props.target.baseUrl}${path}`,
+        apiKey: props.target.apiKey,
+        request: options,
+        filename,
+        reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(options)}`,
+      });
+      if (outcome === "cancelled") return;
+    } else {
+      const response = await apiFetchTo(props.target, path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(options),
+      });
+      const blob = await response.blob();
+      downloadVideoExport(blob, filename);
+    }
     exportOpen.value = false;
-    actionStatus.value = result === "shared" ? "Export ready to share" : "Video exported";
+    actionStatus.value = native ? "Export ready to share" : "Video exported";
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {

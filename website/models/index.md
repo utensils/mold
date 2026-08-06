@@ -160,13 +160,15 @@ for more options.
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
 | [LTX-2](/models/ltx2)                 | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
+| [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE              |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.
 
-::: warning Backend compatibility
-All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. **LTX-2 /
-LTX-2.3 is CUDA-only for real generation** — its CPU path exists for
-correctness-oriented coverage and can be extremely slow, and Metal is not
-supported for this family in this release.
+::: warning Backend qualification
+All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
+LTX-2.3 is performance-qualified on CUDA; its CPU and Apple Metal paths are
+correctness-oriented and can be extremely slow. Metal checkpoint-backed UAT
+remains pending. Wan is CUDA-only for real generation; its CPU path is
+correctness-oriented and Metal is unsupported.
 :::

@@ -138,6 +138,7 @@ export default defineConfig({
             { text: 'Qwen-Image', link: '/models/qwen-image' },
             { text: 'LTX-2', link: '/models/ltx2' },
             { text: 'LTX Video', link: '/models/ltx-video' },
+            { text: 'Wan Video', link: '/models/wan' },
             { text: 'Upscalers', link: '/models/upscalers' },
           ],
         },
