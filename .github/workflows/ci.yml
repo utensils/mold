@@ -37,6 +37,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       gpu: ${{ steps.filter.outputs.gpu }}
+      flash: ${{ steps.filter.outputs.flash }}
       website: ${{ steps.filter.outputs.website }}
       web: ${{ steps.filter.outputs.web }}
       nix: ${{ steps.filter.outputs.nix }}
@@ -69,6 +70,17 @@ jobs:
               - 'crates/mold-inference/**'
               - 'crates/mold-server/**'
               - 'crates/mold-tui/**'
+              - '.github/workflows/ci.yml'
+            # `flash-attn` compiles 53 FlashAttention v2 kernels through nvcc,
+            # so it gets a narrower filter than `gpu` rather than running on
+            # every GPU-adjacent change. Cargo.lock is deliberately absent: a
+            # lockfile bump would invalidate the kernel cache and cost ~an hour
+            # on the release PR, and the main-branch run below already covers
+            # dependency drift post-merge.
+            flash:
+              - 'crates/mold-inference/src/attention.rs'
+              - 'crates/mold-inference/Cargo.toml'
+              - 'crates/mold-cli/Cargo.toml'
               - '.github/workflows/ci.yml'
             website:
               - 'website/**'
@@ -298,6 +310,73 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check CUDA forced-local and server paths
         run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns
+
+  # The `flash-attn` feature was decorative for months (issue #598) precisely
+  # because nothing ever compiled it: the cfg-stripped fallback in
+  # `attention.rs` rotted into dead code that only a `--features flash-attn`
+  # build can see. This job is the gate that keeps that from recurring.
+  #
+  # It runs on main (keeping the kernel cache warm — GitHub evicts caches after
+  # 7 idle days, and a cold run costs ~an hour) and on PRs that touch the
+  # attention dispatcher or the feature wiring.
+  flash-attn-check:
+    name: FlashAttention feature typecheck
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.flash == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    env:
+      CUDA_COMPUTE_CAP: "89"
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+      # cudaforge defaults to half the available cores; on a 4-vCPU hosted
+      # runner that halves an already long kernel build. 3 keeps peak nvcc
+      # memory clear of the 16 GiB ceiling.
+      CUDAFORGE_THREADS: "3"
+      # Pin the kernel OUT_DIR so the cache survives a cargo metadata-hash
+      # change. cudaforge decides freshness by content hash, not mtime, so a
+      # restored directory short-circuits the whole 53-kernel build.
+      CANDLE_FLASH_ATTN_BUILD_DIR: ${{ github.workspace }}/.flash-attn-kernels
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+      - name: Install Rust build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: root-ci-flash-sm89
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # MUST NOT share `workspace-cuda-sm89`: the key carries no feature
+          # component, so the two jobs would collide and only one save would win.
+          shared-key: workspace-cuda-flash-sm89
+          # rust-cache covers CARGO_HOME and target/ only. The kernel objects
+          # and cudaforge's CUTLASS checkout live outside both, and re-cloning
+          # CUTLASS from github.com on every run is an unretried network
+          # dependency inside a build script.
+          cache-directories: |
+            ~/.cudaforge
+            ${{ github.workspace }}/.flash-attn-kernels
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `--all-targets` on `-p mold-ai` would NOT compile mold-inference's test
+      # module (it builds that crate as a plain dependency lib), so the gate has
+      # to name the inference crate directly to cover its `#[cfg(test)]` code.
+      # `dev-bins` pulls in `attention_bench`, which no other gate compiles.
+      - name: Clippy the flash-attn inference lib, tests and dev-bins
+        run: cargo clippy -p mold-ai-inference --features flash-attn,dev-bins --all-targets -- -D warnings
+      - name: Clippy the flash-attn binary wiring
+        run: cargo clippy -p mold-ai --features flash-attn --all-targets -- -D warnings
 
   metal-check:
     name: Metal forced-local typecheck
