@@ -66,6 +66,32 @@ fn manifest_fallback_names() -> Vec<String> {
         .collect()
 }
 
+fn defaults_from_manifest(
+    manifest: &mold_core::manifest::ModelManifest,
+) -> mold_core::ModelDefaults {
+    mold_core::ModelDefaults {
+        default_steps: manifest.defaults.steps,
+        default_guidance: manifest.defaults.guidance,
+        default_width: manifest.defaults.width,
+        default_height: manifest.defaults.height,
+        description: manifest.description.clone(),
+        default_frames: manifest.defaults.frames,
+        default_fps: manifest.defaults.fps,
+        max_frames: mold_core::validation::max_frames_for_family_at_fps(
+            &manifest.family,
+            manifest.defaults.fps.unwrap_or(24),
+        ),
+        max_runtime_seconds: mold_core::validation::max_runtime_seconds_for_family(
+            &manifest.family,
+        ),
+        max_frames_absolute: mold_core::validation::max_frames_absolute_for_family(
+            &manifest.family,
+        ),
+        frame_step: mold_core::validation::frame_step_for_family(&manifest.family),
+        ..Default::default()
+    }
+}
+
 /// Autocomplete function for model names. Reads the cached model list without
 /// blocking on network I/O; the cache is refreshed by a background task so the
 /// hot path here is always a quick `RwLock::read`. Falls back to the static
@@ -177,6 +203,99 @@ pub struct BuildParams<'a> {
     pub retake_range: Option<TimeRange>,
 }
 
+/// Resolve Discord's human-readable duration sugar onto the selected model's
+/// concrete frame grid. Explicit `frames` remains the advanced escape hatch;
+/// it is deliberately not normalized here so the server can reject mistakes
+/// rather than silently changing a precise request.
+fn resolve_video_timing(
+    family: Option<&str>,
+    defaults: Option<&mold_core::ModelDefaults>,
+    frames: Option<u32>,
+    fps: Option<u32>,
+    duration_seconds: Option<f64>,
+) -> Result<(Option<u32>, Option<u32>), String> {
+    if frames.is_some() && duration_seconds.is_some() {
+        return Err("Use either duration or frames, not both.".to_string());
+    }
+
+    let Some(family) = family.and_then(video_family) else {
+        if duration_seconds.is_some() {
+            return Err("Duration is only available for a recognized video model.".to_string());
+        }
+        return Ok((frames, fps));
+    };
+
+    let resolved_fps = fps
+        .or_else(|| defaults.and_then(|value| value.default_fps))
+        .unwrap_or(24);
+    if resolved_fps == 0 {
+        return Err("Video FPS must be at least 1.".to_string());
+    }
+
+    let Some(seconds) = duration_seconds else {
+        let resolved_frames = frames
+            .or_else(|| defaults.and_then(|value| value.default_frames))
+            .unwrap_or(25);
+        return Ok((Some(resolved_frames), Some(resolved_fps)));
+    };
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("Duration must be a positive number of seconds.".to_string());
+    }
+
+    let max_runtime_seconds = defaults
+        .and_then(|value| value.max_runtime_seconds)
+        .or_else(|| mold_core::validation::max_runtime_seconds_for_family(family));
+    if max_runtime_seconds.is_some_and(|maximum| seconds > f64::from(maximum)) {
+        return Err(format!(
+            "Duration for this model cannot exceed {} seconds.",
+            max_runtime_seconds.unwrap_or_default()
+        ));
+    }
+
+    let step = defaults
+        .and_then(|value| value.frame_step)
+        .or_else(|| mold_core::validation::frame_step_for_family(family))
+        .unwrap_or(1)
+        .max(1);
+    let requested_frames = seconds * f64::from(resolved_fps);
+    if requested_frames > f64::from(u32::MAX) {
+        return Err("Duration is too large.".to_string());
+    }
+    let frames_on_grid = ((((requested_frames.max(1.0) - 1.0) / f64::from(step)).round() as u32)
+        .saturating_mul(step))
+    .saturating_add(1);
+
+    let max_frames = if let Some(runtime_seconds) = max_runtime_seconds {
+        let raw = runtime_seconds
+            .saturating_mul(resolved_fps)
+            .saturating_add(4);
+        raw.min(
+            defaults
+                .and_then(|value| value.max_frames_absolute)
+                .or_else(|| mold_core::validation::max_frames_absolute_for_family(family))
+                .unwrap_or(u32::MAX),
+        )
+    } else {
+        defaults
+            .and_then(|value| value.max_frames)
+            .or_else(|| mold_core::validation::max_frames_for_family_at_fps(family, resolved_fps))
+            .unwrap_or(u32::MAX)
+    };
+    let max_frames_on_grid = if max_frames <= 1 {
+        1
+    } else {
+        max_frames - ((max_frames - 1) % step)
+    };
+    if frames_on_grid > max_frames_on_grid {
+        return Err(format!(
+            "Duration is too long for this model at {resolved_fps} FPS (maximum {:.1} seconds).",
+            f64::from(max_frames_on_grid) / f64::from(resolved_fps)
+        ));
+    }
+
+    Ok((Some(frames_on_grid), Some(resolved_fps)))
+}
+
 /// Build a `GenerateRequest` from slash command parameters, honoring model
 /// defaults and routing video families to an appropriate container.
 pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
@@ -203,15 +322,25 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         OutputFormat::Png
     };
 
-    // Default to a sensible frame count for video models when the user didn't
-    // specify one: 25 frames (8n+1) ≈ 1 second at 24 FPS.
+    // Match the model defaults advertised by `/api/models`, which are also the
+    // defaults used by Studio. Older servers fall back to the legacy values.
     let frames = if is_video_family {
-        Some(params.frames.unwrap_or(25))
+        Some(
+            params
+                .frames
+                .or_else(|| params.defaults.and_then(|value| value.default_frames))
+                .unwrap_or(25),
+        )
     } else {
         params.frames
     };
     let fps = if is_video_family {
-        Some(params.fps.unwrap_or(24))
+        Some(
+            params
+                .fps
+                .or_else(|| params.defaults.and_then(|value| value.default_fps))
+                .unwrap_or(24),
+        )
     } else {
         params.fps
     };
@@ -504,7 +633,9 @@ pub async fn generate(
     #[description = "Number of video frames (video models only; LTX prefers 8n+1)"] frames: Option<
         u32,
     >,
-    #[description = "Video FPS (video models only, default 24)"] fps: Option<u32>,
+    #[description = "Video duration in seconds (simple alternative to frames; video models only)"]
+    duration: Option<f64>,
+    #[description = "Video FPS (video models only; uses the model default)"] fps: Option<u32>,
     #[description = "Image width in pixels"] width: Option<u32>,
     #[description = "Image height in pixels"] height: Option<u32>,
     #[description = "Number of inference steps"] steps: Option<u32>,
@@ -619,8 +750,29 @@ pub async fn generate(
 
     // Look up model defaults + family from cache
     let model_entry = models.iter().find(|m| m.info.name == model_name);
-    let model_defaults = model_entry.map(|m| &m.defaults);
-    let family = model_entry.map(|m| m.info.family.as_str());
+    // Autocomplete deliberately falls back to built-in manifests while the
+    // server cache is cold. Preserve duration/default behavior in that window
+    // instead of presenting a model that the timing resolver cannot identify.
+    let fallback_manifest = model_entry
+        .is_none()
+        .then(|| mold_core::manifest::find_manifest(&model_name))
+        .flatten();
+    let fallback_defaults = fallback_manifest.map(defaults_from_manifest);
+    let model_defaults = model_entry
+        .map(|m| &m.defaults)
+        .or(fallback_defaults.as_ref());
+    let family = model_entry
+        .map(|m| m.info.family.as_str())
+        .or_else(|| fallback_manifest.map(|manifest| manifest.family.as_str()));
+    let (resolved_frames, resolved_fps) =
+        match resolve_video_timing(family, model_defaults, frames, fps, duration) {
+            Ok(timing) => timing,
+            Err(message) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(ctx, &message).await?;
+                return Ok(());
+            }
+        };
 
     // Fetch source image bytes if an attachment was supplied. This also covers
     // the LTX-2 image-to-video path — the server forwards a source_image to
@@ -693,7 +845,7 @@ pub async fn generate(
             (width, height)
         };
 
-    let requested_frames = frames.unwrap_or(25);
+    let requested_frames = resolved_frames.unwrap_or(25);
     let keyframes =
         (!keyframe_images.is_empty()).then(|| build_keyframes(keyframe_images, requested_frames));
     let retake_range = match (retake_start, retake_end) {
@@ -715,8 +867,8 @@ pub async fn generate(
         negative_prompt: negative_prompt.as_deref(),
         defaults: model_defaults,
         source_image: source_bytes,
-        frames,
-        fps,
+        frames: resolved_frames,
+        fps: resolved_fps,
         strength,
         video_format,
         audio,
@@ -873,6 +1025,68 @@ mod tests {
         });
         assert_eq!(req.output_format, Some(OutputFormat::Mp4));
         assert_eq!(req.frames, Some(25));
+    }
+
+    #[test]
+    fn video_uses_studio_model_defaults() {
+        let defs = mold_core::ModelDefaults {
+            default_frames: Some(97),
+            default_fps: Some(24),
+            ..defaults()
+        };
+        let req = build_generate_request(BuildParams {
+            family: Some("ltx2"),
+            defaults: Some(&defs),
+            ..base_params("panning over a beach", "ltx-2-19b-distilled:fp8")
+        });
+        assert_eq!(req.frames, Some(97));
+        assert_eq!(req.fps, Some(24));
+    }
+
+    #[test]
+    fn duration_uses_model_fps_and_snaps_to_the_frame_grid() {
+        let defs = mold_core::ModelDefaults {
+            default_frames: Some(97),
+            default_fps: Some(24),
+            max_runtime_seconds: Some(20),
+            max_frames_absolute: Some(604),
+            frame_step: Some(8),
+            ..defaults()
+        };
+
+        assert_eq!(
+            resolve_video_timing(Some("ltx2"), Some(&defs), None, None, Some(10.0)).unwrap(),
+            (Some(241), Some(24))
+        );
+        assert_eq!(
+            resolve_video_timing(Some("ltx2"), Some(&defs), None, None, Some(20.0)).unwrap(),
+            (Some(481), Some(24))
+        );
+        assert_eq!(
+            resolve_video_timing(Some("ltx2"), Some(&defs), None, Some(30), Some(10.0)).unwrap(),
+            (Some(297), Some(30))
+        );
+    }
+
+    #[test]
+    fn duration_rejects_ambiguous_or_unsupported_requests() {
+        assert!(resolve_video_timing(Some("ltx2"), None, Some(97), None, Some(4.0)).is_err());
+        assert!(resolve_video_timing(Some("ltx2"), None, None, None, Some(20.1)).is_err());
+        assert!(resolve_video_timing(Some("flux"), None, None, None, Some(4.0)).is_err());
+        assert!(resolve_video_timing(Some("ltx2"), None, None, None, Some(0.0)).is_err());
+    }
+
+    #[test]
+    fn duration_respects_flat_family_frame_caps() {
+        let defs = mold_core::ModelDefaults {
+            default_fps: Some(30),
+            max_frames: Some(257),
+            frame_step: Some(8),
+            ..defaults()
+        };
+        let message = resolve_video_timing(Some("ltx-video"), Some(&defs), None, None, Some(10.0))
+            .unwrap_err();
+        assert!(message.contains("maximum 8.6 seconds"));
     }
 
     #[test]
@@ -1054,8 +1268,12 @@ mod tests {
     #[test]
     fn generate_stays_within_discords_option_limit() {
         let command = generate();
-        assert_eq!(command.parameters.len(), 22);
+        assert_eq!(command.parameters.len(), 23);
         assert!(command.parameters.len() <= 25);
+        assert!(command
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == "duration"));
     }
 
     #[test]
@@ -1223,6 +1441,17 @@ mod tests {
             !names.iter().any(|n| n.starts_with("qwen3-expand")),
             "utility models should be excluded from suggestions: {names:?}"
         );
+    }
+
+    #[test]
+    fn manifest_fallback_preserves_video_timing_contract() {
+        let manifest = mold_core::manifest::find_manifest("ltx-2-19b-distilled:fp8").unwrap();
+        let defaults = defaults_from_manifest(manifest);
+        assert_eq!(manifest.family, "ltx2");
+        assert_eq!(defaults.default_frames, Some(97));
+        assert_eq!(defaults.default_fps, Some(24));
+        assert_eq!(defaults.max_runtime_seconds, Some(20));
+        assert_eq!(defaults.frame_step, Some(8));
     }
 
     // --- Header sniff ---

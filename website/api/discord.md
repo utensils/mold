@@ -54,6 +54,13 @@ can also attach a `source_image` for img2img on regular models, or as the first
 frame for LTX-2 image-to-video. When the rendered MP4 exceeds Discord's upload
 ceiling the bot falls back to the always-bundled GIF preview.
 
+Use `duration` for the simple path: `duration: 10` uses the selected model's
+default FPS and converts ten seconds to the nearest valid LTX frame count. The
+bot uses the same advertised frame/FPS defaults as Studio, supports LTX-2's
+full 20-second single-generation limit, and rejects a duration beyond the
+selected model's limit. The existing `frames` and `fps` options remain
+available for precise control; `duration` and `frames` cannot be combined.
+
 LTX-2 specialized modes are selected by their attachments: `audio_file` starts
 audio-to-video, `source_video` plus both retake times regenerates that time
 range, and two or three `keyframe_*` images are spaced across the requested
@@ -70,15 +77,15 @@ link to the exact print in the server's Library instead of failing Discord
 upload.
 :::
 
-::: warning `prompt` is now optional — re-register the commands
+::: warning Re-register after command-option changes
 `/generate`'s `prompt` option changed from required to optional so an LTX-2
 image-to-video run can be submitted with just a `source_image`. Discord caches
-command definitions, so **the bot's slash commands must be re-registered** before
-users see the new signature; until then Discord keeps enforcing the old required
-`prompt`. The relaxation is guarded on both ends: the bot only skips the
-up-front check when visual conditioning (`source_image`, `source_video`, or
-keyframes) is attached, and the server's family-aware validator still rejects
-an empty prompt for every image family and for unconditioned text-to-video.
+command definitions, so **the bot's slash commands must be re-registered** after
+upgrading before users see the optional prompt or new `duration` option. The
+prompt relaxation is guarded on both ends: the bot only skips the up-front
+check when visual conditioning (`source_image`, `source_video`, or keyframes)
+is attached, and the server's family-aware validator still rejects an empty
+prompt for every image family and for unconditioned text-to-video.
 :::
 
 ::: info Block List
