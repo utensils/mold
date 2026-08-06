@@ -20,7 +20,7 @@ import type { GalleryImage } from "../../lib/api/types";
 import { isUpscaledImage } from "../../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  saveVideoExport,
+  downloadVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -266,12 +266,12 @@ async function performVideoExport(options: VideoExportOptions) {
     const response = props.target
       ? await apiFetchTo(props.target, path, init)
       : await apiFetch(path, init);
-    const result = await saveVideoExport(
+    downloadVideoExport(
       await response.blob(),
       videoExportFilename(props.item.filename, options.format),
     );
     exportOpen.value = false;
-    toasts.push(result === "shared" ? "Export ready to share" : "Video exported");
+    toasts.push("Video exported");
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {
