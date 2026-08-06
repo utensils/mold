@@ -97,7 +97,30 @@ parameter and dequantize per call against their per-module scale. The `e5m2`
 variants some repositories publish beside them are refused by name — mold
 reads the e4m3 flavour only.
 
+## Discovery
+
+Wan models are installable from the catalog as well as by manifest name. Open
+**Models → Discover** in Mold Studio and search for `wan`, or install a specific
+entry directly:
+
+```bash
+mold pull hf:Wan-AI/Wan2.2-T2V-A14B
+mold pull cv:<version-id>
+```
+
+Every Wan checkpoint in the wild ships the transformer alone, so an install
+also pulls the shared UMT5-XXL encoder and the matching VAE. Those are the same
+files the manifest models use, under `shared/wan/`, so a second Wan install
+reuses them.
+
+Two things the catalog deliberately does not offer. Wan 2.1 **image-to-video**
+entries are filtered out: they condition through a CLIP-vision cross-attention
+branch mold's transformer does not implement, so the download would install and
+then fail to generate. Wan 2.5 and 2.7 are later architectures with no mold
+engine and are filtered out for the same reason. Wan 2.1 text-to-video, both
+A14B experts, and TI2V-5B are all installable.
+
 ## Roadmap
 
-Catalog discovery for Wan is tracked in the
+Remaining Wan work is tracked in the
 [Wan Video milestone](https://github.com/utensils/mold/milestone/4).

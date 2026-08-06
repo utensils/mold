@@ -133,4 +133,11 @@ describe("modelFilters", () => {
     ]);
     expect(familyLabel("qwen-image-edit")).toBe("Qwen Image Edit");
   });
+
+  it("labels wan rather than falling back to the raw slug", () => {
+    // Without a FAMILY_LABELS entry the fallback title-cases the slug, so the
+    // Models filter chip would read "Wan" — the family's own name is "Wan
+    // Video", and it is the string every other surface shows.
+    expect(familyLabel("wan")).toBe("Wan Video");
+  });
 });

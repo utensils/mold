@@ -260,7 +260,13 @@ fn check_planned_memory_budget_with_resident(
 /// workspace can dominate the checkpoint size.
 pub(crate) fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
     match hint.map(|h| h.family) {
-        Some(ActivationFamily::LtxVideo) => {
+        // Every full-weight video family, not just LTX-Video. Wan reaching the
+        // generic arm was actively misleading: it recommends `--batch` (wan
+        // renders one clip at a time regardless) and `--offload` (a FLUX flag
+        // with no wan path), while omitting `--frames`, which is the single
+        // most effective lever because the transformer's activation cost
+        // scales with the token count and tokens scale with frames.
+        Some(family) if family.is_full_weight_video() => {
             "Try reducing --frames or --width/--height, use a quantized variant \
              (e.g. ':q8'), or close other GPU apps."
         }

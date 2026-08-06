@@ -186,6 +186,28 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: true,
             default_scheduler: None,
         },
+        // Wan differs from both LTX entries on three axes, and the catch-all
+        // below gets every one of them wrong: it is the only video family that
+        // *wants* a negative prompt (its checkpoints ship a tuned default and
+        // CFG is live above guidance 1.0), it conditions on a single source
+        // image, and it has no audio branch at all.
+        "wan" => ModelCapabilities {
+            supports_negative_prompt: true,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: true,
+            // Wan's image conditioning is a first-frame anchor, not a
+            // strength-weighted blend, so a strength slider would imply a
+            // control the engine does not read.
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: true,
+            supports_video: true,
+            supports_audio: false,
+            supports_video_upscale: false,
+            default_scheduler: None,
+        },
         _ => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
@@ -275,6 +297,7 @@ mod tests {
             "sdxl",
             "qwen-image",
             "qwen-image-edit",
+            "wan",
             "z-image",
         ] {
             assert!(
@@ -284,6 +307,38 @@ mod tests {
         }
         assert!(!capabilities_for_family("wuerstchen").supports_lora);
         assert!(!capabilities_for_family("ltx-video").supports_lora);
+    }
+
+    /// Wan is the TUI's only video family that keeps the negative prompt and
+    /// takes a source image, and the only one with no audio at all. Without
+    /// its own entry it fell to the catch-all, which hides Frames/FPS — so a
+    /// wan model in the Create form offered no way to set a clip length.
+    #[test]
+    fn wan_shows_video_rows_without_ltx_only_controls() {
+        let caps = capabilities_for_family("wan");
+        assert!(caps.supports_video, "Frames/FPS rows are gated on this");
+        assert!(caps.supports_lora);
+        assert!(caps.supports_source_image);
+        // The negative prompt is live: Wan ships a tuned default and CFG runs
+        // whenever guidance exceeds 1.0.
+        assert!(caps.supports_negative_prompt);
+
+        // LTX-only rows must stay hidden. Audio in particular is not a
+        // degraded control for wan — its checkpoints carry no audio VAE or
+        // vocoder, and the server rejects the request before denoising.
+        assert!(!caps.supports_audio);
+        assert!(!caps.supports_video_upscale);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_controlnet);
+        assert!(!caps.supports_mask);
+        // First-frame anchoring, not a strength-weighted blend.
+        assert!(!caps.supports_strength);
+
+        // The per-model refinement must not resurrect audio for wan the way
+        // an advertised `supports_audio` can for LTX-2.
+        assert!(
+            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None).supports_audio
+        );
     }
 
     #[test]

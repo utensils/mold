@@ -951,8 +951,10 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         // blocks are GPU-resident at peak, so the preflight skips the
         // file-size estimate and uses a fixed streaming cap instead.
         "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
-        // Wan 2.1/2.2: fully GPU-resident transformer at the shipped
-        // 1.3B/5B sizes; the file-size preflight applies in full.
+        // Wan 2.1/2.2: fully GPU-resident transformer at every shipped size —
+        // 1.3B, 5B, and both A14B experts, which are resident one at a time
+        // rather than streamed. The file-size preflight applies in full, and
+        // `estimate_peak_memory` sizes an expert pair as the larger of the two.
         "wan" => ActivationFamily::WanVideo,
         // Unknown families default to FLUX dit shape — same activation
         // class, conservative against unknowns.
