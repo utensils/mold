@@ -49,7 +49,7 @@ noise transferred to the execution device.
 | `qwen-image` | `qwen_image` | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; source, inpaint, LoRA |
 | `qwen-image-edit` | — | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; ordered edit references, LoRA |
 | `ltx-video` | `ltx_video` | supported / supported / supported | none | no | no | `[1]` / cooperative | video; independent-clip chains; no source/audio/LoRA |
-| `ltx2` | `ltx-2`, `ltx2.3` | supported / unsupported / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
+| `ltx2` | `ltx-2`, `ltx2.3` | supported / correctness-only / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
 | `wan` | — | supported / unsupported / correctness-only | UMT5 text encoder | no | no | `[1]` / cooperative | video; text-to-video and single-image conditioning, no chain/audio/LoRA yet |
 | `wuerstchen` | `wuerstchen-v2` | supported / supported / supported | none | no | no | `[1]` / cooperative | image; source and inpaint; no LoRA |
 
