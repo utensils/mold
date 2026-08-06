@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-06
+
 ### Added
 
 - **Prompt expansion now understands video tasks and their conditioning** ([#711](https://github.com/utensils/mold/issues/711)). One additive `task` value drives the server, CLI preview, CLI/TUI generation, Discord, web, desktop, and iPhone: T2V rewrites describe a chronological shot; I2V and V2V preserve their source as visual and temporal authority; retakes preserve everything outside the requested correction; keyframe interpolation treats every anchor as fixed; audio-driven video follows source timing and events; and text-to-audio avoids visual language. Existing `/api/expand` clients remain compatible when they omit `task`, while prepared batches and sequence clips freeze the derived task and become explicitly stale if conditioning changes. Expansion requests carry only the semantic task, never source media bytes.
@@ -1512,7 +1514,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/utensils/mold/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
