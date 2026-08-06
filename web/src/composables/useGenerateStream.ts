@@ -252,7 +252,6 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
  * readout without the per-event UI layer needing to know about chaining. */
 function applyChainProgress(job: Job, evt: ChainProgressEvent) {
   job.lastProgressAt = Date.now();
-  markWorkStarted(job);
   const p = job.progress;
   const meta = job.chain;
   switch (evt.type) {
@@ -261,26 +260,44 @@ function applyChainProgress(job: Job, evt: ChainProgressEvent) {
         meta.stageCount = evt.stage_count;
         meta.estimatedTotalFrames = evt.estimated_total_frames;
       }
-      p.stage = `Chain · ${evt.stage_count} clips · ~${evt.estimated_total_frames} frames`;
+      // The compatibility endpoint synthesizes chain_start from its initial
+      // snapshot even while the durable job is queued. StageStart is the
+      // first proof that a scheduler lane is actually executing it.
+      p.stage = `Queued · ${evt.stage_count} clips · ~${evt.estimated_total_frames} frames`;
       break;
     case "stage_start":
+      markWorkStarted(job);
       if (meta) meta.currentStage = evt.stage_idx;
-      p.stage = chainStageLabel(meta, evt.stage_idx, "Starting");
+      p.stage = chainStageLabel(meta, evt.stage_idx, "Preparing");
       p.step = null;
       p.totalSteps = null;
       break;
     case "denoise_step":
+      markWorkStarted(job);
       if (meta) meta.currentStage = evt.stage_idx;
       p.stage = chainStageLabel(meta, evt.stage_idx, "Denoising");
       p.step = evt.step;
       p.totalSteps = evt.total;
       break;
-    case "stage_done":
-      p.stage = chainStageLabel(meta, evt.stage_idx, "Done");
+    case "stage_done": {
+      // Durable stages release their lane independently. Until the next
+      // stage_start arrives this is queued work, not model loading. The final
+      // stage instead moves directly into final-output preparation.
+      const finalStage =
+        meta?.stageCount != null && evt.stage_idx + 1 >= meta.stageCount;
+      job.workStarted = finalStage;
+      p.queuePosition = null;
+      p.stage = meta?.stageCount
+        ? finalStage
+          ? `Clip ${evt.stage_idx + 1}/${meta.stageCount} done · preparing final output`
+          : `Clip ${evt.stage_idx + 1}/${meta.stageCount} done · next clip queued`
+        : `Clip ${evt.stage_idx + 1} done · next clip queued`;
       p.step = null;
       p.totalSteps = null;
       break;
+    }
     case "stitching":
+      markWorkStarted(job);
       p.stage = `Stitching ${evt.total_frames} frames…`;
       p.step = null;
       p.totalSteps = null;

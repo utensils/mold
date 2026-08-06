@@ -68,6 +68,13 @@ const percent = computed(() => {
   return p && p.total > 0 ? Math.round((p.step / p.total) * 100) : 0;
 });
 const showProgress = computed(() => !props.dense && props.vm.progress !== null);
+const phaseLabel = computed(() => props.vm.phase ?? props.vm.state);
+const phaseClass = computed(() => {
+  if (phaseLabel.value === "queued") return STATE_CLASS.queued;
+  if (phaseLabel.value === "running" || phaseLabel.value === "finalizing")
+    return STATE_CLASS.running;
+  return STATE_CLASS[props.vm.state];
+});
 const errorExpanded = ref(false);
 </script>
 
@@ -76,7 +83,7 @@ const errorExpanded = ref(false);
     class="ms-seqrow"
     :class="{ 'ms-seqrow--dense': dense }"
     data-test="sequence-job-row"
-    :data-state="vm.state"
+    :data-state="phaseLabel"
     role="button"
     tabindex="0"
     @click="emit('select', vm)"
@@ -84,9 +91,7 @@ const errorExpanded = ref(false);
     @keydown.space.prevent="emit('select', vm)"
   >
     <div class="ms-seqrow__identity">
-      <span class="ms-seqrow__state" :class="STATE_CLASS[vm.state]">{{
-        vm.state
-      }}</span>
+      <span class="ms-seqrow__state" :class="phaseClass">{{ phaseLabel }}</span>
       <span class="ms-seqrow__model" :title="model">{{ model }}</span>
       <span class="ms-seqrow__meta">
         {{ vm.stageCount }} clips · {{ clip }}/{{ vm.stageCount }} ·

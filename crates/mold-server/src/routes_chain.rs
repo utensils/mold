@@ -786,7 +786,6 @@ async fn chain_vram_estimate(
     let base_seed = req.seed.unwrap_or(0);
     let mut worst_case_bytes = 0u64;
     let mut fits = true;
-    let mut sampled_any = false;
 
     for (idx, stage) in req.stages.iter().enumerate() {
         let stage_seed = stage
@@ -801,14 +800,17 @@ async fn chain_vram_estimate(
             // answers; it just cannot price the run.
             return None;
         };
-        worst_case_bytes = worst_case_bytes.max(estimate.peak_memory_bytes);
-        if let Some(stage_fits) = estimate.fits_available_memory {
-            sampled_any = true;
-            fits &= stage_fits;
-        }
+        // A queued chain runs stages serially, after earlier GPU work releases
+        // its allocations. Use the same stable physical-capacity estimate as
+        // the one-shot badge; live free VRAM would make this advisory verdict
+        // flip simply because another queued clip is currently denoising.
+        let stage_peak = estimate.capacity_peak_memory_bytes?;
+        let stage_fits = estimate.fits_device_capacity?;
+        worst_case_bytes = worst_case_bytes.max(stage_peak);
+        fits &= stage_fits;
     }
 
-    sampled_any.then_some(mold_core::chain::VramEstimate {
+    Some(mold_core::chain::VramEstimate {
         worst_case_bytes,
         fits,
     })
@@ -1196,6 +1198,7 @@ mod tests {
                 updated_at_unix_ms: 2,
                 error: None,
                 ephemeral: true,
+                execution_phase: None,
                 cancelling: false,
             },
             stages: request

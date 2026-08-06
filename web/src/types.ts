@@ -576,6 +576,7 @@ export interface ChainJobSummary {
   updated_at_unix_ms: number;
   error: string | null;
   ephemeral: boolean;
+  execution_phase?: "queued" | "running" | "finalizing" | null;
 }
 
 export type ChainJobState =
@@ -1075,6 +1076,9 @@ export interface GenerationMemoryEstimate {
   available_memory_bytes?: number | null;
   load_strategy: string;
   fits_available_memory?: boolean | null;
+  capacity_peak_memory_bytes?: number | null;
+  device_capacity_bytes?: number | null;
+  fits_device_capacity?: boolean | null;
 }
 
 export interface ModelComponentStatus {

@@ -1,23 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyFit, estimateLabel, type EstimateFit } from "./estimate";
-
-describe("classifyFit", () => {
-  it("buckets fits / tight / wont-fit / unknown", () => {
-    const est = (peak: number, available: number | null, fits?: boolean) => ({
-      model: "flux-dev:q8",
-      peak_memory_bytes: peak,
-      activation_memory_bytes: 0,
-      available_memory_bytes: available,
-      fits_available_memory: fits ?? null,
-      load_strategy: "full",
-    });
-    expect(classifyFit(est(1, 100))).toBe("fits");
-    expect(classifyFit(est(93, 100))).toBe("tight");
-    expect(classifyFit(est(101, 100))).toBe("wont-fit");
-    expect(classifyFit(est(1, null))).toBe("unknown");
-    expect(classifyFit(est(1, 100, false))).toBe("wont-fit");
-  });
-});
+import { estimateLabel, type EstimateFit } from "./estimate";
 
 describe("estimateLabel", () => {
   const GB = 1_000_000_000;

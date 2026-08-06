@@ -335,8 +335,16 @@ pub async fn resume_chain_job(
             CHAIN_JOB_NOT_RESUMABLE,
         )?);
     }
-    let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+    let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)
         .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+    crate::chain_job_runner::reset_running_stages_for_retry(
+        db,
+        &id,
+        &row.job_dir,
+        &mut manifest,
+        now_ms(),
+    )
+    .map_err(|e| ApiError::internal(format!("failed to reset interrupted chain stage: {e:#}")))?;
     let current_stage = manifest
         .stage_status
         .iter()
@@ -952,6 +960,27 @@ pub(crate) fn jobs_root() -> Result<std::path::PathBuf, ApiError> {
 }
 
 fn summary_for_row(row: &ChainJobRow, manifest: Option<&ChainJobManifest>) -> ChainJobSummary {
+    let execution_phase = match row.state {
+        ChainJobState::Queued => Some(mold_core::chain_job::ChainExecutionPhase::Queued),
+        ChainJobState::Running => manifest.map(|manifest| {
+            if manifest
+                .stage_status
+                .iter()
+                .any(|stage| stage.state == mold_core::chain_job::StageState::Running)
+            {
+                mold_core::chain_job::ChainExecutionPhase::Running
+            } else if manifest
+                .stage_status
+                .iter()
+                .all(|stage| stage.state == mold_core::chain_job::StageState::Completed)
+            {
+                mold_core::chain_job::ChainExecutionPhase::Finalizing
+            } else {
+                mold_core::chain_job::ChainExecutionPhase::Queued
+            }
+        }),
+        _ => None,
+    };
     ChainJobSummary {
         id: row.id.clone(),
         state: row.state,
@@ -962,6 +991,7 @@ fn summary_for_row(row: &ChainJobRow, manifest: Option<&ChainJobManifest>) -> Ch
         updated_at_unix_ms: row.updated_at_ms.max(0) as u64,
         error: row.error.clone(),
         ephemeral: manifest.is_some_and(|manifest| manifest.ephemeral),
+        execution_phase,
         cancelling: false,
     }
 }
@@ -1145,6 +1175,40 @@ mod tests {
             .unwrap();
         file.write_all(&header_json).unwrap();
         file.write_all(&[0u8; 4]).unwrap();
+    }
+
+    #[test]
+    fn active_summary_phase_tracks_stage_lease_not_parent_actor_state() {
+        let request = req(OutputFormat::Mp4).normalise().unwrap();
+        let mut manifest = ChainJobManifest::new("phase-job".into(), 1, &request).unwrap();
+        let row = ChainJobRow {
+            id: "phase-job".into(),
+            state: ChainJobState::Running,
+            model: request.model.clone(),
+            request_json: serde_json::to_string(&request).unwrap(),
+            job_dir: std::path::PathBuf::from("/tmp/phase-job"),
+            stage_count: 1,
+            current_stage: 0,
+            error: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            finalized_at_ms: None,
+        };
+
+        assert_eq!(
+            summary_for_row(&row, Some(&manifest)).execution_phase,
+            Some(mold_core::chain_job::ChainExecutionPhase::Queued)
+        );
+        manifest.stage_status[0].state = StageState::Running;
+        assert_eq!(
+            summary_for_row(&row, Some(&manifest)).execution_phase,
+            Some(mold_core::chain_job::ChainExecutionPhase::Running)
+        );
+        manifest.stage_status[0].state = StageState::Completed;
+        assert_eq!(
+            summary_for_row(&row, Some(&manifest)).execution_phase,
+            Some(mold_core::chain_job::ChainExecutionPhase::Finalizing)
+        );
     }
 
     fn materialize_ltx23_catalog_model(models_dir: &std::path::Path, model: &str) {
@@ -1725,6 +1789,76 @@ mod tests {
 
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn resume_rewinds_stale_cancelled_and_interrupted_stage_leases() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        for (job_id, resumable_state) in [
+            ("01JBR55CANCELRESUME", ChainJobState::Cancelled),
+            ("01JBR55INTRRESUME", ChainJobState::Interrupted),
+        ] {
+            let row = with_mold_home(home.path(), || {
+                let db_ref = db.as_ref().as_ref().unwrap();
+                let row = crate::chain_job_runner::create_job_with_params(
+                    db_ref,
+                    &home.path().join("jobs"),
+                    crate::chain_job_runner::CreateJobParams {
+                        id: job_id.into(),
+                        ephemeral: false,
+                        frozen_model: None,
+                        request: req(OutputFormat::Mp4).normalise().unwrap(),
+                    },
+                )
+                .unwrap();
+                let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+                manifest.stage_status[0].state = StageState::Running;
+                manifest.write_atomic(&row.job_dir).unwrap();
+                chain_jobs::upsert_stage(
+                    db_ref,
+                    &mold_db::chain_jobs::ChainJobStageRow {
+                        job_id: job_id.into(),
+                        stage_idx: 0,
+                        state: StageState::Running,
+                        seed: manifest.stage_status[0].seed,
+                        frames_emitted: None,
+                        generation_time_ms: None,
+                        segment_rel_path: None,
+                        error: None,
+                        updated_at_ms: now_ms(),
+                    },
+                )
+                .unwrap();
+                chain_jobs::update_job_state(db_ref, job_id, resumable_state, None, now_ms())
+                    .unwrap();
+                row
+            });
+
+            let (status, Json(summary)) = with_mold_home(home.path(), || {
+                futures::executor::block_on(resume_chain_job(
+                    State(state.clone()),
+                    Path(job_id.to_string()),
+                ))
+            })
+            .unwrap();
+
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(summary.state, ChainJobState::Queued);
+            assert_eq!(
+                summary.execution_phase,
+                Some(mold_core::chain_job::ChainExecutionPhase::Queued)
+            );
+            let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+            assert_eq!(manifest.stage_status[0].state, StageState::Pending);
+            let stages = chain_jobs::stages_for_job(db.as_ref().as_ref().unwrap(), job_id).unwrap();
+            assert_eq!(stages[0].state, StageState::Pending);
+        }
     }
 
     #[tokio::test]

@@ -5901,6 +5901,18 @@ pub struct GenerationMemoryEstimate {
     pub load_strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fits_available_memory: Option<bool>,
+    /// Stable peak estimate resolved against the roomiest physical GPU's
+    /// total capacity. Unlike `peak_memory_bytes`, this does not follow
+    /// moment-to-moment allocations from work already running on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_peak_memory_bytes: Option<u64>,
+    /// Total VRAM of the GPU used for `capacity_peak_memory_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_capacity_bytes: Option<u64>,
+    /// Whether the capacity-resolved execution strategy passes the same
+    /// family-specific fit policy used by admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fits_device_capacity: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

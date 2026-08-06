@@ -4,6 +4,7 @@ import type { ApiTarget } from "../../lib/api/client";
 import type { GenerateRequest } from "../../lib/api/types";
 import {
   classifyFit,
+  displayEstimateMemory,
   ESTIMATE_TOOLTIP,
   estimateGeneration,
   estimateLabel,
@@ -29,11 +30,8 @@ async function run(req: GenerateRequest) {
     const est = await estimateGeneration(req, props.target);
     if (mine !== token) return;
     fit.value = classifyFit(est);
-    text.value = estimateLabel(
-      fit.value,
-      est.peak_memory_bytes,
-      est.available_memory_bytes ?? null,
-    );
+    const memory = displayEstimateMemory(est);
+    text.value = estimateLabel(fit.value, memory.peakBytes, memory.capacityBytes);
     visible.value = true;
   } catch {
     // Advisory, but say so instead of vanishing — a silently missing badge

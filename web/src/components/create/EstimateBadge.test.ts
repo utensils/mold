@@ -16,6 +16,9 @@ describe("EstimateBadge", () => {
       activation_memory_bytes: 1,
       load_strategy: "resident",
       fits_available_memory: true,
+      capacity_peak_memory_bytes: 4_000_000_000,
+      device_capacity_bytes: 8_000_000_000,
+      fits_device_capacity: true,
     });
   });
 
@@ -79,6 +82,9 @@ describe("EstimateBadge", () => {
         activation_memory_bytes: 1,
         load_strategy: "resident",
         fits_available_memory: true,
+        capacity_peak_memory_bytes: 6_000_000_000,
+        device_capacity_bytes: 8_000_000_000,
+        fits_device_capacity: true,
       });
     const request = {
       prompt: "a cat",
@@ -99,6 +105,9 @@ describe("EstimateBadge", () => {
       activation_memory_bytes: 1,
       load_strategy: "resident",
       fits_available_memory: false,
+      capacity_peak_memory_bytes: 4_000_000_000,
+      device_capacity_bytes: 8_000_000_000,
+      fits_device_capacity: true,
     });
     await flushPromises();
     expect(wrapper.text()).not.toContain("won't fit");

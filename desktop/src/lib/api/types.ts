@@ -291,6 +291,12 @@ export interface GenerationMemoryEstimate {
   available_memory_bytes?: number | null;
   load_strategy: string;
   fits_available_memory?: boolean | null;
+  /** Stable requirement resolved against physical capacity, not current load. */
+  capacity_peak_memory_bytes?: number | null;
+  /** Total capacity of the GPU used for the stable requirement. */
+  device_capacity_bytes?: number | null;
+  /** Stable, family-specific fit verdict resolved against that capacity. */
+  fits_device_capacity?: boolean | null;
 }
 
 /**
@@ -954,6 +960,7 @@ export interface ChainJobSummary {
   updated_at_unix_ms: number;
   error?: string | null;
   ephemeral: boolean;
+  execution_phase?: "queued" | "running" | "finalizing" | null;
 }
 
 export interface ChainJobStageDetail {

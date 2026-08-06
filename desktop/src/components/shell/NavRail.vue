@@ -143,9 +143,9 @@ const developingCount = computed(() => generation.pending.length + railSequences
 /** `clip 3/5 · developing…` — the sequence's answer to developingLabel. */
 function sequenceLine(vm: ActivityJobVM & { kind: "sequence" }): string {
   const clip = Math.min(vm.currentStage + 1, vm.stageCount);
-  return vm.state === "queued"
-    ? `clip ${clip}/${vm.stageCount} · queued`
-    : `clip ${clip}/${vm.stageCount} · developing…`;
+  if (vm.phase === "queued") return `clip ${clip}/${vm.stageCount} · queued`;
+  if (vm.phase === "finalizing") return `clip ${clip}/${vm.stageCount} · finalizing…`;
+  return `clip ${clip}/${vm.stageCount} · developing…`;
 }
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
 
@@ -291,7 +291,7 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
             class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
           >
             <span
-              v-if="vm.state === 'running'"
+              v-if="vm.phase === 'running' || vm.phase === 'finalizing'"
               class="ms-shimmer block h-full w-full"
               aria-hidden="true"
             />

@@ -716,13 +716,14 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
         } else {
             jobs_root.join(&row.job_dir)
         };
-        let manifest = match ChainJobManifest::read_from_dir(&job_dir) {
+        let mut manifest = match ChainJobManifest::read_from_dir(&job_dir) {
             Ok(manifest) => manifest,
             Err(err) => {
                 tracing::warn!(job_id = %row.id, "chain job manifest missing/unreadable during reconcile: {err:#}");
                 continue;
             }
         };
+        reset_running_stages_for_retry(db, &row.id, &job_dir, &mut manifest, now)?;
         let mut authority = if authority_path(&job_dir).is_file() {
             match ChainExecutionAuthority::read_for_parent(&job_dir, &row.id) {
                 Ok(authority) => authority,
@@ -1508,22 +1509,6 @@ fn execute_job_inner(
                 }
             }
 
-            deps.events
-                .publish(&job.id, ChainJobEvent::StageStart { stage_idx });
-            if let Err(err) = mark_stage_running(db, &job.id, &manifest, stage_idx) {
-                fail_stage_job(
-                    db,
-                    deps,
-                    &mut manifest,
-                    &layout,
-                    &job.id,
-                    stage_idx,
-                    format!("{err:#}"),
-                )?;
-                terminal = true;
-                return Ok(());
-            }
-
             let stage_carry = match effective.stages[stage_idx as usize].transition {
                 TransitionMode::Smooth => carry.as_ref(),
                 TransitionMode::Cut | TransitionMode::Fade => None,
@@ -1841,8 +1826,11 @@ fn execute_stage(
             .clone()
     });
     let authority_job_dir = job.job_dir.clone();
-    let on_leased = actor_authority.map(|authority| {
-        Box::new(move |ordinal| {
+    let lease_db = deps.db.clone();
+    let lease_events = deps.events.clone();
+    let lease_job_id = job.id.clone();
+    let on_leased = Some(Box::new(move |ordinal| {
+        if let Some(authority) = actor_authority {
             let mut authority = authority
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1852,9 +1840,17 @@ fn execute_stage(
                     authority.set_preferred_ordinal(Some(ordinal));
                     authority.persist_atomic(&authority_job_dir)
                 })
-                .map_err(|error| format!("persisting leased chain authority: {error:#}"))
-        }) as Box<dyn FnOnce(usize) -> Result<(), String> + Send>
-    });
+                .map_err(|error| format!("persisting leased chain authority: {error:#}"))?;
+        }
+        let db = lease_db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| "chain stage lease acquired without metadata DB".to_string())?;
+        mark_stage_running(db, &authority_job_dir, &lease_job_id, stage_idx, stage_seed)
+            .map_err(|error| format!("marking leased chain stage running: {error:#}"))?;
+        lease_events.publish(&lease_job_id, ChainJobEvent::StageStart { stage_idx });
+        Ok(())
+    }) as ChainLeaseCallback);
 
     executor.render_stage_with_context(
         &stage_job_id,
@@ -2918,6 +2914,7 @@ impl ProductionStageExecutor {
         stage_req: &GenerateRequest,
         carry: Option<&ChainTail>,
         motion_tail_frames: u32,
+        on_leased: Option<ChainLeaseCallback>,
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
         cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome> {
@@ -2932,6 +2929,9 @@ impl ProductionStageExecutor {
         };
         let worker = in_flight.worker().clone();
         let _in_flight = in_flight;
+        if let Some(on_leased) = on_leased {
+            on_leased(worker.gpu.ordinal).map_err(anyhow::Error::msg)?;
+        }
         let _active = WorkerActiveGenerationGuard::new(worker.clone(), model, &stage_req.prompt)?;
         let hint = model_manager::family_for_model_sync(model, config).map(|family| {
             model_manager::ActivationHint {
@@ -3019,6 +3019,7 @@ impl StageExecutor for ProductionStageExecutor {
             stage_req,
             carry,
             motion_tail_frames,
+            None,
             progress,
             cancelled,
         )
@@ -3065,6 +3066,7 @@ impl StageExecutor for ProductionStageExecutor {
                     stage_req,
                     carry,
                     motion_tail_frames,
+                    on_leased,
                     progress.as_ref(),
                     cancelled.as_ref(),
                 )
@@ -3164,25 +3166,81 @@ impl QueueProbe for ProductionQueueProbe {
 
 fn mark_stage_running(
     db: &MetadataDb,
+    job_dir: &std::path::Path,
     job_id: &str,
-    manifest: &ChainJobManifest,
     stage_idx: u32,
+    seed: u64,
 ) -> anyhow::Result<()> {
-    let status = &manifest.stage_status[stage_idx as usize];
     chain_jobs::upsert_stage(
         db,
         &ChainJobStageRow {
             job_id: job_id.to_string(),
             stage_idx,
             state: StageState::Running,
-            seed: status.seed,
+            seed,
             frames_emitted: None,
             generation_time_ms: None,
             segment_rel_path: None,
             error: None,
             updated_at_ms: now_ms_i64(),
         },
-    )
+    )?;
+    // The listing/detail APIs read the durable manifest, so publish the same
+    // lease-aware state there before StageStart becomes observable. This is
+    // what lets every client distinguish an actor waiting for a lane from a
+    // clip that actually owns one.
+    let mut manifest = ChainJobManifest::read_from_dir(job_dir)?;
+    let status = manifest
+        .stage_status
+        .get_mut(stage_idx as usize)
+        .ok_or_else(|| anyhow!("manifest missing status for leased stage {stage_idx}"))?;
+    status.state = StageState::Running;
+    status.error = None;
+    manifest.write_atomic(job_dir)?;
+    Ok(())
+}
+
+/// Clear attempt-local lease state before a resumable job is exposed as
+/// queued again. Completed checkpoints remain authoritative; only a stage
+/// that was interrupted while holding a lane is rewound.
+pub(crate) fn reset_running_stages_for_retry(
+    db: &MetadataDb,
+    job_id: &str,
+    job_dir: &Path,
+    manifest: &mut ChainJobManifest,
+    updated_at_ms: i64,
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    let layout = JobDirLayout::new(job_dir.to_path_buf());
+    for status in manifest
+        .stage_status
+        .iter_mut()
+        .filter(|status| status.state == StageState::Running)
+    {
+        status.state = StageState::Pending;
+        status.frames_emitted = None;
+        status.generation_time_ms = None;
+        status.segment = None;
+        status.tail_frames = None;
+        status.audio = None;
+        status.error = None;
+        status.raw_segment = false;
+        chain_jobs::reset_one_stage(db, job_id, status.idx, updated_at_ms)?;
+        let stage_dir = layout.stage_dir(status.idx);
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(&stage_dir).with_context(|| {
+                format!(
+                    "removing interrupted chain stage directory '{}'",
+                    stage_dir.display()
+                )
+            })?;
+        }
+        changed = true;
+    }
+    if changed {
+        manifest.write_atomic(job_dir)?;
+    }
+    Ok(changed)
 }
 
 fn mark_manifest_stage_failed(
@@ -3281,6 +3339,10 @@ fn fail_stage_job(
 }
 
 fn set_cancelled(db: &MetadataDb, deps: &RunnerDeps, job_id: &str) -> anyhow::Result<()> {
+    if let Some(row) = chain_jobs::get_job(db, job_id)? {
+        let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)?;
+        reset_running_stages_for_retry(db, job_id, &row.job_dir, &mut manifest, now_ms_i64())?;
+    }
     let changed = chain_jobs::try_transition(
         db,
         job_id,
@@ -4247,11 +4309,14 @@ mod tests {
             preferred_ordinal: Option<usize>,
             frozen_model: Option<&mold_core::chain_job::FrozenChainModel>,
             _work_id: Option<&str>,
-            _on_leased: Option<Box<dyn FnOnce(usize) -> Result<(), String> + Send>>,
+            on_leased: Option<Box<dyn FnOnce(usize) -> Result<(), String> + Send>>,
             _cancellation: mold_inference::InferenceCancellationToken,
             _progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
             _cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
         ) -> anyhow::Result<StageExecution> {
+            if let Some(on_leased) = on_leased {
+                on_leased(preferred_ordinal.unwrap_or(0)).map_err(anyhow::Error::msg)?;
+            }
             self.seen
                 .lock()
                 .unwrap()
@@ -4268,6 +4333,80 @@ mod tests {
     impl QueueProbe for FakeProbe {
         fn small_jobs_waiting(&self) -> usize {
             self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    struct LeaseBoundaryExecutor {
+        receiver: Arc<Mutex<Option<tokio::sync::broadcast::Receiver<ChainJobEvent>>>>,
+        saw_queued_boundary: AtomicBool,
+        saw_stage_start_after_lease: AtomicBool,
+    }
+
+    impl StageExecutor for LeaseBoundaryExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            unreachable!("lease boundary test uses the context-aware seam")
+        }
+
+        fn render_stage_with_context(
+            &self,
+            _job_id: &str,
+            _stage_idx: u32,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            preferred_ordinal: Option<usize>,
+            _frozen_model: Option<&mold_core::chain_job::FrozenChainModel>,
+            _work_id: Option<&str>,
+            on_leased: Option<ChainLeaseCallback>,
+            _cancellation: mold_inference::InferenceCancellationToken,
+            progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
+            _cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> anyhow::Result<StageExecution> {
+            let mut receiver = self.receiver.lock().unwrap();
+            let receiver = receiver.as_mut().expect("test receiver installed");
+            let mut before_lease = Vec::new();
+            while let Ok(event) = receiver.try_recv() {
+                before_lease.push(event);
+            }
+            self.saw_queued_boundary.store(
+                !before_lease
+                    .iter()
+                    .any(|event| matches!(event, ChainJobEvent::StageStart { .. })),
+                Ordering::SeqCst,
+            );
+
+            on_leased.expect("runner supplies the lease boundary callback")(
+                preferred_ordinal.unwrap_or(0),
+            )
+            .map_err(anyhow::Error::msg)?;
+            self.saw_stage_start_after_lease.store(
+                matches!(
+                    receiver.try_recv(),
+                    Ok(ChainJobEvent::StageStart { stage_idx: 0 })
+                ),
+                Ordering::SeqCst,
+            );
+            let _ = progress(1, 2);
+            Ok(StageExecution {
+                outcome: StageRenderOutcome::Done(outcome(90)),
+                device_ordinal: preferred_ordinal,
+            })
         }
     }
 
@@ -7307,6 +7446,33 @@ mod tests {
     }
 
     #[test]
+    fn stage_start_is_published_only_after_the_executor_acquires_its_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55LEASE", &req, ChainJobState::Queued);
+        let receiver = Arc::new(Mutex::new(None));
+        let executor = Arc::new(LeaseBoundaryExecutor {
+            receiver: receiver.clone(),
+            saw_queued_boundary: AtomicBool::new(false),
+            saw_stage_start_after_lease: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        *receiver.lock().unwrap() = Some(deps.events.subscribe_persistent_for_tests(&row.id));
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        assert!(executor.saw_queued_boundary.load(Ordering::SeqCst));
+        assert!(executor.saw_stage_start_after_lease.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn resume_carry_from_disk_loads_smooth_tail_and_rejects_cut_or_fade_carry() {
         let dir = tempfile::tempdir().unwrap();
         let job_dir = dir.path().join("job");
@@ -7405,6 +7571,9 @@ mod tests {
         manifest.stage_status[0].generation_time_ms = Some(123);
         manifest.stage_status[0].segment = Some("stages/000/segment.mp4".into());
         manifest.write_atomic(&job_dir).unwrap();
+        let mut second_manifest = ChainJobManifest::read_from_dir(&second_dir).unwrap();
+        second_manifest.stage_status[0].state = StageState::Running;
+        second_manifest.write_atomic(&second_dir).unwrap();
 
         let (flipped, repaired) = startup_reconcile(&db, &dir.path().join("jobs")).unwrap();
 
@@ -7420,6 +7589,17 @@ mod tests {
         let second_after = chain_jobs::get_job(&db, &second.id).unwrap().unwrap();
         assert_eq!(second_after.state, ChainJobState::Interrupted);
         assert_eq!(second_after.current_stage, 0);
+        let second_stage = chain_jobs::stages_for_job(&db, &second.id)
+            .unwrap()
+            .remove(0);
+        assert_eq!(second_stage.state, StageState::Pending);
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&second_dir)
+                .unwrap()
+                .stage_status[0]
+                .state,
+            StageState::Pending
+        );
         let stage = chain_jobs::stages_for_job(&db, &row.id).unwrap().remove(0);
         assert_eq!(stage.state, StageState::Completed);
         assert_eq!(

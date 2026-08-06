@@ -7,7 +7,11 @@
  * activity strip").
  */
 
-import type { ChainJobState, ChainJobSummary } from "./api/chainTypes";
+import type {
+  ChainExecutionPhase,
+  ChainJobState,
+  ChainJobSummary,
+} from "./api/chainTypes";
 import { friendlySequenceError } from "./sequence";
 
 export type ActivityAction =
@@ -43,6 +47,9 @@ export type ActivityJobVM =
       hostLabel: string;
       model: string;
       state: ChainJobState;
+      /** Lease-aware active phase. Unlike parent `state`, `running` means a
+       * stage actually owns a scheduler lane. */
+      phase: ChainExecutionPhase | null;
       stageCount: number;
       currentStage: number;
       progress: { step: number; total: number } | null;
@@ -112,6 +119,11 @@ export function sequenceToVM(
     hostLabel: host.hostLabel,
     model: summary.model,
     state: summary.state,
+    phase:
+      summary.execution_phase ??
+      (summary.state === "queued" || summary.state === "running"
+        ? summary.state
+        : null),
     stageCount: summary.stage_count,
     currentStage: summary.current_stage,
     progress,
@@ -140,7 +152,9 @@ export function needsAttention(vm: ActivityJobVM): boolean {
 }
 
 function isRunning(vm: ActivityJobVM): boolean {
-  return vm.kind === "print" ? vm.phase === "running" : vm.state === "running";
+  return vm.kind === "print"
+    ? vm.phase === "running"
+    : vm.phase === "running" || vm.phase === "finalizing";
 }
 
 /** Merge prints and sequences into one list: active work first (running

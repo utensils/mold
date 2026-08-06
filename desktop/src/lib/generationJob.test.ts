@@ -32,9 +32,20 @@ describe("chain Job adapters", () => {
     });
     expect(job).toMatchObject({
       id: "chain-1",
-      status: "loading",
+      status: "queued",
       chainStageCount: 3,
-      stage: "Preparing 3 clips",
+      stage: "Queued · 3 clips",
+    });
+
+    applyChainProgress(job, {
+      type: "stage_start",
+      stage_idx: 0,
+      job_id: "chain-1",
+    });
+    expect(job).toMatchObject({
+      status: "loading",
+      chainStageIndex: 0,
+      stage: "Preparing clip 1 of 3",
     });
 
     applyChainProgress(job, {
@@ -51,6 +62,30 @@ describe("chain Job adapters", () => {
       step: 31,
       total: 72,
       stage: "Clip 2 of 3",
+    });
+
+    applyChainProgress(job, {
+      type: "stage_done",
+      stage_idx: 1,
+      frames_emitted: 97,
+      job_id: "chain-1",
+    });
+    expect(job).toMatchObject({
+      status: "queued",
+      chainStageIndex: 1,
+      stage: "Clip 2 of 3 complete · next clip queued",
+    });
+
+    applyChainProgress(job, {
+      type: "stage_done",
+      stage_idx: 2,
+      frames_emitted: 97,
+      job_id: "chain-1",
+    });
+    expect(job).toMatchObject({
+      status: "finishing",
+      chainStageIndex: 2,
+      stage: "Clip 3 of 3 complete · preparing final output",
     });
 
     applyChainProgress(job, {
