@@ -725,13 +725,13 @@ pub(crate) fn preflight_planned_memory_guard(
         let free = authoritative_cuda_available(
             mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
         )?;
-        return check_planned_memory_budget_with_resident(
+        check_planned_memory_budget_with_resident(
             model_name,
             predicted_peak_bytes,
             free,
             active_vram_bytes,
             rejection_suggestion(hint),
-        );
+        )
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -818,12 +818,12 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
         let available = authoritative_cuda_available(
             mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
         )?;
-        return check_planned_memory_budget(
+        check_planned_memory_budget(
             model_name,
             predicted_peak_bytes,
             available,
             rejection_suggestion(hint),
-        );
+        )
     }
 
     #[cfg(not(feature = "cuda"))]
