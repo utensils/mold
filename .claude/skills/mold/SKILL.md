@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # mold — Local AI Image Generation CLI
 
-Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, and Wuerstchen diffusion models running on local GPU hardware.
+Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2, and Wuerstchen diffusion models running on local GPU hardware.
 
 The native apps' public privacy policy is sourced at `website/privacy.md`,
 published at `https://utensils.io/mold/privacy`, and linked from the desktop and
@@ -246,6 +246,12 @@ mold run ltx-video-0.9.6-distilled:bf16 "a campfire at night" --frames 17 --form
 
 # GIF for pipe-friendly output
 mold run ltx-video-0.9.6-distilled:bf16 "a sunset" --format gif | mpv -
+
+# Wan 2.1 text-to-video (frames must be 4n+1: 77, 81, 121, ...; MP4 default)
+mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
+
+# Wan 2.2 5B at 720p24
+mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 
 # WebP animated output
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
