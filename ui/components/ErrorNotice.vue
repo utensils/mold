@@ -7,9 +7,13 @@ const props = withDefaults(
     message: string;
     /** Optional diagnostic payload; visible copy remains human-readable. */
     copyMessage?: string | null;
+    compact?: boolean;
+    dismissible?: boolean;
   }>(),
-  { copyMessage: null },
+  { copyMessage: null, compact: false, dismissible: false },
 );
+
+const emit = defineEmits<{ dismiss: [] }>();
 
 const copied = ref(false);
 const copyFailed = ref(false);
@@ -38,12 +42,14 @@ async function copyError() {
   <div
     role="alert"
     data-test="error-notice"
-    class="flex flex-wrap items-start gap-3 rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-stop"
+    class="flex flex-wrap rounded-control border border-stop/45 bg-stop/10 px-3 text-stop"
+    :class="compact ? 'items-center gap-2 py-1.5' : 'items-start gap-3 py-2.5'"
   >
     <p
       data-test="error-notice-message"
       data-selectable
-      class="min-w-0 flex-1 text-body leading-relaxed"
+      class="min-w-0 flex-1 text-body"
+      :class="compact ? 'leading-snug' : 'leading-relaxed'"
     >
       {{ message }}
     </p>
@@ -65,6 +71,17 @@ async function copyError() {
     >
       <Icon v-if="!copied" name="copy" :size="16" />
       <Icon v-else name="check" :size="16" />
+    </button>
+    <button
+      v-if="dismissible"
+      type="button"
+      data-test="dismiss-error-notice"
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control text-stop transition-colors hover:bg-stop/10 hover:text-ink active:translate-y-px"
+      aria-label="Dismiss error message"
+      title="Dismiss"
+      @click="emit('dismiss')"
+    >
+      <Icon name="close" :size="16" />
     </button>
     <div v-if="$slots.actions" class="flex w-full flex-wrap items-center gap-2">
       <slot name="actions" />

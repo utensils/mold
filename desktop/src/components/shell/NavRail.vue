@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import NavItem from "@ui/components/NavItem.vue";
 import Keycap from "@ui/components/Keycap.vue";
+import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import type { IconName } from "@ui/icons";
 import logoUrl from "../../assets/logo.png";
 import StatusPopover from "./StatusPopover.vue";
@@ -28,11 +29,13 @@ import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
+import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useToastStore } from "../../stores/toasts";
 import { badgeCount } from "../../lib/notifications";
 import { shortcutLabel } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 
 const route = useRoute();
 const router = useRouter();
@@ -43,9 +46,11 @@ const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
+const liveActivity = useLiveActivityStore();
 const gallery = useGalleryStore();
 const toasts = useToastStore();
 const draft = useSequenceDraftStore();
+const openLiveWork = useOpenLiveWork();
 
 // Workspace badges (§08 G11): Library counts prints developed since the last
 // visit; Machines shows a stop dot when any connected host is offline.
@@ -138,7 +143,31 @@ const railSequences = computed(() =>
   ).active.filter((vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence"),
 );
 
-const developingCount = computed(() => generation.pending.length + railSequences.value.length);
+/** Server-owned work survives this client's restart. Keep it in the global
+ * Now developing rail, not the current session's Create activity strip. Rows
+ * already represented by local print/sequence state stay on their richer,
+ * actionable rail cards instead of rendering twice. */
+const sharedRows = computed(() => {
+  const primaryId = hosts.primaryHost?.id ?? "local";
+  const local = new Set(
+    generation.jobs.flatMap((job) =>
+      job.id ? [`${job.hostId ?? primaryId}:generation:${job.id}`] : [],
+    ),
+  );
+  for (const { hostId, job } of chains.allJobs) local.add(`${hostId}:sequence:${job.id}`);
+  return liveActivity.rows.filter((row) => !local.has(row.key));
+});
+
+const developingCount = computed(
+  () => generation.pending.length + railSequences.value.length + sharedRows.value.length,
+);
+
+onMounted(() => {
+  if (!import.meta.env.TEST) liveActivity.start();
+});
+onBeforeUnmount(() => {
+  if (!import.meta.env.TEST) liveActivity.stop();
+});
 
 /** `clip 3/5 · developing…` — the sequence's answer to developingLabel. */
 function sequenceLine(vm: ActivityJobVM & { kind: "sequence" }): string {
@@ -275,10 +304,11 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
         </span>
       </div>
       <div
-        v-if="railJobs.length > 0 || railSequences.length > 0"
+        v-if="railJobs.length > 0 || railSequences.length > 0 || sharedRows.length > 0"
         data-test="developing-jobs"
         class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2"
       >
+        <LiveActivityList :rows="sharedRows" compact interactive @select="openLiveWork" />
         <a
           v-for="vm in railSequences"
           :key="vm.key"

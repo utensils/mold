@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  amendChainJob,
+  ApiHttpError,
   cancelChainJob,
   chainJobEventsUrl,
   chainJobStagePreviewUrl,
@@ -545,6 +547,20 @@ describe("chain job api helpers", () => {
       },
     );
 
+    const amendRequest = { stages: chainRequest().stages ?? [], steps: 12 };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...summary, preserved_stages: 1 })),
+    );
+    await amendChainJob("job/1", amendRequest);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/amend",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(amendRequest),
+      },
+    );
+
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
     await cancelChainJob("job/1");
     expect(fetchMock).toHaveBeenLastCalledWith(
@@ -574,6 +590,21 @@ describe("chain job api helpers", () => {
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/gc", {
       method: "POST",
       headers: {},
+    });
+  });
+
+  it("preserves typed HTTP errors from durable sequence requests", async () => {
+    installFetch({ error: "job moved on" }, 409);
+
+    const error = await amendChainJob("job/1", {
+      stages: chainRequest().stages ?? [],
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiHttpError);
+    expect(error).toMatchObject({
+      message:
+        'POST /api/chain-jobs/job/1/amend failed: 409 {"error":"job moved on"}',
+      status: 409,
     });
   });
 

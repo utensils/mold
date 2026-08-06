@@ -211,6 +211,33 @@ describe("PreparedExpansionBatch", () => {
     expect(wrapper.get('[data-test="discard-prepared"]').attributes("disabled")).toBeUndefined();
   });
 
+  it("cancels the review from the explicit action or Escape", async () => {
+    const buttonWrapper = mountBatch();
+    expect(buttonWrapper.get('[data-test="discard-prepared"]').text()).toBe("Cancel");
+    await buttonWrapper.get('[data-test="discard-prepared"]').trigger("click");
+    expect(buttonWrapper.emitted("discard")).toHaveLength(1);
+
+    const escapeWrapper = mountBatch();
+    await flushPromises();
+    expect(document.activeElement).toBe(escapeWrapper.findAll("textarea")[0]!.element);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(escapeWrapper.emitted("discard")).toHaveLength(1);
+  });
+
+  it("does not discard the review when Escape belongs to another surface", async () => {
+    const wrapper = mountBatch();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+
+    expect(wrapper.emitted("discard")).toBeUndefined();
+    outside.remove();
+  });
+
   it("preserves stale work, names the reasons, and blocks generation", () => {
     const wrapper = mountBatch({
       staleReasons: [

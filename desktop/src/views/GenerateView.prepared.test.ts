@@ -639,7 +639,7 @@ describe("GenerateView prepared expansion batches", () => {
     });
   });
 
-  it("applies a Remix with the style snapshotted before the request", async () => {
+  it("remixes Batch 1 in place with the style snapshotted before the request", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;
     form.stylePreset = "cinematic";
@@ -657,17 +657,20 @@ describe("GenerateView prepared expansion batches", () => {
     pending.resolve({
       source_prompt: "a lighthouse at dusk",
       source_kind: "direct",
-      variants: ["one", "two", "three"].map((prompt) => ({
+      variants: ["one"].map((prompt) => ({
         prompt,
         dimensions: ["camera"],
       })),
     });
     await flushPromises();
 
-    const prepared = wrapper.findComponent(PreparedExpansionBatch);
-    expect(prepared.props("batch").stylePreset).toBe("cinematic");
-    prepared.vm.$emit("apply", prepared.props("batch").prompts[0]!.id);
-    await nextTick();
+    expect(vi.mocked(remixPrompt)).toHaveBeenCalledWith(
+      expect.objectContaining({ variations: 1 }),
+      expect.anything(),
+    );
+    expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(false);
+    expect(form.prompt).toBe("one");
+    expect(form.batchSize).toBe(1);
     expect(form.stylePreset).toBe("");
 
     await wrapper.get('[data-test="generate-button"]').trigger("click");
@@ -680,6 +683,31 @@ describe("GenerateView prepared expansion batches", () => {
         dimensions: ["camera"],
       },
     });
+  });
+
+  it("prepares the explicitly selected number of Remix variants", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 3;
+    vi.mocked(remixPrompt).mockResolvedValue({
+      source_prompt: "a lighthouse at dusk",
+      source_kind: "direct",
+      variants: ["one", "two", "three"].map((prompt) => ({
+        prompt,
+        dimensions: ["camera"],
+      })),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("remix");
+    await flushPromises();
+
+    expect(vi.mocked(remixPrompt)).toHaveBeenCalledWith(
+      expect.objectContaining({ variations: 3 }),
+      expect.anything(),
+    );
+    expect(wrapper.findComponent(PreparedExpansionBatch).props("batch").prompts).toHaveLength(3);
+    expect(form.batchSize).toBe(3);
   });
 
   it("offers immediate human-readable recovery when a quick expansion changes models", async () => {

@@ -16,6 +16,10 @@ export interface QueueEntry {
   position: number;
   gpu?: number;
   target_gpu?: number | null;
+  /** Additive request settings exposed by current servers. Kept unknown in
+   * studio because desktop and web own structurally compatible metadata types. */
+  metadata?: unknown;
+  seed_pinned?: boolean | null;
 }
 
 export interface QueueWorkItem {

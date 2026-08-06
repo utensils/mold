@@ -143,15 +143,24 @@ carries a count of advanced values that differ from their defaults. The
 open state and expanded section persist across sessions
 (`tui.advanced_open` / `tui.advanced_section`).
 
-| Section                | Rows                                                                                |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                      |
-| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)                                    |
-| Source image           | Source, Strength, Mask, ControlNet (per model)                                      |
-| LoRA                   | LoRA path + scale                                                                   |
-| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                |
-| Output format          | png / jpeg / gif / apng / webp / mp4                                                |
-| Video                  | Frames, FPS; LTX-2 Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2× |
+| Section                | Rows                                                                                          |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                |
+| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)                                              |
+| Source image           | Source, Strength, Mask, ControlNet (per model)                                                |
+| LoRA                   | LoRA path + scale                                                                             |
+| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                          |
+| Output format          | png / jpeg / gif / apng / webp / mp4                                                          |
+| Video                  | Frames, FPS; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2× |
+
+The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
+**two-stage-hq**, and **distilled**. Auto omits the request field so the server
+keeps checkpoint selection authority; each explicit recipe selects MP4 and is
+shown in the collapsed Video summary and Advanced badge. Guidance and the
+Negative prompt section follow the selected recipe's CFG contract. Pipelines
+that require an audio file, source video, keyframes, a retake window, or an
+IC-LoRA—and the audio-only `t2a` output—remain intentionally absent until the
+TUI can author and handle those inputs and outputs end to end.
 
 The Audio row is capability-driven: a checkpoint that advertises missing
 audio assets does not show it. `default` leaves the field absent so the

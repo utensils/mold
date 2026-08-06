@@ -33,7 +33,7 @@ function baseJob(): Job {
 }
 
 describe("ActivityStrip", () => {
-  it("shows shared work from another client with explicit host and stale state", () => {
+  it("keeps recovered shared work visible and actionable", async () => {
     useLiveActivityStore().hosts = {
       render: {
         hostId: "render",
@@ -46,12 +46,14 @@ describe("ActivityStrip", () => {
         error: "offline",
         items: [
           {
-            id: "foreign",
-            kind: "generation",
-            phase: "running",
-            model: "flux-dev",
+            id: "pull-1",
+            kind: "download",
+            phase: "downloading",
+            model: "ltx-2",
             created_at_unix_ms: 1,
             updated_at_unix_ms: 2,
+            current: 50,
+            total: 100,
             can_cancel: false,
           },
         ],
@@ -61,6 +63,8 @@ describe("ActivityStrip", () => {
     const wrapper = mount(ActivityStrip);
     expect(wrapper.get("[data-test='shared-live-activity']").text()).toContain("Render box");
     expect(wrapper.text()).toContain("Last seen active · offline");
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/models");
   });
 
   it("is hidden when nothing is in flight", () => {

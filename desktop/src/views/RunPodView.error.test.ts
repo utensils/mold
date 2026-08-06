@@ -6,6 +6,7 @@ describe("RunPodView operation errors", () => {
     expect(source).toContain('v-if="runpod.operationError"');
     expect(source).toContain('import ErrorNotice from "@ui/components/ErrorNotice.vue"');
     expect(source).toContain(':message="runpod.operationError"');
-    expect(source).toContain('@click="runpod.clearOperationError()"');
+    expect(source).toContain("dismissible");
+    expect(source).toContain('@dismiss="runpod.clearOperationError()"');
   });
 });

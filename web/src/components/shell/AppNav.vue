@@ -8,11 +8,12 @@
  * Downloads opens the existing drawer via the shared `mold:open-downloads`
  * window event (App listens); the ⌘K palette uses the same channel.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
+import NowDevelopingPopover from "./NowDevelopingPopover.vue";
 import { useDownloads } from "../../composables/useDownloads";
 import {
   markGalleryVisited,
@@ -20,11 +21,28 @@ import {
 } from "../../lib/notifications";
 import type { IconName } from "@ui/icons";
 import { useStatusPoll } from "../../composables/useStatusPoll";
+import { useHostRouting } from "../../composables/useHostRouting";
+import { useLiveActivity } from "../../composables/useLiveActivity";
+import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 
 const route = useRoute();
 const router = useRouter();
 const downloads = useDownloads();
 const { error: engineError } = useStatusPoll();
+const routing = useHostRouting();
+const liveActivity = useLiveActivity(routing);
+const openLiveWork = useOpenLiveWork(routing);
+
+onMounted(() => {
+  if (import.meta.env.TEST) return;
+  routing.start();
+  liveActivity.start();
+});
+onBeforeUnmount(() => {
+  if (import.meta.env.TEST) return;
+  liveActivity.stop();
+  routing.stop();
+});
 
 // Cross-workspace badge signals (spec §08 G11): a fresh-prints accent dot on
 // the Library pill (cleared on entering the Library) and a stop-tinted dot on
@@ -167,6 +185,11 @@ const menuOpen = ref(false);
 
       <div class="spacer" />
 
+      <NowDevelopingPopover
+        :rows="liveActivity.rows.value"
+        @select="openLiveWork"
+      />
+
       <form class="search-box" role="search" @submit.prevent="submitSearch">
         <Icon name="search" :size="14" class="search-icon" />
         <input
@@ -212,6 +235,11 @@ const menuOpen = ref(false);
       </router-link>
 
       <div class="spacer" />
+
+      <NowDevelopingPopover
+        :rows="liveActivity.rows.value"
+        @select="openLiveWork"
+      />
 
       <button
         type="button"

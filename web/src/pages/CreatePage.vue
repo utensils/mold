@@ -15,8 +15,6 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
-import { useLiveActivity } from "../composables/useLiveActivity";
-import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import { projectResolution } from "../components/create/resolutionProjection";
@@ -88,6 +86,10 @@ import {
   pendingSequenceHandoff,
   takeSequenceHandoff,
 } from "../composables/useSequenceHandoff";
+import {
+  pendingGenerationHandoff,
+  takeGenerationHandoff,
+} from "../composables/useGenerationHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   sequenceToVM,
@@ -140,6 +142,9 @@ import {
   storeLastSeed,
 } from "../lib/lastSeed";
 import { useQueue } from "../composables/useQueue";
+import { useLiveActivity } from "../composables/useLiveActivity";
+import { useOpenLiveWork } from "../composables/useOpenLiveWork";
+import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -188,6 +193,7 @@ const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
 const liveActivity = useLiveActivity(routing);
+const openLiveWork = useOpenLiveWork(routing);
 // The model list follows the routing target: a pinned machine shows its own
 // models, Auto / Most capable show the union across ready machines. Single-host
 // installs collapse to exactly the origin's `/api/models`, as before.
@@ -610,6 +616,8 @@ const sequenceVMs = computed<ActivityJobVM[]>(() => {
   return out;
 });
 
+/** Server-owned rows survive this tab and client. Avoid duplicating work that
+ * the current Create session already renders with its richer local controls. */
 const sharedActivityRows = computed(() =>
   liveActivity.rows.value.filter((row) => {
     if (row.kind === "generation") {
@@ -1703,6 +1711,22 @@ function applySequenceHandoff() {
   }
 }
 watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
+
+function applyGenerationHandoff() {
+  const handoff = takeGenerationHandoff();
+  if (!handoff) return;
+  setOutput("single");
+  draft.stopEditing();
+  editBaselineShared.value = null;
+  const metadata =
+    handoff.seedPinned === false
+      ? ({ ...handoff.metadata, seed: null } as unknown as OutputMetadata)
+      : handoff.metadata;
+  form.state.value = applyMetadataToForm(form.state.value, metadata, {
+    models: models.value,
+  });
+}
+watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
 
 /** The digest chip's one hop. `Clear inactive` and `Clean up disk` moved with
  *  it: they are destructive, host-scoped, and live in the History drawer now. */
@@ -3141,7 +3165,6 @@ function openAdvanced() {
 }
 
 onMounted(async () => {
-  liveActivity.start();
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
@@ -3167,7 +3190,6 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  liveActivity.stop();
   stopAutoRefresh();
   clearSequencePreviews();
   phoneQuery?.removeEventListener?.("change", syncPhone);
@@ -3205,6 +3227,7 @@ onBeforeUnmount(() => {
           @open="openJob"
           @sequence-action="onSequenceAction"
           @show-history="onShowSequenceHistory"
+          @shared-open="openLiveWork"
         />
 
         <div class="flex items-center gap-2">
