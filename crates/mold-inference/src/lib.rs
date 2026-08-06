@@ -36,6 +36,10 @@ pub mod sdxl;
 pub mod shared_pool;
 pub mod upscaler;
 pub mod vae_tiling;
+// Consumed by the Wan engine once its factory arm lands (stack layer wan/04);
+// until then only this crate's tests exercise it.
+#[allow(dead_code)]
+pub(crate) mod wan;
 pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
