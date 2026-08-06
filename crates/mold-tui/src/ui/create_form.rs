@@ -197,6 +197,9 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
         AdvSection::Output => vec![ParamField::Format],
         AdvSection::Video => {
             let mut fields = vec![ParamField::Frames, ParamField::Fps];
+            if caps.supports_video_upscale {
+                fields.push(ParamField::Pipeline);
+            }
             if caps.supports_audio {
                 fields.push(ParamField::Audio);
             }
@@ -301,6 +304,9 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
         AdvSection::Output => format!("{:?}", params.format).to_lowercase(),
         AdvSection::Video => {
             let mut summary = format!("{}f \u{00b7} {}fps", params.frames, params.fps);
+            if let Some(pipeline) = params.pipeline {
+                summary.push_str(&format!(" \u{00b7} {pipeline}"));
+            }
             if let Some(enabled) = params.enable_audio {
                 summary.push_str(if enabled {
                     " \u{00b7} audio on"
@@ -368,6 +374,9 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         count += 1;
     }
     if params.enable_audio.is_some() {
+        count += 1;
+    }
+    if params.pipeline.is_some() {
         count += 1;
     }
     if params.spatial_upscale.is_some() {
@@ -540,9 +549,10 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_video_section_exposes_audio_and_upscalers_without_leaking_to_legacy_video() {
+    fn ltx2_video_section_exposes_pipeline_audio_and_upscalers_without_leaking_to_legacy_video() {
         let ltx2 = capabilities_for_family("ltx2");
         let ltx2_fields = section_fields(AdvSection::Video, &ltx2);
+        assert!(ltx2_fields.contains(&ParamField::Pipeline));
         assert!(ltx2_fields.contains(&ParamField::Audio));
         assert!(ltx2_fields.contains(&ParamField::SpatialUpscale));
         assert!(ltx2_fields.contains(&ParamField::TemporalUpscale));
@@ -554,6 +564,7 @@ mod tests {
 
         let legacy = capabilities_for_family("ltx-video");
         let legacy_fields = section_fields(AdvSection::Video, &legacy);
+        assert!(!legacy_fields.contains(&ParamField::Pipeline));
         assert!(!legacy_fields.contains(&ParamField::Audio));
         assert!(!legacy_fields.contains(&ParamField::SpatialUpscale));
         assert!(!legacy_fields.contains(&ParamField::TemporalUpscale));
@@ -648,14 +659,15 @@ mod tests {
         assert_eq!(section_summary(AdvSection::Negative, &params, false), "on");
 
         params.enable_audio = Some(true);
+        params.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStageHq);
         assert_eq!(
             section_summary(AdvSection::Video, &params, true),
-            "25f \u{00b7} 24fps \u{00b7} audio on"
+            "25f \u{00b7} 24fps \u{00b7} two-stage-hq \u{00b7} audio on"
         );
         params.enable_audio = Some(false);
         assert_eq!(
             section_summary(AdvSection::Video, &params, true),
-            "25f \u{00b7} 24fps \u{00b7} audio off"
+            "25f \u{00b7} 24fps \u{00b7} two-stage-hq \u{00b7} audio off"
         );
         params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
         params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
@@ -668,7 +680,7 @@ mod tests {
         };
         assert_eq!(
             section_summary(AdvSection::Video, &params, true),
-            "25f \u{00b7} 24fps \u{00b7} audio off \u{00b7} spatial 1.5× \u{00b7} temporal 2× \u{00b7} guidance 5"
+            "25f \u{00b7} 24fps \u{00b7} two-stage-hq \u{00b7} audio off \u{00b7} spatial 1.5× \u{00b7} temporal 2× \u{00b7} guidance 5"
         );
     }
 
@@ -700,11 +712,18 @@ mod tests {
             "an explicit audio override must count even when it disables audio"
         );
 
+        params.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStage);
+        assert_eq!(
+            advanced_active_count(&params, false),
+            10,
+            "an explicit pipeline override must count"
+        );
+
         params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
         params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
         assert_eq!(
             advanced_active_count(&params, false),
-            11,
+            12,
             "each explicit latent upscale override must count"
         );
         params.guidance_overrides = mold_core::Ltx2GuidanceOverrides {
@@ -716,7 +735,7 @@ mod tests {
         };
         assert_eq!(
             advanced_active_count(&params, false),
-            16,
+            17,
             "each explicit guidance override must count"
         );
     }

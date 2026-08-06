@@ -2,9 +2,9 @@ use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
     validation::{MAX_STG_BLOCKS, MAX_STG_BLOCK_INDEX},
-    Config, GenerateResponse, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
-    ModelInfoExtended, OutputFormat, PromptTransformOperation, RemixResponse, Scheduler,
-    ServerStatus, SseProgressEvent,
+    Config, GenerateResponse, Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale,
+    Ltx2TemporalUpscale, ModelInfoExtended, OutputFormat, PromptTransformOperation, RemixResponse,
+    Scheduler, ServerStatus, SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -447,6 +447,7 @@ pub enum ParamField {
     // Advanced — Video
     Frames,
     Fps,
+    Pipeline,
     Audio,
     SpatialUpscale,
     TemporalUpscale,
@@ -480,6 +481,7 @@ impl ParamField {
             Self::ControlModel => "CNet Mdl",
             Self::Frames => "Frames",
             Self::Fps => "FPS",
+            Self::Pipeline => "Pipeline",
             Self::Audio => "Audio",
             Self::SpatialUpscale => "Spatial",
             Self::TemporalUpscale => "Temporal",
@@ -622,6 +624,10 @@ pub struct GenerateParams {
     // Video
     pub frames: u32,
     pub fps: u32,
+    /// Explicit source-free LTX-2 video recipe. `None` lets the server select
+    /// the checkpoint default. Conditioning-dependent and audio-only recipes
+    /// stay out of the TUI until their required media paths are authorable.
+    pub pipeline: Option<Ltx2PipelineMode>,
     /// `None` preserves the pipeline default; explicit values mirror the
     /// CLI's `--audio` and `--no-audio` controls.
     pub enable_audio: Option<bool>,
@@ -744,6 +750,7 @@ impl GenerateParams {
             mask_image_path: None,
             frames: 25,
             fps: 24,
+            pipeline: None,
             enable_audio: None,
             spatial_upscale: None,
             temporal_upscale: None,
@@ -839,6 +846,10 @@ impl GenerateParams {
                 .to_string(),
             ParamField::Frames => self.frames.to_string(),
             ParamField::Fps => self.fps.to_string(),
+            ParamField::Pipeline => self
+                .pipeline
+                .map(|pipeline| pipeline.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
             ParamField::Audio => self
                 .enable_audio
                 .map(|enabled| if enabled { "on" } else { "off" })
@@ -1008,9 +1019,8 @@ pub struct GenerateState {
 }
 
 impl GenerateState {
-    /// TUI currently exposes the checkpoint's default LTX recipe rather than
-    /// a pipeline picker, so distilled checkpoint identity fully resolves the
-    /// primary guidance control.
+    /// The checkpoint default or an explicit source-free LTX-2 recipe resolves
+    /// whether the primary guidance control is adjustable.
     pub fn guidance_adjustable(&self) -> bool {
         !self.capabilities.supports_video || self.capabilities.supports_negative_prompt
     }
@@ -2084,9 +2094,9 @@ impl App {
     }
 
     /// Recompute Create rows from the selected model's family and the current
-    /// catalog's checkpoint-specific audio fact. An incompatible model clears
-    /// stale audio and LTX-2 latent-upscale overrides before they can leak into
-    /// another family.
+    /// catalog's checkpoint-specific audio and guidance facts. An incompatible
+    /// model clears stale audio plus LTX-2 pipeline and latent-upscale overrides
+    /// before they can leak into another family.
     fn sync_generate_capabilities(&mut self) {
         let model = &self.generate.params.model;
         let family = family_for_model(model, &self.config);
@@ -2102,21 +2112,48 @@ impl App {
             .iter()
             .find(|entry| entry.name == *model)
             .and_then(|entry| entry.guidance_capabilities);
-        self.generate.capabilities = capabilities_for_model(
-            &family,
-            model,
-            advertised_audio_support,
-            advertised_guidance,
-        );
+        let effective_guidance = self
+            .generate
+            .params
+            .pipeline
+            .map(|pipeline| {
+                mold_core::GuidanceCapabilities::for_recipe(&family, model, Some(pipeline))
+            })
+            .or(advertised_guidance);
+        self.generate.capabilities =
+            capabilities_for_model(&family, model, advertised_audio_support, effective_guidance);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
         }
         if !self.generate.capabilities.supports_video_upscale {
+            self.generate.params.pipeline = None;
             self.generate.params.spatial_upscale = None;
             self.generate.params.temporal_upscale = None;
             self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
         }
         self.refresh_create_rows();
+    }
+
+    /// Re-resolve the primary guidance/negative-prompt contract after the
+    /// user changes an explicit LTX-2 recipe. Returning to Auto must restore
+    /// the server-advertised checkpoint contract instead of inferring from an
+    /// opaque catalog ID, while preserving the selected row across reflow.
+    fn sync_pipeline_guidance(&mut self) {
+        if !self.generate.capabilities.supports_video_upscale {
+            return;
+        }
+        let selected_row = self.generate.rows.get(self.generate.param_index).copied();
+        self.sync_generate_capabilities();
+        if let Some(selected_row) = selected_row {
+            if let Some(index) = self
+                .generate
+                .rows
+                .iter()
+                .position(|row| *row == selected_row)
+            {
+                self.generate.param_index = index;
+            }
+        }
     }
 
     /// Spawn a background upscale job for the currently selected gallery image.
@@ -4400,6 +4437,30 @@ impl App {
                 let grid = video_grid.expect("fps has video grid");
                 p.frames = p.frames.min(tui_max_video_frames(grid, p.fps));
             }
+            ParamField::Pipeline => {
+                p.pipeline = match (p.pipeline, delta >= 0) {
+                    (None, true) | (Some(Ltx2PipelineMode::TwoStage), false) => {
+                        Some(Ltx2PipelineMode::OneStage)
+                    }
+                    (Some(Ltx2PipelineMode::OneStage), true)
+                    | (Some(Ltx2PipelineMode::TwoStageHq), false) => {
+                        Some(Ltx2PipelineMode::TwoStage)
+                    }
+                    (Some(Ltx2PipelineMode::TwoStage), true)
+                    | (Some(Ltx2PipelineMode::Distilled), false) => {
+                        Some(Ltx2PipelineMode::TwoStageHq)
+                    }
+                    (Some(Ltx2PipelineMode::TwoStageHq), true) | (None, false) => {
+                        Some(Ltx2PipelineMode::Distilled)
+                    }
+                    (Some(Ltx2PipelineMode::Distilled), true)
+                    | (Some(Ltx2PipelineMode::OneStage), false) => None,
+                    // These modes cannot be authored by the current TUI. If
+                    // stale state reaches this boundary, recover to Auto.
+                    (Some(_), _) => None,
+                };
+                p.format = OutputFormat::Mp4;
+            }
             ParamField::Audio => {
                 p.enable_audio = match (p.enable_audio, delta >= 0) {
                     (None, true) | (Some(false), false) => Some(true),
@@ -4494,6 +4555,9 @@ impl App {
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel => {}
+        }
+        if field == ParamField::Pipeline {
+            self.sync_pipeline_guidance();
         }
     }
 
@@ -5041,6 +5105,7 @@ impl App {
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
             ParamField::Audio => self.adjust_field(ParamField::Audio, 1),
+            ParamField::Pipeline => self.adjust_field(ParamField::Pipeline, 1),
             ParamField::SpatialUpscale => self.adjust_field(ParamField::SpatialUpscale, 1),
             ParamField::TemporalUpscale => self.adjust_field(ParamField::TemporalUpscale, 1),
             ParamField::StgBlocks => {
@@ -5145,6 +5210,7 @@ impl App {
         self.generate.params.upscale_model = None;
         self.generate.params.frames = default_frames;
         self.generate.params.fps = default_fps;
+        self.generate.params.pipeline = None;
         self.generate.params.enable_audio = None;
         self.generate.params.spatial_upscale = None;
         self.generate.params.temporal_upscale = None;
@@ -5155,6 +5221,7 @@ impl App {
         self.generate.params.control_image_path = None;
         self.generate.params.control_model = None;
         self.generate.params.control_scale = 1.0;
+        self.sync_generate_capabilities();
     }
 
     // ── Settings view helpers ─────────────────────────────────────────
@@ -10875,6 +10942,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_row_cycles_source_free_ltx2_recipes_and_selects_mp4() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.generate.params.model = "ltx-2.3-22b-dev:fp8".into();
+        app.config.models.insert(
+            app.generate.params.model.clone(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
+        app.sync_generate_capabilities();
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Video);
+        app.refresh_create_rows();
+        let pipeline_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|row| {
+                *row == CreateRow::SectionField(AdvSection::Video, ParamField::Pipeline)
+            })
+            .expect("LTX-2 Video section must expose Pipeline");
+        app.generate.param_index = pipeline_idx;
+
+        assert_eq!(app.generate.params.pipeline, None);
+        app.increment_param(1);
+        assert_eq!(
+            app.generate.params.pipeline,
+            Some(Ltx2PipelineMode::OneStage)
+        );
+        assert_eq!(app.generate.params.format, OutputFormat::Mp4);
+        assert!(
+            app.generate.capabilities.supports_negative_prompt,
+            "the one-stage recipe uses CFG even when Auto inherited a distilled checkpoint default"
+        );
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(
+            app.generate.params.pipeline,
+            Some(Ltx2PipelineMode::TwoStage)
+        );
+        app.increment_param(-1);
+        assert_eq!(
+            app.generate.params.pipeline,
+            Some(Ltx2PipelineMode::OneStage)
+        );
+        app.increment_param(-1);
+        assert_eq!(app.generate.params.pipeline, None);
+        app.increment_param(-1);
+        assert_eq!(
+            app.generate.params.pipeline,
+            Some(Ltx2PipelineMode::Distilled)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_distilled_pipeline_disables_primary_guidance() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "ltx-2.3-22b-dev:fp8".into();
+        app.config.models.insert(
+            app.generate.params.model.clone(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
+        app.generate.capabilities = crate::model_info::capabilities_for_model(
+            "ltx2",
+            &app.generate.params.model,
+            None,
+            None,
+        );
+        app.generate.params.pipeline = Some(Ltx2PipelineMode::Distilled);
+        app.generate.params.guidance = 7.0;
+        app.sync_pipeline_guidance();
+
+        app.adjust_field(ParamField::Guidance, 1);
+
+        assert_eq!(app.generate.params.guidance, 7.0);
+        assert!(!app.generate.guidance_adjustable());
+        assert!(!app.generate.capabilities.supports_negative_prompt);
+    }
+
+    #[tokio::test]
+    async fn returning_pipeline_to_auto_restores_advertised_catalog_guidance() {
+        let mut app = make_settings_test_app();
+        let model = "cv:opaque-ltx2-checkpoint";
+        app.generate.params.model = model.into();
+        app.config.models.insert(
+            model.into(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
+        let mut entry = make_test_catalog_entry(model, 8, 1.0, 1216, 704, "Opaque LTX-2");
+        entry.info.family = "ltx2".into();
+        entry.guidance_capabilities = Some(mold_core::GuidanceCapabilities::FIXED_ONE);
+        app.models.catalog.push(entry);
+
+        app.sync_generate_capabilities();
+        assert!(!app.generate.capabilities.supports_negative_prompt);
+
+        app.generate.params.pipeline = Some(Ltx2PipelineMode::OneStage);
+        app.sync_pipeline_guidance();
+        assert!(app.generate.capabilities.supports_negative_prompt);
+
+        app.generate.params.pipeline = None;
+        app.sync_pipeline_guidance();
+        assert!(
+            !app.generate.capabilities.supports_negative_prompt,
+            "Auto must restore the server-advertised fixed guidance contract"
+        );
+    }
+
+    #[tokio::test]
     async fn ltx2_upscale_rows_cycle_native_modes() {
         use crate::ui::create_form::{AdvSection, CreateRow};
         let mut app = make_settings_test_app();
@@ -11030,6 +11215,7 @@ mod tests {
         let mut app = make_settings_test_app();
         app.generate.params.model = "flux2-klein:q8".into();
         app.generate.params.enable_audio = Some(true);
+        app.generate.params.pipeline = Some(Ltx2PipelineMode::TwoStage);
         app.generate.params.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
         app.generate.params.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
         app.generate.params.guidance_overrides.modality_scale = Some(3.0);
@@ -11040,6 +11226,7 @@ mod tests {
         assert!(!app.generate.capabilities.supports_audio);
         assert!(!app.generate.capabilities.supports_video_upscale);
         assert_eq!(app.generate.params.enable_audio, None);
+        assert_eq!(app.generate.params.pipeline, None);
         assert_eq!(app.generate.params.spatial_upscale, None);
         assert_eq!(app.generate.params.temporal_upscale, None);
         assert!(app.generate.params.guidance_overrides.is_empty());
