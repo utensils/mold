@@ -428,9 +428,10 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         seed_contract: CPU_SEED,
         media: MediaKind::Video,
         workflows: WorkflowCapabilities {
-            // Text-to-video only in this layer; I2V/TI2V conditioning, chained
-            // clips, generated audio, and LoRA all arrive later.
-            source: false,
+            // Single-image conditioning is live (TI2V latent inpaint and the
+            // I2V channel concat); chained clips, generated audio, and LoRA
+            // arrive later.
+            source: true,
             edit_references: false,
             lora: false,
             generated_audio: false,
