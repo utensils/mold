@@ -251,6 +251,7 @@ const prevStyle = ref<{
 const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
 const queueingVariations = ref(false);
+const preparingVariations = ref(false);
 const expandRoute = ref<HostRoute | null>(null);
 interface QuickPreparedExpansion {
   expandedPrompt: string;
@@ -284,6 +285,9 @@ interface PreparedWebBatch {
   remixDimensions?: readonly (readonly RemixDimension[])[];
 }
 const preparedBatch = ref<PreparedWebBatch | null>(null);
+const ordinarySubmitBlocked = computed(
+  () => preparingVariations.value || preparedBatch.value !== null,
+);
 
 function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
@@ -2370,6 +2374,7 @@ function submitRequestCopies(
 }
 
 async function onSubmit(allowStaleQuick = false) {
+  if (ordinarySubmitBlocked.value) return;
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
   // list is empty, so a model check first would blame the model instead), and
@@ -2500,6 +2505,7 @@ async function onExpand() {
   // legitimate render — there is nothing to enrich.
   if (!form.state.value.prompt.trim()) return;
   if (form.state.value.batchSize > 1) {
+    if (preparingVariations.value) return;
     if (!validateSubmit()) return;
     const decision = chainDecision.value;
     if (decision.kind === "reject") {
@@ -2513,22 +2519,23 @@ async function onExpand() {
     const selectedHostPolicy = routing.targetId.value;
     const baseRequest = form.toRequest(currentModel.value);
     const task = expansionTaskForCurrentOutput(baseRequest);
-    const result =
-      decision.kind === "chain"
-        ? await routing.resolveFeasibleChain(
-            resolveChainRequest(baseRequest, decision),
-            count,
-          )
-        : await routing.resolveFeasible(baseRequest, count);
-    if (result.kind !== "route") {
-      toast("error", feasibilityMessage(result, "every prepared variation"));
-      return;
-    }
-    const route = result.route;
-    const submitRoute = normalizeSubmitRoute(route);
-    const style = styleHint(form.state.value.stylePreset ?? "");
-    composerError.value = null;
+    preparingVariations.value = true;
     try {
+      const result =
+        decision.kind === "chain"
+          ? await routing.resolveFeasibleChain(
+              resolveChainRequest(baseRequest, decision),
+              count,
+            )
+          : await routing.resolveFeasible(baseRequest, count);
+      if (result.kind !== "route") {
+        toast("error", feasibilityMessage(result, "every prepared variation"));
+        return;
+      }
+      const route = result.route;
+      const submitRoute = normalizeSubmitRoute(route);
+      const style = styleHint(form.state.value.stylePreset ?? "");
+      composerError.value = null;
       const response = await expandPrompt(
         {
           prompt: sourcePrompt,
@@ -2556,6 +2563,8 @@ async function onExpand() {
     } catch (error) {
       composerError.value =
         error instanceof Error ? error.message : String(error);
+    } finally {
+      preparingVariations.value = false;
     }
     return;
   }
@@ -3456,6 +3465,7 @@ onBeforeUnmount(() => {
             :height="form.state.value.height"
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
+            :busy="ordinarySubmitBlocked"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
             :history="promptHistory"

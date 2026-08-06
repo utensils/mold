@@ -1395,14 +1395,16 @@ concurrent resume without cross-chain state corruption.
 
 ### 12.1 Phases A–E: preserve client siblings
 
-Desktop, web, iPhone, CLI, and TUI keep expanding Batch N into N independent
-requests with:
+Desktop, web, iPhone, CLI, and TUI keep Batch N as N independent requests.
+Ordinary desktop/web Generate siblings reuse the visible prompt; explicitly
+prepared variations, including iPhone Batch N, retain one reviewed prompt per
+sibling. Both paths carry:
 
 - `batch_size = 1`;
 - one frozen normalized route;
 - `base_seed.wrapping_add(index)`;
 - `batch_id`, one-based `batch_index`, and `batch_count`;
-- one reviewed prompt per prepared sibling.
+- one reviewed prompt per sibling when the user explicitly prepared variations.
 
 The scheduler recognizes sibling metadata for display and locality but each
 sibling remains independently cancellable and independently publishable.

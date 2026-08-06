@@ -227,7 +227,7 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
 
 <template>
   <nav
-    class="nav-rail relative flex shrink-0 flex-col border-r border-edge bg-bench pt-3.5 pb-3"
+    class="nav-rail relative flex min-h-0 shrink-0 flex-col overflow-hidden border-r border-edge bg-bench pt-3.5 pb-3"
     :class="collapsed ? 'px-1.5' : 'px-2.5'"
     :style="{ width: `${railWidth}px` }"
     aria-label="Primary"

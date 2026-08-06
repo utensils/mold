@@ -88,9 +88,28 @@ describe("ComposerCard", () => {
     ).toBeDefined();
   });
 
-  it("hides the Generate button for prepared multi-image batches", () => {
+  it("keeps Generate visible for multi-image batches", () => {
     const wrapper = mountComposer(baseForm(), { effectiveBatchSize: 3 });
-    expect(wrapper.find("[data-test='generate-button']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='generate-button']").text()).toContain("Generate");
+  });
+
+  it("disables Generate while batch expansion is running", () => {
+    const wrapper = mountComposer(baseForm(), {
+      effectiveBatchSize: 3,
+      expansionRunning: true,
+    });
+    expect(wrapper.get("[data-test='generate-button']").attributes("disabled")).toBeDefined();
+  });
+
+  it("does not submit from the shortcut while Generate is disabled", async () => {
+    const wrapper = mountComposer(baseForm(), {
+      effectiveBatchSize: 3,
+      hasPrepared: true,
+    });
+    await wrapper
+      .get("textarea[aria-label='Prompt']")
+      .trigger("keydown", { key: "Enter", metaKey: true });
+    expect(wrapper.emitted("generate")).toBeUndefined();
   });
 
   it("forwards blocked + running expansion state to the ExpandControl", () => {

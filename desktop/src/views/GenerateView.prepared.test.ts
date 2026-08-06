@@ -194,6 +194,25 @@ describe("GenerateView prepared expansion batches", () => {
     expect(prepared.props("batch").route.hostId).toBe("local");
   });
 
+  it("generates Batch N directly without implicitly expanding the prompt", async () => {
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(expandPrompt).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledTimes(1);
+    const [request, batch, , , options] = submit.mock.calls[0]!;
+    expect(request).toMatchObject({ prompt: "a lighthouse at dusk" });
+    expect(batch).toBe(3);
+    expect(options).toEqual({});
+  });
+
   it("prepares and preserves exactly eight reviewed prompts", async () => {
     const prompts = Array.from({ length: 8 }, (_, index) => `variation ${index + 1}`);
     useGenerateFormStore().form.batchSize = prompts.length;

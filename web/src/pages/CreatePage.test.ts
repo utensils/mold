@@ -1416,6 +1416,44 @@ describe("CreatePage layout and behavior", () => {
     expect(batchIds.size).toBe(1);
   });
 
+  it("blocks ordinary submit while variations are preparing and awaiting review", async () => {
+    let releaseExpansion!: (value: {
+      original: string;
+      expanded: string[];
+    }) => void;
+    expandPromptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseExpansion = resolve;
+        }),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    const composer = wrapper.getComponent({ name: "ComposerCard" });
+    expect(composer.props("busy")).toBe(true);
+    composer.vm.$emit("submit");
+    await flushPromises();
+    expect(submitMock).not.toHaveBeenCalled();
+
+    releaseExpansion({
+      original: "a lighthouse",
+      expanded: ["north light", "storm light", "harbor light"],
+    });
+    await flushPromises();
+    expect(composer.props("busy")).toBe(true);
+    composer.vm.$emit("submit");
+    await flushPromises();
+    expect(submitMock).not.toHaveBeenCalled();
+  });
+
   it("opens prompt expansion while an earlier print is running", async () => {
     streamJobsRef.value = [
       {
@@ -3049,6 +3087,7 @@ function pageStubs() {
     },
     ComposerCard: {
       name: "ComposerCard",
+      props: ["busy"],
       template:
         '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
