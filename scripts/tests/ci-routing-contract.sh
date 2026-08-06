@@ -25,6 +25,22 @@ require_text "$ci" \
   "if: needs.changes.outputs.gpu == 'true'" \
   "backend checks are not routed through the GPU-specific classifier"
 require_text "$ci" \
+  "cargo clippy -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings" \
+  "CUDA-gated production code is not linted"
+require_text "$ci" \
+  "cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings" \
+  "Metal-gated production code is not linted"
+require_text "$ci" \
+  "cargo clippy -p mold-ai --features flash-attn -- -D warnings" \
+  "the flash-attn binary wiring is only typechecked"
+flash_filter="$(sed -n '/^            flash:/,/^            website:/p' "$ci")"
+if grep -Fq ".github/workflows/ci.yml" <<< "$flash_filter"; then
+  fail "unrelated root CI edits still trigger the hour-long FlashAttention kernel build on PRs"
+fi
+require_text "$ci" \
+  "if: github.event_name == 'push' || needs.changes.outputs.flash == 'true'" \
+  "FlashAttention is not covered by every main push after narrowing its PR paths"
+require_text "$ci" \
   "if: github.event_name == 'push' && needs.changes.outputs.rust == 'true'" \
   "coverage is not deferred to the post-merge main run"
 release_filter="$(sed -n '/^            release:/,/^  release:/p' "$ci")"
