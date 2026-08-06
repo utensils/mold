@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
+import MoldHomeCard from "./MoldHomeCard.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -125,6 +126,8 @@ function hostDot(status: "ready" | "connecting" | "error"): string {
         <p v-if="conn.localError" class="mt-2 text-caption text-stop">{{ conn.localError }}</p>
       </div>
     </div>
+
+    <MoldHomeCard />
 
     <!-- Storage (engine config) -->
     <div v-if="config.available" class="mt-5">
