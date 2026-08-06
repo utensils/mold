@@ -59,6 +59,11 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiFetchTo,
   apiJsonTo,
 }));
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/client")>()),
+  apiFetchTo,
+  apiJsonTo,
+}));
 vi.mock("../lib/api/sse", () => ({ sseStream }));
 vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt }));
@@ -262,6 +267,8 @@ beforeEach(() => {
     if (path === "/api/status") return Promise.resolve(status);
     if (path === "/api/models") return Promise.resolve([model]);
     if (path === "/api/gallery") return Promise.resolve([print]);
+    if (path === "/api/activity")
+      return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
   apiFetchTo.mockReset().mockResolvedValue({
@@ -325,6 +332,39 @@ afterEach(() => {
 });
 
 describe("MobileApp sequence generation", () => {
+  it("shows active work started by another client with host attribution", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: "mobile-host",
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-job",
+              kind: "generation",
+              phase: "running",
+              model: "flux-dev:q4",
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: false,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await flushPromises();
+    const activity = wrapper.get("[data-test='shared-live-activity']");
+    expect(activity.text()).toContain("Studio");
+    expect(activity.text()).toContain("flux-dev:q4");
+    expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
+  });
+
   it("queues a durable two-clip sequence on the selected Keychain-authenticated host", async () => {
     const sequenceModel = {
       ...model,

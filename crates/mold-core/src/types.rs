@@ -2232,6 +2232,52 @@ pub struct QueueListingWire {
     pub plan: Option<QueuePlan>,
 }
 
+// ── GET /api/activity wire types ───────────────────────────────────────────
+
+/// One server-owned, nonterminal unit shown by clients in Now Developing.
+///
+/// This intentionally carries identification and progress metadata only. In
+/// particular, prompts and source media never cross the shared activity
+/// boundary merely because another client can authenticate to the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ActiveWorkItem {
+    /// Stable within this host for the lifetime of the work.
+    pub id: String,
+    /// Extensible public class: `generation`, `sequence`, `download`, or a
+    /// scheduler-owned future work kind.
+    pub kind: String,
+    /// Extensible nonterminal lifecycle (`queued`, `preparing`, `loading`,
+    /// `running`, `downloading`, or `cancelling`).
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Server-confirmed cancellation support for this exact item. Clients may
+    /// narrow this further when the item is not part of their local session.
+    #[serde(default)]
+    pub can_cancel: bool,
+}
+
+/// Durable reconciliation authority for the shared, present-tense half of
+/// Now Developing. Terminal work is deliberately absent; completed/recent
+/// history remains bounded and local to the initiating client.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ActiveWorkSnapshot {
+    /// Stable server identity used to fence a remembered host whose URL or
+    /// machine has changed since the client cached its last snapshot.
+    pub instance_id: String,
+    pub observed_at_unix_ms: u64,
+    #[serde(default)]
+    pub items: Vec<ActiveWorkItem>,
+}
+
 impl QueueListingWire {
     /// Normalize legacy internal lane identities before presenting this
     /// client-side projection to another consumer.

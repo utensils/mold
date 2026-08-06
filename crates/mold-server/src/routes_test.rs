@@ -2488,6 +2488,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_snapshot_exposes_only_server_owned_nonterminal_work() {
+        let mut state = AppState::for_tests();
+        let home = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "sequence-c", ChainJobState::Running);
+        state.metadata_db = Arc::new(Some(db));
+        let (download_id, _, _) = state
+            .downloads
+            .enqueue_recipe(crate::downloads::RecipePayload {
+                catalog_id: "cv:713".into(),
+                files: vec![crate::downloads::OwnedRecipeFile {
+                    url: "http://invalid.example/model.safetensors".into(),
+                    dest: "model.safetensors".into(),
+                    sha256: None,
+                    size_bytes: Some(100),
+                }],
+                auth: mold_core::download::RecipeAuth::None,
+            })
+            .await
+            .unwrap();
+        state.job_registry.register("queued-a", "flux-dev:q4");
+        state.job_registry.register("running-b", "sdxl:q8");
+        state.job_registry.mark_running("running-b", Some(1));
+        state.scheduled_work.set_queue_work_items_for_tests(vec![
+            mold_core::QueueWorkItem {
+                work_id: "running-b:child".into(),
+                parent_id: "running-b".into(),
+                work_kind: "generation".into(),
+                activity_phase: mold_core::QueueActivityPhase::Dispatching,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "expand:0".into(),
+                parent_id: "expand-parent".into(),
+                work_kind: "prompt_expand".into(),
+                activity_phase: mold_core::QueueActivityPhase::Cpu,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "expand:1".into(),
+                parent_id: "expand-parent".into(),
+                work_kind: "prompt_expand".into(),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                ..Default::default()
+            },
+        ]);
+        let registry = state.job_registry.clone();
+        let instance_id = state.instance_id.as_ref().clone();
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 5);
+        let item = |id: &str| items.iter().find(|item| item["id"] == id).unwrap();
+        assert_eq!(item("queued-a")["kind"], "generation");
+        assert_eq!(item("queued-a")["phase"], "queued");
+        assert_eq!(item("queued-a")["can_cancel"], true);
+        assert_eq!(item("running-b")["phase"], "loading");
+        assert_eq!(item("running-b")["can_cancel"], false);
+        assert_eq!(item("expand-parent")["kind"], "prompt_expand");
+        assert_eq!(item("expand-parent")["phase"], "running");
+        assert_eq!(item("sequence-c")["kind"], "sequence");
+        assert_eq!(item("sequence-c")["phase"], "running");
+        assert_eq!(item(&download_id)["kind"], "download");
+        assert_eq!(item(&download_id)["phase"], "queued");
+        assert_eq!(body["instance_id"], instance_id);
+        assert!(body["observed_at_unix_ms"].as_u64().unwrap() > 0);
+
+        registry.remove("queued-a");
+        registry.remove("running-b");
+        let after_generation_terminal = json_body(
+            app.oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let ids = after_generation_terminal["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!ids.contains(&"queued-a"));
+        assert!(!ids.contains(&"running-b"));
+        assert!(ids.contains(&"expand-parent"));
+    }
+
+    #[tokio::test]
     async fn queue_v2_work_items_are_additive_and_legacy_patch_still_reorders_only_entries() {
         let state = AppState::for_tests();
         state.job_registry.register("ordinary-a", "flux");

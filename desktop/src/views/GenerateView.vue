@@ -25,6 +25,7 @@ import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   canvasMatchesSourceResolution,
@@ -170,6 +171,7 @@ const contextMenu = useContextMenuStore();
 const hostGallery = useGalleryStore();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
+const liveActivity = useLiveActivityStore();
 
 function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
   if (result.kind === "infeasible") {
@@ -2622,6 +2624,7 @@ watch(
 );
 
 onMounted(() => {
+  if (!import.meta.env.TEST) liveActivity.start();
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeydown);
   window.addEventListener("resize", clampBenchToViewport);
@@ -2634,6 +2637,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (!import.meta.env.TEST) liveActivity.stop();
   preparationGuard.invalidate();
   submissionGuard.invalidate();
   clearSequenceStageMedia();
