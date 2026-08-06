@@ -2595,7 +2595,10 @@ async function onRemix() {
 }
 
 function applyRemix(payload: { prompt: string; response: RemixResponseWire }) {
-  prevPrompt.value = payload.response.source_prompt;
+  // The modal may have remixed the durable original while the user continued
+  // editing the composer. Undo must return to the live text replaced by Apply,
+  // not to the transform backend's (possibly older) source prompt.
+  prevPrompt.value = form.state.value.prompt;
   prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
   form.state.value.originalPrompt =
     payload.response.root_prompt ?? payload.response.source_prompt;
@@ -2623,6 +2626,10 @@ function applyRemix(payload: { prompt: string; response: RemixResponseWire }) {
         )?.dimensions ?? [],
     },
   };
+  // Remix, like Expand, weaves the active style into the returned prompt.
+  // Clear the chip to avoid applying it twice and retain its curated negative
+  // in the request; undo restores both through the established snapshot.
+  bakeStyleAndClear();
   showRemix.value = false;
 }
 

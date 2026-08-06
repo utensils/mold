@@ -1674,6 +1674,86 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  it("undoes an original-source Remix to the latest live composer edit", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.originalPrompt = "root lighthouse idea";
+    form.state.value.prompt = "expanded lighthouse draft";
+    await nextTick();
+
+    wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
+    await flushPromises();
+    form.state.value.prompt = "latest hand edit while Remix was open";
+    wrapper.getComponent({ name: "RemixModal" }).vm.$emit("apply", {
+      prompt: "subject-preserving remix",
+      response: {
+        source_prompt: "root lighthouse idea",
+        root_prompt: "root lighthouse idea",
+        source_kind: "original",
+        variants: [
+          { prompt: "subject-preserving remix", dimensions: ["camera"] },
+          { prompt: "second", dimensions: ["lighting"] },
+          { prompt: "third", dimensions: ["mood"] },
+        ],
+      },
+    });
+    await nextTick();
+    expect(form.state.value.prompt).toBe("subject-preserving remix");
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe(
+      "latest hand edit while Remix was open",
+    );
+    expect(form.state.value.originalPrompt).toBe("root lighthouse idea");
+  });
+
+  it("bakes and clears an active style when a Remix is applied", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
+    await flushPromises();
+    wrapper.getComponent({ name: "RemixModal" }).vm.$emit("apply", {
+      prompt: "storm light over a cinematic coast",
+      response: {
+        source_prompt: "a lighthouse",
+        source_kind: "direct",
+        variants: [
+          {
+            prompt: "storm light over a cinematic coast",
+            dimensions: ["camera"],
+          },
+          { prompt: "second", dimensions: ["lighting"] },
+          { prompt: "third", dimensions: ["mood"] },
+        ],
+      },
+    });
+    await nextTick();
+
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+    expect(form.toRequest()).toMatchObject({
+      prompt: "storm light over a cinematic coast",
+      negative_prompt: "text, anime, cartoon, graphic, washed out",
+    });
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.negativePrompt).toBe("text");
+  });
+
   it("offers a readable explicit override for a stale quick expansion", async () => {
     const fluxModel = {
       name: "flux-dev:q4",
