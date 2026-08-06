@@ -7,8 +7,9 @@
 //!   the dominant VRAM cost on CUDA at FLUX 1024^2.
 //! * `Flash` — `candle-flash-attn` (flash-attention v2). Only available with
 //!   `--features cuda,flash-attn` and a CUDA tensor in fp16/bf16. Falls through
-//!   to `Math` for an ineligible tensor, or with a one-shot warning when the
-//!   binary was not compiled with FlashAttention support.
+//!   to `Math` silently for an ineligible tensor, or with a one-shot warning
+//!   when the binary was not compiled with FlashAttention support (that
+//!   warning only exists in a build without the feature).
 //!
 //! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
 //! `OnceLock` so we don't re-read the environment on every block.
@@ -40,6 +41,10 @@ pub enum AttentionChunkPolicy {
 /// Tracks whether we've already emitted the "flash requested but unavailable"
 /// warning for this process. The dispatcher prints it at most once so a
 /// 50-step diffusion run doesn't spam the operator log with the same line.
+///
+/// Only exists in a build without `flash-attn`: once the kernel is compiled
+/// in, "requested but not compiled" is not a reachable state.
+#[cfg(not(feature = "flash-attn"))]
 static FLASH_FALLBACK_WARNED: OnceLock<()> = OnceLock::new();
 
 impl AttentionBackend {
@@ -111,6 +116,9 @@ pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
 /// Emit the "flash requested but not compiled" warning at most once per
 /// process. Returns `true` if this call was the one that fired the warning.
 /// Exposed at `pub(crate)` so the unit tests can assert the OnceLock state.
+///
+/// Absent under `flash-attn`; see [`FLASH_FALLBACK_WARNED`].
+#[cfg(not(feature = "flash-attn"))]
 pub(crate) fn warn_flash_fallback_once() -> bool {
     let mut fired = false;
     FLASH_FALLBACK_WARNED.get_or_init(|| {
@@ -125,7 +133,7 @@ pub(crate) fn warn_flash_fallback_once() -> bool {
 }
 
 /// Whether the flash-fallback warning has fired this process. Test helper.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "flash-attn")))]
 pub(crate) fn flash_fallback_warned() -> bool {
     FLASH_FALLBACK_WARNED.get().is_some()
 }
@@ -244,41 +252,79 @@ fn math_attention_chunked_flat(
 
 /// Flash-attention v2 path.
 ///
-/// When the `flash-attn` feature is on and the tensors are CUDA + fp16/bf16,
-/// this calls `candle_flash_attn::flash_attn`. The workspace patch retains
-/// Candle's upstream package names, so the FFI crate and Mold share the same
-/// `Tensor` type without an out-of-band build cfg.
+/// An ineligible tensor (CPU/Metal, or a dtype other than fp16/bf16) always
+/// takes the math path silently — that is the expected shape of a CPU or Metal
+/// run, not a misconfiguration. An eligible tensor goes to the config-specific
+/// [`flash_attention_eligible`].
 pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     if !flash_is_eligible(q) {
-        // CPU/Metal tensors or wrong dtype — fall back without the
-        // FFI-gate warning. Hitting the math path on these devices is the
-        // expected behavior, not a misconfiguration.
         return math_attention(q, k, v, scale);
     }
+    flash_attention_eligible(q, k, v, scale)
+}
 
-    #[cfg(feature = "flash-attn")]
-    {
-        // FLUX QKV are `[B, H, N, D]`. candle-flash-attn wants `[B, N, H, D]`.
-        let q_t = q.transpose(1, 2)?.contiguous()?;
-        let k_t = k.transpose(1, 2)?.contiguous()?;
-        let v_t = v.transpose(1, 2)?.contiguous()?;
-        let out = candle_flash_attn::flash_attn(&q_t, &k_t, &v_t, scale, false)?;
-        // Output is `[B, N, H, D]`; restore `[B, H, N, D]` for callers.
-        return out.transpose(1, 2)?.contiguous();
-    }
+/// Eligible tensor and the kernel is compiled in: run FlashAttention v2.
+///
+/// The workspace patch retains Candle's upstream package names, so the FFI
+/// crate and Mold share the same `Tensor` type without an out-of-band build
+/// cfg.
+#[cfg(feature = "flash-attn")]
+fn flash_attention_eligible(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    // FLUX QKV are `[B, H, N, D]`. candle-flash-attn wants `[B, N, H, D]`.
+    let q_t = to_flash_layout(q)?;
+    let k_t = to_flash_layout(k)?;
+    let v_t = to_flash_layout(v)?;
+    let out = candle_flash_attn::flash_attn(&q_t, &k_t, &v_t, scale, false)?;
+    // Output is `[B, N, H, D]`; restore `[B, H, N, D]` for callers, who go on
+    // to `reshape` it and so need it contiguous.
+    out.transpose(1, 2)?.contiguous()
+}
 
-    // Tensor was eligible (CUDA + fp16/bf16), but this binary omitted the
-    // optional kernel. Warn once before falling through to math.
-    #[cfg(not(feature = "flash-attn"))]
-    {
-        warn_flash_fallback_once();
+/// Transpose `[B, H, N, D]` to the `[B, N, H, D]` candle-flash-attn expects.
+///
+/// The kernel reads the outer strides straight off the layout and only
+/// requires a unit stride on the last axis, so the transposed *view* of a
+/// contiguous input is already an acceptable argument. Copying it anyway cost
+/// a full `B·H·N·D` buffer per tensor per attention call. The `contiguous`
+/// fallback still covers an input that arrives with a non-unit last stride.
+#[cfg(feature = "flash-attn")]
+fn to_flash_layout(t: &Tensor) -> Result<Tensor> {
+    let t = t.transpose(1, 2)?;
+    if t.stride().last() == Some(&1) {
+        Ok(t)
+    } else {
+        t.contiguous()
     }
+}
+
+/// Eligible tensor, but this binary omitted the optional kernel: warn once,
+/// then fall through to math.
+#[cfg(not(feature = "flash-attn"))]
+fn flash_attention_eligible(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    warn_flash_fallback_once();
     math_attention(q, k, v, scale)
 }
 
-/// Flash-attention 2 requires CUDA tensors in fp16 or bf16.
+/// Flash-attention 2 requires CUDA tensors in fp16 or bf16, at a head dim the
+/// kernel accepts.
 fn flash_is_eligible(q: &Tensor) -> bool {
-    matches!(q.device(), Device::Cuda(_)) && matches!(q.dtype(), DType::F16 | DType::BF16)
+    matches!(q.device(), Device::Cuda(_))
+        && matches!(q.dtype(), DType::F16 | DType::BF16)
+        && q.dim(D::Minus1).is_ok_and(flash_supports_head_dim)
+}
+
+/// Head dims `candle_flash_attn::flash_attn` accepts: a multiple of 8, at most
+/// 512. Anything else is an `Err` from the FFI wrapper, raised before it
+/// touches the tensors.
+///
+/// FLUX, Flux.2 and LTX-2 are all pinned at 128 by their configs, but Z-Image
+/// reads `head_dim` off the checkpoint at runtime and Mold will load an
+/// arbitrary `cv:`/`hf:` Z-Image export — so an unsupported value is reachable
+/// by a user, and it must degrade to the math path rather than fail the
+/// generation. Sizes in range but off a compiled bucket are fine: the kernel
+/// rounds up and predicates the loads, which is numerically exact.
+fn flash_supports_head_dim(head_dim: usize) -> bool {
+    head_dim > 0 && head_dim.is_multiple_of(8) && head_dim <= 512
 }
 
 #[cfg(test)]
@@ -359,6 +405,90 @@ mod tests {
         let math = math_attention(&q, &k, &v, scale).unwrap();
         let flash = flash_attention(&q, &k, &v, scale).unwrap();
         assert!(max_abs_diff(&math, &flash) < 1e-5);
+        // The load-bearing half of "CPU must not warn" is that ineligibility
+        // routes to math *before* the warning site. Assert the predicate
+        // rather than the process-global latch, which `flash_fallback_warns_once`
+        // sets from another test thread in nondeterministic order.
+        assert!(
+            !flash_is_eligible(&q),
+            "CPU tensors must never be flash-eligible"
+        );
+    }
+
+    /// `to_flash_layout` hands the kernel a transposed *view* instead of the
+    /// copy the code used to make. That is only sound because the FFI wrapper
+    /// reads the outer strides off the layout and requires nothing but a unit
+    /// stride on the last axis, so this pins the two against each other.
+    ///
+    /// Requires a CUDA device and so does not execute in CI, which has no GPU
+    /// runner; it is a developer-machine guard for a change whose failure mode
+    /// is wrong pixels rather than an error. Verified on an RTX 4090.
+    #[test]
+    #[cfg(feature = "flash-attn")]
+    fn flash_layout_view_matches_contiguous_copy() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (b, h, n, d) = (1, 4, 256, 64);
+        let mk = || {
+            Tensor::randn(0f32, 1.0, (b, h, n, d), &device)
+                .and_then(|t| t.to_dtype(DType::BF16))
+                .expect("cuda tensor")
+        };
+        let (q, k, v) = (mk(), mk(), mk());
+        let scale = 1.0 / (d as f32).sqrt();
+
+        let viewed = candle_flash_attn::flash_attn(
+            &to_flash_layout(&q).unwrap(),
+            &to_flash_layout(&k).unwrap(),
+            &to_flash_layout(&v).unwrap(),
+            scale,
+            false,
+        )
+        .unwrap();
+        let copied = candle_flash_attn::flash_attn(
+            &q.transpose(1, 2).unwrap().contiguous().unwrap(),
+            &k.transpose(1, 2).unwrap().contiguous().unwrap(),
+            &v.transpose(1, 2).unwrap().contiguous().unwrap(),
+            scale,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(viewed.dims(), copied.dims());
+        assert_eq!(
+            max_abs_diff(
+                &viewed.to_dtype(DType::F32).unwrap(),
+                &copied.to_dtype(DType::F32).unwrap()
+            ),
+            0.0,
+            "a transposed view must give the kernel exactly what the copy did"
+        );
+    }
+
+    /// FA2 rejects a head dim that is not a multiple of 8, or above 512.
+    /// Z-Image takes `head_dim` from whatever checkpoint the user loaded, so
+    /// those values are reachable and must route to math instead of failing
+    /// the generation.
+    #[test]
+    fn test_flash_head_dim_support_matches_kernel_contract() {
+        for supported in [8, 32, 64, 96, 128, 160, 192, 224, 256, 512] {
+            assert!(
+                flash_supports_head_dim(supported),
+                "head_dim {supported} is accepted by candle-flash-attn"
+            );
+        }
+        // In range and a multiple of 8 but not a compiled bucket: the kernel
+        // rounds up to the next bucket and predicates the loads.
+        assert!(flash_supports_head_dim(40));
+        assert!(flash_supports_head_dim(200));
+
+        for unsupported in [0, 1, 12, 100, 520, 1024] {
+            assert!(
+                !flash_supports_head_dim(unsupported),
+                "head_dim {unsupported} must fall back to math"
+            );
+        }
     }
 
     #[test]
@@ -411,7 +541,11 @@ mod tests {
     ///
     /// The CPU test build does not compile the optional CUDA kernel; asserting
     /// the helper directly keeps the one-shot contract independent of hardware.
+    ///
+    /// Only meaningful without `flash-attn` — with the kernel compiled in, the
+    /// helper it exercises does not exist.
     #[test]
+    #[cfg(not(feature = "flash-attn"))]
     fn flash_fallback_warns_once() {
         // First call fires the warning; subsequent calls are no-ops.
         let first = warn_flash_fallback_once();

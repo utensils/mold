@@ -47,6 +47,13 @@ name = "sd_singlefile_inspect"
 path = "src/bin/sd_singlefile_inspect.rs"
 required-features = ["dev-bins"]
 
+# Needs `flash-attn` on top of `dev-bins` to measure anything: without it the
+# flash column silently benchmarks the math fallback.
+[[bin]]
+name = "attention_bench"
+path = "src/bin/attention_bench.rs"
+required-features = ["dev-bins", "cuda"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }

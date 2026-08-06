@@ -381,7 +381,7 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     key: "env.MOLD_ATTN",
     section: "performance",
     label: "Attention backend",
-    help: "math is the portable default; flash needs a CUDA build with flash-attn.",
+    help: "math is the portable default. flash needs a CUDA build with the flash-attn feature, which the built-in engine is not — it falls back to math here.",
     editor: "select",
     options: [
       { value: "", label: "math (default)" },
