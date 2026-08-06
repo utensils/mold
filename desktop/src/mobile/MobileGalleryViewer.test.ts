@@ -303,11 +303,8 @@ describe("MobileGalleryViewer", () => {
     expect(view.get("[data-test='video-export-dialog']").text()).toContain("WEBP");
   });
 
-  it("opens the iOS share sheet with the exported image file", async () => {
-    const share = vi.fn(async () => undefined);
-    const canShare = vi.fn(() => true);
-    Object.defineProperty(navigator, "share", { value: share, configurable: true });
-    Object.defineProperty(navigator, "canShare", { value: canShare, configurable: true });
+  it("opens the native iOS share sheet after the remote export completes", async () => {
+    invoke.mockResolvedValueOnce("shared");
     const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
     await flushPromises();
 
@@ -316,13 +313,21 @@ describe("MobileGalleryViewer", () => {
     await view.get("[data-test='video-export-dialog'] form").trigger("submit");
     await flushPromises();
 
-    expect(canShare).toHaveBeenCalledWith({
-      files: [expect.objectContaining({ name: "developed clip.gif", type: "image/gif" })],
+    expect(invoke).toHaveBeenCalledWith("share_exported_animation", {
+      url: "http://studio.tailnet.ts.net:7680/api/gallery/export/developed%20clip.mp4",
+      apiKey: "secret",
+      request: {
+        format: "gif",
+        playback: "loop",
+        repeat: "forever",
+        max_dimension: 720,
+        fps: 12,
+      },
+      filename: "developed clip.gif",
+      reuseKey:
+        'http://studio.tailnet.ts.net:7680\ndeveloped clip.mp4\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
     });
-    expect(share).toHaveBeenCalledWith({
-      files: [expect.objectContaining({ name: "developed clip.gif", type: "image/gif" })],
-      title: "developed clip.gif",
-    });
+    expect(apiFetchTo).not.toHaveBeenCalled();
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
       "Export ready to share",
     );
@@ -358,17 +363,22 @@ describe("MobileGalleryViewer", () => {
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Video exported");
   });
 
-  it("keeps export options retryable when the iOS share sheet is dismissed", async () => {
-    Object.defineProperty(navigator, "share", {
-      value: vi.fn(async () => {
-        throw new DOMException("Share cancelled", "AbortError");
-      }),
-      configurable: true,
-    });
-    Object.defineProperty(navigator, "canShare", {
-      value: vi.fn(() => true),
-      configurable: true,
-    });
+  it("keeps export options retryable when the native iOS share sheet cannot open", async () => {
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    invoke.mockRejectedValueOnce(new Error("Couldn’t open the iOS share sheet"));
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(view.get("[data-test='video-export-dialog']").isVisible()).toBe(true);
+    expect(view.get("[role='alert']").text()).toContain("Couldn’t open the iOS share sheet");
+  });
+
+  it("keeps a cancelled native export staged for a retry", async () => {
+    invoke.mockResolvedValueOnce("cancelled").mockResolvedValueOnce("shared");
     const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
     await flushPromises();
 
@@ -378,7 +388,16 @@ describe("MobileGalleryViewer", () => {
     await flushPromises();
 
     expect(view.get("[data-test='video-export-dialog']").isVisible()).toBe(true);
-    expect(view.find("[role='alert']").exists()).toBe(false);
+    expect(view.find("[data-test='gallery-viewer-action-status']").exists()).toBe(false);
+
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    const calls = invoke.mock.calls.filter(([command]) => command === "share_exported_animation");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.[1]).toEqual(calls[0]?.[1]);
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
   });
 
   it("fails closed when the generated video's exact host is unavailable", async () => {
