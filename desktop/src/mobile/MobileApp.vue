@@ -10,7 +10,13 @@ import {
   watch,
 } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Format, scan } from "@tauri-apps/plugin-barcode-scanner";
+import {
+  cancel as cancelBarcodeScanner,
+  checkPermissions as checkBarcodeScannerPermissions,
+  Format,
+  requestPermissions as requestBarcodeScannerPermissions,
+  scan,
+} from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -368,6 +374,8 @@ const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const discovering = ref(false);
 const pairing = ref(false);
+const pairingScannerOpen = ref(false);
+let pairingScannerCancelled = false;
 let stopPairingDeepLinks: (() => void) | null = null;
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
@@ -1421,17 +1429,48 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     hostInput.apiKey = claim.api_key ?? "";
     await connectHost();
   } catch (error) {
-    hostError.value = describeTransportError(error);
+    if (!pairingScannerCancelled) hostError.value = describeTransportError(error);
   } finally {
+    pairingScannerCancelled = false;
     pairing.value = false;
   }
 }
 
 function scanPairingCode(): Promise<void> {
   return pairFromCode(async () => {
-    const result = await scan({ cameraDirection: "back", formats: [Format.QRCode] });
-    return result.content;
+    let permission = await checkBarcodeScannerPermissions();
+    if (permission === "prompt") {
+      permission = await requestBarcodeScannerPermissions();
+    }
+    if (permission !== "granted") {
+      throw new Error(
+        "Camera access is required to scan a pairing code. Allow camera access in Settings and try again.",
+      );
+    }
+    pairingScannerOpen.value = true;
+    await nextTick();
+    try {
+      const result = await scan({
+        cameraDirection: "back",
+        formats: [Format.QRCode],
+        windowed: true,
+      });
+      return result.content;
+    } finally {
+      pairingScannerOpen.value = false;
+    }
   });
+}
+
+async function cancelPairingScan(): Promise<void> {
+  if (!pairingScannerOpen.value) return;
+  pairingScannerCancelled = true;
+  try {
+    await cancelBarcodeScanner();
+  } catch (error) {
+    pairingScannerCancelled = false;
+    hostError.value = describeTransportError(error, "Pairing scanner");
+  }
 }
 
 async function openPairingUrls(urls: string[]): Promise<void> {
@@ -4156,6 +4195,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true;
+  if (pairingScannerOpen.value) {
+    pairingScannerCancelled = true;
+    void cancelBarcodeScanner().catch(() => undefined);
+  }
   preparationGuard.invalidate();
   submissionGuard.invalidate();
   submissionUiId += 1;
@@ -4180,7 +4223,45 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="mobile-shell" :class="{ 'is-settings-open': settingsOpen }">
+  <main
+    class="mobile-shell"
+    :class="{ 'is-settings-open': settingsOpen, 'is-pair-scanning': pairingScannerOpen }"
+  >
+    <section
+      v-if="pairingScannerOpen"
+      class="mobile-pair-scanner"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="mobile-pair-scanner-title"
+      data-test="mobile-pair-scanner"
+    >
+      <header class="mobile-pair-scanner-head">
+        <div>
+          <span class="mobile-pair-scanner-kicker">Mold pairing</span>
+          <h1 id="mobile-pair-scanner-title">Scan pairing code</h1>
+        </div>
+        <button
+          class="mobile-pair-scanner-cancel"
+          type="button"
+          data-test="mobile-pair-scanner-cancel"
+          @click="cancelPairingScan"
+        >
+          Cancel
+        </button>
+      </header>
+      <div class="mobile-pair-scanner-stage" aria-hidden="true">
+        <div class="mobile-pair-scanner-frame">
+          <span class="mobile-pair-scanner-corner corner-top-left" />
+          <span class="mobile-pair-scanner-corner corner-top-right" />
+          <span class="mobile-pair-scanner-corner corner-bottom-left" />
+          <span class="mobile-pair-scanner-corner corner-bottom-right" />
+        </div>
+      </div>
+      <footer class="mobile-pair-scanner-foot">
+        <strong>Point your camera at the QR code</strong>
+        <span>On your host, open Settings → Mobile pairing.</span>
+      </footer>
+    </section>
     <header v-if="settingsOpen" class="mobile-header mobile-settings-nav">
       <button
         ref="settingsBackButton"

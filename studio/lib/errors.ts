@@ -45,6 +45,14 @@ function hostLabel(hostName: string | null | undefined): string {
 export function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null) {
+    for (const key of ["message", "error", "reason"] as const) {
+      const value = (error as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (value instanceof Error && value.message) return value.message;
+    }
+    return "";
+  }
   return error == null ? "" : String(error);
 }
 

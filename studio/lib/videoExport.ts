@@ -34,24 +34,9 @@ export function videoExportFilename(
   return `${stem}.${format === "apng" ? "png" : format}`;
 }
 
-/** Save in browsers/desktop, or open the native iOS share sheet when WebKit
- * exposes file sharing. The latter lets the user choose Photos, Files, or any
- * installed destination instead of silently assuming one library. */
-export async function saveVideoExport(
-  blob: Blob,
-  filename: string,
-): Promise<"shared" | "saved"> {
-  const file = new File([blob], filename, { type: blob.type });
-  if (
-    typeof navigator !== "undefined" &&
-    typeof navigator.share === "function" &&
-    typeof navigator.canShare === "function" &&
-    navigator.canShare({ files: [file] })
-  ) {
-    await navigator.share({ files: [file], title: filename });
-    return "shared";
-  }
-
+/** Download an exported animation. This is deliberately the browser default:
+ * desktop Web Share support must not turn a local save into a share sheet. */
+export function downloadVideoExport(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement("a");
@@ -63,5 +48,31 @@ export async function saveVideoExport(
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }
+}
+
+/** Open the native iOS share sheet for an exported animation, falling back to
+ * a file download on older WebKit builds. Callers must opt into this path. */
+export async function shareVideoExport(
+  blob: Blob,
+  filename: string,
+): Promise<"shared" | "saved" | "cancelled"> {
+  const file = new File([blob], filename, { type: blob.type });
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.share === "function" &&
+    typeof navigator.canShare === "function" &&
+    navigator.canShare({ files: [file] })
+  ) {
+    try {
+      await navigator.share({ files: [file], title: filename });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError")
+        return "cancelled";
+      throw error;
+    }
+    return "shared";
+  }
+
+  downloadVideoExport(blob, filename);
   return "saved";
 }
