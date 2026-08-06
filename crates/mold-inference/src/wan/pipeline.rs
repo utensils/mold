@@ -108,6 +108,18 @@ pub(crate) fn detect_vae_generation(path: &Path) -> Result<WanVaeGeneration> {
     )
 }
 
+/// Resolve the unconditional prompt for CFG. Only *absence* falls back to
+/// the tuned default the checkpoints were trained against — an explicit
+/// value is authoritative, including the empty string `--no-negative`
+/// produces, which must stay an empty uncond rather than being silently
+/// replaced.
+fn resolve_negative_prompt(requested: Option<&str>) -> &str {
+    match requested {
+        Some(text) => text.trim(),
+        None => mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT,
+    }
+}
+
 /// Derive the DiT config from the checkpoint's tensor shapes.
 ///
 /// Shape-driven rather than name-driven, the way ComfyUI detects its models: a
@@ -122,7 +134,22 @@ pub(crate) fn detect_vae_generation(path: &Path) -> Result<WanVaeGeneration> {
 /// - `head.head.weight` `[out_dim * patch, dim]` gives the output channels.
 /// - The highest `blocks.{i}.` index gives the depth.
 pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerConfig> {
-    let shapes = header_shapes(path)?;
+    // The shipped Comfy-Org repacks store every DiT key under
+    // `model.diffusion_model.` (verified against the real
+    // wan2.1_t2v_1.3B_bf16.safetensors header) while the VAE and encoder
+    // files are bare. The loader already strips the prefix; detection must
+    // see the same names or the advertised checkpoint fails before the
+    // prefix-aware loader ever runs.
+    let shapes: Vec<(String, Vec<usize>)> = header_shapes(path)?
+        .into_iter()
+        .map(|(name, shape)| {
+            let bare = name
+                .strip_prefix("model.diffusion_model.")
+                .map(str::to_string)
+                .unwrap_or(name);
+            (bare, shape)
+        })
+        .collect();
     let find = |key: &str| -> Result<&Vec<usize>> {
         shapes
             .iter()
@@ -394,12 +421,7 @@ impl WanEngine {
 
         progress.stage_start("Encoding prompt");
         let encode_start = Instant::now();
-        let negative = req
-            .negative_prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .unwrap_or(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT);
+        let negative = resolve_negative_prompt(req.negative_prompt.as_deref());
         let prompts: Vec<&str> = if needs_cfg {
             vec![req.prompt.as_str(), negative]
         } else {
@@ -913,6 +935,65 @@ mod tests {
 
         let config = detect_transformer_config(&path).unwrap();
         assert_eq!(config, WanTransformerConfig::t2v_1_3b());
+    }
+
+    /// The shipped Comfy-Org repacks prefix every DiT key with
+    /// `model.diffusion_model.` (verified against the real 1.3B header, 825
+    /// keys, all prefixed). Detection must see through it exactly like the
+    /// loader does — this was a hard generate-time failure before the fix.
+    #[test]
+    fn transformer_detection_sees_through_the_shipped_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wan-prefixed.safetensors");
+        let mut shapes: Vec<(String, Vec<usize>)> = vec![
+            (
+                "model.diffusion_model.patch_embedding.weight".into(),
+                vec![1536, 16, 1, 2, 2],
+            ),
+            (
+                "model.diffusion_model.blocks.0.ffn.0.weight".into(),
+                vec![8960, 1536],
+            ),
+            (
+                "model.diffusion_model.text_embedding.0.weight".into(),
+                vec![1536, 4096],
+            ),
+            (
+                "model.diffusion_model.time_embedding.0.weight".into(),
+                vec![1536, 256],
+            ),
+            (
+                "model.diffusion_model.head.head.weight".into(),
+                vec![64, 1536],
+            ),
+        ];
+        for layer in 0..30 {
+            shapes.push((
+                format!("model.diffusion_model.blocks.{layer}.modulation"),
+                vec![1, 6, 1536],
+            ));
+        }
+        let borrowed: Vec<(&str, &[usize])> = shapes
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape.as_slice()))
+            .collect();
+        write_header(&path, &borrowed);
+
+        let config = detect_transformer_config(&path).unwrap();
+        assert_eq!(config, WanTransformerConfig::t2v_1_3b());
+    }
+
+    /// Absence falls back to the tuned default; an explicit value — the empty
+    /// string `--no-negative` produces included — is authoritative.
+    #[test]
+    fn explicit_empty_negative_prompt_is_preserved() {
+        assert_eq!(
+            resolve_negative_prompt(None),
+            mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT
+        );
+        assert_eq!(resolve_negative_prompt(Some("")), "");
+        assert_eq!(resolve_negative_prompt(Some("   ")), "");
+        assert_eq!(resolve_negative_prompt(Some("blurry")), "blurry");
     }
 
     #[test]
