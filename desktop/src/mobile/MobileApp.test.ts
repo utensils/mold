@@ -18,6 +18,9 @@ const {
   startCatalogDownload,
   previewChainPlacement,
   previewGenerationPlacement,
+  checkBarcodeScannerPermissions,
+  requestBarcodeScannerPermissions,
+  cancelBarcodeScanner,
   scanPairingQr,
   claimPairingSession,
   getCurrentDeepLinks,
@@ -36,6 +39,9 @@ const {
   startCatalogDownload: vi.fn(),
   previewChainPlacement: vi.fn(),
   previewGenerationPlacement: vi.fn(),
+  checkBarcodeScannerPermissions: vi.fn(),
+  requestBarcodeScannerPermissions: vi.fn(),
+  cancelBarcodeScanner: vi.fn(),
   scanPairingQr: vi.fn(),
   claimPairingSession: vi.fn(),
   getCurrentDeepLinks: vi.fn(),
@@ -46,6 +52,9 @@ const {
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-barcode-scanner", () => ({
   Format: { QRCode: "QRCode" },
+  checkPermissions: checkBarcodeScannerPermissions,
+  requestPermissions: requestBarcodeScannerPermissions,
+  cancel: cancelBarcodeScanner,
   scan: scanPairingQr,
 }));
 vi.mock("@tauri-apps/plugin-deep-link", () => ({
@@ -325,6 +334,9 @@ beforeEach(() => {
   startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
   previewChainPlacement.mockReset().mockResolvedValue(plannedPlacement());
   previewGenerationPlacement.mockReset().mockResolvedValue(plannedPlacement());
+  checkBarcodeScannerPermissions.mockReset().mockResolvedValue("granted");
+  requestBarcodeScannerPermissions.mockReset();
+  cancelBarcodeScanner.mockReset().mockResolvedValue(undefined);
   scanPairingQr.mockReset();
   claimPairingSession.mockReset();
   getCurrentDeepLinks.mockReset().mockResolvedValue(null);
@@ -5095,6 +5107,65 @@ describe("MobileApp host and catalog coordination", () => {
     await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
     await flushPromises();
   }
+
+  it("settles first-run camera permission before opening the pairing scanner", async () => {
+    checkBarcodeScannerPermissions.mockResolvedValue("prompt");
+    requestBarcodeScannerPermissions.mockResolvedValue("granted");
+    scanPairingQr.mockRejectedValue("cancelled");
+
+    await scanFromMachines();
+
+    expect(requestBarcodeScannerPermissions).toHaveBeenCalledOnce();
+    expect(scanPairingQr).toHaveBeenCalledOnce();
+    expect(scanPairingQr).toHaveBeenCalledWith({
+      cameraDirection: "back",
+      formats: ["QRCode"],
+      windowed: true,
+    });
+    expect(requestBarcodeScannerPermissions.mock.invocationCallOrder[0]).toBeLessThan(
+      scanPairingQr.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("wraps camera mode in cancellable Mold UI and cleans up without an error", async () => {
+    const pendingScan = deferred<{ content: string }>();
+    scanPairingQr.mockReturnValue(pendingScan.promise);
+    cancelBarcodeScanner.mockImplementation(async () => pendingScan.reject("cancelled"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+    await flushPromises();
+
+    const scanner = wrapper.get("[data-test='mobile-pair-scanner']");
+    expect(scanner.attributes("role")).toBe("dialog");
+    expect(scanner.text()).toContain("Point your camera at the QR code");
+    await scanner.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(cancelBarcodeScanner).toHaveBeenCalledOnce();
+    expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
+    expect(wrapper.find(".error-text").exists()).toBe(false);
+  });
+
+  it("does not open the pairing scanner when camera access is denied", async () => {
+    checkBarcodeScannerPermissions.mockResolvedValue("prompt");
+    requestBarcodeScannerPermissions.mockResolvedValue("denied");
+
+    await scanFromMachines();
+
+    expect(scanPairingQr).not.toHaveBeenCalled();
+    expect(wrapper?.get(".error-text").text()).toContain("Allow camera access in Settings");
+  });
+
+  it("renders structured native scanner failures as readable copy", async () => {
+    scanPairingQr.mockRejectedValue({ message: "The camera is unavailable." });
+
+    await scanFromMachines();
+
+    expect(wrapper?.get(".error-text").text()).toBe("The camera is unavailable.");
+  });
 
   it("rejects expired pairing codes before contacting the host", async () => {
     scanPairingQr.mockResolvedValue({
