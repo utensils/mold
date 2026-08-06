@@ -1,5 +1,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    mold_core::Config::ensure_saved_mold_dir_available()?;
+
     // Initialize tracing (when run as a standalone binary).
     // When invoked via `mold discord`, the CLI sets up tracing instead.
     let filter = std::env::var("MOLD_LOG").unwrap_or_else(|_| "info".to_string());

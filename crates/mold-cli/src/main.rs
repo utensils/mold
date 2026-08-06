@@ -1636,6 +1636,10 @@ async fn run() -> anyhow::Result<()> {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
 
+    // A missing saved root means its external drive is offline. Fail before
+    // the DB, logger, model cache, or output paths can recreate that mount.
+    mold_core::Config::ensure_saved_mold_dir_available()?;
+
     // Install the DB-backed `Config` overlay hook: first load runs the
     // one-shot config.toml → DB migration, every subsequent load picks
     // up authoritative user-preference values from the DB. Safe to run

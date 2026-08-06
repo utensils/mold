@@ -755,8 +755,11 @@ is_schnell = false
     #[test]
     fn mold_dir_defaults_to_dot_mold() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("MOLD_HOME_POINTER_PATH", temp.path().join("missing"));
         std::env::remove_var("MOLD_HOME");
         let dir = Config::mold_dir().unwrap();
+        std::env::remove_var("MOLD_HOME_POINTER_PATH");
         assert!(
             dir.ends_with(".mold"),
             "should end with .mold: got {:?}",
@@ -771,6 +774,77 @@ is_schnell = false
         let dir = Config::mold_dir().unwrap();
         std::env::remove_var("MOLD_HOME");
         assert_eq!(dir, PathBuf::from("/custom/mold"));
+    }
+
+    #[test]
+    fn mold_dir_uses_the_saved_shared_selection() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let pointer = temp.path().join("config/mold/home");
+        std::env::set_var("MOLD_HOME_POINTER_PATH", &pointer);
+        std::env::remove_var("MOLD_HOME");
+
+        Config::save_mold_dir(std::path::Path::new("/Volumes/Studio/Mold")).unwrap();
+        assert_eq!(
+            Config::mold_dir().unwrap(),
+            PathBuf::from("/Volumes/Studio/Mold")
+        );
+        assert_eq!(
+            Config::default().resolved_models_dir(),
+            PathBuf::from("/Volumes/Studio/Mold/models")
+        );
+        assert_eq!(
+            std::fs::read_to_string(pointer).unwrap(),
+            "/Volumes/Studio/Mold"
+        );
+        std::env::remove_var("MOLD_HOME_POINTER_PATH");
+    }
+
+    #[test]
+    fn mold_home_environment_wins_over_the_saved_selection() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let pointer = temp.path().join("home-pointer");
+        std::fs::write(&pointer, "/saved/mold").unwrap();
+        std::env::set_var("MOLD_HOME_POINTER_PATH", &pointer);
+        std::env::set_var("MOLD_HOME", "/environment/mold");
+
+        assert_eq!(
+            Config::mold_dir().unwrap(),
+            PathBuf::from("/environment/mold")
+        );
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_HOME_POINTER_PATH");
+    }
+
+    #[test]
+    fn missing_saved_mold_home_is_an_explicit_startup_error() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let pointer = temp.path().join("home-pointer");
+        let missing = temp.path().join("offline-volume/mold");
+        std::fs::write(&pointer, missing.to_string_lossy().as_bytes()).unwrap();
+        std::env::set_var("MOLD_HOME_POINTER_PATH", &pointer);
+        std::env::remove_var("MOLD_HOME");
+
+        let error = Config::ensure_saved_mold_dir_available().unwrap_err();
+        assert!(error.to_string().contains("unavailable"));
+        assert!(!missing.exists());
+        std::env::remove_var("MOLD_HOME_POINTER_PATH");
+    }
+
+    #[test]
+    fn corrupt_saved_mold_home_pointer_fails_closed() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let pointer = temp.path().join("home-pointer");
+        std::fs::write(&pointer, "  \n").unwrap();
+        std::env::set_var("MOLD_HOME_POINTER_PATH", &pointer);
+        std::env::remove_var("MOLD_HOME");
+
+        let error = Config::ensure_saved_mold_dir_available().unwrap_err();
+        assert!(error.to_string().contains("unreadable or invalid"));
+        std::env::remove_var("MOLD_HOME_POINTER_PATH");
     }
 
     #[test]
