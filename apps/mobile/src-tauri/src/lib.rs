@@ -27,6 +27,7 @@ pub fn run() {
             keychain::keychain_delete_api_key,
             media::copy_image_to_clipboard,
             media::save_image_to_photos,
+            media::save_video_to_photos,
         ])
         .run(app_context())
         .expect("error while running mold-mobile");
@@ -75,7 +76,7 @@ mod tests {
     fn ios_declares_add_only_photos_access_for_explicit_saves() {
         let plist = include_str!("../Info.ios.plist");
         assert!(plist.contains("<key>NSPhotoLibraryAddUsageDescription</key>"));
-        assert!(plist.contains("Save generated images"));
+        assert!(plist.contains("Save generated images and videos"));
     }
 
     #[test]

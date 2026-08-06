@@ -58,8 +58,8 @@ Desktop Settings → About opens the public Mold privacy policy through the nati
 external-browser opener, matching the iPhone disclosure.
 Library merges every saved remote host, streams full-size media through a
 short-lived path-scoped ticket, plays videos with native seeking, swipes between
-prints, exposes explicit native Copy image / Save photo and Use as prompt /
-Use as source actions, and opens generated stills in the same viewer. Persistent
+prints, exposes explicit native Copy image / Save photo / Save video and Use as
+prompt / Use as source actions, and opens generated stills in the same viewer. Persistent
 New visit state mirrors desktop, while both shells derive the Upscaled badge
 from output provenance. Host detail
 shows telemetry, storage, queue, downloads, and installed models. Models merges
