@@ -270,10 +270,15 @@ jobs:
         run: |
           msrv=$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)
           test -n "$msrv"
-          rustup toolchain install "$msrv" --profile minimal
-          cargo "+$msrv" check --workspace --all-targets --locked
-          cargo "+$msrv" check -p mold-ai --locked \
-            --features preview,discord,expand,tui,webp,mp4,mdns
+          case "$msrv" in
+            *.*.*) msrv_toolchain=$msrv ;;
+            *.*) msrv_toolchain=$msrv.0 ;;
+            *) echo "Invalid rust-version: $msrv" >&2; exit 1 ;;
+          esac
+          rustup toolchain install "$msrv_toolchain" --profile minimal
+          cargo "+$msrv_toolchain" check --workspace --all-targets --locked
+          cargo "+$msrv_toolchain" check -p mold-ai --locked \
+            --features preview,discord,expand,tui,metrics,webp,mp4,mdns
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
