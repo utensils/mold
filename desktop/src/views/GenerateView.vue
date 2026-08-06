@@ -3287,6 +3287,7 @@ onBeforeUnmount(() => {
           v-if="quickStaleReasons.length && !preparedBatch"
           data-test="quick-expansion-stale"
           class="mx-5 mb-2"
+          :dismissible="false"
           :message="quickStaleMessage"
         >
           <template #actions>

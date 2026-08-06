@@ -28,4 +28,22 @@ describe("ErrorNotice", () => {
       wrapper.get("[data-test='copy-error-notice']").attributes("aria-label"),
     ).toBe("Error copied");
   });
+
+  it("renders compact spacing and emits from an accessible dismiss button", async () => {
+    const wrapper = mount(ErrorNotice, {
+      props: { message: "Expansion failed.", compact: true, dismissible: true },
+    });
+
+    expect(wrapper.get("[data-test='error-notice']").classes()).toContain(
+      "py-1.5",
+    );
+    expect(
+      wrapper.get("[data-test='error-notice-message']").classes(),
+    ).toContain("leading-snug");
+
+    const dismiss = wrapper.get("[data-test='dismiss-error-notice']");
+    expect(dismiss.attributes("aria-label")).toBe("Dismiss error message");
+    await dismiss.trigger("click");
+    expect(wrapper.emitted("dismiss")).toEqual([[]]);
+  });
 });

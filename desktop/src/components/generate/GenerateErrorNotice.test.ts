@@ -52,4 +52,19 @@ describe("GenerateErrorNotice", () => {
       "Copy error message",
     );
   });
+
+  it("dismisses the current error and reappears for a new message", async () => {
+    const wrapper = mount(GenerateErrorNotice, {
+      props: { message: "The first generation failed." },
+    });
+
+    expect(wrapper.get("[data-test='error-notice']").classes()).toContain("py-1.5");
+    await wrapper.get("[data-test='dismiss-error-notice']").trigger("click");
+    expect(wrapper.find("[data-test='error-notice']").exists()).toBe(false);
+
+    await wrapper.setProps({ message: "The retry failed differently." });
+    expect(wrapper.get("[data-test='error-notice-message']").text()).toBe(
+      "The retry failed differently.",
+    );
+  });
 });
