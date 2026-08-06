@@ -1,7 +1,14 @@
 import { apiJson, apiJsonTo, type ApiTarget } from "./client";
 import type { GenerateRequest, GenerationMemoryEstimate } from "./types";
+import {
+  classifyGenerationFit,
+  displayGenerationMemory,
+  generationEstimateLabel,
+  GENERATION_ESTIMATE_TOOLTIP,
+  type EstimateFit,
+} from "@studio/lib/generationMemoryEstimate";
 
-export type EstimateFit = "fits" | "tight" | "wont-fit" | "unknown";
+export type { EstimateFit };
 
 /**
  * VRAM preflight for a pending generation. Takes the full request; only the
@@ -24,20 +31,23 @@ export function estimateGeneration(
 }
 
 /**
- * Bucket an estimate into a fit verdict for the badge. "Tight" is the top ~8%
- * of available memory — it fits, but barely. Unknown when the server can't see
- * available memory (remote engine without telemetry).
+ * Bucket an estimate into a stable hardware-fit verdict for the badge.
+ * Moment-to-moment free VRAM is intentionally ignored: active/queued work owns
+ * that memory temporarily and made this label alternate while a host worked.
+ * Older servers without capacity fields report an estimate without claiming a
+ * fit verdict.
  */
 export function classifyFit(est: GenerationMemoryEstimate): EstimateFit {
-  const available = est.available_memory_bytes;
-  if (est.fits_available_memory === false) return "wont-fit";
-  if (available == null) return "unknown";
-  if (est.peak_memory_bytes > available) return "wont-fit";
-  if (est.peak_memory_bytes > available * 0.92) return "tight";
-  return "fits";
+  return classifyGenerationFit(est);
 }
 
-const gb = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+/** Stable values used by the badge copy; legacy servers retain estimate-only copy. */
+export function displayEstimateMemory(est: GenerationMemoryEstimate): {
+  peakBytes: number;
+  capacityBytes: number | null;
+} {
+  return displayGenerationMemory(est);
+}
 
 /**
  * Badge copy. Every string leads with "VRAM" so the reader knows what is
@@ -48,21 +58,8 @@ export function estimateLabel(
   peakBytes: number,
   availableBytes: number | null,
 ): string {
-  switch (fit) {
-    case "fits":
-      return availableBytes !== null
-        ? `VRAM · fits — est. ${gb(peakBytes)} of ${gb(availableBytes)}`
-        : `VRAM · est. ${gb(peakBytes)}`;
-    case "tight":
-      return "VRAM · tight — close other apps";
-    case "wont-fit":
-      return "VRAM · won't fit on this GPU";
-    default:
-      return `VRAM · est. ${gb(peakBytes)}`;
-  }
+  return generationEstimateLabel(fit, peakBytes, availableBytes);
 }
 
 /** Plain-language tooltip for the badge. */
-export const ESTIMATE_TOOLTIP =
-  "Preflight estimate of peak GPU memory (VRAM) this print needs, versus the " +
-  "connected engine's available memory. Advisory — actual use varies.";
+export const ESTIMATE_TOOLTIP = GENERATION_ESTIMATE_TOOLTIP;

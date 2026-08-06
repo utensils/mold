@@ -251,7 +251,7 @@ const active = computed(
           >
           {{ vm.model }}
           <span v-if="vm.kind === 'sequence'" class="activity__seq-meta">
-            · {{ vm.stageCount }} clips · {{ vm.state }}
+            · {{ vm.stageCount }} clips · {{ vm.phase ?? vm.state }}
             <template v-if="sequenceStageLabel(vm)">
               · {{ sequenceStageLabel(vm) }}</template
             >

@@ -4902,7 +4902,7 @@ onBeforeUnmount(() => {
                       {{ row.sequence.stageCount }} clips
                     </p>
                     <span>
-                      {{ row.sequence.state }} · clip
+                      {{ row.sequence.phase ?? row.sequence.state }} · clip
                       {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
                         row.sequence.stageCount
                       }}

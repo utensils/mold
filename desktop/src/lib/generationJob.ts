@@ -190,24 +190,30 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
 /** Apply one chain-specific SSE progress frame to the shared Job shape. */
 export function applyChainProgress(job: Job, event: ChainProgressEvent): Job {
   if (event.job_id) job.id = event.job_id;
-  job.queuePosition = null;
 
   switch (event.type) {
     case "chain_start":
-      job.status = "loading";
+      // The durable-chain compatibility stream synthesizes this from its
+      // initial snapshot, including while the chain is still waiting for a
+      // device. It describes the work shape; StageStart is the first proof
+      // that GPU execution actually began.
       job.chainStageIndex = null;
       job.chainStageCount = event.stage_count;
       job.step = 0;
-      job.stage = `Preparing ${event.stage_count} clips`;
+      job.stage = `Queued · ${event.stage_count} clips`;
       break;
     case "stage_start": {
+      job.queuePosition = null;
       job.status = "loading";
       job.chainStageIndex = event.stage_idx;
       const count = job.chainStageCount;
-      job.stage = count ? `Clip ${event.stage_idx + 1} of ${count}` : `Clip ${event.stage_idx + 1}`;
+      job.stage = count
+        ? `Preparing clip ${event.stage_idx + 1} of ${count}`
+        : `Preparing clip ${event.stage_idx + 1}`;
       break;
     }
     case "denoise_step": {
+      job.queuePosition = null;
       job.status = "denoising";
       job.chainStageIndex = event.stage_idx;
       const count = job.chainStageCount ?? event.stage_idx + 1;
@@ -216,14 +222,25 @@ export function applyChainProgress(job: Job, event: ChainProgressEvent): Job {
       job.stage = `Clip ${event.stage_idx + 1} of ${count}`;
       break;
     }
-    case "stage_done":
-      job.status = "loading";
+    case "stage_done": {
+      // Each durable stage releases its scheduler lane before the next stage
+      // is admitted. It may wait behind other host work, so do not call that
+      // interval loading or running. The final stage has no successor: it
+      // moves directly into server-side final-output preparation.
+      const count = job.chainStageCount;
+      const finalStage = count !== null && event.stage_idx + 1 >= count;
+      job.status = finalStage ? "finishing" : "queued";
+      job.queuePosition = null;
       job.chainStageIndex = event.stage_idx;
-      if (job.chainStageCount) {
-        job.stage = `Clip ${event.stage_idx + 1} of ${job.chainStageCount} complete`;
+      if (count) {
+        job.stage = finalStage
+          ? `Clip ${event.stage_idx + 1} of ${count} complete · preparing final output`
+          : `Clip ${event.stage_idx + 1} of ${count} complete · next clip queued`;
       }
       break;
+    }
     case "stitching":
+      job.queuePosition = null;
       job.status = "finishing";
       job.step = job.total;
       job.stage = `Stitching ${event.total_frames} frames`;
@@ -324,7 +341,7 @@ export function jobStatusCode(job: Job): string {
     case "finishing":
       return "FINALIZING";
     case "loading":
-      return "LOADING";
+      return job.stage?.toUpperCase() ?? "PREPARING";
     case "queued":
       return job.queuePosition && job.queuePosition > 0 ? `QUEUED #${job.queuePosition}` : "QUEUED";
     case "complete":

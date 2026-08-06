@@ -351,6 +351,7 @@ describe("resolveChainRequest", () => {
 describe("workStarted tracking", () => {
   beforeEach(() => {
     lastSingleHandlers = null;
+    lastChainHandlers = null;
     try {
       localStorage.removeItem("mold.generate.jobs");
     } catch {
@@ -383,6 +384,45 @@ describe("workStarted tracking", () => {
     lastSingleHandlers!.onProgress({ type: "stage_start", name: "Loading" });
     expect(job.workStarted).toBe(true);
     expect(job.progress.queuePosition).toBeNull();
+  });
+
+  it("keeps a chain queued until a stage starts and between durable stages", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(lastChainHandlers).not.toBeNull();
+
+    lastChainHandlers!.onProgress({
+      type: "chain_start",
+      stage_count: 3,
+      estimated_total_frames: 241,
+    });
+    expect(job.workStarted).toBe(false);
+    expect(job.progress.stage).toBe("Queued · 3 clips · ~241 frames");
+
+    lastChainHandlers!.onProgress({ type: "stage_start", stage_idx: 0 });
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.stage).toBe("Preparing clip 1/3");
+
+    lastChainHandlers!.onProgress({
+      type: "stage_done",
+      stage_idx: 0,
+      frames_emitted: 97,
+    });
+    expect(job.workStarted).toBe(false);
+    expect(job.progress.stage).toBe("Clip 1/3 done · next clip queued");
+
+    lastChainHandlers!.onProgress({
+      type: "stage_done",
+      stage_idx: 2,
+      frames_emitted: 97,
+    });
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.stage).toBe("Clip 3/3 done · preparing final output");
+
+    lastChainHandlers!.onProgress({ type: "stitching", total_frames: 241 });
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.stage).toBe("Stitching 241 frames…");
   });
 
   it("returns to automatic canvas selection when new work is submitted", () => {

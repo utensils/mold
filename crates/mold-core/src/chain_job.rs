@@ -49,6 +49,19 @@ pub enum ChainJobState {
     Cancelled,
 }
 
+/// Present-tense execution phase for an active durable sequence.
+///
+/// The parent job becomes `running` when its actor claims the record, before
+/// any stage necessarily owns a scheduler lease. Clients use this additive
+/// phase instead of mistaking that orchestration state for GPU activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainExecutionPhase {
+    Queued,
+    Running,
+    Finalizing,
+}
+
 /// Per-stage state, stored as snake_case TEXT in `chain_job_stages.state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -617,6 +630,8 @@ pub struct ChainJobSummary {
     pub updated_at_unix_ms: u64,
     pub error: Option<String>,
     pub ephemeral: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_phase: Option<ChainExecutionPhase>,
     /// Cooperative cancellation has been requested for the active stage and
     /// will settle at its next safe engine boundary.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1089,6 +1104,7 @@ tail_frames = 17
                 updated_at_unix_ms: manifest.created_at_unix_ms,
                 error: None,
                 ephemeral: false,
+                execution_phase: None,
                 cancelling: false,
             },
             stages: manifest
@@ -1362,6 +1378,7 @@ request_json = "{}"
                 updated_at_unix_ms: 2,
                 error: None,
                 ephemeral: false,
+                execution_phase: None,
                 cancelling: false,
             },
             stages: vec![ChainJobStageDetail {

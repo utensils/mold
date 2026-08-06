@@ -3068,7 +3068,7 @@ onBeforeUnmount(() => {
                       job.status === "finishing"
                         ? `fixing — ${job.stage ?? "finishing"}…`
                         : job.status === "loading"
-                          ? "loading model…"
+                          ? `${job.stage ?? "Preparing"}…`
                           : "developing…"
                     }}
                   </span>

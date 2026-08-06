@@ -119,7 +119,10 @@ describe("job status labels", () => {
 
   it("preserves queue, loading, and progress detail", () => {
     expect(jobStatusCode({ ...withStatus("queued"), queuePosition: 2 })).toBe("QUEUED #2");
-    expect(jobStatusCode(withStatus("loading"))).toBe("LOADING");
+    expect(jobStatusCode(withStatus("loading"))).toBe("PREPARING");
+    expect(jobStatusCode({ ...withStatus("loading"), stage: "Loading weights" })).toBe(
+      "LOADING WEIGHTS",
+    );
     expect(jobStatusCode({ ...withStatus("denoising"), step: 3, total: 8 })).toBe("3/8");
   });
 

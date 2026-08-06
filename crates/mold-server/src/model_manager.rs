@@ -780,34 +780,96 @@ pub(crate) async fn estimate_generation_memory(
             })?
         }
     };
-    let hint = activation_hint_for_request(state, req).await;
+    let mut effective_req = req.clone();
+    effective_req.placement = Some(
+        state
+            .config
+            .read()
+            .await
+            .effective_placement(&req.model, req.placement.as_ref()),
+    );
+    let hint = activation_hint_for_request(state, &effective_req).await;
     // This endpoint is diagnostic, not an admission side channel. Use the
     // latest resource-sampler facts and report the roomiest current
     // candidate for an Auto request; never perform a device-0 live query or
     // substitute total VRAM when no free-memory sample exists.
-    let roomiest = state.resources.latest().and_then(|snapshot| {
-        snapshot
-            .gpus
-            .iter()
-            .map(|gpu| (gpu.vram_total.saturating_sub(gpu.vram_used), gpu.ordinal))
-            .max_by_key(|(available, ordinal)| (*available, std::cmp::Reverse(*ordinal)))
-    });
+    let resources = state.resources.latest();
+    let explicit_ordinal = state
+        .gpu_pool
+        .resolve_explicit_placement_gpu(effective_req.placement.as_ref())
+        .map_err(ApiError::validation)?;
+    let canonical = state.device_registry.canonical_snapshot(
+        &state.gpu_pool,
+        resources.as_ref(),
+        &state.job_registry,
+    );
+    // Capacity diagnostics must follow the same device eligibility boundary
+    // as dispatch. A disabled, draining, degraded, or otherwise unavailable
+    // GPU is not evidence that this request fits, and a hard placement pin
+    // narrows both the live and stable estimates to that one device.
+    let candidates = resources
+        .as_ref()
+        .map(|snapshot| {
+            canonical
+                .scheduler_devices
+                .iter()
+                .filter(|device| device.schedulable)
+                .filter(|device| explicit_ordinal.is_none_or(|ordinal| device.ordinal == ordinal))
+                .filter_map(|device| {
+                    snapshot
+                        .gpus
+                        .iter()
+                        .find(|gpu| gpu.backend == device.backend && gpu.ordinal == device.ordinal)
+                        .map(|gpu| {
+                            (
+                                gpu.vram_total.saturating_sub(gpu.vram_used),
+                                gpu.vram_total,
+                                gpu.ordinal,
+                            )
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let roomiest = candidates
+        .iter()
+        .map(|(available, _, ordinal)| (*available, *ordinal))
+        .max_by_key(|(available, ordinal)| (*available, std::cmp::Reverse(*ordinal)));
+    // The Create badge answers a different question from current admission:
+    // whether this request fits the host's hardware once earlier work releases
+    // its allocations. Resolve that estimate against physical capacity so an
+    // active denoise/load cannot make the answer oscillate on every sample.
+    let roomiest_capacity = candidates
+        .iter()
+        .map(|(_, capacity, ordinal)| (*capacity, *ordinal))
+        .max_by_key(|(capacity, ordinal)| (*capacity, std::cmp::Reverse(*ordinal)));
     let available = roomiest.map(|(available, _)| available);
     let forced_offload = matches!(
         mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     );
     let estimate = estimate_generation_memory_for_request(
-        req,
+        &effective_req,
         &paths,
         hint,
         available,
         forced_offload,
-        request_has_effective_lora(req),
+        request_has_effective_lora(&effective_req),
         roomiest.is_some_and(|(_, ordinal)| {
             crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal)
         }),
     );
+    let capacity_estimate = roomiest_capacity.map(|(capacity, ordinal)| {
+        estimate_generation_memory_for_request(
+            &effective_req,
+            &paths,
+            hint,
+            Some(capacity),
+            forced_offload,
+            request_has_effective_lora(&effective_req),
+            crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal),
+        )
+    });
 
     Ok(GenerationMemoryEstimate {
         model: req.model.clone(),
@@ -816,6 +878,11 @@ pub(crate) async fn estimate_generation_memory(
         available_memory_bytes: estimate.available_memory_bytes,
         load_strategy: format!("{:?}", estimate.load_strategy).to_ascii_lowercase(),
         fits_available_memory: estimate.fits_available_memory,
+        capacity_peak_memory_bytes: capacity_estimate
+            .as_ref()
+            .map(|estimate| estimate.peak_memory_bytes),
+        device_capacity_bytes: roomiest_capacity.map(|(capacity, _)| capacity),
+        fits_device_capacity: capacity_estimate.and_then(|estimate| estimate.fits_available_memory),
     })
 }
 

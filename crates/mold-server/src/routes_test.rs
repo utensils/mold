@@ -341,6 +341,110 @@ mod tests {
         ))
     }
 
+    fn publish_test_gpu_resources(
+        resources: &crate::resources::ResourceBroadcaster,
+        total: u64,
+        used: u64,
+    ) {
+        publish_test_gpu_resource_snapshots(resources, &[(0, total, used)]);
+    }
+
+    fn publish_test_gpu_resource_snapshots(
+        resources: &crate::resources::ResourceBroadcaster,
+        gpus: &[(usize, u64, u64)],
+    ) {
+        resources.publish(mold_core::ResourceSnapshot {
+            hostname: "estimate-host".into(),
+            timestamp: gpus
+                .iter()
+                .map(|(_, _, used)| *used)
+                .max()
+                .and_then(|used| i64::try_from(used).ok())
+                .unwrap_or_default(),
+            gpus: gpus
+                .iter()
+                .map(|(ordinal, total, used)| mold_core::GpuSnapshot {
+                    ordinal: *ordinal,
+                    name: format!("estimate-gpu-{ordinal}"),
+                    backend: mold_core::GpuBackend::Cuda,
+                    vram_total: *total,
+                    vram_used: *used,
+                    vram_used_by_mold: Some(*used),
+                    vram_used_by_other: Some(0),
+                    gpu_utilization: Some(0),
+                })
+                .collect(),
+            system_ram: mold_core::RamSnapshot {
+                total: 128_000_000_000,
+                used: 32_000_000_000,
+                available: None,
+                used_by_mold: 1_000_000_000,
+                used_by_other: 31_000_000_000,
+            },
+            cpu: None,
+        });
+    }
+
+    fn app_with_test_gpu_resources(
+        total: u64,
+        used: u64,
+    ) -> (axum::Router, Arc<crate::resources::ResourceBroadcaster>) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tx),
+            Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![gpu_worker_stub(0)].into(),
+            }),
+            200,
+        );
+        install_worker_registry(&mut state);
+        let resources = state.resources.clone();
+        publish_test_gpu_resources(&resources, total, used);
+        (app_with_state(state), resources)
+    }
+
+    fn app_with_test_gpu_snapshots(
+        gpus: &[(usize, u64, u64)],
+        disabled_ordinals: &[usize],
+    ) -> axum::Router {
+        app_with_test_gpu_snapshots_and_config(
+            gpus,
+            disabled_ordinals,
+            mold_core::Config::default(),
+        )
+    }
+
+    fn app_with_test_gpu_snapshots_and_config(
+        gpus: &[(usize, u64, u64)],
+        disabled_ordinals: &[usize],
+        config: mold_core::Config,
+    ) -> axum::Router {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            Arc::new(crate::gpu_pool::GpuPool {
+                workers: gpus
+                    .iter()
+                    .map(|(ordinal, _, _)| gpu_worker_stub(*ordinal))
+                    .collect::<Vec<_>>()
+                    .into(),
+            }),
+            200,
+        );
+        install_worker_registry(&mut state);
+        for ordinal in disabled_ordinals {
+            let id = format!("cuda:{ordinal:032x}");
+            state
+                .device_registry
+                .set_desired_enabled(&id, false)
+                .unwrap();
+        }
+        publish_test_gpu_resource_snapshots(&state.resources, gpus);
+        app_with_state(state)
+    }
+
     struct MoldHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
@@ -427,8 +531,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chain_validation_returns_normalized_plan_without_job_storage() {
-        let app = app_empty();
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("chain-estimate");
+        populate_manifest_files(&models_dir, "ltx-2-19b-distilled:fp8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+        let (app, resources) = app_with_test_gpu_resources(48_000_000_000, 8_000_000_000);
         let mut request = route_chain_request();
         request.stages[0].transition = TransitionMode::Cut;
         let mut continuation = route_chain_stage("second shot", TransitionMode::Fade);
@@ -466,7 +575,25 @@ mod tests {
                 .contains("opening clip"),
             "normalization warning should explain the coerced first transition: {body}"
         );
-        assert!(body["vram_estimate"].is_null());
+        let stable_vram = body["vram_estimate"].clone();
+        assert!(stable_vram["worst_case_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(stable_vram["fits"], true);
+
+        // A busy GPU changes current free memory, not whether this normalized
+        // sequence fits the host after earlier queued work releases VRAM.
+        publish_test_gpu_resources(&resources, 48_000_000_000, 40_000_000_000);
+        let busy_response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/chain/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(busy_response.status(), StatusCode::OK);
+        assert_eq!(json_body(busy_response).await["vram_estimate"], stable_vram);
 
         let queue = app
             .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
@@ -477,6 +604,9 @@ mod tests {
             json_body(queue).await["entries"].as_array().unwrap().len(),
             0
         );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[tokio::test]
@@ -5060,7 +5190,7 @@ mod tests {
         populate_manifest_files(&models_dir, "sdxl-base:fp16");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let app = app_empty();
+        let (app, resources) = app_with_test_gpu_resources(48_000_000_000, 8_000_000_000);
         let body = serde_json::json!({
             "prompt": "a cat",
             "model": "sdxl-base:fp16",
@@ -5089,6 +5219,31 @@ mod tests {
         assert!(json["activation_memory_bytes"].as_u64().unwrap() > 0);
         assert!(json["load_strategy"].as_str().is_some());
         let base_peak = json["peak_memory_bytes"].as_u64().unwrap();
+        let capacity_peak = json["capacity_peak_memory_bytes"].as_u64().unwrap();
+        assert_eq!(json["device_capacity_bytes"], 48_000_000_000_u64);
+        assert_eq!(json["fits_device_capacity"], true);
+
+        // Active work changes immediately free memory, but the hardware-fit
+        // estimate must remain stable for an unchanged request and GPU.
+        publish_test_gpu_resources(&resources, 48_000_000_000, 40_000_000_000);
+        let busy_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(busy_resp.status(), StatusCode::OK);
+        let busy_json = json_body(busy_resp).await;
+        assert_eq!(busy_json["capacity_peak_memory_bytes"], capacity_peak);
+        assert_eq!(busy_json["device_capacity_bytes"], 48_000_000_000_u64);
+        assert_ne!(
+            busy_json["available_memory_bytes"],
+            json["available_memory_bytes"]
+        );
 
         let larger_body = serde_json::json!({
             "prompt": "a cat",
@@ -5125,6 +5280,94 @@ mod tests {
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn generate_estimate_uses_only_eligible_and_explicitly_pinned_gpus() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("estimate-device-selection");
+        populate_manifest_files(&models_dir, "sdxl-base:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let request = serde_json::json!({
+            "prompt": "a cat",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 7.5,
+            "batch_size": 1,
+            "output_format": "png"
+        });
+        let heterogeneous = [
+            (0, 24_000_000_000, 2_000_000_000),
+            (1, 80_000_000_000, 4_000_000_000),
+        ];
+
+        // A physically larger GPU that has been disabled is not a capacity
+        // candidate for automatic routing.
+        let disabled_app = app_with_test_gpu_snapshots(&heterogeneous, &[1]);
+        let disabled_response = disabled_app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled_response.status(), StatusCode::OK);
+        let disabled_json = json_body(disabled_response).await;
+        assert_eq!(disabled_json["device_capacity_bytes"], 24_000_000_000_u64);
+
+        // When both devices are eligible, an explicit placement remains
+        // authoritative instead of borrowing the roomier sibling's verdict.
+        let pinned_app = app_with_test_gpu_snapshots(&heterogeneous, &[]);
+        let mut pinned_request = request.clone();
+        pinned_request["placement"] = serde_json::json!({
+            "text_encoders": { "kind": "gpu", "ordinal": 0 }
+        });
+        let pinned_response = pinned_app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(pinned_request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pinned_response.status(), StatusCode::OK);
+        let pinned_json = json_body(pinned_response).await;
+        assert_eq!(pinned_json["device_capacity_bytes"], 24_000_000_000_u64);
+
+        // Persisted/environment placement is the scheduler default when the
+        // request omits placement, so the diagnostic must normalize through
+        // the same Config authority before choosing a capacity candidate.
+        let mut config = mold_core::Config::default();
+        config.set_model_placement(
+            "sdxl-base:fp16",
+            Some(mold_core::DevicePlacement {
+                text_encoders: mold_core::DeviceRef::gpu(0),
+                advanced: None,
+            }),
+        );
+        let configured_app = app_with_test_gpu_snapshots_and_config(&heterogeneous, &[], config);
+        let configured_response = configured_app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(configured_response.status(), StatusCode::OK);
+        let configured_json = json_body(configured_response).await;
+        assert_eq!(configured_json["device_capacity_bytes"], 24_000_000_000_u64);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[tokio::test]

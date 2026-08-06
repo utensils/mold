@@ -1,44 +1,26 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from "vue";
 import { fetchGenerationEstimate, type StreamTarget } from "../../api";
-import type {
-  GenerateRequestWire,
-  GenerationMemoryEstimate,
-} from "../../types";
+import type { GenerateRequestWire } from "../../types";
+import {
+  classifyGenerationFit,
+  displayGenerationMemory,
+  generationEstimateLabel,
+  GENERATION_ESTIMATE_TOOLTIP,
+  type EstimateFit,
+} from "@studio/lib/generationMemoryEstimate";
 
 const props = defineProps<{
   request: GenerateRequestWire | null;
   target?: StreamTarget | null;
 }>();
 
-type Fit = "fits" | "tight" | "wont-fit" | "unknown" | "unavailable";
+type Fit = EstimateFit | "unavailable";
 const fit = ref<Fit>("unknown");
 const text = ref("");
 const visible = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let token = 0;
-
-function classify(est: GenerationMemoryEstimate): Exclude<Fit, "unavailable"> {
-  const available = est.available_memory_bytes;
-  if (est.fits_available_memory === false) return "wont-fit";
-  if (available == null) return "unknown";
-  if (est.peak_memory_bytes > available) return "wont-fit";
-  if (est.peak_memory_bytes > available * 0.92) return "tight";
-  return "fits";
-}
-
-const gb = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
-function label(
-  state: Exclude<Fit, "unavailable">,
-  est: GenerationMemoryEstimate,
-): string {
-  const available = est.available_memory_bytes ?? null;
-  if (state === "tight") return "VRAM · tight — close other apps";
-  if (state === "wont-fit") return "VRAM · won't fit on this GPU";
-  if (state === "fits" && available !== null)
-    return `VRAM · fits — est. ${gb(est.peak_memory_bytes)} of ${gb(available)}`;
-  return `VRAM · est. ${gb(est.peak_memory_bytes)}`;
-}
 
 async function run(request: GenerateRequestWire) {
   const mine = ++token;
@@ -48,8 +30,13 @@ async function run(request: GenerateRequestWire) {
       props.target ?? undefined,
     );
     if (mine !== token) return;
-    fit.value = classify(estimate);
-    text.value = label(fit.value, estimate);
+    fit.value = classifyGenerationFit(estimate);
+    const memory = displayGenerationMemory(estimate);
+    text.value = generationEstimateLabel(
+      fit.value,
+      memory.peakBytes,
+      memory.capacityBytes,
+    );
   } catch {
     if (mine !== token) return;
     fit.value = "unavailable";
@@ -84,7 +71,7 @@ onUnmounted(() => {
     data-test="vram-estimate"
     role="status"
     aria-live="polite"
-    title="Preflight estimate of peak GPU memory for this print on the selected machine."
+    :title="GENERATION_ESTIMATE_TOOLTIP"
     class="font-mono text-[11px]"
     :class="{
       'text-halide': fit === 'fits' || fit === 'unknown',

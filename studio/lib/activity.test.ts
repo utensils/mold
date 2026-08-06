@@ -88,6 +88,24 @@ describe("sequenceToVM", () => {
     if (vm.kind !== "sequence") return;
     expect(vm.progress).toEqual({ step: 4, total: 8 });
   });
+
+  it("keeps a claimed parent queued until the server reports a leased stage", () => {
+    const waiting = sequenceToVM(
+      summary({ state: "running", execution_phase: "queued" }),
+      { hostId: "plato", hostLabel: "plato" },
+    );
+    const leased = sequenceToVM(
+      summary({ state: "running", execution_phase: "running" }),
+      { hostId: "plato", hostLabel: "plato" },
+    );
+    if (waiting.kind !== "sequence" || leased.kind !== "sequence") return;
+    expect(waiting.phase).toBe("queued");
+    expect(leased.phase).toBe("running");
+    expect(mergeActivity([], [waiting, leased]).map((vm) => vm.key)).toEqual([
+      leased.key,
+      waiting.key,
+    ]);
+  });
 });
 
 describe("mergeActivity", () => {

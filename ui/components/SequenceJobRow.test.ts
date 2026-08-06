@@ -44,6 +44,16 @@ describe("SequenceJobRow", () => {
     expect(text).toContain("plato");
   });
 
+  it("renders the lease-aware phase instead of the claimed parent state", () => {
+    const wrapper = mount(SequenceJobRow, {
+      props: { vm: vm({ execution_phase: "queued" }) },
+    });
+    expect(
+      wrapper.get("[data-test='sequence-job-row']").attributes("data-state"),
+    ).toBe("queued");
+    expect(wrapper.text()).toContain("queued");
+  });
+
   it("falls back to the raw model id when no display label is supplied", () => {
     const wrapper = mount(SequenceJobRow, { props: { vm: vm() } });
     expect(wrapper.text()).toContain("ltx-2.3-22b-distilled:fp8");

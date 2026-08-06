@@ -130,6 +130,7 @@ export interface ChainScript {
 
 export type ChainJobState =
   "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+export type ChainExecutionPhase = "queued" | "running" | "finalizing";
 
 export type ChainStageState = "pending" | "running" | "completed" | "failed";
 
@@ -143,6 +144,9 @@ export interface ChainJobSummary {
   updated_at_unix_ms: number;
   error?: string | null;
   ephemeral?: boolean;
+  /** Additive server truth for active work. Parent state can be `running`
+   * while its next clip is still waiting for a scheduler lease. */
+  execution_phase?: ChainExecutionPhase | null;
 }
 
 /** Internal long-video compatibility shims share the chain runner but are
