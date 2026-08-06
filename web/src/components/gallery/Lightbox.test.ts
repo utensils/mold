@@ -64,6 +64,16 @@ describe("Lightbox (desktop two-pane)", () => {
     expect(text).toContain("Download");
   });
 
+  it("offers format export for MP4 videos without replacing download", () => {
+    const wrapper = mountWide({
+      item: { ...item, filename: "rain.mp4", format: "mp4" },
+    });
+    expect(wrapper.get("[data-test='export-video']").text()).toContain(
+      "Export format",
+    );
+    expect(wrapper.text()).toContain("Download");
+  });
+
   it("renders complete generation metadata and copies prompt and seed", async () => {
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, "clipboard", {

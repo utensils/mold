@@ -648,6 +648,9 @@ export const useGenerationStore = defineStore("generation", {
       }
     },
     /** Revoke every held object URL and clear all jobs (teardown/tests). */
+    targetForJob(clientId: number): ApiTarget | null {
+      return targets.get(clientId) ?? null;
+    },
     resetJobs() {
       for (const job of this.jobs) {
         if (!jobHasSettled(job)) {
