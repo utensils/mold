@@ -108,9 +108,13 @@ class EmbeddedPtxParserContract(unittest.TestCase):
             and not inventory["incomplete_modules"]
             and len(inventory["observed_targets"]) == 1
         ):
-            compute_cap = str(inventory["observed_targets"][0]).removeprefix(
-                "sm_"
+            target = str(inventory["observed_targets"][0])
+            match = self.probe_module.TARGET_ARCHITECTURE_RE.fullmatch(
+                target.encode("ascii")
             )
+            if match is None:
+                raise AssertionError(f"invalid fixture target: {target}")
+            compute_cap = match.group(1).decode("ascii")
             build_root = self.temp_dir / f"{name}-build"
             output_dir = build_root / "candle-kernels-fixture" / "out"
             output_dir.mkdir(parents=True)
@@ -126,7 +130,7 @@ class EmbeddedPtxParserContract(unittest.TestCase):
                         "entries": {
                             "fixture": {
                                 "object_path": str(output_dir / "fixture.ptx"),
-                                "gpu_arch": f"sm_{compute_cap}",
+                                "gpu_arch": target,
                             }
                         },
                     }
@@ -224,6 +228,51 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         self.assertEqual(
             self.seal_module.current_kernel_output_dirs(build_root, "86"), []
         )
+
+    def test_cudaforge_cache_accepts_auto_suffixed_blackwell_target(self) -> None:
+        build_root = self.temp_dir / "blackwell-cudaforge-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "fixture.ptx").write_text("fixture", encoding="utf-8")
+        (output_dir / "ptx.rs").write_text(
+            'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir / ".cudaforge_cache.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        "fixture": {
+                            "object_path": str(output_dir / "fixture.ptx"),
+                            "gpu_arch": "sm_100a",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            self.seal_module.current_kernel_output_dirs(build_root, "100"),
+            [output_dir],
+        )
+        self.assertEqual(
+            self.seal_module.kernel_output_target(output_dir, "100"),
+            "sm_100a",
+        )
+
+    def test_probe_accepts_cudaforge_architecture_suffix(self) -> None:
+        fixture = self.fixture(
+            "cudaforge-blackwell-target",
+            """
+.version 8.8
+.target sm_100a
+.address_size 64
+.visible .entry real() { ret; }
+""",
+        )
+        self.assert_probe_and_verifier_accept(fixture, 100)
 
     def test_cudaforge_cache_rejects_a_non_object_document(self) -> None:
         build_root = self.temp_dir / "malformed-cudaforge-build"
