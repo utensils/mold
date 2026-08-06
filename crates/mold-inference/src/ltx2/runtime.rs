@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use super::backend::compute_dtype;
 use super::conditioning::retake_temporal_mask;
 use super::execution::SamplerMode;
 use super::guidance::{
@@ -56,7 +57,7 @@ use crate::device::{
     dtype_bytes, fmt_gb, free_vram_bytes, ltx2_activation_budget_bytes, thread_gpu_ordinal,
     try_synchronize_device, usable_free_vram_bytes, PhaseVramProbe, PhaseVramReport,
 };
-use crate::engine::{gpu_dtype, seeded_randn};
+use crate::engine::seeded_randn;
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase};
@@ -2739,7 +2740,7 @@ fn render_real_distilled_av(
         }
     }
 
-    let dtype = gpu_dtype(device);
+    let dtype = compute_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
     let stage1_video_conditioning = maybe_load_stage_video_conditioning(
@@ -3632,7 +3633,7 @@ fn render_real_two_stage_av(
         device,
         DType::F32,
     )?;
-    let dtype = gpu_dtype(device);
+    let dtype = compute_dtype(device);
     let conditioned_audio = maybe_load_native_conditioning_audio(plan, audio_shape, device, dtype)?;
     let frozen_audio_denoise_mask = conditioned_audio
         .as_ref()
@@ -4148,7 +4149,7 @@ fn render_real_one_stage_av(
         }
     }
 
-    let dtype = gpu_dtype(device);
+    let dtype = compute_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let stage1_video_conditioning = maybe_load_stage_video_conditioning(
         plan,
@@ -4306,7 +4307,7 @@ fn render_real_retake_av(
     )?;
     let audio_shape = prompt_inputs.audio_shape;
     let cond_mask: Option<&Tensor> = None;
-    let dtype = gpu_dtype(device);
+    let dtype = compute_dtype(device);
     let retake_range = plan
         .retake_range
         .as_ref()
@@ -5443,10 +5444,10 @@ fn load_ltx2_audio_transformer(
             !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
         let vb = if checkpoint_is_nvfp4 {
             let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
-            VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+            VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_convrot {
             let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
-            VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+            VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_fp8 {
             load_fp8_safetensors_with_callback(
                 std::slice::from_ref(&checkpoint_path),
@@ -5542,7 +5543,7 @@ pub(crate) fn render_real_t2a_audio(
         .to_vec1::<f32>()?;
     let sigmas_no_terminal = &sigmas[..sigmas.len().saturating_sub(1)];
 
-    let dtype = gpu_dtype(device);
+    let dtype = compute_dtype(device);
     let stage_loras = stage_lora_stack(plan, 0)?;
     let transformer = load_ltx2_audio_transformer(plan, device, &stage_loras, progress)?;
     if debug_enabled {
@@ -6643,7 +6644,7 @@ fn ltx2_transformer_var_builder<'a>(
         let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
         return Ok(VarBuilder::from_backend(
             Box::new(backend),
-            gpu_dtype(device),
+            compute_dtype(device),
             device.clone(),
         ));
     }
@@ -6651,7 +6652,7 @@ fn ltx2_transformer_var_builder<'a>(
         let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
         return Ok(VarBuilder::from_backend(
             Box::new(backend),
-            gpu_dtype(device),
+            compute_dtype(device),
             device.clone(),
         ));
     }
@@ -7332,7 +7333,7 @@ fn transformer_weight_dtype(_plan: &Ltx2GeneratePlan, device: &candle_core::Devi
     // Public LTX-2 FP8 manifests keep transformer weights in float8 storage but
     // run the native Rust matmuls in the normal compute dtype after applying the
     // checkpoint-provided per-tensor weight scales.
-    gpu_dtype(device)
+    compute_dtype(device)
 }
 
 fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan, header: Option<&Ltx2CheckpointHeader>) -> bool {

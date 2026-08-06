@@ -70,7 +70,7 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
         .unwrap();
     assert_eq!(ltx2.backends.cuda, BackendQualification::Supported);
     assert_eq!(ltx2.backends.cpu, BackendQualification::CorrectnessOnly);
-    assert_eq!(ltx2.backends.metal, BackendQualification::Unsupported);
+    assert_eq!(ltx2.backends.metal, BackendQualification::CorrectnessOnly);
     assert_eq!(ltx2.media, MediaKind::Video);
     assert!(ltx2.workflows.source);
     assert!(ltx2.workflows.generated_audio);

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::assets;
-use super::backend::Ltx2Backend;
+use super::backend::{compute_dtype, Ltx2Backend};
 use super::conditioning::{self, StagedLatent};
 use super::execution;
 use super::lora;
@@ -49,7 +49,7 @@ fn resolve_scene_embeddings_path(
         .then(|| candidate.to_string_lossy().into_owned())
 }
 use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
-use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
 use crate::progress::{InferenceCancellationToken, ProgressCallback};
 
@@ -574,7 +574,10 @@ impl Ltx2Engine {
                 }
                 Ok(Device::Cpu)
             }
-            Ltx2Backend::Metal => unreachable!("unsupported Metal backend should have errored"),
+            Ltx2Backend::Metal => {
+                self.info("Metal detected, using native LTX-2 correctness path");
+                Ok(Device::new_metal(self.gpu_ordinal)?)
+            }
         }
     }
 
@@ -586,7 +589,7 @@ impl Ltx2Engine {
     ) -> Result<Ltx2RuntimeSession> {
         let load_start = Instant::now();
         log_prompt_encoder_placement(&device, &prompt_device);
-        let dtype = gpu_dtype(&prompt_device);
+        let dtype = compute_dtype(&prompt_device);
         self.emit("Loading native LTX-2 prompt encoder");
         let prompt_encoder = NativePromptEncoder::load(
             Path::new(&plan.gemma_root),
@@ -1555,9 +1558,9 @@ fn ltx2_runtime_device_refs(
 /// Resolve the device for the LTX-2 Gemma 3 12B prompt encoder given the
 /// transformer's chosen device.
 ///
-/// - Transformer on CPU/Metal: keep the encoder on the same device. CPU
-///   means the user opted out of GPU end-to-end and Metal LTX-2 isn't
-///   supported anyway (caller will have errored before this).
+/// - Transformer on CPU/Metal: keep the encoder on the same device. CPU means
+///   the user opted out of GPU end-to-end; Metal uses the shared unified-memory
+///   correctness path.
 /// - Transformer on CUDA: defer to the auto-resolver in
 ///   [`crate::device::resolve_ltx2_gemma_placement`], which honors the
 ///   `MOLD_LTX2_GEMMA_DEVICE` override and walks active GPU → siblings →

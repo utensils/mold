@@ -378,7 +378,7 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         aliases: &["ltx-2", "ltx2.3"],
         backends: BackendApplicability {
             cuda: BackendQualification::Supported,
-            metal: BackendQualification::Unsupported,
+            metal: BackendQualification::CorrectnessOnly,
             cpu: BackendQualification::CorrectnessOnly,
         },
         placement: ComponentPlacementCapability {
