@@ -56,9 +56,9 @@ path = "src/bin/attention_bench.rs"
 required-features = ["dev-bins", "cuda"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
-mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }
-mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.21.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.22.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.22.0" }
+mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.22.0" }
 anyhow = "1"
 candle-core = "0.11"
 candle-nn = "0.11"
