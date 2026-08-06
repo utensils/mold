@@ -287,7 +287,7 @@ onUnmounted(() => {
   <div class="relative flex h-full flex-col overflow-hidden">
     <TitleBar class="h-11 shrink-0" />
     <UpdateBanner />
-    <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr]">
+    <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr] overflow-hidden">
       <NavRail />
       <main class="min-h-0 min-w-0 overflow-hidden">
         <router-view />

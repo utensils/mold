@@ -115,6 +115,9 @@ describe("NavRail developing jobs", () => {
 
     const region = wrapper.get("[data-test='developing-region']");
     const jobs = wrapper.get("[data-test='developing-jobs']");
+    expect(wrapper.get("nav").classes()).toEqual(
+      expect.arrayContaining(["min-h-0", "overflow-hidden"]),
+    );
     expect(region.classes()).toEqual(expect.arrayContaining(["min-h-0", "flex-1"]));
     expect(jobs.classes()).toEqual(
       expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]),

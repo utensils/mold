@@ -2290,15 +2290,12 @@ async function generate() {
     promptMissing.value ||
     !form.model ||
     chainReject.value ||
+    expansionRunning.value ||
     preparedSubmitting.value ||
     submissionPlanning.value
   )
     return;
   const prepared = preparedBatch.value;
-  if (effectiveBatchSize.value > 1 && !prepared) {
-    await expandForCurrentBatch();
-    return;
-  }
   if (
     prepared &&
     (preparedStaleReasons.value.length > 0 ||
@@ -3330,7 +3327,7 @@ onBeforeUnmount(() => {
 
         <div
           data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-y-auto bg-desk"
+          class="flex min-h-0 shrink-0 flex-col overflow-x-hidden overflow-y-auto bg-desk"
           :style="{
             height: `${benchHeight}px`,
             containerType: 'size',

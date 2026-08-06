@@ -97,6 +97,20 @@ describe("ActivityStrip", () => {
     expect(generation.selectedClientId).toBe(7);
   });
 
+  it("bounds queued pills and summarizes the remainder", () => {
+    const generation = useGenerationStore();
+    generation.jobs = Array.from({ length: 20 }, (_, index) => ({
+      ...baseJob(),
+      clientId: index + 1,
+      prompt: `queued ${index + 1}`,
+    }));
+
+    const wrapper = mount(ActivityStrip);
+
+    expect(wrapper.findAll("[data-test='activity-queued']")).toHaveLength(4);
+    expect(wrapper.get("[data-test='activity-queued-overflow']").text()).toBe("+16 queued");
+  });
+
   it("shows accrued RunPod cost for a job routed to a live pod", () => {
     const generation = useGenerationStore();
     generation.jobs = [
