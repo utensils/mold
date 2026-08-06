@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { hostSelectionLabel, type PreparedExpansionBatch } from "../../lib/preparedExpansion";
 import type { ExpansionPullView } from "../../lib/expansionPull";
 import ExpansionPullStatus from "./ExpansionPullStatus.vue";
@@ -138,6 +138,21 @@ function confirmCollapse() {
   confirmingRemovalId.value = null;
   emit("collapse", id);
 }
+
+function dismissOnEscape(event: KeyboardEvent) {
+  if (event.key !== "Escape" || event.defaultPrevented || confirmingRemovalId.value) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && !sectionEl.value?.contains(active)) return;
+  event.preventDefault();
+  emit("discard");
+}
+
+onMounted(async () => {
+  window.addEventListener("keydown", dismissOnEscape);
+  await nextTick();
+  sectionEl.value?.querySelector<HTMLTextAreaElement>('[data-test="prepared-prompt"]')?.focus();
+});
+onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
 </script>
 
 <template>
@@ -340,7 +355,7 @@ function confirmCollapse() {
       aria-modal="false"
       aria-labelledby="collapse-title"
       class="border-safelight/45 mt-3 rounded-control border bg-[color-mix(in_srgb,var(--safelight)_8%,transparent)] p-3"
-      @keydown.esc="keepPreparedBatch"
+      @keydown.esc.stop.prevent="keepPreparedBatch"
     >
       <p id="collapse-title" class="text-body font-semibold text-ink">Continue with one prompt?</p>
       <p class="mt-1 max-w-[65ch] text-caption text-ink-2">
@@ -376,7 +391,7 @@ function confirmCollapse() {
         class="min-h-8 rounded-control px-2 text-caption text-ink-3 transition-colors duration-100 hover:bg-stop/10 hover:text-stop"
         @click="emit('discard')"
       >
-        Discard prepared batch
+        Cancel
       </button>
       <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
         <span class="text-caption text-ink-3">

@@ -2,6 +2,7 @@ import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AppNav from "./AppNav.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
+import { takeGenerationHandoff } from "../../composables/useGenerationHandoff";
 
 const routeState = vi.hoisted(() => ({
   name: "library" as string,
@@ -12,6 +13,19 @@ const dlState = vi.hoisted(() => ({
   activeJobs: [] as unknown[],
   queued: [] as unknown[],
 }));
+const liveState = vi.hoisted(() => ({ rows: [] as Record<string, unknown>[] }));
+const routingState = vi.hoisted(() => ({
+  hosts: [
+    {
+      id: "render",
+      label: "Render box",
+      url: "http://render:7680",
+      apiKey: "secret",
+      status: "ready",
+    },
+  ],
+}));
+const listQueueMock = vi.hoisted(() => vi.fn());
 
 vi.mock("vue-router", () => ({
   useRoute: () => routeState,
@@ -25,6 +39,21 @@ vi.mock("../../composables/useDownloads", () => ({
     active: { value: null },
   }),
 }));
+vi.mock("../../composables/useHostRouting", () => ({
+  useHostRouting: () => ({
+    hosts: { value: routingState.hosts },
+    start: vi.fn(),
+    stop: vi.fn(),
+  }),
+}));
+vi.mock("../../composables/useLiveActivity", () => ({
+  useLiveActivity: () => ({
+    rows: { value: liveState.rows },
+    start: vi.fn(),
+    stop: vi.fn(),
+  }),
+}));
+vi.mock("@studio/api/queuePlan", () => ({ listQueue: listQueueMock }));
 
 const notifState = vi.hoisted(() => ({ fresh: 0, offline: false }));
 const statusState = vi.hoisted(() => ({ error: null as string | null }));
@@ -59,6 +88,9 @@ describe("AppNav", () => {
     notifState.fresh = 0;
     notifState.offline = false;
     statusState.error = null;
+    liveState.rows = [];
+    takeGenerationHandoff();
+    listQueueMock.mockReset();
     markGalleryVisitedMock.mockClear();
     pushMock.mockClear();
   });
@@ -125,6 +157,52 @@ describe("AppNav", () => {
     window.removeEventListener("mold:open-downloads", listener);
 
     expect(listener).toHaveBeenCalled();
+  });
+
+  it("opens recovered work from Now developing and restores its settings", async () => {
+    liveState.rows = [
+      {
+        key: "render:generation:foreign",
+        id: "foreign",
+        kind: "generation",
+        phase: "running",
+        model: "flux-dev",
+        hostId: "render",
+        hostLabel: "Render box",
+        stale: false,
+        hostError: null,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        can_cancel: false,
+      },
+    ];
+    listQueueMock.mockResolvedValue({
+      entries: [
+        {
+          id: "foreign",
+          seed_pinned: true,
+          metadata: { model: "flux-dev", prompt: "restore me", seed: 42 },
+        },
+      ],
+      plan: null,
+    });
+    const wrapper = mountNav();
+    await wrapper
+      .findAll("[data-test='now-developing-trigger']")[0]!
+      .trigger("click");
+    await wrapper
+      .findAll("[data-test^='live-activity-select-']")[0]!
+      .trigger("click");
+
+    expect(listQueueMock).toHaveBeenCalledWith({
+      baseUrl: "http://render:7680",
+      apiKey: "secret",
+    });
+    expect(takeGenerationHandoff()).toMatchObject({
+      metadata: { prompt: "restore me", seed: 42 },
+      seedPinned: true,
+    });
+    expect(pushMock).toHaveBeenCalledWith("/create");
   });
 
   it("toggles the mobile nav sheet from the hamburger", async () => {
