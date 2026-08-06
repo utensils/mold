@@ -1315,6 +1315,48 @@ Examples:
         task: Option<String>,
     },
 
+    /// Preview subject-preserving prompt alternatives without generating.
+    #[command(after_long_help = "\
+Examples:
+  mold remix \"a cat astronaut\"
+  mold remix \"she turns\" --model ltx-2-19b-distilled:fp8 --task image-to-video
+  mold remix \"a lighthouse\" --dimensions camera,lighting --variations 4
+  mold remix \"a cat\" --source original --root-prompt \"a cat\" --json")]
+    Remix {
+        /// Exact prompt to use as the remix source.
+        source_prompt: String,
+        /// Target generation model, used for family-aware policy.
+        #[arg(short, long, add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+        /// Exact number of alternatives to return.
+        #[arg(long, default_value = "3")]
+        variations: usize,
+        /// Output the structured Remix response as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Expansion backend override.
+        #[arg(long)]
+        backend: Option<String>,
+        /// LLM model override.
+        #[arg(long)]
+        expand_model: Option<String>,
+        /// Resolved conditioning policy.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// How the source relates to the visible prompt history.
+        #[arg(long, default_value = "direct", value_parser = ["original", "current", "direct"])]
+        source: String,
+        /// Earliest known user prompt, when different from the remix source.
+        #[arg(long)]
+        root_prompt: Option<String>,
+        /// Creative dimensions to vary; repeat or pass comma-separated values.
+        #[arg(long, value_delimiter = ',')]
+        dimensions: Vec<String>,
+        /// Locked style constraint retained in every alternative.
+        #[arg(long)]
+        style: Option<String>,
+    },
+
     /// Unload the current model from the server to free GPU memory
     #[command(
         after_long_help = "Requires a running server (mold serve). Use 'mold ps' to check status."
@@ -1885,6 +1927,34 @@ async fn run() -> anyhow::Result<()> {
                 backend.as_deref(),
                 expand_model.as_deref(),
                 task.as_deref(),
+            )
+            .await?;
+        }
+        Commands::Remix {
+            source_prompt,
+            model,
+            variations,
+            json,
+            backend,
+            expand_model,
+            task,
+            source,
+            root_prompt,
+            dimensions,
+            style,
+        } => {
+            commands::remix::run(
+                &source_prompt,
+                model.as_deref(),
+                variations,
+                json,
+                backend.as_deref(),
+                expand_model.as_deref(),
+                task.as_deref(),
+                &source,
+                root_prompt.as_deref(),
+                &dimensions,
+                style.as_deref(),
             )
             .await?;
         }

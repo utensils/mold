@@ -283,6 +283,38 @@ export interface ExpandResponse {
   expanded: string[];
 }
 
+export type RemixSourceKind = "original" | "current" | "direct";
+export type RemixDimension =
+  "composition" | "camera" | "lighting" | "setting" | "mood" | "movement" | "style";
+
+export interface RemixRequest {
+  source_prompt: string;
+  root_prompt?: string;
+  source_kind: RemixSourceKind;
+  model_family: string;
+  variations?: number;
+  task: ExpandTask;
+  style?: string;
+  dimensions: RemixDimension[];
+}
+
+export interface RemixResponse {
+  source_prompt: string;
+  root_prompt?: string;
+  source_kind: RemixSourceKind;
+  variants: Array<{ prompt: string; dimensions: RemixDimension[] }>;
+}
+
+export type PromptTransformOperation = "expand" | "remix";
+export interface PromptTransformProvenance {
+  operation: PromptTransformOperation;
+  root_prompt?: string;
+  source_prompt: string;
+  source_kind: RemixSourceKind;
+  task: ExpandTask;
+  dimensions?: RemixDimension[];
+}
+
 /** `POST /api/generate/estimate` — mirrors mold-core `GenerationMemoryEstimate`. */
 export interface GenerationMemoryEstimate {
   model: string;
@@ -308,6 +340,7 @@ export interface GenerationMemoryEstimate {
  */
 export interface GenerateRequest {
   prompt: string;
+  prompt_transform?: PromptTransformProvenance | null;
   negative_prompt?: string | null;
   model: string;
   width: number;

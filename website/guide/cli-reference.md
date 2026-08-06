@@ -181,6 +181,21 @@ mold expand <PROMPT> [OPTIONS]
 | `--backend <URL>`        | Expansion backend override     |
 | `--expand-model <MODEL>` | LLM model override             |
 
+## `mold remix`
+
+Preview subject-preserving alternatives without queueing generation. Three
+variants are returned by default; use `--json` for the structured source and
+dimension provenance.
+
+```console
+mold remix <SOURCE_PROMPT> [OPTIONS]
+mold remix "a lighthouse" --dimensions camera,lighting --variations 4
+mold remix "she turns" --model ltx-2-19b-distilled:fp8 --task image-to-video
+```
+
+Use `--source original|current|direct` and optional `--root-prompt` to describe
+where the selected source came from. `--style` is locked across every variant.
+
 ## `mold serve`
 
 Start the HTTP inference server.

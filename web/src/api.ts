@@ -7,6 +7,8 @@ import type {
   CreateChainJobResponse,
   ExpandRequestWire,
   ExpandResponseWire,
+  RemixRequestWire,
+  RemixResponseWire,
   GalleryImage,
   GenerateRequestWire,
   GenerationMemoryEstimate,
@@ -219,6 +221,24 @@ export async function expandPrompt(
     throw new Error(`POST /api/expand failed: ${res.status} ${text}`);
   }
   return (await res.json()) as ExpandResponseWire;
+}
+
+export async function remixPrompt(
+  req: RemixRequestWire,
+  signal?: AbortSignal,
+  target?: StreamTarget,
+): Promise<RemixResponseWire> {
+  const res = await fetch(`${targetBase(target)}/api/remix`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...targetHeaders(target) },
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`POST /api/remix failed: ${res.status} ${text}`);
+  }
+  return (await res.json()) as RemixResponseWire;
 }
 
 export interface GenerateStreamHandlers {

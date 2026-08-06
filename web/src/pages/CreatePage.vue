@@ -22,6 +22,7 @@ import { advancedActiveCount } from "../components/create/advancedCount";
 import { projectResolution } from "../components/create/resolutionProjection";
 import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
+import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
@@ -45,6 +46,10 @@ import {
   expansionTaskForRequest,
   type ExpandTask,
 } from "@studio/lib/expandTask";
+import {
+  conditioningFingerprint,
+  promptSource,
+} from "@studio/lib/promptTransform";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -103,6 +108,11 @@ import {
   upscaleStream,
   type StreamTarget,
 } from "../api";
+import type {
+  PromptTransformProvenanceWire,
+  RemixDimension,
+  RemixResponseWire,
+} from "../types";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import { useChainJobs } from "../composables/useChainJobs";
 import { sequenceSharedParams } from "../lib/sequenceParams";
@@ -191,6 +201,9 @@ const promptHistory = ref<string[]>([]);
 const muted = ref(loadMuted());
 
 const showExpand = ref(false);
+const showRemix = ref(false);
+const remixRoute = ref<HostRoute | null>(null);
+const remixTask = ref<ExpandTask>("text-to-image");
 const showPicker = ref(false);
 const showMask = ref(false);
 const showAdvanced = ref(false);
@@ -223,6 +236,7 @@ function onTemplatesKeydown(event: KeyboardEvent) {
 // batch = 1 rewrites the prompt in place (undoable); batch > 1 fans out into
 // editable variations reviewed in the canvas before queueing.
 const prevPrompt = ref<string | null>(null);
+const prevOriginalPrompt = ref<string | null>(null);
 /**
  * The style state a quick expansion's bake-and-clear replaced: the chip it
  * dropped, and the negative prompt before and after the preset's curated
@@ -246,9 +260,11 @@ interface QuickPreparedExpansion {
   task: ExpandTask;
   selectedHostPolicy: string;
   route: HostRoute | null;
+  promptTransform?: PromptTransformProvenanceWire;
 }
 const quickPrepared = ref<QuickPreparedExpansion | null>(null);
 interface PreparedWebBatch {
+  kind?: "expand" | "remix";
   batchId: string;
   sourcePrompt: string;
   model: string;
@@ -262,6 +278,10 @@ interface PreparedWebBatch {
     { kind: "reject" }
   >;
   route: HostRoute;
+  rootPrompt?: string;
+  sourceKind?: "original" | "current" | "direct";
+  conditioningFingerprint?: string;
+  remixDimensions?: readonly (readonly RemixDimension[])[];
 }
 const preparedBatch = ref<PreparedWebBatch | null>(null);
 
@@ -282,7 +302,15 @@ function sameRoute(
 
 function preparedStaleReasons(batch: PreparedWebBatch): string[] {
   const reasons: string[] = [];
-  if (form.state.value.prompt.trim() !== batch.sourcePrompt)
+  const currentSource =
+    batch.kind === "remix"
+      ? promptSource(
+          form.state.value.prompt,
+          form.state.value.originalPrompt,
+          batch.sourceKind === "original" ? "original" : "current",
+        ).prompt
+      : form.state.value.prompt.trim();
+  if (currentSource !== batch.sourcePrompt)
     reasons.push("Source prompt changed after these variations were prepared.");
   if (form.state.value.model !== batch.model)
     reasons.push(
@@ -297,6 +325,14 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
   );
   if (currentTask !== batch.task)
     reasons.push(`Conditioning changed from ${batch.task} to ${currentTask}.`);
+  if (
+    batch.conditioningFingerprint !== undefined &&
+    conditioningFingerprint(form.toRequest(currentModel.value)) !==
+      batch.conditioningFingerprint
+  )
+    reasons.push(
+      "Conditioning media changed after these remixes were prepared.",
+    );
   if (form.state.value.batchSize !== batch.requestedCount)
     reasons.push(
       `Batch changed from ${batch.requestedCount} to ${form.state.value.batchSize}.`,
@@ -332,16 +368,14 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
     reasons.push(
       `Conditioning changed from ${snapshot.task} to ${currentTask}.`,
     );
-  if (routing.targetId.value !== snapshot.selectedHostPolicy)
-    reasons.push(
-      "The Run on selection changed after this prompt was expanded.",
-    );
-  const currentRoute = routing.resolve(snapshot.model);
-  if (!sameRoute(snapshot.route, currentRoute))
-    reasons.push(
-      `${snapshot.route?.label ?? "This server"} is no longer the prepared generation route.`,
-    );
   return reasons;
+}
+
+function quickRouteIsCurrent(snapshot: QuickPreparedExpansion): boolean {
+  return (
+    routing.targetId.value === snapshot.selectedHostPolicy &&
+    sameRoute(snapshot.route, routing.resolve(snapshot.model))
+  );
 }
 const quickConflictReasons = computed(() =>
   quickPrepared.value ? quickStaleReasons(quickPrepared.value) : [],
@@ -1693,6 +1727,7 @@ function onNewPrint() {
   preparedBatch.value = null;
   quickPrepared.value = null;
   prevPrompt.value = null;
+  prevOriginalPrompt.value = null;
   prevStyle.value = null;
   composerError.value = null;
   preprocessingStatus.value = null;
@@ -2347,7 +2382,9 @@ async function onSubmit(allowStaleQuick = false) {
     }
   }
   let route =
-    quick && !allowStaleQuick ? cloneRoute(quick.route) : resolveSubmitRoute();
+    quick && !allowStaleQuick && quickRouteIsCurrent(quick)
+      ? cloneRoute(quick.route)
+      : resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
   const decision = chainDecision.value;
@@ -2400,6 +2437,7 @@ async function onSubmit(allowStaleQuick = false) {
   const req = form.toRequest(currentModel.value);
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
+  if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
   if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
@@ -2531,6 +2569,110 @@ async function onExpand() {
   showExpand.value = true;
 }
 
+async function onRemix() {
+  if (!form.state.value.prompt.trim()) return;
+  if (!validateSubmit()) return;
+  const baseRequest = form.toRequest(currentModel.value);
+  const decision = chainDecision.value;
+  if (decision.kind === "reject") {
+    toast("error", decision.reason);
+    return;
+  }
+  const result =
+    decision.kind === "chain"
+      ? await routing.resolveFeasibleChain(
+          resolveChainRequest(baseRequest, decision),
+          3,
+        )
+      : await routing.resolveFeasible(baseRequest, 3);
+  if (result.kind !== "route") {
+    toast("error", feasibilityMessage(result, "three reviewed remixes"));
+    return;
+  }
+  remixRoute.value = cloneRoute(result.route);
+  remixTask.value = expansionTaskForCurrentOutput(baseRequest);
+  showRemix.value = true;
+}
+
+function applyRemix(payload: { prompt: string; response: RemixResponseWire }) {
+  // The modal may have remixed the durable original while the user continued
+  // editing the composer. Undo must return to the live text replaced by Apply,
+  // not to the transform backend's (possibly older) source prompt.
+  prevPrompt.value = form.state.value.prompt;
+  prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
+  form.state.value.originalPrompt =
+    payload.response.root_prompt ?? payload.response.source_prompt;
+  form.state.value.prompt = payload.prompt;
+  quickPrepared.value = {
+    expandedPrompt: payload.prompt,
+    originalPrompt:
+      payload.response.root_prompt ?? payload.response.source_prompt,
+    model: form.state.value.model,
+    family: currentFamily.value,
+    task: remixTask.value,
+    selectedHostPolicy: routing.targetId.value,
+    route: cloneRoute(remixRoute.value),
+    promptTransform: {
+      operation: "remix",
+      ...(payload.response.root_prompt
+        ? { root_prompt: payload.response.root_prompt }
+        : {}),
+      source_prompt: payload.response.source_prompt,
+      source_kind: payload.response.source_kind,
+      task: remixTask.value,
+      dimensions:
+        payload.response.variants.find(
+          (variant) => variant.prompt === payload.prompt,
+        )?.dimensions ?? [],
+    },
+  };
+  // Remix, like Expand, weaves the active style into the returned prompt.
+  // Clear the chip to avoid applying it twice and retain its curated negative
+  // in the request; undo restores both through the established snapshot.
+  bakeStyleAndClear();
+  showRemix.value = false;
+}
+
+async function prepareRemixBatch(response: RemixResponseWire) {
+  const route = remixRoute.value;
+  if (!route) return;
+  const baseRequest = form.toRequest(currentModel.value);
+  const decision = chainDecision.value;
+  if (decision.kind === "reject") {
+    toast("error", decision.reason);
+    return;
+  }
+  const variants = response.variants.map((variant) => variant.prompt.trim());
+  if (
+    variants.length < 2 ||
+    variants.length > 3 ||
+    variants.some((prompt) => !prompt)
+  ) {
+    composerError.value = "Select two or three non-empty remix variants.";
+    return;
+  }
+  form.state.value.batchSize = variants.length;
+  variations.value = variants;
+  preparedBatch.value = {
+    kind: "remix",
+    batchId: createUuid(),
+    sourcePrompt: response.source_prompt,
+    ...(response.root_prompt ? { rootPrompt: response.root_prompt } : {}),
+    sourceKind: response.source_kind,
+    conditioningFingerprint: conditioningFingerprint(baseRequest),
+    remixDimensions: response.variants.map((variant) => variant.dimensions),
+    model: form.state.value.model,
+    family: currentFamily.value,
+    task: remixTask.value,
+    requestedCount: variants.length,
+    selectedHostPolicy: routing.targetId.value,
+    baseRequest,
+    decision,
+    route: cloneRoute(route)!,
+  };
+  showRemix.value = false;
+}
+
 function onExpandClip(clipId: string, prompt: string) {
   const route = resolveSubmitRoute();
   if (route === false) return;
@@ -2575,6 +2717,7 @@ function applyExpandedPrompt(v: string) {
     return;
   }
   prevPrompt.value = form.state.value.prompt;
+  prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
   quickPrepared.value = {
     expandedPrompt: v,
     originalPrompt: form.state.value.prompt.trim(),
@@ -2584,6 +2727,7 @@ function applyExpandedPrompt(v: string) {
     selectedHostPolicy: routing.targetId.value,
     route: cloneRoute(expandRoute.value),
   };
+  form.state.value.originalPrompt = form.state.value.prompt.trim();
   form.state.value.prompt = v;
   // Same bake-and-clear as the desktop app: the rewrite absorbed the look, so
   // leaving the chip lit would apply it twice at submit.
@@ -2593,6 +2737,7 @@ function applyExpandedPrompt(v: string) {
 function undoExpand() {
   if (prevPrompt.value === null) return;
   form.state.value.prompt = prevPrompt.value;
+  form.state.value.originalPrompt = prevOriginalPrompt.value;
   // Undo re-arms the whole pre-expansion state: prompt, chip, and the negative
   // fragments the bake merged in — unless the user has edited the negative
   // since, which is theirs to keep.
@@ -2604,6 +2749,7 @@ function undoExpand() {
     }
   }
   prevPrompt.value = null;
+  prevOriginalPrompt.value = null;
   prevStyle.value = null;
   quickPrepared.value = null;
 }
@@ -2613,6 +2759,10 @@ function useVariation(index: number) {
   const v = variations.value[index];
   if (v == null) return;
   form.state.value.prompt = v;
+  form.state.value.originalPrompt =
+    preparedBatch.value?.rootPrompt ??
+    preparedBatch.value?.sourcePrompt ??
+    null;
   // The variation text already carries the baked look, so the chip clears —
   // and the preset's curated negative comes with it.
   bakeStyleAndClear();
@@ -2692,7 +2842,21 @@ async function queueVariations() {
           ...prepared.baseRequest,
           prompt,
           batch_size: 1,
-          original_prompt: prepared.sourcePrompt,
+          original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
+          ...(prepared.kind === "remix"
+            ? {
+                prompt_transform: {
+                  operation: "remix" as const,
+                  ...(prepared.rootPrompt
+                    ? { root_prompt: prepared.rootPrompt }
+                    : {}),
+                  source_prompt: prepared.sourcePrompt,
+                  source_kind: prepared.sourceKind ?? "direct",
+                  task: prepared.task,
+                  dimensions: [...(prepared.remixDimensions?.[index] ?? [])],
+                },
+              }
+            : {}),
           batch_id: prepared.batchId,
           batch_index: index + 1,
           batch_count: list.length,
@@ -2818,6 +2982,7 @@ function openJob(job: Job) {
   if ("prompt" in request && typeof request.prompt === "string") {
     form.state.value.prompt = request.prompt;
   }
+  form.state.value.originalPrompt = request.original_prompt ?? null;
   form.state.value.stylePreset = null;
   form.state.value.expand = {
     enabled: false,
@@ -3296,6 +3461,7 @@ onBeforeUnmount(() => {
             :history="promptHistory"
             @submit="onSubmit"
             @expand="onExpand"
+            @remix="onRemix"
             @undo-expand="undoExpand"
           >
             <template v-if="isPhone" #mobile-controls>
@@ -3557,6 +3723,18 @@ onBeforeUnmount(() => {
         expandClipId = null;
         expandRoute = null;
       "
+    />
+    <RemixModal
+      :open="showRemix"
+      :prompt="form.state.value.prompt"
+      :original-prompt="form.state.value.originalPrompt"
+      :family="currentFamily"
+      :task="remixTask"
+      :style="styleHint(form.state.value.stylePreset ?? '')"
+      :target="normalizeSubmitRoute(remixRoute)?.target"
+      @close="showRemix = false"
+      @apply="applyRemix"
+      @prepare="prepareRemixBatch"
     />
     <ImagePickerModal
       :open="showPicker"

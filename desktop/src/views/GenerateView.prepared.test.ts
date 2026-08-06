@@ -15,7 +15,9 @@ import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useDownloadsStore } from "../stores/downloads";
 import { useUiStore } from "../stores/ui";
+import { useAppPrefsStore } from "../stores/appPrefs";
 import { expandPrompt } from "../lib/api/expand";
+import { remixPrompt } from "../lib/api/remix";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { ApiError } from "../lib/api/client";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
@@ -53,6 +55,7 @@ vi.mock("../lib/api/client", () => ({
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt: vi.fn() }));
+vi.mock("../lib/api/remix", () => ({ remixPrompt: vi.fn() }));
 vi.mock("../lib/api/catalog", () => ({ startCatalogDownload: vi.fn() }));
 vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess: vi.fn() }));
 vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
@@ -132,6 +135,7 @@ describe("GenerateView prepared expansion batches", () => {
       },
     });
     vi.mocked(expandPrompt).mockReset();
+    vi.mocked(remixPrompt).mockReset();
     vi.mocked(startCatalogDownload).mockReset();
     vi.mocked(startCatalogDownload).mockResolvedValue("pull-job");
     vi.mocked(applySourceFitPreprocess).mockReset();
@@ -585,6 +589,78 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]![2]).toEqual(localRoute);
+  });
+
+  it("reuses a quick transformed prompt after a host-only selection change", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    useAppPrefsStore().settings = { generateTargetHost: "capable" } as never;
+    await nextTick();
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(false);
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({
+      prompt: "storm light",
+      original_prompt: "a lighthouse at dusk",
+    });
+  });
+
+  it("applies a Remix with the style snapshotted before the request", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    form.stylePreset = "cinematic";
+    const pending = deferred<Awaited<ReturnType<typeof remixPrompt>>>();
+    vi.mocked(remixPrompt).mockReturnValue(pending.promise);
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("remix");
+    await nextTick();
+    form.stylePreset = "anime";
+    pending.resolve({
+      source_prompt: "a lighthouse at dusk",
+      source_kind: "direct",
+      variants: ["one", "two", "three"].map((prompt) => ({
+        prompt,
+        dimensions: ["camera"],
+      })),
+    });
+    await flushPromises();
+
+    const prepared = wrapper.findComponent(PreparedExpansionBatch);
+    expect(prepared.props("batch").stylePreset).toBe("cinematic");
+    prepared.vm.$emit("apply", prepared.props("batch").prompts[0]!.id);
+    await nextTick();
+    expect(form.stylePreset).toBe("");
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({
+      prompt: "one",
+      prompt_transform: {
+        operation: "remix",
+        source_prompt: "a lighthouse at dusk",
+        dimensions: ["camera"],
+      },
+    });
   });
 
   it("offers immediate human-readable recovery when a quick expansion changes models", async () => {

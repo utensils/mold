@@ -66,6 +66,12 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
 
     // Ctrl shortcuts (work from any focus)
     match (key.code, key.modifiers) {
+        (KeyCode::Char('e' | 'E'), modifiers)
+            if modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            return Action::RemixPrompt
+        }
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => return Action::ExpandPrompt,
         (KeyCode::Char('m'), KeyModifiers::CONTROL) => return Action::OpenModelSelector,
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => return Action::RandomizeSeed,

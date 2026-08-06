@@ -1,5 +1,13 @@
 use base64::Engine;
 
+fn validate_video_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(())
+    } else {
+        Err("the selected video does not have a valid host URL".to_string())
+    }
+}
+
 fn decode_image(data_b64: &str) -> Result<Vec<u8>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
@@ -123,6 +131,101 @@ pub async fn save_image_to_photos(
     wait_for_image_action(receiver, "save").await
 }
 
+#[cfg(target_os = "ios")]
+fn save_downloaded_video(staged: &std::path::Path) -> Result<(), String> {
+    use block2::{DynBlock, RcBlock};
+    use objc2_foundation::{NSString, NSURL};
+    use objc2_photos::{PHAssetChangeRequest, PHPhotoLibrary};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let file_url = NSURL::fileURLWithPath(&NSString::from_str(&staged.to_string_lossy()));
+    let created = Arc::new(AtomicBool::new(false));
+    let created_in_block = Arc::clone(&created);
+    let changes = RcBlock::new(move || {
+        // SAFETY: PhotoKit reads the retained file URL while executing its
+        // change transaction and copies the asset before the call returns.
+        let request =
+            unsafe { PHAssetChangeRequest::creationRequestForAssetFromVideoAtFileURL(&file_url) };
+        created_in_block.store(request.is_some(), Ordering::Release);
+    });
+    let change_ptr = std::ptr::from_ref::<DynBlock<dyn Fn()>>(&changes).cast_mut();
+    // SAFETY: The heap-copied block remains alive for this synchronous PhotoKit
+    // transaction, and the staged file is retained until it completes.
+    let save_result =
+        unsafe { PHPhotoLibrary::sharedPhotoLibrary().performChangesAndWait_error(change_ptr) };
+    save_result.map_err(|error| error.localizedDescription().to_string())?;
+    if created.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err("Photos could not create a video asset from this file".to_string())
+    }
+}
+
+#[cfg(target_os = "ios")]
+async fn download_and_save_video(url: String) -> Result<(), String> {
+    use std::io::Write;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let staged =
+        std::env::temp_dir().join(format!("mold-video-{}-{unique}.mp4", std::process::id()));
+    let download_result = async {
+        // reqwest deliberately leaves provider selection to the app so the
+        // iOS shell can use the smaller, well-supported ring backend.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|error| format!("could not prepare the video download: {error}"))?;
+        let mut response = client
+            .get(&url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| format!("could not download the video: {error}"))?;
+        let mut file = std::fs::File::create(&staged)
+            .map_err(|error| format!("could not stage the video: {error}"))?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("could not download the video: {error}"))?
+        {
+            file.write_all(&chunk)
+                .map_err(|error| format!("could not stage the video: {error}"))?;
+        }
+        file.sync_all()
+            .map_err(|error| format!("could not finish staging the video: {error}"))
+    }
+    .await;
+    if let Err(error) = download_result {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = save_downloaded_video(&staged);
+        let _ = std::fs::remove_file(&staged);
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn save_video_to_photos(url: String) -> Result<(), String> {
+    validate_video_url(&url)?;
+    #[cfg(target_os = "ios")]
+    return download_and_save_video(url).await;
+
+    #[cfg(not(target_os = "ios"))]
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use base64::Engine;
@@ -143,5 +246,14 @@ mod tests {
             "could not decode the image to copy"
         );
         assert!(super::require_platform_image(Some(()), "save").is_ok());
+    }
+
+    #[test]
+    fn video_downloads_accept_only_http_urls() {
+        assert!(super::validate_video_url("https://studio.example/media.mp4").is_ok());
+        assert!(super::validate_video_url("http://studio.local:7680/media.mp4").is_ok());
+        assert!(super::validate_video_url("file:///private/video.mp4").is_err());
+        assert!(super::validate_video_url("blob:generated-video").is_err());
+        assert!(super::validate_video_url("javascript:alert(1)").is_err());
     }
 }

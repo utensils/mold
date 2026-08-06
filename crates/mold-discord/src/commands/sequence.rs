@@ -144,6 +144,7 @@ fn build_sequence_request(params: SequenceParams<'_>) -> Result<ChainRequest, St
         output_format: OutputFormat::Mp4,
         placement: None,
         original_prompt: None,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,

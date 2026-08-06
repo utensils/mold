@@ -10,9 +10,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::expand_prompts::{
-    build_batch_messages_with_context_for_task, build_single_messages_for_task,
+    build_batch_messages_with_context_for_task, build_remix_messages_with_context_for_task,
+    build_single_messages_for_task,
 };
-use crate::ExpandTask;
+use crate::{ExpandTask, PromptTransformOperation, RemixDimension};
 
 /// Maximum number of prompt variations for Discord (embed character limit).
 pub const DISCORD_MAX_VARIATIONS: usize = 5;
@@ -58,6 +59,10 @@ pub struct ExpandConfig {
     pub model_family: String,
     /// Resolved generation task and conditioning policy.
     pub task: ExpandTask,
+    /// Internal transform mode. Ordinary expansion remains the default.
+    pub operation: PromptTransformOperation,
+    /// Resolved, task-safe dimensions used only for Remix.
+    pub remix_dimensions: Vec<RemixDimension>,
     /// Number of prompt variations to generate (1 = single expansion).
     pub variations: usize,
     /// Sampling temperature (0.0-2.0). Higher = more creative.
@@ -86,6 +91,8 @@ impl Default for ExpandConfig {
         Self {
             model_family: "flux".to_string(),
             task: ExpandTask::TextToImage,
+            operation: PromptTransformOperation::Expand,
+            remix_dimensions: Vec::new(),
             variations: 1,
             temperature: 0.7,
             top_p: 0.9,
@@ -97,6 +104,73 @@ impl Default for ExpandConfig {
             style: None,
         }
     }
+}
+
+/// Resolve a Remix request's dimensions without silently weakening source
+/// authority. Explicit unsafe dimensions are rejected; an omitted list uses a
+/// task-aware default. A locked style is never treated as variable.
+pub fn resolve_remix_dimensions(
+    requested: &[RemixDimension],
+    task: ExpandTask,
+    style_locked: bool,
+) -> Result<Vec<RemixDimension>> {
+    let allowed: &[RemixDimension] = match task {
+        ExpandTask::TextToImage | ExpandTask::TextToVideo => &[
+            RemixDimension::Composition,
+            RemixDimension::Camera,
+            RemixDimension::Lighting,
+            RemixDimension::Setting,
+            RemixDimension::Mood,
+            RemixDimension::Movement,
+            RemixDimension::Style,
+        ],
+        ExpandTask::ImageToVideo
+        | ExpandTask::VideoToVideo
+        | ExpandTask::Retake
+        | ExpandTask::KeyframeInterpolation
+        | ExpandTask::AudioDrivenVideo => &[RemixDimension::Movement],
+        ExpandTask::TextToAudio => &[RemixDimension::Mood, RemixDimension::Movement],
+    };
+    let candidates = if requested.is_empty() {
+        allowed
+            .iter()
+            .copied()
+            .filter(|dimension| !(style_locked && *dimension == RemixDimension::Style))
+            .collect::<Vec<_>>()
+    } else {
+        requested.to_vec()
+    };
+    let mut resolved = Vec::new();
+    for dimension in candidates {
+        anyhow::ensure!(
+            allowed.contains(&dimension),
+            "remix dimension '{dimension}' conflicts with the {task} conditioning authority"
+        );
+        anyhow::ensure!(
+            !(style_locked && dimension == RemixDimension::Style),
+            "remix dimension 'style' cannot vary while a locked style constraint is set"
+        );
+        if !resolved.contains(&dimension) {
+            resolved.push(dimension);
+        }
+    }
+    anyhow::ensure!(
+        !resolved.is_empty(),
+        "remix requires at least one safe dimension"
+    );
+    Ok(resolved)
+}
+
+/// Deterministic one-dimension assignment for a one-based logical variation.
+pub fn remix_dimensions_for_position(
+    dimensions: &[RemixDimension],
+    position: usize,
+) -> Vec<RemixDimension> {
+    dimensions
+        .get(position.saturating_sub(1) % dimensions.len().max(1))
+        .copied()
+        .into_iter()
+        .collect()
 }
 
 /// Result of a prompt expansion.
@@ -278,7 +352,18 @@ impl PromptExpander for ApiExpander {
             let family_override = attempt_config
                 .family_overrides
                 .get(&attempt_config.model_family);
-            let messages = if attempt.total > 1 {
+            let messages = if attempt_config.operation == PromptTransformOperation::Remix {
+                build_remix_messages_with_context_for_task(
+                    prompt,
+                    &attempt_config.model_family,
+                    attempt_config.variations,
+                    attempt_config.task,
+                    Some((attempt.start, attempt.total)),
+                    family_override,
+                    attempt_config.style.as_deref(),
+                    &attempt_config.remix_dimensions,
+                )
+            } else if attempt.total > 1 {
                 build_batch_messages_with_context_for_task(
                     prompt,
                     &attempt_config.model_family,
@@ -342,11 +427,14 @@ impl PromptExpander for ApiExpander {
                     )
                 })?;
 
-            Ok(if attempt.total > 1 {
-                parse_variations(&content, attempt_config.variations)
-            } else {
-                vec![clean_expanded_prompt(&content)]
-            })
+            Ok(
+                if attempt_config.operation == PromptTransformOperation::Remix || attempt.total > 1
+                {
+                    parse_variations(&content, attempt_config.variations)
+                } else {
+                    vec![clean_expanded_prompt(&content)]
+                },
+            )
         })?;
 
         Ok(ExpandResult {
@@ -585,6 +673,8 @@ impl ExpandSettings {
         ExpandConfig {
             model_family: model_family.to_string(),
             task: ExpandTask::for_family(model_family),
+            operation: PromptTransformOperation::Expand,
+            remix_dimensions: Vec::new(),
             variations,
             temperature: self.temperature,
             top_p: self.top_p,
@@ -1307,5 +1397,36 @@ word_limit = 250
         let flux = settings.families.get("flux").unwrap();
         assert_eq!(flux.word_limit, Some(250));
         assert!(flux.style_notes.is_none());
+    }
+
+    #[test]
+    fn remix_dimensions_are_task_safe_and_deterministic() {
+        let text = resolve_remix_dimensions(&[], ExpandTask::TextToImage, false).unwrap();
+        assert!(text.contains(&RemixDimension::Composition));
+        assert!(text.contains(&RemixDimension::Style));
+        assert_eq!(
+            remix_dimensions_for_position(&text, text.len() + 1),
+            vec![RemixDimension::Composition]
+        );
+
+        let conditioned = resolve_remix_dimensions(&[], ExpandTask::ImageToVideo, false).unwrap();
+        assert_eq!(conditioned, vec![RemixDimension::Movement]);
+        let error = resolve_remix_dimensions(
+            &[RemixDimension::Composition],
+            ExpandTask::ImageToVideo,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("conditioning authority"));
+    }
+
+    #[test]
+    fn locked_style_cannot_be_a_remix_dimension() {
+        let defaults = resolve_remix_dimensions(&[], ExpandTask::TextToImage, true).unwrap();
+        assert!(!defaults.contains(&RemixDimension::Style));
+        assert!(
+            resolve_remix_dimensions(&[RemixDimension::Style], ExpandTask::TextToImage, true)
+                .is_err()
+        );
     }
 }

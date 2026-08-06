@@ -48,6 +48,7 @@ fn sample_request() -> ChainRequest {
         output_format: OutputFormat::Mp4,
         placement: None,
         original_prompt: None,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,
