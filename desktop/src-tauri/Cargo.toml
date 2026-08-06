@@ -9,7 +9,7 @@ authors = [
 license = "MIT"
 repository = "https://github.com/utensils/mold"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.93"
 
 # This crate is deliberately its own cargo root (see the root Cargo.toml
 # [workspace] exclude): the Tauri dependency tree must not enter the CUDA

@@ -99,7 +99,7 @@ resolver = "2"
 
 **Why (rejecting workspace membership):**
 
-- The root workspace is MSRV 1.85 / edition 2021 and every CI gate runs `--workspace` (`cargo check/clippy/test --workspace` with `-D warnings`). Joining would drag ~400 Tauri/objc2/wry crates into `clippy --workspace`, into crane's `buildDepsOnly` artifacts (invalidating the CUDA dep cache on every Tauri bump), and into `Cargo.lock` churn for a CUDA-heavy workspace. Exclusion means **zero risk to existing CI/builds** — the only main-tree edits are the one-line exclude, flake additions, and a new branch-gated workflow.
+- The root workspace is MSRV 1.93 / edition 2021 and every CI gate runs `--workspace` (`cargo check/clippy/test --workspace` with `-D warnings`). Joining would drag ~400 Tauri/objc2/wry crates into `clippy --workspace`, into crane's `buildDepsOnly` artifacts (invalidating the CUDA dep cache on every Tauri bump), and into `Cargo.lock` churn for a CUDA-heavy workspace. Exclusion means **zero risk to existing CI/builds** — the only main-tree edits are the one-line exclude, flake additions, and a new branch-gated workflow.
 - This is exactly the proven Aethon pattern (`cargoRoot = "src-tauri"`, separate `Cargo.lock`, `rustPlatform.buildRustPackage` + `cargo-tauri.hook`).
 - Path dependencies work fine across the boundary: `desktop/src-tauri` depends on `../../crates/mold-server` etc. by path; it compiles those crates under its own lock/profile.
 - **Deliberate choice: edition 2021 for the desktop crate** (Tauri 2 does not require 2024). This keeps treefmt's `rustfmt { edition = "2021" }` correct for the whole tree and lets the desktop crate build with the devshell's existing stable toolchain. (Aethon used 2024; we don't need it and it buys friction.)
@@ -334,7 +334,7 @@ desktop/
 name = "mold-desktop"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.93"
 
 [lib]
 name = "mold_desktop_lib"
