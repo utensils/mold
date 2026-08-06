@@ -20,6 +20,7 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-layout")).toContain("overflow-hidden");
     expect(classesFor(viewSource, "generate-workbench")).toContain("min-h-0");
     expect(classesFor(viewSource, "generate-workbench")).toContain("overflow-hidden");
+    expect(classesFor(viewSource, "create-bottom-panel")).toContain("overflow-x-hidden");
     expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
   });
 
@@ -79,7 +80,10 @@ describe("GenerateView layout", () => {
     expect(composerCardSource).toMatch(
       /const promptMissing = computed\(\s*\(\) => promptRequired\(props\.form\) && !props\.form\.prompt\.trim\(\),?\s*\);/s,
     );
-    expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="promptMissing ||');
+    expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="generateDisabled"');
+    expect(composerCardSource).toMatch(
+      /const generateDisabled = computed\([\s\S]*?promptMissing\.value/,
+    );
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 
     expect(viewSource).toContain('from "@studio/lib/promptRequirement"');

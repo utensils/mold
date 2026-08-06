@@ -53,6 +53,15 @@ const emit = defineEmits<{
 // and Generate must not stay disabled on a request the server would admit —
 // the view's `generate()` early return moves with this in lockstep.
 const promptMissing = computed(() => promptRequired(props.form) && !props.form.prompt.trim());
+const generateDisabled = computed(
+  () =>
+    promptMissing.value ||
+    !props.form.model ||
+    props.chainReject ||
+    props.hasPrepared ||
+    props.expansionRunning ||
+    props.submitting,
+);
 const placeholder = computed(() =>
   promptPlaceholder(props.form, "Describe the image you want to create…"),
 );
@@ -93,7 +102,7 @@ function cycleHistory(direction: "prev" | "next") {
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && primaryModifierPressed(e)) {
     e.preventDefault();
-    emit("generate");
+    if (!generateDisabled.value) emit("generate");
   } else if ((e.key === "e" || e.key === "E") && primaryModifierPressed(e)) {
     e.preventDefault();
     expandControl.value?.expand();
@@ -163,11 +172,10 @@ defineExpose({ focus, expand, record });
         >
         <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
         <button
-          v-if="effectiveBatchSize === 1"
           type="button"
           data-test="generate-button"
           class="ms-composer__generate"
-          :disabled="promptMissing || !form.model || chainReject || hasPrepared || submitting"
+          :disabled="generateDisabled"
           @click="emit('generate')"
         >
           <Icon name="sparkle" :size="16" />

@@ -81,7 +81,6 @@ jobs:
               - 'crates/mold-inference/src/attention.rs'
               - 'crates/mold-inference/Cargo.toml'
               - 'crates/mold-cli/Cargo.toml'
-              - '.github/workflows/ci.yml'
             website:
               - 'website/**'
               - '.github/workflows/ci.yml'
@@ -303,6 +302,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Free runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
@@ -322,8 +323,8 @@ jobs:
         with:
           shared-key: workspace-cuda-sm89
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check CUDA forced-local and server paths
-        run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns
+      - name: Clippy CUDA forced-local and server paths
+        run: cargo clippy -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
 
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in
@@ -332,7 +333,9 @@ jobs:
   #
   # It runs on main (keeping the kernel cache warm — GitHub evicts caches after
   # 7 idle days, and a cold run costs ~an hour) and on PRs that touch the
-  # attention dispatcher or the feature wiring.
+  # attention dispatcher or Cargo feature wiring. Workflow-only edits get
+  # their proof on the mandatory main run instead of blocking the PR for the
+  # 79-minute cold build.
   flash-attn-check:
     name: FlashAttention feature typecheck
     needs: changes
@@ -395,14 +398,8 @@ jobs:
       # `dev-bins` pulls in `attention_bench`, which no other gate compiles.
       - name: Clippy the flash-attn inference lib, tests and dev-bins
         run: cargo clippy -p mold-ai-inference --features flash-attn,dev-bins --all-targets -- -D warnings
-      # Deliberately `check`, not `clippy`. This step exists to prove the
-      # binary's feature wiring resolves; linting `-p mold-ai` with the feature
-      # additionally lints every `cuda`-gated crate, and mold-server carries
-      # pre-existing violations there that no gate has ever run (cuda-check is
-      # `cargo check` only, and the `rust` clippy job has no CUDA). Widening
-      # this gate to cover that debt belongs in its own change — see #738.
-      - name: Check the flash-attn binary wiring
-        run: cargo check -p mold-ai --features flash-attn
+      - name: Clippy the flash-attn binary wiring
+        run: cargo clippy -p mold-ai --features flash-attn -- -D warnings
 
   metal-check:
     name: Metal forced-local typecheck
@@ -412,12 +409,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace-metal
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check Metal forced-local and server paths
-        run: cargo check -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns
+      - name: Clippy Metal forced-local and server paths
+        run: cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
 
   coverage:
     needs: changes

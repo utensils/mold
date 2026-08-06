@@ -119,6 +119,13 @@ describe("ComposerCard", () => {
     ).toContain("Expand to 4");
   });
 
+  it("keeps Generate visible for multi-image batches", () => {
+    const wrapper = factory({ batchSize: 4 });
+    expect(wrapper.get("[data-test='composer-submit']").text()).toContain(
+      "Generate",
+    );
+  });
+
   it("shows the undo affordance only when an expansion is undoable", async () => {
     const wrapper = factory();
     expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(false);

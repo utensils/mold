@@ -1682,7 +1682,7 @@ async fn generate_local_batch(
 
     enum LocalOwnerEvent {
         Ready(usize),
-        Completed(usize, u32, GenerateResponse),
+        Completed(usize, u32, Box<GenerateResponse>),
         Failed(usize, u32, anyhow::Error),
         Crashed(usize, anyhow::Error),
     }
@@ -1735,8 +1735,11 @@ async fn generate_local_batch(
                     })();
                     match result {
                         Ok(response) => {
-                            let _ =
-                                event_tx.send(LocalOwnerEvent::Completed(ordinal, index, response));
+                            let _ = event_tx.send(LocalOwnerEvent::Completed(
+                                ordinal,
+                                index,
+                                Box::new(response),
+                            ));
                             let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
                         }
                         Err(error) => {
@@ -1794,7 +1797,7 @@ async fn generate_local_batch(
                     )));
                     break 'events;
                 }
-                completed.push((index, response));
+                completed.push((index, *response));
                 terminal_items += 1;
             }
             LocalOwnerEvent::Failed(ordinal, index, error) => {

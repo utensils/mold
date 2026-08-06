@@ -74,6 +74,11 @@ const running = computed<Job | null>(
     ) ?? null,
 );
 const queued = computed<Job[]>(() => generation.pending.filter((j) => j.status === "queued"));
+const MAX_QUEUED_PILLS = 4;
+const visibleQueued = computed(() => queued.value.slice(0, MAX_QUEUED_PILLS));
+const hiddenQueuedCount = computed(() =>
+  Math.max(0, queued.value.length - visibleQueued.value.length),
+);
 const runningPct = computed(() =>
   running.value ? Math.round(jobProgress(running.value) * 100) : 0,
 );
@@ -268,7 +273,7 @@ function deleteConfirmed() {
       </template>
       <div v-else class="ms-activity__idle-spacer" />
       <div
-        v-for="job in queued"
+        v-for="job in visibleQueued"
         :key="job.clientId"
         class="ms-activity__pill"
         data-test="activity-queued"
@@ -288,6 +293,13 @@ function deleteConfirmed() {
           ✕
         </button>
       </div>
+      <span
+        v-if="hiddenQueuedCount > 0"
+        class="ms-activity__overflow data-mono"
+        data-test="activity-queued-overflow"
+      >
+        +{{ hiddenQueuedCount }} queued
+      </span>
       <!-- Everything settled the strip is not listing, in one mono count. -->
       <button
         v-if="digest"
@@ -376,11 +388,16 @@ function deleteConfirmed() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  flex-shrink: 0;
 }
 .ms-activity__row {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 .ms-activity__kicker {
   font-family: var(--f-mono);
@@ -426,7 +443,9 @@ function deleteConfirmed() {
   font-size: 9.5px;
 }
 .ms-activity__pill {
-  flex: 0 0 auto;
+  flex: 1 1 120px;
+  min-width: 0;
+  max-width: 166px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -434,6 +453,12 @@ function deleteConfirmed() {
   border: 1px solid var(--edge);
   border-radius: 20px;
   padding: 5px 5px 5px 11px;
+}
+.ms-activity__overflow {
+  flex: 0 0 auto;
+  color: var(--ink-3);
+  font-size: 9.5px;
+  white-space: nowrap;
 }
 .ms-activity__pill-text {
   font-size: 11px;
