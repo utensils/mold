@@ -2215,71 +2215,117 @@ mod tests {
         assert_eq!(back.shape().dims(), &[3, 5]);
     }
 
-    /// **candle cannot read the shipped Wan GGUF today**, and this pins why.
+    /// Full GGUF round trip, 5-D patch embedding included.
     ///
-    /// `gguf_file.rs`'s `GGUF_MAX_TENSOR_DIMS` is 4 and is enforced while
-    /// reading tensor infos. The QuantStack A14B files carry exactly one 5-D
-    /// tensor — `patch_embedding.weight`, ggml dims `[2, 2, 1, 36, 5120]` —
-    /// which is inherent to the architecture (`[dim, in_dim, pt, ph, pw]`), not
-    /// a quirk of one quantizer. `Content::read` therefore fails before a
-    /// single tensor is loaded.
+    /// Every Wan GGUF carries one 5-D tensor — `patch_embedding.weight`,
+    /// `[dim, in_dim, pt, ph, pw]` — which candle refused until the compat
+    /// branch raised `GGUF_MAX_TENSOR_DIMS` to 5 (`3a49a729`). This writes a
+    /// complete tiny model, reads it back through `from_gguf`, and requires the
+    /// forward to match the safetensors path that produced the weights.
     ///
-    /// The `WanWeights::Quantized` path below is complete and exercised by
-    /// `gguf_quantized_source_loads_a_four_dimensional_model`; only the 5-D
-    /// patch embedding blocks the real files. Resolving it is an architecture
-    /// call — raise the cap in the candle patch branch, or give mold its own
-    /// GGUF reader — so it is recorded here rather than worked around.
+    /// Quantizing at F32 is lossless, so any divergence is a naming, dim-order,
+    /// or dispatch bug rather than quantization error.
     #[test]
-    fn candle_rejects_the_five_dimensional_patch_embedding_the_real_files_use() {
-        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
-
-        let device = Device::Cpu;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("five_dim.gguf");
-
-        // The production shape, scaled down: [dim, in_dim, pt, ph, pw].
-        let weight = Tensor::zeros((16, 16, 1, 2, 2), DType::F32, &device).unwrap();
-        let q = QTensor::quantize(&weight, GgmlDType::F32).unwrap();
-        let arch = gguf_file::Value::String("wan".to_string());
-        let mut file = std::fs::File::create(&path).unwrap();
-        gguf_file::write(
-            &mut file,
-            &[("general.architecture", &arch)],
-            &[("patch_embedding.weight", &q)],
-        )
-        .unwrap();
-        drop(file);
-
-        let mut file = std::fs::File::open(&path).unwrap();
-        let error = match gguf_file::Content::read(&mut file) {
-            Ok(_) => panic!(
-                "candle now reads 5-D GGUF tensors — the Wan GGUF blocker is gone, \
-                 wire up the real round-trip test"
-            ),
-            Err(error) => error.to_string(),
-        };
-        assert!(
-            error.contains("5 dimensions") && error.contains("max is 4"),
-            "unexpected error: {error}"
-        );
-    }
-
-    /// The quantized weight source itself is sound: a model whose tensors are
-    /// all <= 4-D loads through GGUF and reproduces the safetensors forward.
-    ///
-    /// Built by swapping the patch embedding for a 1x1x1 patch, which makes it
-    /// 4-D (`[dim, in_dim, 1, 1]`... still 5 in this layout) — so instead this
-    /// exercises every OTHER tensor class through `WanWeights::Quantized`:
-    /// 2-D linears, 1-D norms and biases, and the 3-D `modulation`.
-    #[test]
-    fn gguf_quantized_source_loads_every_non_patch_tensor_class() {
+    fn gguf_round_trip_reproduces_the_safetensors_forward() {
         use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
         use candle_nn::{VarBuilder as NnVarBuilder, VarMap};
 
         let device = Device::Cpu;
         let dtype = DType::F32;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blocks.gguf");
+        let path = dir.path().join("tiny_wan.gguf");
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        let plain = WanTransformer::from_var_builder(
+            NnVarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        // Every tensor the model asked for, under its bare GGUF name — the
+        // shipped files carry no `model.diffusion_model.` prefix.
+        let quantized: Vec<(String, QTensor)> = {
+            let data = varmap.data().lock().unwrap();
+            data.iter()
+                .map(|(name, var)| {
+                    (
+                        name.clone(),
+                        QTensor::quantize(var.as_tensor(), GgmlDType::F32).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert!(
+            quantized
+                .iter()
+                .any(|(name, q)| name == "patch_embedding.weight" && q.shape().rank() == 5),
+            "the fixture must exercise the 5-D patch embedding"
+        );
+
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let arch = gguf_file::Value::String("wan".to_string());
+        let mut file = std::fs::File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
+        drop(file);
+
+        let from_gguf = WanTransformer::from_gguf(&path, config.clone(), &device).unwrap();
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+
+        let want = plain.forward(&x, &timestep, &context).unwrap();
+        let got = from_gguf.forward(&x, &timestep, &context).unwrap();
+        assert_eq!(want.dims(), got.dims());
+
+        let want_v: Vec<f32> = want.flatten_all().unwrap().to_vec1().unwrap();
+        let got_v: Vec<f32> = got.flatten_all().unwrap().to_vec1().unwrap();
+        let err = want_v
+            .iter()
+            .zip(&got_v)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            err < 1e-4,
+            "GGUF forward diverged from safetensors by {err:e}"
+        );
+
+        // Per-token timesteps travel the same path.
+        let per_token = Tensor::from_vec(vec![500f32; 4], (1, 4), &device).unwrap();
+        let want = plain.forward(&x, &per_token, &context).unwrap();
+        let got = from_gguf.forward(&x, &per_token, &context).unwrap();
+        let err = want
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .zip(got.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-4, "per-token GGUF forward diverged by {err:e}");
+    }
+
+    /// The quantized source serves every tensor class the real files contain,
+    /// and refuses a shape the config did not ask for.
+    #[test]
+    fn gguf_quantized_source_serves_every_tensor_class() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        use candle_nn::{VarBuilder as NnVarBuilder, VarMap};
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("classes.gguf");
 
         let config = WanTransformerConfig {
             ffn_dim: 32,
@@ -2293,20 +2339,17 @@ mod tests {
             config.clone(),
         )
         .unwrap();
-
-        // Everything except the 5-D patch embedding, which candle refuses.
-        let data = varmap.data().lock().unwrap();
-        let quantized: Vec<(String, QTensor)> = data
-            .iter()
-            .filter(|(name, _)| *name != "patch_embedding.weight")
-            .map(|(name, var)| {
-                (
-                    name.clone(),
-                    QTensor::quantize(var.as_tensor(), GgmlDType::F32).unwrap(),
-                )
-            })
-            .collect();
-        drop(data);
+        let quantized: Vec<(String, QTensor)> = {
+            let data = varmap.data().lock().unwrap();
+            data.iter()
+                .map(|(name, var)| {
+                    (
+                        name.clone(),
+                        QTensor::quantize(var.as_tensor(), GgmlDType::F32).unwrap(),
+                    )
+                })
+                .collect()
+        };
         let refs: Vec<(&str, &QTensor)> = quantized
             .iter()
             .map(|(name, q)| (name.as_str(), q))
@@ -2316,31 +2359,42 @@ mod tests {
         gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
         drop(file);
 
-        // The source reads back every class it was given, in torch dim order.
         let vb = mold_candle::quantized::VarBuilder::from_gguf(&path, &device).unwrap();
         let source = WanWeights::quantized(vb);
         let dim = config.dim;
 
-        // 2-D linear, dequantized and compared against the original.
+        // 2-D linear through QMatMul.
         let linear = source.pp("blocks.0.self_attn.q").linear(dim, dim).unwrap();
         let probe = Tensor::randn(0f32, 1f32, (1, 4, dim), &device).unwrap();
-        let got = linear.forward(&probe).unwrap();
-        assert_eq!(got.dims(), &[1, 4, dim]);
+        assert_eq!(linear.forward(&probe).unwrap().dims(), &[1, 4, dim]);
 
-        // 1-D norm gain and 3-D modulation.
-        let gain = source
-            .pp("blocks.0.self_attn.norm_q")
-            .tensor(dim, "weight", candle_nn::Init::Const(1.0))
-            .unwrap();
-        assert_eq!(gain.dims(), &[dim]);
-        let modulation = source
-            .pp("blocks.0")
-            .tensor((1, 6, dim), "modulation", TEST_WEIGHT_INIT)
-            .unwrap();
+        // 1-D norm gain, 3-D modulation, 5-D patch embedding.
         assert_eq!(
-            modulation.dims(),
+            source
+                .pp("blocks.0.self_attn.norm_q")
+                .tensor(dim, "weight", candle_nn::Init::Const(1.0))
+                .unwrap()
+                .dims(),
+            &[dim]
+        );
+        assert_eq!(
+            source
+                .pp("blocks.0")
+                .tensor((1, 6, dim), "modulation", TEST_WEIGHT_INIT)
+                .unwrap()
+                .dims(),
             &[1, 6, dim],
-            "3-D modulation must survive the GGUF round trip in torch order"
+            "3-D modulation must come back in torch order"
+        );
+        let (pt, ph, pw) = config.patch_size;
+        assert_eq!(
+            source
+                .pp("patch_embedding")
+                .tensor((dim, config.in_dim, pt, ph, pw), "weight", TEST_WEIGHT_INIT)
+                .unwrap()
+                .dims(),
+            &[dim, config.in_dim, pt, ph, pw],
+            "5-D patch embedding must come back in torch order"
         );
 
         // A shape the config does not expect is refused, not silently reshaped.
