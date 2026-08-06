@@ -277,12 +277,17 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
             "extend_video",
         ),
         (req.keyframes.is_some(), "keyframes"),
+        // Core validation accepts source_image + mask_image as generic
+        // inpainting, but Wan's conditioning never reads the mask — the
+        // render would succeed while repainting everything, which reads as
+        // "my mask had no effect".
+        (req.mask_image.is_some(), "mask_image"),
     ];
     for (present, field) in unsupported {
         if present {
             bail!(
                 "{field} is not yet supported for Wan — the family ships text-to-video and \
-                 single-image conditioning; video-to-video and keyframes land later"
+                 single-image conditioning; video-to-video, masks, and keyframes land later"
             );
         }
     }
@@ -301,6 +306,33 @@ pub(crate) enum WanConditioningShape {
     /// `cat([noise(z), mask(4), image(z)])`. Wan 2.1 I2V-14B and Wan 2.2
     /// I2V-A14B both declare 36 channels against the 16-channel 2.1 VAE.
     ChannelConcat,
+}
+
+/// Refuse the 36-channel checkpoints this engine cannot yet run correctly,
+/// naming what each is missing. Wan 2.1 I2V carries a CLIP-vision
+/// cross-attention branch (`k_img`/`v_img`) the transformer omits; a Wan 2.2
+/// A14B expert is architecturally a plain 36-channel DiT, but a real
+/// generation needs the high/low-noise expert pair switched at the sigma
+/// boundary, which this engine does not perform until the A14B layer lands.
+fn reject_unwired_channel_concat_checkpoint(transformer: &Path) -> Result<()> {
+    let has_clip_branch = header_shapes(transformer)?.into_iter().any(|(name, _)| {
+        name.trim_start_matches("model.diffusion_model.")
+            .contains("cross_attn.k_img")
+    });
+    if has_clip_branch {
+        bail!(
+            "{} is a Wan 2.1 image-to-video checkpoint, which needs the CLIP-vision \
+             cross-attention branch mold does not implement yet — use a Wan 2.2 checkpoint \
+             (wan22-ti2v-5b) for image conditioning",
+            transformer.display()
+        );
+    }
+    bail!(
+        "{} looks like one Wan 2.2 A14B expert; A14B generation needs the high/low-noise \
+         expert pair switched at the sigma boundary, which lands with the A14B layer \
+         (issue #747) — until then use wan22-ti2v-5b",
+        transformer.display()
+    )
 }
 
 pub(crate) fn conditioning_shape(in_dim: usize, z_dim: usize) -> Result<WanConditioningShape> {
@@ -616,6 +648,15 @@ impl WanEngine {
         let vae_config = vae_generation.config();
         let transformer_config = detect_transformer_config(&paths.transformer)?;
         let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
+        // A 36-channel checkpoint is structurally incomplete on this engine:
+        // Wan 2.1 I2V additionally needs the CLIP-vision `k_img`/`v_img`
+        // branch the transformer omits, and Wan 2.2 I2V-A14B needs two-expert
+        // switching this engine does not perform yet. Accepting either would
+        // render — wrongly. The channel-concat *conditioning* stays live via
+        // the tiny-component test seam until the A14B layer wires experts.
+        if shape == WanConditioningShape::ChannelConcat {
+            reject_unwired_channel_concat_checkpoint(&paths.transformer)?;
+        }
 
         let (default_frames, default_fps) = vae_generation.default_timing();
         let num_frames = req.frames.unwrap_or(default_frames);
@@ -1312,6 +1353,46 @@ mod tests {
 
         let config = detect_transformer_config(&path).unwrap();
         assert_eq!(config, WanTransformerConfig::t2v_1_3b());
+    }
+
+    /// A mask the conditioning never reads must be rejected, not silently
+    /// ignored — a full-image repaint that "succeeds" reads as a broken mask.
+    #[test]
+    fn mask_image_is_rejected_with_a_clear_message() {
+        let mut req = request();
+        req.source_image = Some(vec![1, 2, 3]);
+        req.mask_image = Some(vec![4, 5, 6]);
+        let err = reject_unsupported_conditioning(&req).unwrap_err();
+        assert!(err.to_string().contains("mask_image"), "got: {err}");
+    }
+
+    /// 36-channel checkpoints are refused with a message naming what is
+    /// missing: the 2.1 CLIP branch, or A14B expert switching.
+    #[test]
+    fn unwired_channel_concat_checkpoints_are_refused_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // 2.1 I2V: carries cross_attn.k_img — refused for the CLIP branch.
+        let clip = temp.path().join("wan21-i2v.safetensors");
+        write_header(
+            &clip,
+            &[
+                ("patch_embedding.weight", &[5120, 36, 1, 2, 2][..]),
+                ("blocks.0.cross_attn.k_img.weight", &[5120, 1280][..]),
+            ],
+        );
+        let err = reject_unwired_channel_concat_checkpoint(&clip).unwrap_err();
+        assert!(err.to_string().contains("CLIP-vision"), "got: {err}");
+
+        // A14B expert: no k_img — refused for missing expert switching.
+        let expert = temp.path().join("a14b-high.safetensors");
+        write_header(
+            &expert,
+            &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
+        );
+        let err = reject_unwired_channel_concat_checkpoint(&expert).unwrap_err();
+        assert!(err.to_string().contains("expert"), "got: {err}");
+        assert!(err.to_string().contains("#747"), "got: {err}");
     }
 
     /// A CPU-parked encoder must compute in F32 — candle's CPU backend has no
