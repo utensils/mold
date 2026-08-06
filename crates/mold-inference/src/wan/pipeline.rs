@@ -38,6 +38,7 @@ use crate::shared_pool::SharedPool;
 use crate::wan::conditioning::{
     build_a14b_conditioning, WanImageAnchors, WanLatentGeometry, WanTi2vInpaint,
 };
+use crate::wan::lora::WanLoraRegistry;
 use crate::wan::model::transformer::{WanTransformer, WanTransformerConfig};
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
 use crate::wan::sampler::{apply_cfg, FlowUniPc, WanSchedule, WanScheduleConfig};
@@ -134,6 +135,24 @@ fn encoder_dtype_for(text_device: &Device, model_dtype: DType) -> DType {
     } else {
         model_dtype
     }
+}
+
+/// Collect the request's LoRA stack.
+///
+/// `lora` is the legacy single-adapter field and `loras` the multi-adapter
+/// one; a request may carry either. Both are passed through verbatim — Wan has
+/// no preset names to resolve, unlike LTX-2's camera-control shorthand.
+fn normalize_loras(req: &GenerateRequest) -> Vec<mold_core::LoraWeight> {
+    let mut out: Vec<mold_core::LoraWeight> = Vec::new();
+    if let Some(loras) = &req.loras {
+        out.extend(loras.iter().cloned());
+    }
+    if out.is_empty() {
+        if let Some(lora) = &req.lora {
+            out.push(lora.clone());
+        }
+    }
+    out
 }
 
 /// Resolve the unconditional prompt for CFG. Only *absence* falls back to
@@ -791,11 +810,22 @@ impl WanEngine {
         // ------------------------------------------------------------------
         progress.stage_start("Loading Wan transformer");
         let transformer_start = Instant::now();
-        let transformer = WanTransformer::from_safetensors_file(
-            &paths.transformer,
+        // LoRAs merge as the weights are read, so the merged tensor is the only
+        // copy that is ever resident.
+        let loras = WanLoraRegistry::load(&normalize_loras(req))?;
+        if !loras.is_empty() {
+            progress.info(&format!(
+                "Merging {} LoRA patch(es) across {} tensors",
+                loras.patch_count(),
+                loras.tensor_count()
+            ));
+        }
+        let transformer = WanTransformer::from_safetensors_with_loras(
+            std::slice::from_ref(&paths.transformer),
             transformer_config.clone(),
             &device,
             dtype,
+            &loras,
         )?;
         progress.phase_done(
             ProgressPhase::ModelLoad,

@@ -580,13 +580,45 @@ impl WanTransformer {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        // dtype and device travel on the VarBuilder from here on.
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
-        let vb = if vb.contains_tensor("patch_embedding.weight") {
-            vb
+        Self::from_safetensors_with_loras(paths, config, device, dtype, &Default::default())
+    }
+
+    /// Load with a LoRA stack merged into the weights as they are read.
+    ///
+    /// The merge happens inside a `SimpleBackend` rather than after
+    /// construction, so no code in this module changes and the merged weight is
+    /// the only copy that ever exists — there is no separate base tensor to
+    /// keep resident. That is the same shape as FLUX's `LoraBackend`.
+    pub fn from_safetensors_with_loras(
+        paths: &[std::path::PathBuf],
+        config: WanTransformerConfig,
+        device: &Device,
+        dtype: DType,
+        loras: &crate::wan::lora::WanLoraRegistry,
+    ) -> Result<Self> {
+        // The shipped Comfy-Org repacks prefix every DiT key; bare exports and
+        // the GGUF layout do not. Probe once and reuse for both paths.
+        let probe = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+        let prefix = if probe.contains_tensor("patch_embedding.weight") {
+            String::new()
         } else {
-            vb.pp("model.diffusion_model")
+            "model.diffusion_model.".to_string()
         };
+        drop(probe);
+
+        if loras.is_empty() {
+            let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+            let vb = if prefix.is_empty() {
+                vb
+            } else {
+                vb.pp("model.diffusion_model")
+            };
+            return Self::from_var_builder(vb, config);
+        }
+
+        let backend =
+            unsafe { crate::wan::lora::WanLoraBackend::new(paths, prefix, loras.clone())? };
+        let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Self::from_var_builder(vb, config)
     }
 
