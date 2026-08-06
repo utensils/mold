@@ -60,7 +60,7 @@ crates/
 | `mold-discord/`   | `mold-ai-discord`          |
 | `mold-tui/`       | `mold-ai-tui`              |
 
-**MSRV**: 1.85.
+**MSRV**: 1.93.
 
 **iPhone app** (`apps/mobile/src-tauri`, frontend entry in `desktop/src/mobile/`): a standalone thin Tauri crate, excluded from the root workspace so the desktop GPU/server dependency tree is never cross-compiled for iOS. It is always remote-only (`HostView.kind = "remote"`, `primary = false`) and owns the five Mold Studio destinations as four tabs plus a push screen: **Create**, a merged remote **Library**, **Models**, **Machines**/host detail, and a header-pushed Settings screen; a full-screen Advanced sheet hosts the sampler/negative/source/LoRA/format controls with an active-count badge. Reuse `desktop/src/lib` API types, explicit-target HTTP/SSE helpers, capability/request form, source fitting, gallery media, catalog, and theme logic; never import a desktop store that assumes a local **This device** engine.
 

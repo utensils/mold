@@ -26,7 +26,7 @@ authors = [
     "Jeffrey Dilley <jeff.dilley@gmail.com>",
 ]
 description = "CLI-native local AI image and video generation for people, scripts, and agents"
-rust-version = "1.85"
+rust-version = "1.93"
 homepage = "https://github.com/utensils/mold"
 repository = "https://github.com/utensils/mold"
 readme = "README.md"
