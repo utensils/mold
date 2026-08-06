@@ -278,6 +278,28 @@ jobs:
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 
+  msrv:
+    name: Declared MSRV
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read workspace MSRV
+        id: msrv
+        shell: bash
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv"
+          echo "toolchain=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.toolchain }}
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+      - name: Check workspace on declared MSRV
+        run: cargo check --workspace --all-targets --locked
+
   cuda-check:
     name: CUDA forced-local typecheck
     needs: changes

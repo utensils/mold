@@ -24,7 +24,7 @@ optdepends=(
 # `clang` + `lld` + `nasm` mirror the apt deps in .github/workflows/release.yml
 # build-linux-sm89 — candle-flash-attn and the H.264 decoder need them.
 makedepends=(
-  'rust>=1.85'
+  'rust>=1.93'
   'cargo'
   'cuda'
   'clang'

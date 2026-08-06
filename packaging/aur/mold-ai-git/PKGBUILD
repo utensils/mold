@@ -23,7 +23,7 @@ optdepends=(
 
 makedepends=(
   'git'
-  'rust>=1.85'
+  'rust>=1.93'
   'cargo'
   'cuda'
   'clang'
