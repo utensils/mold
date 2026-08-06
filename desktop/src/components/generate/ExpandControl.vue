@@ -9,10 +9,14 @@ const props = defineProps<{
   hostLabel: string | null;
   canUndo: boolean;
   blocked?: boolean;
+  originalAvailable?: boolean;
+  remixSource?: "original" | "current";
 }>();
 
 const emit = defineEmits<{
   (e: "expand"): void;
+  (e: "remix"): void;
+  (e: "update:remixSource", value: "original" | "current"): void;
   (e: "restore"): void;
 }>();
 
@@ -53,6 +57,34 @@ defineExpose({ expand });
       {{ actionLabel }}
       <kbd v-if="!running" class="kbd-hint ml-1">{{ shortcutLabel("E") }}</kbd>
     </button>
+
+    <button
+      type="button"
+      data-test="remix-action"
+      class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
+      :disabled="blocked || running || !prompt.trim()"
+      title="Create three subject-preserving prompt remixes"
+      @click="emit('remix')"
+    >
+      Remix
+    </button>
+    <label v-if="originalAvailable" class="flex items-center gap-1 text-caption text-ink-3">
+      Source
+      <select
+        data-test="remix-source-select"
+        class="border-edge min-h-7 rounded-control border bg-bath px-1.5 text-caption text-ink-2"
+        :value="remixSource ?? 'original'"
+        @change="
+          emit(
+            'update:remixSource',
+            ($event.target as HTMLSelectElement).value as 'original' | 'current',
+          )
+        "
+      >
+        <option value="original">Original idea</option>
+        <option value="current">Current prompt</option>
+      </select>
+    </label>
 
     <button
       v-if="!isPreparedBatch && canUndo"

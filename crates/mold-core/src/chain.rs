@@ -229,6 +229,8 @@ pub struct ChainRequest {
     /// Original source prompt shared by a client-prepared sibling batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_transform: Option<crate::PromptTransformProvenance>,
     /// Durable prepared-batch identity and one-based sibling position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
@@ -655,6 +657,7 @@ impl ChainRequest {
             control_scale: 1.0,
             expand: None,
             original_prompt: self.original_prompt.clone(),
+            prompt_transform: self.prompt_transform.clone(),
             batch_id: self.batch_id.clone(),
             batch_index: self.batch_index,
             batch_count: self.batch_count,
@@ -1068,6 +1071,7 @@ mod tests {
             output_format: OutputFormat::Mp4,
             placement: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -1094,6 +1098,7 @@ mod tests {
             output_format: OutputFormat::Mp4,
             placement: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -1557,6 +1562,7 @@ mod tests {
             output_format: OutputFormat::Mp4,
             placement: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -1743,6 +1749,7 @@ mod tests {
             output_format: OutputFormat::Mp4,
             placement: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,

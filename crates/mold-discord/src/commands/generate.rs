@@ -375,6 +375,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         control_scale: 1.0,
         expand: None,
         original_prompt: None,
+        prompt_transform: None,
         batch_id: None,
         batch_index: None,
         batch_count: None,

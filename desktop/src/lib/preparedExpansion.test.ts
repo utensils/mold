@@ -4,6 +4,7 @@ import {
   PreparationRequestGuard,
   createPreparedExpansionBatch,
   quickExpansionStaleReasons,
+  quickExpansionRouteIsCurrent,
   preparedExpansionStaleReasons,
   validateExpandedPrompts,
   type PreparedExpansionInputs,
@@ -239,10 +240,32 @@ describe("prepared expansion lifecycle", () => {
           hostTargets: new Map([[route.hostId, { ...route.target, kind: route.kind }]]),
         },
       ),
-    ).toEqual([
-      "Expanded prompt changed after it was prepared.",
-      "Host selection changed from Auto to Most capable.",
-    ]);
+    ).toEqual(["Expanded prompt changed after it was prepared."]);
+  });
+
+  it("treats a host-only quick change as route release, not semantic staleness", () => {
+    const snapshot = {
+      requestToken: 7,
+      originalPrompt: "a lighthouse",
+      expandedPrompt: "a cinematic lighthouse",
+      model: inputs.model,
+      family: inputs.family,
+      task: inputs.task,
+      stylePreset: null,
+      selectedHostPolicy: null,
+      route,
+    };
+    const current = {
+      expandedPrompt: snapshot.expandedPrompt,
+      model: snapshot.model,
+      family: snapshot.family,
+      task: snapshot.task,
+      selectedHostPolicy: "new-host",
+      readyHostIds: new Set([route.hostId]),
+      hostLabels: new Map([[route.hostId, route.label]]),
+    };
+    expect(quickExpansionStaleReasons(snapshot, current)).toEqual([]);
+    expect(quickExpansionRouteIsCurrent(snapshot, current)).toBe(false);
   });
 
   it("keeps a quick expansion fresh when an unknown instance identity becomes known", () => {

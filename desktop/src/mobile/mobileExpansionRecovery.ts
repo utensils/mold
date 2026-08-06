@@ -1,4 +1,5 @@
 import type { PreparedExpansionInputs } from "../lib/preparedExpansion";
+import type { RemixDimension, RemixSourceKind } from "../lib/api/types";
 import { resolveStyleId } from "../lib/stylePresets";
 import type { HostRoute } from "../stores/hosts";
 import type { MobileHost } from "./hosts";
@@ -12,6 +13,15 @@ export interface MobileExpansionRecoveryRecord {
   readonly host: Readonly<MobileHost>;
   readonly requestToken: number;
   readonly replacePrepared: boolean;
+  readonly remix: Readonly<MobileRemixRecoveryPayload> | null;
+}
+
+export interface MobileRemixRecoveryPayload {
+  sourcePrompt: string;
+  rootPrompt?: string;
+  sourceKind: RemixSourceKind;
+  dimensions: readonly RemixDimension[];
+  conditioningFingerprint: string;
 }
 
 interface MobileExpansionRecoveryDraft {
@@ -22,12 +32,14 @@ interface MobileExpansionRecoveryDraft {
   route: HostRoute;
   requestToken: number;
   replacePrepared: boolean;
+  remix?: MobileRemixRecoveryPayload | null;
 }
 
 export interface CurrentMobileExpansionRecovery {
   inputs: PreparedExpansionInputs;
   currentHost: MobileHost | undefined;
   tokenCurrent: boolean;
+  remix?: MobileRemixRecoveryPayload | null;
 }
 
 /** Deep, immutable recovery state. The pull host is derived only from the frozen route. */
@@ -37,6 +49,9 @@ export function createMobileExpansionRecovery(
   const inputs = Object.freeze({ ...draft.inputs });
   const target = Object.freeze({ ...draft.route.target });
   const route = Object.freeze({ ...draft.route, target });
+  const remix = draft.remix
+    ? Object.freeze({ ...draft.remix, dimensions: Object.freeze([...draft.remix.dimensions]) })
+    : null;
   const host = Object.freeze<MobileHost>({
     id: route.hostId,
     name: route.label,
@@ -56,6 +71,7 @@ export function createMobileExpansionRecovery(
     host,
     requestToken: draft.requestToken,
     replacePrepared: draft.replacePrepared,
+    remix,
   });
 }
 
@@ -72,11 +88,27 @@ function sameInputs(
     current.sourcePrompt === frozen.sourcePrompt &&
     current.model === frozen.model &&
     current.family === frozen.family &&
+    current.task === frozen.task &&
     current.requestedCount === frozen.requestedCount &&
     // The frozen style chip is part of the recovery record so a resumed pull
     // re-requests with exactly the style the user reviewed.
     sameStyle(current.stylePreset, frozen.stylePreset) &&
     current.selectedHostPolicy === frozen.selectedHostPolicy
+  );
+}
+
+function sameRemix(
+  current: MobileRemixRecoveryPayload | null | undefined,
+  frozen: Readonly<MobileRemixRecoveryPayload> | null,
+): boolean {
+  if (!current || !frozen) return !current && !frozen;
+  return (
+    current.sourcePrompt === frozen.sourcePrompt &&
+    current.rootPrompt === frozen.rootPrompt &&
+    current.sourceKind === frozen.sourceKind &&
+    current.conditioningFingerprint === frozen.conditioningFingerprint &&
+    current.dimensions.length === frozen.dimensions.length &&
+    current.dimensions.every((dimension, index) => dimension === frozen.dimensions[index])
   );
 }
 
@@ -88,6 +120,9 @@ export function mobileExpansionRecoveryStaleReason(
   if (!current.tokenCurrent) return "This expansion recovery is no longer current.";
   if (!sameInputs(current.inputs, recovery.inputs)) {
     return "Expansion inputs changed after the missing model was detected.";
+  }
+  if (!sameRemix(current.remix, recovery.remix)) {
+    return "Remix inputs changed after the missing model was detected.";
   }
   const host = current.currentHost;
   if (!host || !host.online || host.id !== recovery.route.hostId) {

@@ -318,6 +318,86 @@ impl std::str::FromStr for ExpandTask {
     }
 }
 
+/// Which creative dimension a prompt remix is allowed to vary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemixDimension {
+    Composition,
+    Camera,
+    Lighting,
+    Setting,
+    Mood,
+    Movement,
+    Style,
+}
+
+impl std::fmt::Display for RemixDimension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Composition => "composition",
+            Self::Camera => "camera",
+            Self::Lighting => "lighting",
+            Self::Setting => "setting",
+            Self::Mood => "mood",
+            Self::Movement => "movement",
+            Self::Style => "style",
+        })
+    }
+}
+
+impl std::str::FromStr for RemixDimension {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "composition" => Ok(Self::Composition),
+            "camera" => Ok(Self::Camera),
+            "lighting" => Ok(Self::Lighting),
+            "setting" => Ok(Self::Setting),
+            "mood" => Ok(Self::Mood),
+            "movement" => Ok(Self::Movement),
+            "style" => Ok(Self::Style),
+            _ => Err(format!(
+                "unknown remix dimension '{value}'. Valid: composition, camera, lighting, setting, mood, movement, style"
+            )),
+        }
+    }
+}
+
+/// Which prompt a Remix request used as its immediate source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemixSourceKind {
+    Original,
+    Current,
+    #[default]
+    Direct,
+}
+
+/// Prompt-transform operation retained with generated output provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptTransformOperation {
+    Expand,
+    Remix,
+}
+
+/// Additive provenance describing the prompt transform that produced a
+/// generation prompt. `root_prompt` is the user's earliest known idea while
+/// `source_prompt` is the exact text passed to the transform backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PromptTransformProvenance {
+    pub operation: PromptTransformOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_prompt: Option<String>,
+    pub source_prompt: String,
+    #[serde(default)]
+    pub source_kind: RemixSourceKind,
+    pub task: ExpandTask,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<RemixDimension>,
+}
+
 /// Request to expand a short prompt into a generation-aware prompt.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExpandRequest {
@@ -359,6 +439,50 @@ pub struct ExpandResponse {
     pub original: String,
     /// Expanded prompt(s)
     pub expanded: Vec<String>,
+}
+
+fn default_remix_variations() -> usize {
+    3
+}
+
+/// Request for subject-preserving prompt alternatives. This deliberately uses
+/// a separate endpoint from Expand so older hosts fail closed instead of
+/// silently ignoring a mode field and returning the wrong transform.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RemixRequest {
+    pub source_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_prompt: Option<String>,
+    #[serde(default)]
+    pub source_kind: RemixSourceKind,
+    #[serde(default = "default_expand_model_family")]
+    pub model_family: String,
+    #[serde(default = "default_remix_variations")]
+    pub variations: usize,
+    /// A fixed style constraint. When present, Style cannot also be varied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<ExpandTask>,
+    /// Empty means the server's task-aware default set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<RemixDimension>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RemixVariant {
+    pub prompt: String,
+    pub dimensions: Vec<RemixDimension>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RemixResponse {
+    pub source_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_prompt: Option<String>,
+    pub source_kind: RemixSourceKind,
+    pub task: ExpandTask,
+    pub variants: Vec<RemixVariant>,
 }
 
 /// Request to upscale an image using a super-resolution model (e.g. Real-ESRGAN).
@@ -495,6 +619,10 @@ pub struct GenerateRequest {
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    /// Structured prompt-transform provenance. New clients also populate
+    /// `original_prompt` so older hosts retain the root/source prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_transform: Option<PromptTransformProvenance>,
     /// Durable client-generated identifier shared by prepared batch siblings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
@@ -1107,6 +1235,8 @@ pub struct OutputMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_transform: Option<PromptTransformProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_index: Option<u32>,
@@ -1233,6 +1363,7 @@ impl OutputMetadata {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
+            prompt_transform: req.prompt_transform.clone(),
             batch_id: req.batch_id.clone(),
             batch_index: req.batch_index,
             batch_count: req.batch_count,
@@ -3091,6 +3222,52 @@ mod tests {
         assert_eq!(back.variations, 1);
     }
 
+    #[test]
+    fn remix_request_defaults_are_stable_and_structured() {
+        let request: RemixRequest = serde_json::from_str(r#"{"source_prompt":"a cat"}"#).unwrap();
+        assert_eq!(request.model_family, "flux");
+        assert_eq!(request.variations, 3);
+        assert_eq!(request.source_kind, RemixSourceKind::Direct);
+        assert!(request.dimensions.is_empty());
+
+        let response = RemixResponse {
+            source_prompt: request.source_prompt,
+            root_prompt: Some("a cat".into()),
+            source_kind: RemixSourceKind::Original,
+            task: ExpandTask::TextToImage,
+            variants: vec![RemixVariant {
+                prompt: "a cat in a low-angle frame".into(),
+                dimensions: vec![RemixDimension::Camera],
+            }],
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["variants"][0]["dimensions"][0], "camera");
+        assert_eq!(json["source_kind"], "original");
+    }
+
+    #[test]
+    fn prompt_transform_provenance_reaches_output_metadata() {
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"camera remix","model":"flux-schnell:q8","width":512,"height":512,"steps":4}"#,
+        )
+        .unwrap();
+        request.original_prompt = Some("a cat".into());
+        request.prompt_transform = Some(PromptTransformProvenance {
+            operation: PromptTransformOperation::Remix,
+            root_prompt: Some("a cat".into()),
+            source_prompt: "an expanded cat portrait".into(),
+            source_kind: RemixSourceKind::Current,
+            task: ExpandTask::TextToImage,
+            dimensions: vec![RemixDimension::Camera],
+        });
+        let metadata = OutputMetadata::from_generate_request(&request, 7, None, "test");
+        assert_eq!(metadata.original_prompt.as_deref(), Some("a cat"));
+        let provenance = metadata.prompt_transform.unwrap();
+        assert_eq!(provenance.operation, PromptTransformOperation::Remix);
+        assert_eq!(provenance.source_prompt, "an expanded cat portrait");
+        assert_eq!(provenance.dimensions, vec![RemixDimension::Camera]);
+    }
+
     // ── GET /api/queue wire types ────────────────────────────────────────
 
     #[test]
@@ -3245,6 +3422,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3439,6 +3617,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3500,6 +3679,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3558,6 +3738,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: Some("prepared-batch-1".to_string()),
             batch_index: Some(2),
             batch_count: Some(3),
@@ -3631,6 +3812,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3754,6 +3936,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3812,6 +3995,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -3873,6 +4057,7 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -4484,6 +4669,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -4548,6 +4734,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -4625,6 +4812,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -4687,6 +4875,7 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -4812,6 +5001,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            prompt_transform: None,
             batch_id: None,
             batch_index: None,
             batch_count: None,
@@ -5508,6 +5698,9 @@ pub struct ExpandCapabilities {
     /// applicable for API backends.
     pub model_present: Option<bool>,
     pub backend: ExpandBackend,
+    /// Subject-preserving Remix is available through `POST /api/remix`.
+    #[serde(default)]
+    pub remix: bool,
 }
 
 // ── Device inventory ────────────────────────────────────────────────────────
@@ -6452,11 +6645,13 @@ mod server_event_tests {
             configured: true,
             model_present: Some(false),
             backend: ExpandBackend::Local,
+            remix: true,
         };
         let api = ExpandCapabilities {
             configured: true,
             model_present: None,
             backend: ExpandBackend::Api,
+            remix: true,
         };
 
         assert_eq!(
@@ -6464,7 +6659,8 @@ mod server_event_tests {
             serde_json::json!({
                 "configured": true,
                 "model_present": false,
-                "backend": "local"
+                "backend": "local",
+                "remix": true
             })
         );
         assert_eq!(
@@ -6472,7 +6668,8 @@ mod server_event_tests {
             serde_json::json!({
                 "configured": true,
                 "model_present": null,
-                "backend": "api"
+                "backend": "api",
+                "remix": true
             })
         );
     }

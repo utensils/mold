@@ -15,6 +15,7 @@ import {
 } from "../lib/toasts";
 import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
+import { useHostRouting } from "../composables/useHostRouting";
 import {
   __testing__ as chainJobsTesting,
   useChainJobs,
@@ -1673,6 +1674,86 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  it("undoes an original-source Remix to the latest live composer edit", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.originalPrompt = "root lighthouse idea";
+    form.state.value.prompt = "expanded lighthouse draft";
+    await nextTick();
+
+    wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
+    await flushPromises();
+    form.state.value.prompt = "latest hand edit while Remix was open";
+    wrapper.getComponent({ name: "RemixModal" }).vm.$emit("apply", {
+      prompt: "subject-preserving remix",
+      response: {
+        source_prompt: "root lighthouse idea",
+        root_prompt: "root lighthouse idea",
+        source_kind: "original",
+        variants: [
+          { prompt: "subject-preserving remix", dimensions: ["camera"] },
+          { prompt: "second", dimensions: ["lighting"] },
+          { prompt: "third", dimensions: ["mood"] },
+        ],
+      },
+    });
+    await nextTick();
+    expect(form.state.value.prompt).toBe("subject-preserving remix");
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe(
+      "latest hand edit while Remix was open",
+    );
+    expect(form.state.value.originalPrompt).toBe("root lighthouse idea");
+  });
+
+  it("bakes and clears an active style when a Remix is applied", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
+    await flushPromises();
+    wrapper.getComponent({ name: "RemixModal" }).vm.$emit("apply", {
+      prompt: "storm light over a cinematic coast",
+      response: {
+        source_prompt: "a lighthouse",
+        source_kind: "direct",
+        variants: [
+          {
+            prompt: "storm light over a cinematic coast",
+            dimensions: ["camera"],
+          },
+          { prompt: "second", dimensions: ["lighting"] },
+          { prompt: "third", dimensions: ["mood"] },
+        ],
+      },
+    });
+    await nextTick();
+
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+    expect(form.toRequest()).toMatchObject({
+      prompt: "storm light over a cinematic coast",
+      negative_prompt: "text, anime, cartoon, graphic, washed out",
+    });
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.negativePrompt).toBe("text");
+  });
+
   it("offers a readable explicit override for a stale quick expansion", async () => {
     const fluxModel = {
       name: "flux-dev:q4",
@@ -1772,6 +1853,57 @@ describe("CreatePage layout and behavior", () => {
       instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
+  });
+
+  it("reuses a quick transformed prompt on a newly selected host without stale recovery", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        description: "Flux Dev",
+        size_gb: 4,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+        is_loaded: false,
+        hf_repo: "example/flux",
+        downloaded: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    useHostRouting().setTarget(ORIGIN_HOST_ID);
+    await nextTick();
+
+    expect(
+      wrapper.find("[data-test='web-quick-expansion-stale']").exists(),
+    ).toBe(false);
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      prompt: "storm light over the harbor",
+      original_prompt: "a lighthouse",
+    });
+    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
   });
 
   it("applies a clip expansion to the clip, never the composer's prompt or style", async () => {

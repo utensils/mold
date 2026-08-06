@@ -156,6 +156,7 @@ Tap a tile to open the full-screen viewer:
 - images are shown uncropped;
 - generated images open this same viewer when tapped;
 - videos stream from their owning host with native playback and seeking;
+- use **Save video** to add the original MP4 to Photos;
 - swipe left or right to move through the loaded prints; and
 - use **Copy image** or **Save photo** instead of the system long-press menu;
 - use **Use as prompt** to restore recorded generation settings, or **Use as

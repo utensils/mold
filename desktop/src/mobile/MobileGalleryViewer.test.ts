@@ -253,6 +253,45 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("close")).toHaveLength(1);
   });
 
+  it("saves the original MP4 to Photos through the native iOS bridge", async () => {
+    streamableMediaUrl
+      .mockResolvedValueOnce("https://studio/media/playback-ticket")
+      .mockResolvedValueOnce("https://studio/media/save-ticket");
+    const view = mountViewer({
+      ...image,
+      filename: "developed clip.mp4",
+      format: "mp4",
+    });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-save-video']").trigger("click");
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenLastCalledWith("/api/gallery/image/developed%20clip.mp4", {
+      target,
+      cacheKey: "studio",
+      allowLegacyBlob: false,
+    });
+    expect(invoke).toHaveBeenCalledWith("save_video_to_photos", {
+      url: "https://studio/media/save-ticket",
+    });
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Saved to Photos");
+  });
+
+  it("reports native video save failures without closing the viewer", async () => {
+    invoke.mockRejectedValueOnce(new Error("Photos access is denied"));
+    const view = mountViewer({ ...image, filename: "clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-save-video']").trigger("click");
+    await flushPromises();
+
+    expect(view.find("[role='dialog']").exists()).toBe(true);
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Photos access is denied",
+    );
+  });
+
   it("opens video export options for an MP4", async () => {
     const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
     await flushPromises();
@@ -358,6 +397,7 @@ describe("MobileGalleryViewer", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='gallery-viewer-export']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='gallery-viewer-save-video']").exists()).toBe(false);
   });
 
   it("shows a retryable error when full media cannot be fetched", async () => {

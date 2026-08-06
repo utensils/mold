@@ -29,6 +29,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/chain-jobs/:id/stages/:idx/media`       | Stream a completed stage MP4; HEAD and byte ranges are supported                                                  |
 | `POST`   | `/api/chain-jobs/:id/stages/:idx/media-token` | Mint a short-lived ticket scoped to that exact stage-media path                                                   |
 | `POST`   | `/api/expand`                                 | Expand a prompt using LLM, optionally absorbing a visual `style` directive                                        |
+| `POST`   | `/api/remix`                                  | Generate exact-count, subject-preserving prompt alternatives with structured provenance                           |
 | `GET`    | `/api/models`                                 | List available models                                                                                             |
 | `GET`    | `/api/models/:model/components`               | List required model component readiness and paths                                                                 |
 | `GET`    | `/api/loras`                                  | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
@@ -1364,6 +1365,33 @@ curl -X POST http://localhost:7680/api/expand \
   "expanded": ["a sleek black cat prowling a rain-slicked alley, ..."]
 }
 ```
+
+## `/api/remix`
+
+Remix is separate from Expand so an older host returns `404` instead of
+silently applying expansion semantics. The server preserves the source subject
+and explicit constraints, assigns each result a deterministic creative
+dimension, and rejects dimensions that contradict image/video/audio
+conditioning authority.
+
+```bash
+curl -X POST http://localhost:7680/api/remix \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source_prompt": "a red lighthouse with exactly three windows",
+    "root_prompt": "a red lighthouse",
+    "source_kind": "current",
+    "model_family": "flux",
+    "variations": 3,
+    "dimensions": ["camera", "lighting"]
+  }'
+```
+
+Dimensions are `composition`, `camera`, `lighting`, `setting`, `mood`,
+`movement`, and `style`. When `style` is supplied it is a locked constraint and
+cannot also appear in `dimensions`. An omitted dimension list uses task-aware
+defaults. The response returns `variants[]` with both `prompt` and the exact
+`dimensions` label used for that alternative.
 
 ## `/api/upscale`
 

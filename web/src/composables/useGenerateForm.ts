@@ -90,6 +90,7 @@ function defaultForm(): GenerateFormState {
   return {
     version: FORM_VERSION,
     prompt: "",
+    originalPrompt: null,
     stylePreset: null,
     negativePrompt: "",
     model: "",
@@ -337,6 +338,7 @@ export function applyMetadataToForm(
   return {
     ...next,
     prompt: metadata.prompt ?? "",
+    originalPrompt: metadata.original_prompt ?? null,
     // Saved metadata already carries the fully-composed prompt (style extras
     // included at generation time); re-applying a preset would double-append.
     stylePreset: null,
@@ -679,6 +681,10 @@ export function useGenerateForm(): UseGenerateForm {
       // to `t2a` and back.
       return stripAudioOnlyIncompatibleFields({
         prompt: styled.prompt,
+        ...(s.originalPrompt?.trim() &&
+        s.originalPrompt.trim() !== styled.prompt
+          ? { original_prompt: s.originalPrompt.trim() }
+          : {}),
         negative_prompt: capabilities.supportsNegativePrompt
           ? styled.negative || null
           : null,

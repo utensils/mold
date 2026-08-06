@@ -154,4 +154,55 @@ describe("mobile expansion recovery", () => {
     expect(recovery.inputs).toEqual(inputs);
     expect(recovery.route).toEqual(route);
   });
+
+  it("rejects conditioning-task drift during a frozen pull", () => {
+    const recovery = createMobileExpansionRecovery({
+      id: 8,
+      leaseId: "lease-8",
+      model: "qwen3-expand:q8",
+      inputs,
+      route,
+      requestToken: 9,
+      replacePrepared: false,
+    });
+
+    expect(
+      mobileExpansionRecoveryStaleReason(recovery, {
+        inputs: { ...inputs, task: "image-to-video" },
+        currentHost: recovery.host,
+        tokenCurrent: true,
+      }),
+    ).toContain("inputs changed");
+  });
+
+  it("freezes and compares remix source, dimensions, and conditioning identity", () => {
+    const remix = {
+      sourcePrompt: "a lighthouse",
+      rootPrompt: "a lighthouse",
+      sourceKind: "original" as const,
+      dimensions: ["composition", "lighting"] as const,
+      conditioningFingerprint: "media-a",
+    };
+    const recovery = createMobileExpansionRecovery({
+      id: 9,
+      leaseId: "lease-9",
+      model: "qwen3-expand:q8",
+      inputs: { ...inputs, kind: "remix" },
+      route,
+      requestToken: 10,
+      replacePrepared: false,
+      remix,
+    });
+
+    expect(Object.isFrozen(recovery.remix)).toBe(true);
+    expect(Object.isFrozen(recovery.remix?.dimensions)).toBe(true);
+    expect(
+      mobileExpansionRecoveryStaleReason(recovery, {
+        inputs: { ...inputs, kind: "remix" },
+        currentHost: recovery.host,
+        tokenCurrent: true,
+        remix: { ...remix, dimensions: ["composition", "mood"] },
+      }),
+    ).toContain("Remix inputs changed");
+  });
 });

@@ -17,6 +17,7 @@ pub(crate) mod local_engine;
 pub mod mcp;
 pub mod ps;
 pub mod pull;
+pub mod remix;
 pub mod rm;
 pub mod run;
 pub mod runpod;

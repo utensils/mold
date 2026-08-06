@@ -29,6 +29,7 @@ const emit = defineEmits<{
   (e: "pull"): void;
   (e: "retry-expansion"): void;
   (e: "generate"): void;
+  (e: "apply", id: string): void;
 }>();
 
 const confirmingRemovalId = ref<string | null>(null);
@@ -149,12 +150,19 @@ function confirmCollapse() {
     <header class="flex flex-wrap items-start justify-between gap-2">
       <div>
         <h2 id="prepared-expansion-title" class="text-body font-semibold text-ink">
-          Review {{ batch.prompts.length }} variations
+          Review {{ batch.prompts.length }} {{ batch.kind === "remix" ? "remixes" : "variations" }}
         </h2>
         <p class="mt-0.5 text-caption text-ink-2">
           {{ batch.route.label }}
           <span aria-hidden="true"> · </span>
           <span>{{ policyLabel }} resolved</span>
+        </p>
+        <p
+          v-if="batch.kind === 'remix'"
+          data-test="remix-source-label"
+          class="mt-1 text-caption text-ink-2"
+        >
+          Remixing {{ batch.sourceKind === "original" ? "original idea" : "current prompt" }}
         </p>
       </div>
       <button
@@ -165,7 +173,7 @@ function confirmCollapse() {
         :disabled="preparing || submitting"
         @click="requestReplacement('regenerate')"
       >
-        {{ preparing ? "Regenerating…" : "Regenerate all" }}
+        {{ preparing ? "Regenerating…" : batch.kind === "remix" ? "Re-remix" : "Regenerate all" }}
       </button>
     </header>
 
@@ -302,6 +310,16 @@ function confirmCollapse() {
             Variation {{ index + 1 }} needs a prompt before generation.
           </p>
         </div>
+        <button
+          v-if="batch.kind === 'remix'"
+          type="button"
+          class="border-edge min-h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+          :data-test="`apply-remix-${index}`"
+          :disabled="submitting || !prompt.text.trim()"
+          @click="emit('apply', prompt.id)"
+        >
+          Apply
+        </button>
         <button
           v-if="batch.prompts.length > 1"
           type="button"

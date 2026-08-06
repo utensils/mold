@@ -45,6 +45,55 @@ describe("MobilePromptTools", () => {
     );
   });
 
+  it("keeps Remix distinct and discloses original/current source with task-aware dimensions", async () => {
+    const form = reactive(newGenerateForm());
+    form.prompt = "expanded owl in moonlight";
+    form.originalPrompt = "small owl";
+    const wrapper = mount(MobilePromptTools, {
+      props: {
+        form,
+        target,
+        running: false,
+        canUndo: false,
+        blocked: false,
+        remixSource: "original",
+        remixDimensions: ["composition", "movement"],
+        task: "image-to-video",
+      },
+    });
+
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    expect(wrapper.emitted("remix")).toHaveLength(1);
+    expect(wrapper.get("[data-test='mobile-remix-options']").text()).toContain(
+      "Remixing original prompt",
+    );
+    expect(wrapper.get("[data-test='mobile-remix-options']").text()).toContain("Movement");
+    expect(wrapper.find("input[value='composition']").exists()).toBe(false);
+    expect(wrapper.find("input[value='camera']").exists()).toBe(false);
+
+    await wrapper.get("input[value='current']").setValue(true);
+    expect(wrapper.emitted("update:remixSource")?.at(-1)).toEqual(["current"]);
+  });
+
+  it("removes Style from text Remix dimensions while a style is locked", () => {
+    const form = reactive(newGenerateForm());
+    form.prompt = "small owl";
+    form.stylePreset = "cinematic";
+    const wrapper = mount(MobilePromptTools, {
+      props: {
+        form,
+        target,
+        running: false,
+        canUndo: false,
+        blocked: false,
+        task: "text-to-image",
+      },
+    });
+    const dimensions = wrapper.get(".mobile-remix-dimensions").text();
+    expect(dimensions).toContain("Movement");
+    expect(dimensions).not.toContain("Style");
+  });
+
   it("preserves Recent prompts and refreshes them for the selected target", async () => {
     const form = reactive(newGenerateForm());
     const wrapper = mount(MobilePromptTools, {

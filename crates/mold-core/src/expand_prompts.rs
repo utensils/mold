@@ -4,7 +4,7 @@
 //! This module provides tailored system prompts for each model family.
 
 use crate::expand::FamilyOverride;
-use crate::ExpandTask;
+use crate::{expand::remix_dimensions_for_position, ExpandTask, RemixDimension};
 
 /// Return the word limit and prompt style notes for a given model family.
 pub(crate) fn family_config(family: &str) -> (u32, &'static str) {
@@ -177,6 +177,24 @@ You are an audio generation prompt writer. Generate {N} distinct chronological s
 Vary audible timing, space, intensity, or arrangement while preserving the requested sound, speech, music, mood, and intent. Do not use visual composition or camera language. Keep each under {WORD_LIMIT} words.
 
 Output as a JSON array of {N} strings, nothing else. No preamble, no explanation.
+
+{TASK_NOTES}
+
+{MODEL_NOTES}";
+
+const REMIX_SYSTEM_TEMPLATE: &str = "\
+You are a subject-preserving prompt remix editor. Generate {N} intentionally varied prompt alternatives from the user's source prompt.
+
+Non-negotiable rules:
+1. Preserve the central subject, identity, requested action, named entities, quantities, relationships, and every explicit user constraint.
+2. Do not replace the concept with a new scene and do not merely swap synonyms.
+3. For each numbered variation, vary ONLY its assigned creative dimension. Preserve all unassigned dimensions.
+4. Obey the conditioning authority in TASK NOTES; attached media is not present here but remains authoritative for generation.
+5. Keep each prompt self-contained and under {WORD_LIMIT} words.
+6. Output a JSON array of exactly {N} strings, in the assigned order, with no preamble or explanation.
+
+ASSIGNED DIMENSIONS:
+{DIMENSION_PLAN}
 
 {TASK_NOTES}
 
@@ -420,6 +438,56 @@ pub fn build_batch_messages_with_context_for_task(
     ]
 }
 
+/// Build subject-preserving Remix messages. Remix deliberately ignores custom
+/// Expand templates so an expansion override cannot erase its preservation
+/// contract. `logical_range` keeps dimension labels stable across chunks.
+#[allow(clippy::too_many_arguments)]
+pub fn build_remix_messages_with_context_for_task(
+    prompt: &str,
+    family: &str,
+    variations: usize,
+    task: ExpandTask,
+    logical_range: Option<(usize, usize)>,
+    family_override: Option<&FamilyOverride>,
+    style: Option<&str>,
+    dimensions: &[RemixDimension],
+) -> Vec<(String, String)> {
+    let (word_limit, model_notes) = resolve_task_family_config(family, task, family_override);
+    let start = logical_range.map_or(1, |(start, _)| start);
+    let dimension_plan = (0..variations)
+        .map(|offset| {
+            let position = start + offset;
+            let labels = remix_dimensions_for_position(dimensions, position)
+                .into_iter()
+                .map(|dimension| dimension.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{position}. {labels}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut system = REMIX_SYSTEM_TEMPLATE
+        .replace("{N}", &variations.to_string())
+        .replace("{WORD_LIMIT}", &word_limit.to_string())
+        .replace("{DIMENSION_PLAN}", &dimension_plan)
+        .replace("{TASK_NOTES}", task_notes(task))
+        .replace("{MODEL_NOTES}", &model_notes);
+    if let Some((_, total)) = logical_range {
+        system.push_str(&format!(
+            "\n\nLOGICAL SET: These are positions {start} through {} of {total}; avoid concepts likely used by earlier positions.",
+            start.saturating_add(variations).saturating_sub(1)
+        ));
+    }
+    apply_style_directive(&mut system, style, task);
+    if style.is_some_and(|value| !value.trim().is_empty()) {
+        system.push_str("\nThe STYLE DIRECTIVE is locked: preserve it in every alternative.");
+    }
+    vec![
+        ("system".to_string(), system),
+        ("user".to_string(), prompt.to_string()),
+    ]
+}
+
 /// Format a ChatML prompt string for local Qwen3 inference.
 ///
 /// When `thinking` is false, appends `<think>\n\n</think>\n\n` after the
@@ -591,6 +659,46 @@ mod tests {
         assert!(system.contains("never vary source identity"));
         assert!(!system.contains("vary controlled motion, camera behavior"));
         assert!(!system.contains("distinct image prompts"));
+    }
+
+    #[test]
+    fn remix_template_preserves_subject_and_assigns_dimensions() {
+        let messages = build_remix_messages_with_context_for_task(
+            "a red lighthouse with exactly three windows",
+            "flux",
+            3,
+            ExpandTask::TextToImage,
+            Some((1, 3)),
+            None,
+            Some("linocut"),
+            &[RemixDimension::Camera, RemixDimension::Lighting],
+        );
+        let system = &messages[0].1;
+        assert!(system.contains("central subject"));
+        assert!(system.contains("every explicit user constraint"));
+        assert!(system.contains("1. camera"));
+        assert!(system.contains("2. lighting"));
+        assert!(system.contains("3. camera"));
+        assert!(system.contains("STYLE DIRECTIVE"));
+        assert!(system.contains("locked"));
+        assert_eq!(messages[1].1, "a red lighthouse with exactly three windows");
+    }
+
+    #[test]
+    fn conditioned_remix_keeps_task_authority() {
+        let messages = build_remix_messages_with_context_for_task(
+            "she completes the turn",
+            "ltx2",
+            2,
+            ExpandTask::KeyframeInterpolation,
+            Some((1, 2)),
+            None,
+            None,
+            &[RemixDimension::Movement],
+        );
+        let system = &messages[0].1;
+        assert!(system.contains("keyframes are fixed visual anchors"));
+        assert!(system.contains("vary ONLY its assigned creative dimension"));
     }
 
     #[test]

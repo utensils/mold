@@ -16,10 +16,19 @@ import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
+import { remixPrompt } from "../lib/api/remix";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
+import {
+  conditioningFingerprint,
+  defaultRemixDimensions,
+  promptSource,
+  remixDimensionsForTask,
+  validateRemixVariants,
+  DEFAULT_REMIX_VARIATIONS,
+} from "@studio/lib/promptTransform";
 import { claimPairingSession, parseMobilePairingPayload } from "@studio/api/pairing";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -75,6 +84,9 @@ import type {
   Ltx2ControlAdapterInfo,
   Ltx2CameraControlInfo,
   ModelEntry,
+  PromptTransformProvenance,
+  RemixDimension,
+  RemixSourceKind,
   ServerStatus,
 } from "../lib/api/types";
 import {
@@ -167,6 +179,7 @@ import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
+import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
@@ -183,6 +196,7 @@ import { useMobileDownloadsStore } from "./mobileDownloads";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
+  type MobileRemixRecoveryPayload,
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
 import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
@@ -232,6 +246,38 @@ interface MobileExpansionPullAttempt {
   allowExistingInFlight: boolean;
   requestError: string | null;
   terminalJob: DownloadJob | null;
+}
+
+interface MobileRemixReviewState {
+  sourcePrompt: string;
+  rootPrompt?: string;
+  sourceKind: RemixSourceKind;
+  visiblePrompt: string;
+  model: string;
+  family: string;
+  task: ReturnType<typeof expansionTaskForRequest>;
+  stylePreset: string | null;
+  dimensions: RemixDimension[];
+  conditioningFingerprint: string;
+  selectedHostPolicy: string | null;
+  route: HostRoute;
+  variants: MobileRemixReviewVariant[];
+  requestToken: number;
+}
+
+interface MobileRemixUndoSnapshot {
+  prompt: string;
+  originalPrompt: string | null;
+  stylePreset: string;
+}
+
+interface MobileAppliedRemix {
+  prompt: string;
+  rootPrompt?: string;
+  sourcePrompt: string;
+  sourceKind: RemixSourceKind;
+  task: ReturnType<typeof expansionTaskForRequest>;
+  dimensions: RemixDimension[];
 }
 
 function sentence(text: string): string {
@@ -421,6 +467,11 @@ const expansionRecovery = ref<MobileExpansionRecoveryRecord | null>(null);
 const expansionPullAttempt = ref<MobileExpansionPullAttempt | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
+const remixSource = ref<RemixSourceKind>("original");
+const remixDimensions = ref<RemixDimension[]>([]);
+const remixReview = ref<MobileRemixReviewState | null>(null);
+const remixUndo = ref<MobileRemixUndoSnapshot | null>(null);
+const appliedRemix = ref<MobileAppliedRemix | null>(null);
 /**
  * The negative prompt before and after a bake-and-clear merged the preset's
  * curated fragments into it. Undo re-arms `before` alongside the prompt and
@@ -643,9 +694,58 @@ const effectiveBatchSize = computed(() =>
     ? 1
     : Math.max(1, Math.floor(form.batchSize)),
 );
+const currentExpansionTask = computed(() =>
+  expansionTaskForRequest(form.family, buildRequest(form)),
+);
+watch(
+  [currentExpansionTask, () => form.stylePreset] as const,
+  ([task], previous) => {
+    const styleLocked = Boolean(form.stylePreset?.trim());
+    const available = remixDimensionsForTask(task, styleLocked);
+    const retained = remixDimensions.value.filter((dimension) => available.includes(dimension));
+    remixDimensions.value =
+      previous === undefined || retained.length === 0
+        ? defaultRemixDimensions(task, styleLocked)
+        : retained;
+  },
+  { immediate: true },
+);
 const selectedRoute = computed<HostRoute | null>(() => {
   const host = selectedHost.value;
   return host ? routeForMobileHost(host) : null;
+});
+
+/** A finished single-result transform is prompt content, not work owned by the
+ * machine that rewrote it. Carry its semantic snapshot to an explicitly chosen
+ * ready machine while dropping the previous route/download authority. Reviewed
+ * multi-variation batches deliberately keep their original frozen route. */
+function carryQuickTransformToHost(hostId: string): void {
+  const snapshot = quickExpansionSnapshot.value;
+  const host = hosts.value.find((candidate) => candidate.id === hostId);
+  if (
+    !snapshot ||
+    preparedBatch.value ||
+    !host ||
+    host.connected === false ||
+    !host.online ||
+    form.prompt !== snapshot.expandedPrompt ||
+    form.model !== snapshot.model ||
+    form.family !== snapshot.family ||
+    currentExpansionTask.value !== snapshot.task
+  ) {
+    return;
+  }
+  quickExpansionSnapshot.value = {
+    ...snapshot,
+    selectedHostPolicy: hostId,
+    route: routeForMobileHost(host),
+  };
+  if (expansionRecovery.value?.route.hostId !== hostId) clearExpansionRecovery();
+  expansionError.value = "";
+}
+
+watch(selectedHostId, (hostId, previous) => {
+  if (hostId && hostId !== previous) carryQuickTransformToHost(hostId);
 });
 const expansionMissingModel = computed(() => {
   const recovery = expansionRecovery.value;
@@ -655,11 +755,20 @@ const preparedStaleReasons = computed(() => {
   const batch = preparedBatch.value;
   if (!batch) return [];
   return preparedExpansionStaleReasons(batch, {
-    sourcePrompt: form.prompt.trim(),
+    sourcePrompt:
+      batch.kind === "remix"
+        ? promptSource(form.prompt, form.originalPrompt, batch.sourceKind).prompt
+        : form.prompt.trim(),
     model: form.model,
     family: form.family,
-    task: expansionTaskForRequest(form.family, buildRequest(form)),
-    requestedCount: effectiveBatchSize.value,
+    task: currentExpansionTask.value,
+    requestedCount: batch.kind === "remix" ? batch.prompts.length : effectiveBatchSize.value,
+    ...(batch.kind === "remix"
+      ? {
+          dimensions: [...remixDimensions.value],
+          conditioningFingerprint: conditioningFingerprint(buildRequest(form)),
+        }
+      : {}),
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
@@ -700,6 +809,32 @@ const quickStaleReasons = computed(() => {
       ]),
     ),
   });
+});
+const remixStaleReasons = computed(() => {
+  const review = remixReview.value;
+  if (!review) return [];
+  const reasons: string[] = [];
+  const source = promptSource(form.prompt, form.originalPrompt, review.sourceKind);
+  if (source.prompt !== review.sourcePrompt || source.kind !== review.sourceKind) {
+    reasons.push("Remix source changed after these variants were prepared.");
+  }
+  if (form.model !== review.model) reasons.push("Model changed after this remix was prepared.");
+  if (form.family !== review.family)
+    reasons.push("Model family changed after this remix was prepared.");
+  if (currentExpansionTask.value !== review.task)
+    reasons.push(`Conditioning changed from ${review.task} to ${currentExpansionTask.value}.`);
+  if (conditioningFingerprint(buildRequest(form)) !== review.conditioningFingerprint)
+    reasons.push("Conditioning media changed after this remix was prepared.");
+  if ((form.stylePreset || null) !== review.stylePreset)
+    reasons.push("Style changed after this remix was prepared.");
+  if (selectedHostId.value !== review.selectedHostPolicy)
+    reasons.push("Selected machine changed after this remix was prepared.");
+  if (JSON.stringify(remixDimensions.value) !== JSON.stringify(review.dimensions))
+    reasons.push("Remix dimensions changed after these variants were prepared.");
+  const host = hosts.value.find((candidate) => candidate.id === review.route.hostId);
+  if (!sameFrozenHost(review.route, host))
+    reasons.push(`${review.route.label}'s connection details changed.`);
+  return reasons;
 });
 const generationModels = computed(() =>
   models.value.filter((model) => model.downloaded && isGenerationModel(model)),
@@ -1314,6 +1449,9 @@ async function selectHost(id: string): Promise<void> {
   if (!connectedHosts.value.some((host) => host.id === id)) return;
   selectedHostId.value = id;
   await refreshModels();
+  // A host restored from storage may only become ready during refreshModels.
+  // Re-run the carry after its exact instance identity is known.
+  if (selectedHostId.value === id) carryQuickTransformToHost(id);
 }
 
 function showHostDetail(id: string): void {
@@ -1955,6 +2093,46 @@ function expansionInputs(count: number): PreparedExpansionInputs {
   };
 }
 
+function mobileRemixRecoveryPayload(
+  requestedSource: RemixSourceKind = remixSource.value,
+): MobileRemixRecoveryPayload {
+  const request = buildRequest(form);
+  const source = promptSource(form.prompt, form.originalPrompt, requestedSource);
+  return {
+    sourcePrompt: source.prompt,
+    ...(source.rootPrompt ? { rootPrompt: source.rootPrompt } : {}),
+    sourceKind: source.kind,
+    dimensions: [...remixDimensions.value],
+    conditioningFingerprint: conditioningFingerprint(request),
+  };
+}
+
+function remixInputs(sourceKind: RemixSourceKind = remixSource.value): {
+  prepared: PreparedExpansionInputs;
+  remix: MobileRemixRecoveryPayload;
+  visiblePrompt: string;
+} {
+  const remix = mobileRemixRecoveryPayload(sourceKind);
+  return {
+    prepared: {
+      kind: "remix",
+      sourcePrompt: remix.sourcePrompt,
+      ...(remix.rootPrompt ? { rootPrompt: remix.rootPrompt } : {}),
+      sourceKind: remix.sourceKind,
+      dimensions: [...remix.dimensions],
+      conditioningFingerprint: remix.conditioningFingerprint,
+      model: form.model,
+      family: form.family,
+      task: currentExpansionTask.value,
+      requestedCount: DEFAULT_REMIX_VARIATIONS,
+      stylePreset: form.stylePreset || null,
+      selectedHostPolicy: selectedHostId.value || null,
+    },
+    remix,
+    visiblePrompt: form.prompt,
+  };
+}
+
 function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean {
   return mobileHostMatchesRoute(route, host);
 }
@@ -2029,6 +2207,7 @@ function setExpansionFailure(
   route: HostRoute,
   requestToken: number,
   replacePrepared: boolean,
+  remix: MobileRemixRecoveryPayload | null = null,
 ): string {
   const message = error instanceof Error ? error.message : String(error);
   const missingModel = parseMissingExpandModel(message);
@@ -2043,6 +2222,7 @@ function setExpansionFailure(
       route,
       requestToken,
       replacePrepared,
+      remix,
     });
   }
   return missingModel
@@ -2051,6 +2231,9 @@ function setExpansionFailure(
 }
 
 function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | null {
+  const currentRemix = recovery.remix
+    ? mobileRemixRecoveryPayload(recovery.remix.sourceKind)
+    : null;
   return mobileExpansionRecoveryStaleReason(recovery, {
     inputs: expansionInputs(recovery.inputs.requestedCount),
     currentHost: hosts.value.find((host) => host.id === recovery.route.hostId),
@@ -2058,6 +2241,7 @@ function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | 
       !unmounted &&
       expansionRecovery.value?.id === recovery.id &&
       preparationGuard.isCurrent(recovery.requestToken),
+    remix: currentRemix,
   });
 }
 
@@ -2107,6 +2291,8 @@ function commitExpandedPrompts(
   focus: ReplacementFocusOwnership,
 ): void {
   if (inputs.requestedCount === 1) {
+    remixUndo.value = null;
+    appliedRemix.value = null;
     quickExpansionOriginal.value = inputs.sourcePrompt;
     form.prompt = prompts[0]!;
     form.originalPrompt = inputs.sourcePrompt;
@@ -2135,6 +2321,8 @@ function commitExpandedPrompts(
     return;
   }
   preparedBatch.value = createPreparedExpansionBatch(inputs, route, prompts, requestToken);
+  remixUndo.value = null;
+  appliedRemix.value = null;
   quickExpansionSnapshot.value = null;
   clearExpansionRecovery(false);
   if (replacePrepared) restoreReplacementFocus(focus, "prepared");
@@ -2217,6 +2405,270 @@ async function expandForCurrentBatch(
   }
 }
 
+function commitRemixReview(
+  prepared: PreparedExpansionInputs,
+  remix: MobileRemixRecoveryPayload,
+  visiblePrompt: string,
+  route: HostRoute,
+  variants: ReturnType<typeof validateRemixVariants>,
+  requestToken: number,
+): void {
+  remixReview.value = {
+    sourcePrompt: remix.sourcePrompt,
+    ...(remix.rootPrompt ? { rootPrompt: remix.rootPrompt } : {}),
+    sourceKind: remix.sourceKind,
+    visiblePrompt,
+    model: prepared.model,
+    family: prepared.family,
+    task: prepared.task,
+    stylePreset: prepared.stylePreset,
+    dimensions: [...remix.dimensions],
+    conditioningFingerprint: remix.conditioningFingerprint,
+    selectedHostPolicy: prepared.selectedHostPolicy,
+    route: { ...route, target: { ...route.target } },
+    variants: variants.map((variant, index) => ({
+      id: `remix-${requestToken}-${index + 1}`,
+      prompt: variant.prompt,
+      dimensions: [...variant.dimensions],
+      selected: false,
+    })),
+    requestToken,
+  };
+  clearExpansionRecovery(false);
+}
+
+async function remixCurrent(
+  routeOverride: HostRoute | null = null,
+  replacePrepared = false,
+): Promise<void> {
+  const { prepared, remix, visiblePrompt } = remixInputs();
+  const route = routeOverride ?? selectedRoute.value;
+  const host = route ? hosts.value.find((candidate) => candidate.id === route.hostId) : undefined;
+  if (
+    !prepared.sourcePrompt ||
+    !prepared.model ||
+    !route ||
+    !host ||
+    remix.dimensions.length === 0 ||
+    expansionRunning.value ||
+    (preparedBatch.value && !replacePrepared)
+  ) {
+    return;
+  }
+  if (!sameFrozenHost(route, host)) {
+    expansionError.value = `${route.label} isn't reachable with the frozen connection. Remix will not fall back.`;
+    return;
+  }
+  if (expandCapabilities[route.hostId]?.configured === false) {
+    expansionError.value = `Prompt tools aren't configured on ${route.label}. Configure that host before retrying.`;
+    clearExpansionRecovery();
+    return;
+  }
+
+  clearExpansionRecovery();
+  submissionGuard.invalidate();
+  const token = preparationGuard.begin();
+  expansionRunning.value = true;
+  expansionError.value = "";
+  try {
+    const styleDirective = styleHint(prepared.stylePreset ?? "");
+    const response = await remixPrompt(
+      {
+        source_prompt: remix.sourcePrompt,
+        ...(remix.rootPrompt ? { root_prompt: remix.rootPrompt } : {}),
+        source_kind: remix.sourceKind,
+        model_family: prepared.family,
+        variations: DEFAULT_REMIX_VARIATIONS,
+        task: prepared.task,
+        ...(styleDirective ? { style: styleDirective } : {}),
+        dimensions: [...remix.dimensions],
+      },
+      route.target,
+    );
+    if (!preparationGuard.isCurrent(token)) return;
+    if (
+      response.source_prompt !== remix.sourcePrompt ||
+      response.source_kind !== remix.sourceKind ||
+      (response.root_prompt ?? undefined) !== remix.rootPrompt
+    ) {
+      throw new Error("The host returned Remix provenance for a different source prompt.");
+    }
+    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+    const current = remixInputs(remix.sourceKind);
+    const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
+    if (
+      JSON.stringify(current.prepared) !== JSON.stringify(prepared) ||
+      JSON.stringify(current.remix) !== JSON.stringify(remix) ||
+      !sameFrozenHost(route, currentHost)
+    ) {
+      expansionError.value =
+        "The prompt, model, conditioning, dimensions, style, or host changed while Remix was running. Remix again with the current inputs.";
+      return;
+    }
+    commitRemixReview(prepared, remix, visiblePrompt, route, variants, token);
+    if (replacePrepared) preparedBatch.value = null;
+  } catch (error) {
+    if (!preparationGuard.isCurrent(token)) return;
+    expansionError.value = setExpansionFailure(
+      error,
+      prepared,
+      route,
+      token,
+      replacePrepared,
+      remix,
+    )
+      .replaceAll("Expansion", "Remix")
+      .replaceAll("expansion", "remix");
+  } finally {
+    if (!unmounted && preparationGuard.isCurrent(token)) expansionRunning.value = false;
+  }
+}
+
+function replacePreparedPrompts(useFrozenRoute: boolean): void {
+  const batch = preparedBatch.value;
+  if (!batch) return;
+  if (batch.kind !== "remix") {
+    void expandForCurrentBatch(true, useFrozenRoute ? batch.route : null);
+    return;
+  }
+  remixSource.value = batch.sourceKind ?? "current";
+  remixDimensions.value = [
+    ...(batch.dimensions ?? defaultRemixDimensions(batch.task, Boolean(batch.stylePreset))),
+  ];
+  void remixCurrent(useFrozenRoute ? batch.route : null, true);
+}
+
+function toggleRemixVariant(id: string): void {
+  const variant = remixReview.value?.variants.find((candidate) => candidate.id === id);
+  if (variant && remixStaleReasons.value.length === 0 && !expansionRunning.value) {
+    variant.selected = !variant.selected;
+  }
+}
+
+function editRemixVariant(payload: { id: string; prompt: string }): void {
+  const variant = remixReview.value?.variants.find((candidate) => candidate.id === payload.id);
+  if (variant && remixStaleReasons.value.length === 0 && !expansionRunning.value) {
+    variant.prompt = payload.prompt;
+  }
+}
+
+function rememberRemixUndo(): void {
+  remixUndo.value = {
+    prompt: form.prompt,
+    originalPrompt: form.originalPrompt,
+    stylePreset: form.stylePreset,
+  };
+}
+
+function applyRemixSelection(): void {
+  const review = remixReview.value;
+  if (!review || remixStaleReasons.value.length > 0) return;
+  const selected = review.variants.filter((variant) => variant.selected && variant.prompt.trim());
+  if (selected.length === 0) return;
+  if (selected.length === 1) {
+    rememberRemixUndo();
+    preparationGuard.invalidate();
+    submissionGuard.invalidate();
+    form.prompt = selected[0]!.prompt.trim();
+    form.originalPrompt = review.rootPrompt ?? review.sourcePrompt;
+    bakeStyleNegative(review.stylePreset ?? "", review.family);
+    form.stylePreset = "";
+    quickExpansionOriginal.value = null;
+    quickExpansionSnapshot.value = {
+      requestToken: review.requestToken,
+      originalPrompt: review.sourcePrompt,
+      expandedPrompt: selected[0]!.prompt.trim(),
+      model: review.model,
+      family: review.family,
+      task: review.task,
+      stylePreset: review.stylePreset,
+      selectedHostPolicy: review.selectedHostPolicy,
+      route: { ...review.route, target: { ...review.route.target } },
+    };
+    appliedRemix.value = {
+      prompt: selected[0]!.prompt.trim(),
+      ...(review.rootPrompt ? { rootPrompt: review.rootPrompt } : {}),
+      sourcePrompt: review.sourcePrompt,
+      sourceKind: review.sourceKind,
+      task: review.task,
+      dimensions: [...selected[0]!.dimensions],
+    };
+    remixReview.value = null;
+    expansionError.value = "";
+    clearExpansionRecovery();
+    return;
+  }
+  const inputs: PreparedExpansionInputs = {
+    kind: "remix",
+    sourcePrompt: review.sourcePrompt,
+    ...(review.rootPrompt ? { rootPrompt: review.rootPrompt } : {}),
+    sourceKind: review.sourceKind,
+    dimensions: [...review.dimensions],
+    conditioningFingerprint: review.conditioningFingerprint,
+    model: review.model,
+    family: review.family,
+    task: review.task,
+    requestedCount: selected.length,
+    stylePreset: review.stylePreset,
+    selectedHostPolicy: review.selectedHostPolicy,
+  };
+  preparedBatch.value = createPreparedExpansionBatch(
+    inputs,
+    review.route,
+    selected.map((variant) => variant.prompt.trim()),
+    review.requestToken,
+  );
+  Object.assign(preparedBatch.value, {
+    remixVariantDimensions: selected.map((variant) => [...variant.dimensions]),
+  });
+  remixUndo.value = null;
+  appliedRemix.value = null;
+  quickExpansionOriginal.value = null;
+  quickExpansionSnapshot.value = null;
+  remixReview.value = null;
+  expansionError.value = "";
+}
+
+function restoreRemixSource(): void {
+  const review = remixReview.value;
+  if (!review) return;
+  rememberRemixUndo();
+  form.prompt = review.sourcePrompt;
+  form.originalPrompt = review.sourceKind === "original" ? null : (review.rootPrompt ?? null);
+  appliedRemix.value = null;
+  quickExpansionSnapshot.value = null;
+  remixReview.value = null;
+  preparationGuard.invalidate();
+  clearExpansionRecovery();
+  expansionError.value = "";
+}
+
+function discardRemixReview(): void {
+  preparationGuard.invalidate();
+  remixReview.value = null;
+  clearExpansionRecovery();
+  expansionError.value = "";
+}
+
+function undoPromptPreparation(): void {
+  const snapshot = remixUndo.value;
+  if (!snapshot) {
+    restoreQuickExpansion();
+    return;
+  }
+  submissionGuard.invalidate();
+  preparationGuard.invalidate();
+  form.prompt = snapshot.prompt;
+  form.originalPrompt = snapshot.originalPrompt;
+  form.stylePreset = snapshot.stylePreset;
+  remixUndo.value = null;
+  appliedRemix.value = null;
+  quickExpansionSnapshot.value = null;
+  remixReview.value = null;
+  expansionError.value = "";
+  clearExpansionRecovery();
+}
+
 /**
  * Bake-and-clear owes the user the preset's curated negative: the chip is
  * about to be dropped, so submit-time composition will never see it again.
@@ -2276,6 +2728,16 @@ async function reexpandAndDevelop(): Promise<void> {
   if (quickExpansionSnapshot.value && quickStaleReasons.value.length === 0) {
     await generate();
   }
+}
+
+async function recoverQuickPromptTransform(): Promise<void> {
+  if (!appliedRemix.value) {
+    await reexpandAndDevelop();
+    return;
+  }
+  undoPromptPreparation();
+  await nextTick();
+  await remixCurrent();
 }
 
 async function copyQuickExpansionError(): Promise<void> {
@@ -2368,6 +2830,18 @@ function discardPreparedBatch(): void {
   if (restoreFocus) {
     void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
   }
+}
+
+function preparedRemixDimensions(
+  batch: PreparedExpansionBatchState,
+  index: number,
+): RemixDimension[] {
+  const perVariant = (
+    batch as PreparedExpansionBatchState & {
+      remixVariantDimensions?: readonly (readonly RemixDimension[])[];
+    }
+  ).remixVariantDimensions;
+  return [...(perVariant?.[index] ?? batch.dimensions ?? [])];
 }
 
 async function pullExpansionModel(): Promise<void> {
@@ -2477,16 +2951,30 @@ async function retryExpansionAfterPull(): Promise<void> {
     // The immutable recovery record owns the style: a resumed pull re-requests
     // with exactly the directive the user saw frozen, not the live chip.
     const styleDirective = styleHint(recovery.inputs.stylePreset ?? "");
-    const response = await expandPrompt(
-      recovery.inputs.sourcePrompt,
-      {
-        variations: recovery.inputs.requestedCount,
-        ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
-        task: recovery.inputs.task,
-        ...(styleDirective ? { style: styleDirective } : {}),
-      },
-      recovery.route.target,
-    );
+    const response = recovery.remix
+      ? await remixPrompt(
+          {
+            source_prompt: recovery.remix.sourcePrompt,
+            ...(recovery.remix.rootPrompt ? { root_prompt: recovery.remix.rootPrompt } : {}),
+            source_kind: recovery.remix.sourceKind,
+            model_family: recovery.inputs.family,
+            variations: DEFAULT_REMIX_VARIATIONS,
+            task: recovery.inputs.task,
+            ...(styleDirective ? { style: styleDirective } : {}),
+            dimensions: [...recovery.remix.dimensions],
+          },
+          recovery.route.target,
+        )
+      : await expandPrompt(
+          recovery.inputs.sourcePrompt,
+          {
+            variations: recovery.inputs.requestedCount,
+            ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
+            task: recovery.inputs.task,
+            ...(styleDirective ? { style: styleDirective } : {}),
+          },
+          recovery.route.target,
+        );
     if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
       return;
     }
@@ -2495,15 +2983,35 @@ async function retryExpansionAfterPull(): Promise<void> {
       markExpansionRecoveryStale(recovery, changed);
       return;
     }
-    const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
-    commitExpandedPrompts(
-      { ...recovery.inputs },
-      { ...recovery.route, target: { ...recovery.route.target } },
-      prompts,
-      recovery.requestToken,
-      recovery.replacePrepared,
-      focus,
-    );
+    if (recovery.remix) {
+      if (!("variants" in response))
+        throw new Error("The host returned an invalid Remix response.");
+      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+      commitRemixReview(
+        { ...recovery.inputs },
+        {
+          ...recovery.remix,
+          dimensions: [...recovery.remix.dimensions],
+        },
+        form.prompt,
+        { ...recovery.route, target: { ...recovery.route.target } },
+        variants,
+        recovery.requestToken,
+      );
+      if (recovery.replacePrepared) preparedBatch.value = null;
+    } else {
+      if (!("expanded" in response))
+        throw new Error("The host returned an invalid expansion response.");
+      const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
+      commitExpandedPrompts(
+        { ...recovery.inputs },
+        { ...recovery.route, target: { ...recovery.route.target } },
+        prompts,
+        recovery.requestToken,
+        recovery.replacePrepared,
+        focus,
+      );
+    }
   } catch (error) {
     if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
       return;
@@ -2588,7 +3096,18 @@ async function generate(): Promise<void> {
         batchId: prepared.batchId,
         promptIds: prepared.prompts.map((prompt) => prompt.id),
         prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
-        originalPrompt: prepared.sourcePrompt,
+        originalPrompt: prepared.rootPrompt ?? prepared.sourcePrompt,
+        promptTransforms:
+          prepared.kind === "remix"
+            ? prepared.prompts.map((_, index): PromptTransformProvenance => ({
+                operation: "remix",
+                ...(prepared.rootPrompt ? { root_prompt: prepared.rootPrompt } : {}),
+                source_prompt: prepared.sourcePrompt,
+                source_kind: prepared.sourceKind ?? "current",
+                task: prepared.task,
+                dimensions: preparedRemixDimensions(prepared, index),
+              }))
+            : undefined,
         route: { ...prepared.route, target: { ...prepared.route.target } },
       }
     : null;
@@ -2667,6 +3186,16 @@ async function generate(): Promise<void> {
   preparedSubmitting.value = !!preparedSubmission;
   try {
     request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
+    if (appliedRemix.value && appliedRemix.value.prompt === form.prompt) {
+      request.prompt_transform = {
+        operation: "remix",
+        ...(appliedRemix.value.rootPrompt ? { root_prompt: appliedRemix.value.rootPrompt } : {}),
+        source_prompt: appliedRemix.value.sourcePrompt,
+        source_kind: appliedRemix.value.sourceKind,
+        task: appliedRemix.value.task,
+        dimensions: [...appliedRemix.value.dimensions],
+      };
+    }
   } catch (error) {
     if (!ownsPreparedSubmission()) return;
     setGenerationStatus(describeTransportError(error, route.label), true);
@@ -2784,6 +3313,9 @@ async function generate(): Promise<void> {
     ? {
         prompts: preparedSubmission.prompts,
         originalPrompt: preparedSubmission.originalPrompt,
+        ...(preparedSubmission.promptTransforms
+          ? { promptTransforms: preparedSubmission.promptTransforms }
+          : {}),
         batchId: preparedSubmission.batchId,
       }
     : {};
@@ -3855,11 +4387,17 @@ onBeforeUnmount(() => {
               :model="selectedGenerationModel"
               :target="selectedTarget"
               :running="expansionRunning"
-              :can-undo="quickExpansionOriginal !== null"
-              :blocked="!!preparedBatch"
+              :can-undo="quickExpansionOriginal !== null || remixUndo !== null"
+              :blocked="!!preparedBatch || !!remixReview"
               :models="generationModels"
+              :remix-source="remixSource"
+              :remix-dimensions="remixDimensions"
+              :task="currentExpansionTask"
               @expand="expandForCurrentBatch()"
-              @undo="restoreQuickExpansion"
+              @remix="remixCurrent()"
+              @undo="undoPromptPreparation"
+              @update:remix-source="remixSource = $event"
+              @update:remix-dimensions="remixDimensions = $event"
             />
             <div
               v-if="quickStaleReasons.length"
@@ -3898,9 +4436,9 @@ onBeforeUnmount(() => {
                   type="button"
                   data-test="mobile-reexpand-and-develop"
                   :disabled="expansionRunning || preparedSubmitting"
-                  @click="reexpandAndDevelop"
+                  @click="recoverQuickPromptTransform"
                 >
-                  Re-expand and Develop
+                  {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
                 </button>
                 <button
                   class="secondary-button mobile-touch-action"
@@ -3914,14 +4452,14 @@ onBeforeUnmount(() => {
                 <button
                   class="secondary-button mobile-touch-action"
                   type="button"
-                  @click="restoreQuickExpansion"
+                  @click="undoPromptPreparation"
                 >
                   Restore original
                 </button>
               </div>
             </div>
             <div
-              v-if="expansionError && !expansionMissingModel && !preparedBatch"
+              v-if="expansionError && !expansionMissingModel && !preparedBatch && !remixReview"
               class="mobile-generate-validation"
               role="alert"
               data-test="mobile-expansion-error"
@@ -3963,6 +4501,22 @@ onBeforeUnmount(() => {
               @pull="pullExpansionModel"
               @retry-expansion="retryExpansionAfterPull"
             />
+            <MobileRemixReview
+              v-if="remixReview"
+              :source-kind="remixReview.sourceKind"
+              :source-prompt="remixReview.sourcePrompt"
+              :variants="remixReview.variants"
+              :host-label="remixReview.route.label"
+              :stale-reasons="remixStaleReasons"
+              :running="expansionRunning"
+              :error="expansionMissingModel ? '' : expansionError"
+              @toggle="toggleRemixVariant"
+              @edit="editRemixVariant"
+              @reremix="remixCurrent()"
+              @apply="applyRemixSelection"
+              @restore="restoreRemixSource"
+              @discard="discardRemixReview"
+            />
             <MobilePreparedExpansionBatch
               v-if="preparedBatch"
               :batch="preparedBatch"
@@ -3973,8 +4527,8 @@ onBeforeUnmount(() => {
               @edit="editPreparedPrompt"
               @remove="removePreparedPrompt"
               @collapse="collapsePreparedBatch"
-              @regenerate="expandForCurrentBatch(true, preparedBatch.route)"
-              @refresh="expandForCurrentBatch(true)"
+              @regenerate="replacePreparedPrompts(true)"
+              @refresh="replacePreparedPrompts(false)"
               @discard="discardPreparedBatch"
               @generate="generate"
             />
