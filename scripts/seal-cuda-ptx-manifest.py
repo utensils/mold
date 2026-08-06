@@ -65,7 +65,7 @@ def current_kernel_output_dirs(build_root: Path, compute_cap: str) -> list[Path]
         output_dir = ptx_rs.parent
         cache = output_dir / ".cudaforge_cache.json"
         if cache.is_file():
-            if cudaforge_cache_matches(output_dir, compute_cap):
+            if kernel_output_target(output_dir, compute_cap) is not None:
                 matches.append(output_dir)
             continue
 
@@ -78,20 +78,28 @@ def current_kernel_output_dirs(build_root: Path, compute_cap: str) -> list[Path]
     return matches
 
 
-def cudaforge_cache_matches(output_dir: Path, compute_cap: str) -> bool:
+def kernel_output_target(output_dir: Path, compute_cap: str) -> str | None:
     cache_path = output_dir / ".cudaforge_cache.json"
+    if not cache_path.is_file():
+        output = output_dir.parent / "output"
+        marker = f"cargo:rustc-env=CUDA_COMPUTE_CAP={compute_cap}"
+        if output.is_file() and marker in output.read_text(
+            encoding="utf-8", errors="replace"
+        ):
+            return f"sm_{compute_cap}"
+        return None
+
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return False
+        return None
 
     if not isinstance(cache, dict):
-        return False
+        return None
     entries = cache.get("entries")
     if not isinstance(entries, dict):
-        return False
+        return None
 
-    expected_arch = f"sm_{compute_cap}"
     referenced_names = {path.name for path in referenced_ptx_files(output_dir)}
     observed: dict[str, set[str]] = {}
     for entry in entries.values():
@@ -105,9 +113,17 @@ def cudaforge_cache_matches(output_dir: Path, compute_cap: str) -> bool:
         if name in referenced_names:
             observed.setdefault(name, set()).add(gpu_arch)
 
-    return bool(referenced_names) and all(
-        observed.get(name) == {expected_arch} for name in referenced_names
-    )
+    if not referenced_names or not all(
+        len(observed.get(name, set())) == 1 for name in referenced_names
+    ):
+        return None
+    generated_arches = set().union(*(observed[name] for name in referenced_names))
+    if len(generated_arches) != 1:
+        return None
+    generated_arch = generated_arches.pop()
+    if re.fullmatch(rf"sm_{re.escape(compute_cap)}(?:[af])?", generated_arch):
+        return generated_arch
+    return None
 
 
 def referenced_ptx_files(output_dir: Path) -> list[Path]:
@@ -141,6 +157,17 @@ def main() -> int:
             f"no candle-kernels output for CUDA_COMPUTE_CAP={args.compute_cap} "
             f"under {args.build_root}"
         )
+    output_targets = {
+        target
+        for output_dir in output_dirs
+        if (target := kernel_output_target(output_dir, args.compute_cap)) is not None
+    }
+    if len(output_targets) != 1:
+        fail(
+            "candle-kernels outputs disagree on their generated CUDA target: "
+            + ", ".join(sorted(output_targets))
+        )
+    cuda_target = output_targets.pop()
 
     readelf = run("readelf", "-SW", str(args.binary))
     if readelf.returncode != 0:
@@ -178,7 +205,7 @@ def main() -> int:
 
         manifest = {
             "schema_version": SCHEMA,
-            "cuda_target": f"sm_{args.compute_cap}",
+            "cuda_target": cuda_target,
             "modules": sorted(
                 modules.values(),
                 key=lambda module: (

@@ -88,6 +88,10 @@ COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
 COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
 COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
+# Cargo resolves explicit build-script paths before compiling the stub crates.
+# Keep these in the manifest-first layer so dependency caching remains valid.
+COPY crates/mold-core/build.rs crates/mold-core/build.rs
+COPY crates/mold-server/build.rs crates/mold-server/build.rs
 
 # Create stub source files so cargo can resolve and build dependencies
 RUN mkdir -p crates/mold-core/src \
