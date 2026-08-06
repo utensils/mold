@@ -114,6 +114,88 @@ fn ltx2_v2_single_file_uses_v2_vae() {
     );
 }
 
+/// Wan's two VAEs are different architectures, and the sub-family names are
+/// actively misleading about which is which: **the 2.2 A14B pair uses the 2.1
+/// VAE**, the same 16-channel file the 1.3B uses. Only TI2V-5B takes the
+/// 48-channel 2.2 VAE. A `starts_with("wan22")` rule would hand both A14B
+/// experts a VAE their DiT rejects, after a 10 GB download.
+#[test]
+fn wan_a14b_takes_the_2_1_vae_despite_its_2_2_name() {
+    let names_for = |sub: Option<&str>| {
+        companions_for(Family::Wan, sub, Bundling::SingleFile, Kind::Checkpoint)
+    };
+
+    for sub in [
+        Some("wan22-t2v-a14b"),
+        Some("wan22-i2v-a14b"),
+        Some("wan21-t2v-1.3b"),
+        Some("wan21-t2v-14b"),
+        // Unknown community fine-tunes are overwhelmingly 14B-class.
+        None,
+    ] {
+        let names = names_for(sub);
+        assert!(
+            names.contains(&"wan21-vae".to_string()),
+            "{sub:?} must take the 2.1 VAE; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"wan22-vae".to_string()),
+            "{sub:?} must not take the 2.2 VAE; got {names:?}"
+        );
+    }
+
+    let five_b = names_for(Some("wan22-ti2v-5b"));
+    assert!(five_b.contains(&"wan22-vae".to_string()), "got {five_b:?}");
+    assert!(!five_b.contains(&"wan21-vae".to_string()), "got {five_b:?}");
+}
+
+/// Every Wan checkpoint in the wild is transformer-only, so the UMT5 encoder
+/// always rides along — and it must be UMT5, not the T5 the LTX-Video arm
+/// pulls. UMT5 has per-layer relative attention bias that candle's shared-bias
+/// T5 cannot express, which is why mold ships a separate encoder at all.
+#[test]
+fn wan_single_file_pulls_umt5_not_t5() {
+    let names = companions_for(Family::Wan, None, Bundling::SingleFile, Kind::Checkpoint);
+    assert!(
+        names.contains(&"wan-umt5".to_string()),
+        "Wan must pull its UMT5 encoder; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"t5-v1_1-xxl".to_string()),
+        "Wan must NOT pull T5 (~9.5 GB of weights its engine cannot load); got {names:?}"
+    );
+}
+
+#[test]
+fn wan_companions_match_the_manifest_companions() {
+    // The catalog registry and mold-core's `wan-umt5` / `wan21-vae` /
+    // `wan22-vae` manifests must name the same repo and file, or a cv:/hf:
+    // install re-downloads assets a manifest pull already placed on disk
+    // instead of hitting the shared/wan/ cache.
+    let umt5 = companion_by_name("wan-umt5").expect("wan-umt5");
+    assert_eq!(umt5.kind, Kind::TextEncoder);
+    assert_eq!(umt5.repo, "Comfy-Org/Wan_2.1_ComfyUI_repackaged");
+    assert!(umt5
+        .files
+        .contains(&"split_files/text_encoders/umt5_xxl_fp16.safetensors"));
+
+    let vae21 = companion_by_name("wan21-vae").expect("wan21-vae");
+    assert_eq!(vae21.kind, Kind::Vae);
+    assert!(vae21
+        .files
+        .contains(&"split_files/vae/wan_2.1_vae.safetensors"));
+
+    let vae22 = companion_by_name("wan22-vae").expect("wan22-vae");
+    assert_eq!(vae22.kind, Kind::Vae);
+    assert!(vae22
+        .files
+        .contains(&"split_files/vae/wan2.2_vae.safetensors"));
+
+    for companion in [umt5, vae21, vae22] {
+        assert!(companion.family_scope.contains(&Family::Wan));
+    }
+}
+
 #[test]
 fn separated_bundling_has_no_companions() {
     // Diffusers HF entries are self-contained; companions only matter for

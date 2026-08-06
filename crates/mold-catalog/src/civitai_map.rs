@@ -52,6 +52,17 @@ pub fn map_base_model(
         "LTXV2" => (Ltx2, Finetune, Some("v2".into())),
         "LTXV 2.3" => (Ltx2, Finetune, Some("v2.3".into())),
 
+        // Wan. Only the checkpoints this build can actually run are mapped;
+        // the rest stay in `CIVITAI_DROPS` below with the reason. The sub
+        // family carries the variant because one `Family::Wan` spans three
+        // very different runtime shapes — single-expert 2.1, the 2.2 5B, and
+        // the 2.2 two-expert A14B pair.
+        "Wan Video 1.3B t2v" => (Wan, Finetune, Some("wan21-t2v-1.3b".into())),
+        "Wan Video 14B t2v" => (Wan, Finetune, Some("wan21-t2v-14b".into())),
+        "Wan Video 2.2 TI2V-5B" => (Wan, Finetune, Some("wan22-ti2v-5b".into())),
+        "Wan Video 2.2 T2V-A14B" => (Wan, Finetune, Some("wan22-t2v-a14b".into())),
+        "Wan Video 2.2 I2V-A14B" => (Wan, Finetune, Some("wan22-i2v-a14b".into())),
+
         // Qwen
         "Qwen" | "Qwen 2" => (QwenImage, Finetune, None),
 
@@ -78,13 +89,13 @@ pub const CIVITAI_DROPS: &[&str] = &[
     "Mochi",
     "PixArt a",
     "PixArt E",
-    "Wan Video 1.3B t2v",
-    "Wan Video 14B t2v",
+    // Wan 2.1 image-to-video conditions through a CLIP-vision cross-attention
+    // branch (`k_img`/`v_img`) that mold's DiT does not implement, and the
+    // engine refuses those checkpoints by name. Mapping them would offer a
+    // multi-gigabyte download that cannot generate.
     "Wan Video 14B i2v 480p",
     "Wan Video 14B i2v 720p",
-    "Wan Video 2.2 TI2V-5B",
-    "Wan Video 2.2 I2V-A14B",
-    "Wan Video 2.2 T2V-A14B",
+    // Wan 2.5 and 2.7 are later architectures with no mold engine at all.
     "Wan Video 2.5 T2V",
     "Wan Video 2.5 I2V",
     "Wan Image 2.7",
@@ -165,7 +176,7 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
         // don't inherit checkpoint runnability rules.
         Lora => matches!(
             family,
-            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | QwenImage
+            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | Wan | QwenImage
         ),
         Vae | TextEncoder | Tokenizer | Clip => true,
         ControlNet => matches!(family, Sd15 | Sdxl),

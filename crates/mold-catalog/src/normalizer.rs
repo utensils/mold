@@ -219,9 +219,10 @@ pub fn from_hf(
         return Err(NormalizeError::EmptyTree);
     }
     files.sort_by(|a, b| a.url.cmp(&b.url));
-    let modality = match family {
-        Family::LtxVideo | Family::Ltx2 => Modality::Video,
-        _ => Modality::Image,
+    let modality = if family.is_video() {
+        Modality::Video
+    } else {
+        Modality::Image
     };
 
     let kind = classify_hf_kind(&detail, &files);
@@ -231,11 +232,13 @@ pub fn from_hf(
             .ok_or(NormalizeError::EmptyTree)?;
     }
     let total_size = files.iter().filter_map(|f| f.size_bytes).sum::<u64>();
+    // HF entries generally carry no sub_family — single-file HF Flux.2 rows
+    // are rare and Civitai is the load-bearing path there. Wan is the
+    // exception: HF is where it lives, and its 5B variant needs a different
+    // VAE from the rest of the family, so that one is inferred from the id.
+    let sub_family = crate::live::wan_sub_family_from_id(&detail.id);
     let companions = match bundling {
-        // HF entries don't currently carry a sub_family — pass None and let
-        // `companions_for` use its default branch. Single-file HF Flux.2
-        // entries are rare; the Civitai path is the load-bearing one.
-        Bundling::SingleFile => companions_for(family, None, bundling, kind),
+        Bundling::SingleFile => companions_for(family, sub_family.as_deref(), bundling, kind),
         Bundling::Separated => Vec::new(),
     };
     let supported = supported_for(family, bundling, kind);
@@ -255,7 +258,7 @@ pub fn from_hf(
         author: detail.author.clone(),
         family,
         family_role,
-        sub_family: None,
+        sub_family,
         modality,
         kind,
         file_format,
@@ -468,9 +471,10 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
     };
     let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
     let supported = supported_for(family, bundling, kind);
-    let modality = match family {
-        Family::LtxVideo | Family::Ltx2 => Modality::Video,
-        _ => Modality::Image,
+    let modality = if family.is_video() {
+        Modality::Video
+    } else {
+        Modality::Image
     };
 
     let mut recipe_files = vec![civitai_recipe_file(version.id, file, None)];
