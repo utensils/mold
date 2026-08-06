@@ -1814,6 +1814,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "libc",
+ "objc2",
  "objc2-foundation",
  "objc2-photos",
  "objc2-ui-kit",
