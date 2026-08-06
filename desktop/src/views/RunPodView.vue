@@ -544,17 +544,14 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="min-h-0 overflow-y-auto p-4">
-        <ErrorNotice v-if="runpod.operationError" class="mb-4" :message="runpod.operationError">
-          <template #actions>
-            <button
-              type="button"
-              class="text-caption text-ink-2 hover:text-ink"
-              @click="runpod.clearOperationError()"
-            >
-              Dismiss
-            </button>
-          </template>
-        </ErrorNotice>
+        <ErrorNotice
+          v-if="runpod.operationError"
+          compact
+          dismissible
+          class="mb-4"
+          :message="runpod.operationError"
+          @dismiss="runpod.clearOperationError()"
+        />
         <section class="border-edge mb-5 rounded-chrome border bg-bath">
           <div class="flex items-center justify-between px-3 py-2.5">
             <div>
