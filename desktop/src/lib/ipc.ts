@@ -224,6 +224,15 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("app_settings_set", { settings });
   },
+  getMoldHome(): Promise<MoldHomeInfo | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<MoldHomeInfo>("get_mold_home");
+  },
+  changeMoldHome(path: string, migrate: boolean): Promise<void> {
+    if (!inTauri())
+      return Promise.reject(new Error("Changing Mold home requires the desktop app."));
+    return invoke<void>("change_mold_home", { path, migrate });
+  },
   checkForUpdates(channel: UpdateChannel): Promise<UpdateCheckResult> {
     if (!inTauri()) {
       return Promise.resolve({
@@ -428,6 +437,12 @@ export const ipc = {
     return typeof picked === "string" ? picked : null;
   },
 };
+
+export interface MoldHomeInfo {
+  path: string;
+  source: "saved" | "environment" | "default" | "invalid";
+  exists: boolean;
+}
 
 export type SecretName =
   | "hf-token"

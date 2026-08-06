@@ -5,6 +5,7 @@ pub mod gallery;
 #[cfg(target_os = "macos")]
 mod macos_window;
 pub mod menu;
+pub mod mold_home;
 pub mod notifications;
 pub mod relocate;
 pub mod runpod;
@@ -65,16 +66,32 @@ pub fn run() {
     }
 
     // One-shot config.toml → DB migration + DB overlay on Config::load,
-    // exactly like every other mold binary's main().
-    mold_db::config_sync::install_config_post_load_hook();
+    // exactly like every other mold binary's main(). The shared Mold-home
+    // bootstrap pointer is resolved inside Config before either store opens.
+    let saved_home_unavailable = std::env::var_os("MOLD_HOME").is_none()
+        && match mold_core::Config::read_saved_mold_dir() {
+            Ok(Some(path)) => !path.is_dir(),
+            Ok(None) => false,
+            Err(_) => true,
+        };
+    if !saved_home_unavailable {
+        mold_db::config_sync::install_config_post_load_hook();
+    }
 
-    // The desktop app owns no terminal — log to ~/.mold/logs only.
-    let config = mold_core::Config::load_or_default();
-    let log_guard = mold_server::logging::init_tracing_file_only(
-        &config.logging,
-        "info",
-        config.resolved_log_dir(),
-    );
+    // An absent external drive must not be recreated as an empty Mold home.
+    // Keep recovery logs beside the bootstrap pointer so Settings can launch
+    // and let the user reconnect or replace the unavailable location.
+    let config = if saved_home_unavailable {
+        mold_core::Config::default()
+    } else {
+        mold_core::Config::load_or_default()
+    };
+    let log_dir = saved_home_unavailable
+        .then(mold_core::Config::mold_home_pointer_path)
+        .flatten()
+        .and_then(|path| path.parent().map(|parent| parent.join("recovery-logs")))
+        .unwrap_or_else(|| config.resolved_log_dir());
+    let log_guard = mold_server::logging::init_tracing_file_only(&config.logging, "info", log_dir);
 
     tauri::Builder::default()
         .register_uri_scheme_protocol("mold-local", |context, request| {
@@ -142,6 +159,8 @@ pub fn run() {
             commands::app_settings_get,
             commands::app_settings_set,
             commands::get_connection,
+            commands::get_mold_home,
+            commands::change_mold_home,
             commands::ensure_local_server,
             commands::start_local_engine,
             commands::stop_local_engine,

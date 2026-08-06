@@ -752,15 +752,10 @@ fn cleanup_partials_for_model(model: &str) {
     mold_core::download::remove_pulling_marker(&canonical);
     #[cfg(test)]
     test_hooks::record_cleanup(&canonical);
-    if let Ok(models_dir) = std::env::var("MOLD_MODELS_DIR") {
-        let target = std::path::PathBuf::from(models_dir).join(&sanitized);
-        cleanup_partials_in_dir(&target);
-        return;
-    }
-    if let Some(home) = dirs::home_dir() {
-        let target = home.join(".mold/models").join(&sanitized);
-        cleanup_partials_in_dir(&target);
-    }
+    let target = mold_core::Config::load_or_default()
+        .resolved_models_dir()
+        .join(&sanitized);
+    cleanup_partials_in_dir(&target);
 }
 
 /// Test seam: lets the test module observe which models `cleanup_partials_for_model`

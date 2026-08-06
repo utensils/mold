@@ -43,6 +43,7 @@ enum LogFormat {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    mold_core::Config::ensure_saved_mold_dir_available()?;
 
     // Route every `Config::load_or_default()` through the shared
     // DB-backed user-preference hook so this standalone binary sees the

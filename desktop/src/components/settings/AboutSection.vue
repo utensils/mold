@@ -72,7 +72,7 @@ function openPrivacyPolicy(): void {
         Privacy policy
       </button>
     </SettingRow>
-    <SettingRow label="Logs" help="Engine and app logs live in ~/.mold/logs.">
+    <SettingRow label="Logs" help="Engine and app logs live in the active Mold home.">
       <button
         type="button"
         class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
