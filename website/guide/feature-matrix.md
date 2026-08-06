@@ -28,6 +28,7 @@ features today?
 | Qwen-Image-Edit | No      | No         | Yes              |
 | LTX Video       | Not yet | Not yet    | Not yet          |
 | LTX-2           | Yes     | No         | Keyframes        |
+| Wan Video       | Not yet | Not yet    | Not yet          |
 
 ## Control and Adapters
 
@@ -44,6 +45,7 @@ features today?
 | Z-Image         | z-image         | No         | Yes  |
 | Wuerstchen v2   | wuerstchen      | No         | No   |
 | LTX Video       | ltx-video       | No         | No   |
+| Wan Video       | wan             | No         | No   |
 
 ## Prompt Conditioning
 
@@ -66,6 +68,7 @@ features today?
 | ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ------- | ----------- |
 | LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
 | LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes     | Yes         |
+| Wan Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
 | All others | No      | No      | No        | No       | No     | No      | No      | No          |
 
 LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 defaults to MP4 so

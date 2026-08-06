@@ -7,4 +7,6 @@
 //! (cloned under gitignored `tmp/`).
 
 pub(crate) mod model;
+pub mod pipeline;
+pub(crate) mod sampler;
 pub(crate) mod text;

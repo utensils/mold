@@ -50,6 +50,7 @@ noise transferred to the execution device.
 | `qwen-image-edit` | — | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; ordered edit references, LoRA |
 | `ltx-video` | `ltx_video` | supported / supported / supported | none | no | no | `[1]` / cooperative | video; independent-clip chains; no source/audio/LoRA |
 | `ltx2` | `ltx-2`, `ltx2.3` | supported / unsupported / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
+| `wan` | — | supported / unsupported / correctness-only | UMT5 text encoder | no | no | `[1]` / cooperative | video; text-to-video only, no source/chain/audio/LoRA yet |
 | `wuerstchen` | `wuerstchen-v2` | supported / supported / supported | none | no | no | `[1]` / cooperative | image; source and inpaint; no LoRA |
 
 The registry intentionally does not claim generic tiled VAE for Z-Image.
@@ -71,6 +72,7 @@ SD1.5, SDXL, and SD3.
 | `qwen-image-edit` | runtime qualification | `scripts/qwen-edit-parity-smoke.sh`, explicit source-edit CUDA smoke |
 | `ltx-video` | runtime qualification | `scripts/regression-matrix.sh`, video and independent-chain cases |
 | `ltx2` | runtime qualification | `scripts/regression-matrix.sh`, video/source/audio/durable-chain cases |
+| `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video cases (no hardware campaign recorded yet) |
 | `wuerstchen` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source cases |
 
 These are executable owners, not a claim that every case passed on the current
