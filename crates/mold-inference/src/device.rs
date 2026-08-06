@@ -680,6 +680,11 @@ pub enum ActivationFamily {
     /// so the file size on disk (~46 GB at BF16 for the 22B preset)
     /// massively over-estimates GPU residency.
     Ltx2Video,
+    /// Wan 2.1/2.2 video DiT. The currently shipped checkpoints (1.3B bf16
+    /// ~2.8 GB, TI2V-5B fp16 ~10 GB) load fully GPU-resident like LtxVideo;
+    /// the A14B two-expert tier arrives with quantized/streamed residency in
+    /// a later layer and revisits this classification then.
+    WanVideo,
 }
 
 impl ActivationFamily {
@@ -696,7 +701,10 @@ impl ActivationFamily {
     /// resident on GPU at inference time). Used to choose the right headroom
     /// constant in the preflight suggestion message.
     pub fn is_full_weight_video(self) -> bool {
-        matches!(self, ActivationFamily::LtxVideo)
+        matches!(
+            self,
+            ActivationFamily::LtxVideo | ActivationFamily::WanVideo
+        )
     }
 }
 
@@ -782,6 +790,10 @@ pub fn activation_bytes(
         // cost on a 24 GB card is encoder + block workspace, not the
         // full-weight sum.
         ActivationFamily::Ltx2Video => 130.0,
+        // Wan video DiT: split-attention flow transformer in the same
+        // shape class as the LTX families; starts at their calibration
+        // until a bespoke wan admission model lands with the 14B tier.
+        ActivationFamily::WanVideo => 130.0,
     };
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
     /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
@@ -939,6 +951,9 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         // blocks are GPU-resident at peak, so the preflight skips the
         // file-size estimate and uses a fixed streaming cap instead.
         "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        // Wan 2.1/2.2: fully GPU-resident transformer at the shipped
+        // 1.3B/5B sizes; the file-size preflight applies in full.
+        "wan" => ActivationFamily::WanVideo,
         // Unknown families default to FLUX dit shape — same activation
         // class, conservative against unknowns.
         _ => ActivationFamily::FluxDit,
@@ -3312,6 +3327,9 @@ mod tests {
             activation_family_for("wuerstchen"),
             ActivationFamily::Wuerstchen
         );
+        assert_eq!(activation_family_for("wan"), ActivationFamily::WanVideo);
+        assert!(ActivationFamily::WanVideo.is_full_weight_video());
+        assert!(!ActivationFamily::WanVideo.streaming_transformer());
         // Unknown slug — falls back to FluxDit.
         assert_eq!(
             activation_family_for("bogus-family"),
