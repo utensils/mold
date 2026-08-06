@@ -15,12 +15,14 @@ import {
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+  downloadVideoExport,
   shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import { isNativeIOSRuntime } from "./platform";
 
 const props = withDefaults(
   defineProps<{
@@ -336,10 +338,11 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(options),
     });
-    const result = await shareVideoExport(
-      await response.blob(),
-      videoExportFilename(props.item.filename, options.format),
-    );
+    const blob = await response.blob();
+    const filename = videoExportFilename(props.item.filename, options.format);
+    const result = isNativeIOSRuntime()
+      ? await shareVideoExport(blob, filename)
+      : (downloadVideoExport(blob, filename), "saved");
     if (result === "cancelled") return;
     exportOpen.value = false;
     actionStatus.value = result === "shared" ? "Export ready to share" : "Video exported";

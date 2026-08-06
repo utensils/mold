@@ -11,6 +11,9 @@ const { invoke, apiFetchTo, apiJsonTo } = vi.hoisted(() => ({
   apiFetchTo: vi.fn(),
   apiJsonTo: vi.fn(),
 }));
+const { isNativeIOSRuntime } = vi.hoisted(() => ({
+  isNativeIOSRuntime: vi.fn(),
+}));
 
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
@@ -23,6 +26,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiFetchTo,
   apiJsonTo,
 }));
+vi.mock("./platform", () => ({ isNativeIOSRuntime }));
 
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 
@@ -68,6 +72,7 @@ function mountViewer(
 }
 
 beforeEach(() => {
+  isNativeIOSRuntime.mockReset().mockReturnValue(true);
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full");
   evictMedia.mockReset();
   invoke.mockReset().mockResolvedValue(undefined);
@@ -87,6 +92,9 @@ afterEach(() => {
   document.body.innerHTML = "";
   Reflect.deleteProperty(navigator, "share");
   Reflect.deleteProperty(navigator, "canShare");
+  Reflect.deleteProperty(URL, "createObjectURL");
+  Reflect.deleteProperty(URL, "revokeObjectURL");
+  vi.restoreAllMocks();
 });
 
 describe("MobileGalleryViewer", () => {
@@ -279,6 +287,36 @@ describe("MobileGalleryViewer", () => {
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
       "Export ready to share",
     );
+  });
+
+  it("downloads locally when the mobile UI runs outside native iOS", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    const share = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "share", { value: share, configurable: true });
+    Object.defineProperty(navigator, "canShare", {
+      value: vi.fn(() => true),
+      configurable: true,
+    });
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:video-export"),
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+    });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(click).toHaveBeenCalledOnce();
+    expect(share).not.toHaveBeenCalled();
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Video exported");
   });
 
   it("keeps export options retryable when the iOS share sheet is dismissed", async () => {
