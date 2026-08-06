@@ -1099,13 +1099,60 @@ textarea.control {
 
 .mobile-prompt-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
 }
 
 .mobile-prompt-actions .secondary-button {
   min-width: 0;
   padding-inline: 8px;
+}
+
+.mobile-remix-options {
+  margin-top: 8px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  padding: 0 10px 10px;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
+}
+
+.mobile-remix-options > summary {
+  min-height: 44px;
+  align-content: center;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.mobile-remix-source,
+.mobile-remix-dimensions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  border: 0;
+  padding: 0;
+}
+
+.mobile-remix-source legend,
+.mobile-remix-dimensions legend {
+  width: 100%;
+  margin-bottom: 2px;
+  color: var(--ink-3);
+}
+
+.mobile-remix-source label,
+.mobile-remix-dimensions label {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 7px;
+}
+
+.mobile-remix-source input,
+.mobile-remix-dimensions input {
+  width: 20px;
+  height: 20px;
 }
 
 .mobile-inline-panel,

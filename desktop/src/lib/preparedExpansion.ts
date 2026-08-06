@@ -2,11 +2,18 @@ import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
 import type { ExpandTask } from "@studio/lib/expandTask";
+import type { RemixDimension, RemixSourceKind } from "@studio/lib/promptTransform";
+import type { PromptTransformProvenance } from "./api/types";
 
 export type HostSelectionPolicy = string | null;
 
 export interface PreparedExpansionInputs {
+  kind?: "expand" | "remix";
   sourcePrompt: string;
+  rootPrompt?: string;
+  sourceKind?: RemixSourceKind;
+  dimensions?: readonly RemixDimension[];
+  conditioningFingerprint?: string;
   model: string;
   family: string;
   /** Frozen conditioning policy used to create the reviewed rewrite. */
@@ -21,6 +28,7 @@ export interface PreparedExpansionInputs {
 export interface PreparedExpansionPrompt {
   id: string;
   text: string;
+  dimensions?: readonly RemixDimension[];
 }
 
 export interface PreparedExpansionBatch extends PreparedExpansionInputs {
@@ -41,6 +49,7 @@ export interface QuickExpansionSnapshot {
   stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
   route: HostRoute;
+  promptTransform?: PromptTransformProvenance;
 }
 
 export interface CurrentQuickExpansionInputs {
@@ -190,6 +199,18 @@ export function preparedExpansionStaleReasons(
   if (current.task !== batch.task) {
     reasons.push(`Conditioning changed from ${batch.task} to ${current.task}.`);
   }
+  if (
+    batch.conditioningFingerprint !== undefined &&
+    current.conditioningFingerprint !== batch.conditioningFingerprint
+  ) {
+    reasons.push("Conditioning media changed after these variations were prepared.");
+  }
+  if (
+    batch.kind === "remix" &&
+    JSON.stringify(current.dimensions ?? []) !== JSON.stringify(batch.dimensions ?? [])
+  ) {
+    reasons.push("Remix dimensions changed after these variations were prepared.");
+  }
   const styleReason = styleStaleReason(batch.stylePreset, current.stylePreset);
   if (styleReason) reasons.push(styleReason);
   if (current.requestedCount !== batch.requestedCount) {
@@ -237,26 +258,24 @@ export function quickExpansionStaleReasons(
   if (current.task !== snapshot.task) {
     reasons.push(`Conditioning changed from ${snapshot.task} to ${current.task}.`);
   }
-  if (current.selectedHostPolicy !== snapshot.selectedHostPolicy) {
-    reasons.push(
-      `Host selection changed from ${hostSelectionLabel(snapshot.selectedHostPolicy, current.hostLabels)} to ${hostSelectionLabel(current.selectedHostPolicy, current.hostLabels)}.`,
-    );
-  }
-  if (!current.readyHostIds.has(snapshot.route.hostId)) {
-    reasons.push(`${snapshot.route.label} is no longer reachable.`);
-  } else {
-    const target = current.hostTargets?.get(snapshot.route.hostId);
-    if (
-      target &&
-      (target.baseUrl !== snapshot.route.target.baseUrl ||
-        target.apiKey !== snapshot.route.target.apiKey ||
-        target.kind !== snapshot.route.kind ||
-        knownInstanceIdsDiffer(snapshot.route.instanceId, target.instanceId))
-    ) {
-      reasons.push(`${snapshot.route.label}'s connection details changed.`);
-    }
-  }
   return reasons;
+}
+
+/** A host-only change releases quick work from its old route without making the prompt stale. */
+export function quickExpansionRouteIsCurrent(
+  snapshot: QuickExpansionSnapshot,
+  current: CurrentQuickExpansionInputs,
+): boolean {
+  if (current.selectedHostPolicy !== snapshot.selectedHostPolicy) return false;
+  if (!current.readyHostIds.has(snapshot.route.hostId)) return false;
+  const target = current.hostTargets?.get(snapshot.route.hostId);
+  if (!target) return true;
+  return (
+    target.baseUrl === snapshot.route.target.baseUrl &&
+    target.apiKey === snapshot.route.target.apiKey &&
+    target.kind === snapshot.route.kind &&
+    !knownInstanceIdsDiffer(snapshot.route.instanceId, target.instanceId)
+  );
 }
 
 /** Monotonic guard used to reject late refreshes and discarded requests. */

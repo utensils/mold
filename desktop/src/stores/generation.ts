@@ -13,6 +13,7 @@ import type {
   ChainProgressEvent,
   CompleteEvent,
   GenerateRequest,
+  PromptTransformProvenance,
   ProgressEvent,
   SseChainCompleteEvent,
 } from "../lib/api/types";
@@ -116,8 +117,11 @@ export interface BatchRequestOptions {
   prompts?: readonly string[];
   /** Shared source prompt retained as provenance on every sibling request. */
   originalPrompt?: string;
+  /** Per-sibling prompt-transform provenance in the same order as prompts. */
+  promptTransforms?: readonly import("../lib/api/types").PromptTransformProvenance[];
   /** Durable identity shared by prepared siblings and retained in gallery metadata. */
   batchId?: string;
+  promptTransform?: PromptTransformProvenance;
 }
 
 /**
@@ -139,10 +143,26 @@ export function planBatchRequests(
       `Per-item prompt count ${options.prompts.length} does not match batch size ${size}`,
     );
   }
+  if (options.promptTransforms !== undefined && options.promptTransforms.length !== size) {
+    throw new RangeError(
+      `Per-item prompt transform count ${options.promptTransforms.length} does not match batch size ${size}`,
+    );
+  }
   return Array.from({ length: size }, (_, i) => ({
     ...req,
     ...(options.prompts !== undefined ? { prompt: options.prompts[i]! } : {}),
     ...(options.originalPrompt !== undefined ? { original_prompt: options.originalPrompt } : {}),
+    ...(options.promptTransform !== undefined
+      ? {
+          prompt_transform: {
+            ...options.promptTransform,
+            dimensions: [...(options.promptTransform.dimensions ?? [])],
+          },
+        }
+      : {}),
+    ...(options.promptTransforms !== undefined
+      ? { prompt_transform: options.promptTransforms[i] }
+      : {}),
     ...(options.batchId !== undefined
       ? { batch_id: options.batchId, batch_index: i + 1, batch_count: size }
       : {}),

@@ -34,13 +34,20 @@ const props = withDefaults(
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
     preprocessingStatus: string | null;
+    remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
   }>(),
-  { history: () => [] },
+  { history: () => [], remixSource: "original" },
 );
 
-const emit = defineEmits<{ generate: []; expand: []; restore: [] }>();
+const emit = defineEmits<{
+  generate: [];
+  expand: [];
+  remix: [];
+  restore: [];
+  "update:remixSource": [value: "original" | "current"];
+}>();
 
 // A conditioned LTX-2 render may go out undescribed. The placeholder says so,
 // and Generate must not stay disabled on a request the server would admit —
@@ -140,7 +147,11 @@ defineExpose({ focus, expand, record });
         :host-label="expansionHostLabel"
         :can-undo="canUndo"
         :blocked="preparedBlocked"
+        :original-available="!!form.originalPrompt"
+        :remix-source="remixSource"
         @expand="emit('expand')"
+        @remix="emit('remix')"
+        @update:remix-source="emit('update:remixSource', $event)"
         @restore="emit('restore')"
       />
       <div class="ms-composer__right">

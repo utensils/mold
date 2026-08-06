@@ -14,6 +14,7 @@ const {
   evictMedia,
   applySourceFitPreprocess,
   expandPrompt,
+  remixPrompt,
   startCatalogDownload,
   previewChainPlacement,
   previewGenerationPlacement,
@@ -31,6 +32,7 @@ const {
   evictMedia: vi.fn(),
   applySourceFitPreprocess: vi.fn(),
   expandPrompt: vi.fn(),
+  remixPrompt: vi.fn(),
   startCatalogDownload: vi.fn(),
   previewChainPlacement: vi.fn(),
   previewGenerationPlacement: vi.fn(),
@@ -67,6 +69,7 @@ vi.mock("@studio/api/client", async (importOriginal) => ({
 vi.mock("../lib/api/sse", () => ({ sseStream }));
 vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess }));
 vi.mock("../lib/api/expand", () => ({ expandPrompt }));
+vi.mock("../lib/api/remix", () => ({ remixPrompt }));
 vi.mock("../lib/api/catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/catalog")>()),
   startCatalogDownload,
@@ -306,6 +309,17 @@ beforeEach(() => {
         { length: options.variations ?? 1 },
         (_, index) => `${prompt} · prepared ${index + 1}`,
       ),
+    }),
+  );
+  remixPrompt.mockReset().mockImplementation((request) =>
+    Promise.resolve({
+      source_prompt: request.source_prompt,
+      ...(request.root_prompt ? { root_prompt: request.root_prompt } : {}),
+      source_kind: request.source_kind,
+      variants: Array.from({ length: request.variations ?? 3 }, (_, index) => ({
+        prompt: `${request.source_prompt} · remix ${index + 1}`,
+        dimensions: [request.dimensions[index % request.dimensions.length]],
+      })),
     }),
   );
   startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
@@ -953,6 +967,322 @@ describe("MobileApp generation queue", () => {
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a lighthouse");
     expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
     expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
+  });
+
+  it("remixes the original idea into three reviewable variants and applies one without queueing", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse · prepared 1",
+    );
+
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+
+    expect(remixPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source_prompt: "a lighthouse",
+        root_prompt: "a lighthouse",
+        source_kind: "original",
+        model_family: model.family,
+        variations: 3,
+        task: "text-to-video",
+      }),
+      target,
+    );
+    expect(wrapper.findAll(".mobile-remix-editor")).toHaveLength(3);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(0);
+
+    await wrapper.get("input[aria-label='Select remix 2']").setValue(true);
+    await wrapper.get("[data-test='mobile-remix-apply']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse · remix 2",
+    );
+    expect(openStreams).toHaveLength(0);
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(openStreams[0]?.options.body.prompt_transform).toEqual({
+      operation: "remix",
+      root_prompt: "a lighthouse",
+      source_prompt: "a lighthouse",
+      source_kind: "original",
+      task: "text-to-video",
+      dimensions: expect.any(Array),
+    });
+
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse · prepared 1",
+    );
+  });
+
+  it("turns multiple selected remixes into a frozen prepared batch", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a train in the desert");
+
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+    await wrapper.get("input[aria-label='Select remix 1']").setValue(true);
+    await wrapper.get("input[aria-label='Select remix 3']").setValue(true);
+    await wrapper.get("[data-test='mobile-remix-apply']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-remix-review']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
+      "Review 2 variations",
+    );
+    expect(
+      wrapper
+        .findAll(".mobile-prepared-editor")
+        .map((editor) => (editor.element as HTMLTextAreaElement).value),
+    ).toEqual(["a train in the desert · remix 1", "a train in the desert · remix 3"]);
+    expect(openStreams).toHaveLength(0);
+
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(2);
+    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
+      "a train in the desert",
+      "a train in the desert",
+    ]);
+    expect(openStreams.map((stream) => stream.options.body.prompt_transform)).toEqual([
+      expect.objectContaining({
+        operation: "remix",
+        source_prompt: "a train in the desert",
+        source_kind: "direct",
+        task: "text-to-video",
+        dimensions: expect.any(Array),
+      }),
+      expect.objectContaining({
+        operation: "remix",
+        source_prompt: "a train in the desert",
+        source_kind: "direct",
+        task: "text-to-video",
+        dimensions: expect.any(Array),
+      }),
+    ]);
+  });
+
+  it("keeps the root original_prompt for a prepared batch remixed from current text", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-remix-options']").trigger("click");
+    await wrapper.get("input[name='mobile-remix-source'][value='current']").setValue(true);
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+    await wrapper.get("input[aria-label='Select remix 1']").setValue(true);
+    await wrapper.get("input[aria-label='Select remix 3']").setValue(true);
+    await wrapper.get("[data-test='mobile-remix-apply']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
+      "a lighthouse",
+      "a lighthouse",
+    ]);
+    expect(openStreams[0]?.options.body.prompt_transform).toMatchObject({
+      root_prompt: "a lighthouse",
+      source_prompt: "a lighthouse · prepared 1",
+      source_kind: "current",
+    });
+  });
+
+  it("carries a finished quick Expand to a newly selected host without stale recovery", async () => {
+    const renderTarget = {
+      baseUrl: "http://render.tailnet.ts.net:7680",
+      apiKey: "render-secret",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("portable lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(false);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "portable lighthouse · prepared 1",
+    );
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+  });
+
+  it("carries an applied single Remix across hosts but still stales semantic edits", async () => {
+    const renderTarget = {
+      baseUrl: "http://render.tailnet.ts.net:7680",
+      apiKey: "render-secret",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          instanceId: "studio-id",
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          hostname: render ? "render" : "studio",
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("portable train");
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+    await wrapper.get("input[aria-label='Select remix 1']").setValue(true);
+    await wrapper.get("[data-test='mobile-remix-apply']").trigger("click");
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(false);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "portable train · remix 1",
+    );
+
+    await fieldControl("Prompt").setValue("user edited the remix");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-quick-expansion-stale']").text()).toContain(
+      "Expanded prompt changed",
+    );
+  });
+
+  it("keeps a reviewed multi-variation batch pinned when host selection changes", async () => {
+    const renderTarget = {
+      baseUrl: "http://render.tailnet.ts.net:7680",
+      apiKey: "render-secret",
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        { id: "studio-id", name: "Studio", baseUrl: target.baseUrl, instanceId: "studio-id" },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          instanceId: "render-id",
+        },
+      ]),
+    );
+    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
+      Promise.resolve(
+        command === "keychain_get_api_key"
+          ? args?.hostId === "render-id"
+            ? renderTarget.apiKey
+            : target.apiKey
+          : null,
+      ),
+    );
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+      const render = route.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          instance_id: render ? "render-id" : "studio-id",
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two pinned storms");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
+      "Host selection changed from Studio to Render",
+    );
   });
 
   it("recovers a stale quick expansion with readable current-model actions", async () => {
@@ -2148,6 +2478,28 @@ describe("MobileApp generation queue", () => {
     expect(
       wrapper.get("[data-test='mobile-prompt-expand']").attributes("disabled"),
     ).toBeUndefined();
+  });
+
+  it("refuses a missing-model Remix pull after its frozen dimensions change", async () => {
+    remixPrompt.mockRejectedValueOnce(
+      new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("lighthouse in rain");
+    await wrapper.get("[data-test='mobile-prompt-remix']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-pull-expansion']").text()).toContain("Pull");
+
+    const styleDimension = wrapper
+      .findAll(".mobile-remix-dimensions label")
+      .find((label) => label.text().includes("Style"));
+    await styleDimension?.get("input").setValue(false);
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("Remix inputs changed");
   });
 
   it.each(["job_done", "job_failed", "job_cancelled"] as const)(

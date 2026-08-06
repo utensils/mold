@@ -1,23 +1,71 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type { ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { fetchHistoryFrom, type HistoryEntry } from "../lib/api/history";
 import type { GenerateForm } from "../lib/generateForm";
-import type { ModelEntry } from "../lib/api/types";
+import type { ExpandTask, ModelEntry, RemixDimension, RemixSourceKind } from "../lib/api/types";
+import { remixDimensionsForTask } from "@studio/lib/promptTransform";
 import { modelDisplayNameForId } from "../lib/models";
 
-const props = defineProps<{
-  form: GenerateForm;
-  target: ApiTarget;
-  running: boolean;
-  canUndo: boolean;
-  blocked: boolean;
-  models?: ModelEntry[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    form: GenerateForm;
+    target: ApiTarget;
+    running: boolean;
+    canUndo: boolean;
+    blocked: boolean;
+    models?: ModelEntry[];
+    remixSource?: RemixSourceKind;
+    remixDimensions?: RemixDimension[];
+    task?: ExpandTask;
+  }>(),
+  {
+    remixSource: "original",
+    remixDimensions: () => [],
+    task: "text-to-image",
+  },
+);
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);
 
-defineEmits<{ expand: []; undo: [] }>();
+const emit = defineEmits<{
+  expand: [];
+  remix: [];
+  undo: [];
+  "update:remixSource": [value: RemixSourceKind];
+  "update:remixDimensions": [value: RemixDimension[]];
+}>();
+
+const DIMENSION_LABELS: Record<RemixDimension, string> = {
+  composition: "Composition",
+  camera: "Camera",
+  lighting: "Lighting",
+  setting: "Setting",
+  mood: "Mood",
+  movement: "Movement",
+  style: "Style",
+};
+
+const availableDimensions = computed(() =>
+  remixDimensionsForTask(props.task, Boolean(props.form.stylePreset?.trim())),
+);
+const hasOriginal = computed(() => Boolean(props.form.originalPrompt?.trim()));
+const sourceLabel = computed(() => {
+  if (!hasOriginal.value) return "Remixing current prompt";
+  return props.remixSource === "original" ? "Remixing original prompt" : "Remixing current prompt";
+});
+
+function toggleDimension(dimension: RemixDimension): void {
+  const next = new Set(props.remixDimensions);
+  if (next.has(dimension)) {
+    if (next.size === 1) return;
+    next.delete(dimension);
+  } else next.add(dimension);
+  emit(
+    "update:remixDimensions",
+    availableDimensions.value.filter((candidate) => next.has(candidate)),
+  );
+}
 
 const historyOpen = ref(false);
 const loadingHistory = ref(false);
@@ -86,6 +134,15 @@ watch(
       <button
         type="button"
         class="secondary-button"
+        data-test="mobile-prompt-remix"
+        :disabled="running || blocked || !form.prompt.trim()"
+        @click="$emit('remix')"
+      >
+        {{ running ? "Working…" : "Remix" }}
+      </button>
+      <button
+        type="button"
+        class="secondary-button"
         data-test="mobile-prompt-recent"
         :aria-expanded="historyOpen"
         aria-controls="mobile-prompt-history-panel"
@@ -103,6 +160,44 @@ watch(
         Undo
       </button>
     </div>
+
+    <details class="mobile-remix-options" data-test="mobile-remix-options">
+      <summary>{{ sourceLabel }} · {{ remixDimensions.length }} dimensions</summary>
+      <fieldset v-if="hasOriginal" class="mobile-remix-source">
+        <legend>Remix source</legend>
+        <label>
+          <input
+            type="radio"
+            name="mobile-remix-source"
+            value="original"
+            :checked="remixSource === 'original'"
+            @change="emit('update:remixSource', 'original')"
+          />
+          Original
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="mobile-remix-source"
+            value="current"
+            :checked="remixSource === 'current'"
+            @change="emit('update:remixSource', 'current')"
+          />
+          Current
+        </label>
+      </fieldset>
+      <fieldset class="mobile-remix-dimensions">
+        <legend>Creative dimensions</legend>
+        <label v-for="dimension in availableDimensions" :key="dimension">
+          <input
+            type="checkbox"
+            :checked="remixDimensions.includes(dimension)"
+            @change="toggleDimension(dimension)"
+          />
+          {{ DIMENSION_LABELS[dimension] }}
+        </label>
+      </fieldset>
+    </details>
 
     <div v-if="historyOpen" id="mobile-prompt-history-panel" class="mobile-inline-panel">
       <p v-if="loadingHistory" class="mobile-helper-text" role="status">Loading recent prompts…</p>

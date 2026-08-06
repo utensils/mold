@@ -2,11 +2,157 @@ use std::sync::Arc;
 
 use mold_core::{
     classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
-    GenerateResponse, GenerateServerAction, LoraWeight, MoldClient, SseProgressEvent,
+    GenerateResponse, GenerateServerAction, LoraWeight, MoldClient, PromptExpander,
+    PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
-use crate::app::{BackgroundEvent, GenerateParams, GenerationMetadataSnapshot, InferenceMode};
+use crate::app::{
+    BackgroundEvent, GenerateParams, GenerationMetadataSnapshot, InferenceMode,
+    PromptTransformSnapshot,
+};
+
+/// Prepare reviewable Expand/Remix alternatives without queueing generation.
+/// A remote target fails closed on `/api/remix`; it never falls back to
+/// `/api/expand`, which older hosts could silently interpret incorrectly.
+pub async fn run_prompt_transform(
+    server_url: Option<String>,
+    api_key: Option<String>,
+    operation: PromptTransformOperation,
+    request: RemixRequest,
+    snapshot: PromptTransformSnapshot,
+    token: u64,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let result = if let Some(url) = server_url {
+        let client = crate::hosts::client_for(&url, api_key.as_deref());
+        match operation {
+            PromptTransformOperation::Remix => client.remix_prompt(&request).await,
+            PromptTransformOperation::Expand => client
+                .expand_prompt(&mold_core::ExpandRequest {
+                    prompt: request.source_prompt.clone(),
+                    model_family: request.model_family.clone(),
+                    variations: request.variations,
+                    style: request.style.clone(),
+                    task: request.task,
+                })
+                .await
+                .map(|response| RemixResponse {
+                    source_prompt: response.original,
+                    root_prompt: request.root_prompt.clone(),
+                    source_kind: request.source_kind,
+                    task: request.task.unwrap_or_else(|| {
+                        mold_core::ExpandTask::for_family(&request.model_family)
+                    }),
+                    variants: response
+                        .expanded
+                        .into_iter()
+                        .map(|prompt| RemixVariant {
+                            prompt,
+                            dimensions: Vec::new(),
+                        })
+                        .collect(),
+                }),
+        }
+    } else {
+        run_local_prompt_transform(operation, &request).await
+    };
+    match result {
+        Ok(response) => {
+            let _ = tx.send(BackgroundEvent::PromptTransformComplete {
+                token,
+                operation,
+                snapshot,
+                response,
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::PromptTransformFailed {
+                token,
+                message: format!("Prompt transform failed: {error}"),
+            });
+        }
+    }
+}
+
+async fn run_local_prompt_transform(
+    operation: PromptTransformOperation,
+    request: &RemixRequest,
+) -> anyhow::Result<RemixResponse> {
+    let config = mold_core::Config::load_or_default();
+    let settings = config.expand.clone().with_env_overrides();
+    let mut expand_config = settings.to_expand_config(&request.model_family, request.variations);
+    expand_config.operation = operation;
+    expand_config.task = request
+        .task
+        .unwrap_or_else(|| mold_core::ExpandTask::for_family(&request.model_family));
+    expand_config.style = request.style.clone();
+    if operation == PromptTransformOperation::Remix {
+        expand_config.remix_dimensions = mold_core::expand::resolve_remix_dimensions(
+            &request.dimensions,
+            expand_config.task,
+            request
+                .style
+                .as_ref()
+                .is_some_and(|style| !style.trim().is_empty()),
+        )?;
+    }
+
+    let expander: Box<dyn PromptExpander> = if let Some(api) = settings.create_api_expander() {
+        Box::new(api)
+    } else {
+        #[cfg(feature = "expand")]
+        {
+            Box::new(
+                mold_inference::expand::LocalExpander::from_config(&config, Some(&settings.model))
+                    .ok_or_else(|| anyhow::anyhow!("local expansion model is not installed"))?,
+            )
+        }
+        #[cfg(not(feature = "expand"))]
+        {
+            anyhow::bail!(
+                "local prompt transforms require the TUI expand feature or an API backend"
+            )
+        }
+    };
+    let prompt = request.source_prompt.clone();
+    let result =
+        tokio::task::spawn_blocking(move || expander.expand(&prompt, &expand_config)).await??;
+    let task = request
+        .task
+        .unwrap_or_else(|| mold_core::ExpandTask::for_family(&request.model_family));
+    let dimensions = if operation == PromptTransformOperation::Remix {
+        mold_core::expand::resolve_remix_dimensions(
+            &request.dimensions,
+            task,
+            request
+                .style
+                .as_ref()
+                .is_some_and(|style| !style.trim().is_empty()),
+        )?
+    } else {
+        Vec::new()
+    };
+    Ok(RemixResponse {
+        source_prompt: request.source_prompt.clone(),
+        root_prompt: request.root_prompt.clone(),
+        source_kind: request.source_kind,
+        task,
+        variants: result
+            .expanded
+            .into_iter()
+            .enumerate()
+            .map(|(index, prompt)| RemixVariant {
+                prompt,
+                dimensions: if operation == PromptTransformOperation::Remix {
+                    mold_core::expand::remix_dimensions_for_position(&dimensions, index + 1)
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect(),
+    })
+}
 
 /// Run a generation request — tries remote first, falls back to local on connection error.
 /// When batch > 1, loops client-side with `batch_size=1` per iteration (matching CLI behavior).
@@ -21,12 +167,34 @@ pub async fn run_generation(
     api_key: Option<String>,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    let batch = params.batch;
+    let prepared_prompts = params.prepared_prompts.clone();
+    let prepared_transforms = params.prepared_prompt_transforms.clone();
+    let batch = if prepared_prompts.is_empty() {
+        params.batch
+    } else {
+        prepared_prompts.len() as u32
+    };
     let base_seed = params.seed;
+    let prepared_batch_id =
+        (!prepared_prompts.is_empty()).then(|| format!("remix-{:032x}", rand::random::<u128>()));
 
     for i in 0..batch {
         let mut iter_params = params.clone();
         iter_params.batch = 1;
+        let iter_prompt = prepared_prompts
+            .get(i as usize)
+            .cloned()
+            .unwrap_or_else(|| prompt.clone());
+        if let Some(transform) = prepared_transforms.get(i as usize) {
+            iter_params.prompt_transform = Some(transform.clone());
+        }
+        if let Some(batch_id) = &prepared_batch_id {
+            iter_params.batch_id = Some(batch_id.clone());
+            iter_params.batch_index = Some(i + 1);
+            iter_params.batch_count = Some(batch);
+        }
+        iter_params.prepared_prompts.clear();
+        iter_params.prepared_prompt_transforms.clear();
 
         // Increment seed for each batch iteration (first uses original seed)
         if i > 0 {
@@ -41,14 +209,14 @@ pub async fn run_generation(
 
         let metadata_snapshot = GenerationMetadataSnapshot::new(
             iter_params.clone(),
-            prompt.clone(),
+            iter_prompt.clone(),
             negative_prompt.clone(),
         );
 
         if iter_params.inference_mode == InferenceMode::Local {
             run_local_generation_single(
                 iter_params,
-                prompt.clone(),
+                iter_prompt.clone(),
                 negative_prompt.clone(),
                 metadata_snapshot,
                 &tx,
@@ -60,7 +228,7 @@ pub async fn run_generation(
             let mut fell_through = false;
             if let Some(ref url) = effective_url {
                 let client = crate::hosts::client_for(url, api_key.as_deref());
-                let req = build_request(&iter_params, &prompt, &negative_prompt);
+                let req = build_request(&iter_params, &iter_prompt, &negative_prompt);
 
                 match try_server_generate(&client, &req, &metadata_snapshot, &tx).await {
                     ServerResult::Done => {}
@@ -88,7 +256,7 @@ pub async fn run_generation(
                 }
                 run_local_generation_single(
                     iter_params,
-                    prompt.clone(),
+                    iter_prompt.clone(),
                     negative_prompt.clone(),
                     metadata_snapshot,
                     &tx,
@@ -548,10 +716,11 @@ fn build_request(
         control_model: params.control_model.clone(),
         control_scale: params.control_scale,
         expand: if params.expand { Some(true) } else { None },
-        original_prompt: None,
-        batch_id: None,
-        batch_index: None,
-        batch_count: None,
+        original_prompt: params.original_prompt.clone(),
+        prompt_transform: params.prompt_transform.clone(),
+        batch_id: params.batch_id.clone(),
+        batch_index: params.batch_index,
+        batch_count: params.batch_count,
         lora,
         frames: Some(params.frames),
         fps: Some(params.fps),
@@ -881,5 +1050,21 @@ mod tests {
             build_request(&params, "p", &None).guidance_overrides,
             Some(params.guidance_overrides.clone())
         );
+    }
+
+    #[test]
+    fn build_request_propagates_prepared_batch_identity() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.batch = 1;
+        params.batch_id = Some("remix-0123".into());
+        params.batch_index = Some(2);
+        params.batch_count = Some(3);
+
+        let request = build_request(&params, "reviewed sibling", &None);
+        assert_eq!(request.batch_id.as_deref(), Some("remix-0123"));
+        assert_eq!(request.batch_index, Some(2));
+        assert_eq!(request.batch_count, Some(3));
+        assert_eq!(request.batch_size, 1);
     }
 }
