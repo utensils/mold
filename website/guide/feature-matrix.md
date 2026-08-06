@@ -155,9 +155,11 @@ complete workflows.
   cycles for the numeric guidance values and validates comma-separated STG
   blocks before closing the editor; untouched values remain absent from the
   request. Its Video accordion also exposes the shared `enable_audio` contract
-  as a checkpoint-aware default/on/off choice and family-gated
-  `spatial_upscale` / `temporal_upscale` native modes. The remaining pipeline,
-  conditioning-file, and chain-job controls remain a separate tracked gap.
+  as a checkpoint-aware default/on/off choice, family-gated
+  `spatial_upscale` / `temporal_upscale` native modes, and the source-free
+  `one-stage`, `two-stage`, `two-stage-hq`, and `distilled` recipes while Auto
+  leaves `pipeline` absent. Conditioning-file modes, the audio-only `t2a`
+  pipeline, and chain-job administration remain a separate tracked gap.
 - Completed LTX-2 videos report the runtime-resolved pipeline separately from
   the requested Auto/explicit choice. Server, CLI, and TUI saves preserve that
   response in gallery metadata, and web, desktop, iPhone, and TUI Library

@@ -735,7 +735,7 @@ fn build_request(
         extend_video_path: None,
         extend_overlap_frames: None,
         keyframes: None,
-        pipeline: None,
+        pipeline: params.pipeline,
         ic_lora_control: None,
         loras: None,
         retake_range: None,
@@ -1006,6 +1006,23 @@ mod tests {
 
         params.enable_audio = Some(false);
         assert_eq!(build_request(&params, "p", &None).enable_audio, Some(false));
+    }
+
+    #[test]
+    fn build_request_preserves_explicit_ltx2_pipeline_choice() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(
+            build_request(&params, "p", &None).pipeline,
+            None,
+            "untouched TUI state must preserve server pipeline selection"
+        );
+
+        params.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStageHq);
+        assert_eq!(
+            build_request(&params, "p", &None).pipeline,
+            Some(mold_core::Ltx2PipelineMode::TwoStageHq)
+        );
     }
 
     #[test]

@@ -647,6 +647,7 @@ mod tests {
             mask_image_path: None,
             frames: 25,
             fps: 24,
+            pipeline: None,
             enable_audio: None,
             spatial_upscale: None,
             temporal_upscale: None,
