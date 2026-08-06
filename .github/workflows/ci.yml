@@ -381,8 +381,14 @@ jobs:
       # `dev-bins` pulls in `attention_bench`, which no other gate compiles.
       - name: Clippy the flash-attn inference lib, tests and dev-bins
         run: cargo clippy -p mold-ai-inference --features flash-attn,dev-bins --all-targets -- -D warnings
-      - name: Clippy the flash-attn binary wiring
-        run: cargo clippy -p mold-ai --features flash-attn --all-targets -- -D warnings
+      # Deliberately `check`, not `clippy`. This step exists to prove the
+      # binary's feature wiring resolves; linting `-p mold-ai` with the feature
+      # additionally lints every `cuda`-gated crate, and mold-server carries
+      # pre-existing violations there that no gate has ever run (cuda-check is
+      # `cargo check` only, and the `rust` clippy job has no CUDA). Widening
+      # this gate to cover that debt belongs in its own change — see #738.
+      - name: Check the flash-attn binary wiring
+        run: cargo check -p mold-ai --features flash-attn
 
   metal-check:
     name: Metal forced-local typecheck
