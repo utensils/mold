@@ -10,6 +10,8 @@ import { useGalleryStore } from "../../stores/gallery";
 import { useGenerationStore } from "../../stores/generation";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useHostModelsStore } from "../../stores/hostModels";
+import { useLiveActivityStore } from "../../stores/liveActivity";
+import { useComposerStore } from "../../stores/composer";
 
 const stub = { template: "<div />" };
 
@@ -100,6 +102,84 @@ describe("NavRail collapse", () => {
 });
 
 describe("NavRail developing jobs", () => {
+  it("shows recovered work and reloads its submitted settings", async () => {
+    const wrapper = await mountAt("/create");
+    useHostsStore().extras.push({
+      id: "render",
+      label: "Render box",
+      url: "http://render:7680",
+      apiKey: "secret",
+      status: "ready",
+      error: null,
+      instanceId: "render-instance",
+    });
+    useLiveActivityStore().hosts = {
+      render: {
+        hostId: "render",
+        hostLabel: "Render box",
+        target: { baseUrl: "http://render:7680", apiKey: null },
+        routeUrl: "http://render:7680",
+        instanceId: "render-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "foreign",
+            kind: "generation",
+            phase: "running",
+            model: "flux-dev",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: false,
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            entries: [
+              {
+                id: "foreign",
+                model: "flux-dev",
+                state: "running",
+                started_at_unix_ms: 1,
+                position: 0,
+                seed_pinned: true,
+                metadata: {
+                  model: "flux-dev",
+                  prompt: "restore me",
+                  width: 1024,
+                  height: 1024,
+                  steps: 20,
+                  guidance: 3.5,
+                  seed: 42,
+                },
+              },
+            ],
+            plan: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='developing-region']").text()).toContain("Render box");
+    expect(wrapper.text()).not.toContain("nothing developing");
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("click");
+    await flushPromises();
+
+    expect(useComposerStore().prefill).toMatchObject({
+      metadata: { prompt: "restore me", seed: 42 },
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("uses the remaining rail height before scrolling queued jobs", async () => {
     const wrapper = await mountAt("/create");
     const generation = useGenerationStore();

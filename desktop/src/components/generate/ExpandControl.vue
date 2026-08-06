@@ -63,7 +63,11 @@ defineExpose({ expand });
       data-test="remix-action"
       class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
       :disabled="blocked || running || !prompt.trim()"
-      title="Create three subject-preserving prompt remixes"
+      :title="
+        isPreparedBatch
+          ? `Prepare ${batchSize} subject-preserving prompt remixes`
+          : 'Remix this prompt in place'
+      "
       @click="emit('remix')"
     >
       Remix

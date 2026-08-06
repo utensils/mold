@@ -1711,6 +1711,10 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   const source = promptSource(form.prompt, form.originalPrompt, remixSource.value);
   const stylePreset = form.stylePreset || null;
   const dimensions = defaultRemixDimensions(task, Boolean(stylePreset));
+  // Match the Batch value the composer actually presents. Capability/source
+  // constraints can force the effective value to one while preserving the
+  // user's saved raw preference for a later compatible model.
+  const requestedCount = effectiveBatchSize.value;
   const token = preparationGuard.begin();
   expansionRunning.value = true;
   expansionError.value = null;
@@ -1723,7 +1727,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         ...(source.rootPrompt ? { root_prompt: source.rootPrompt } : {}),
         source_kind: source.kind,
         model_family: form.family,
-        variations: 3,
+        variations: requestedCount,
         task,
         ...(style ? { style } : {}),
         dimensions,
@@ -1731,7 +1735,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
       route.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const variants = validateRemixVariants(response.variants, 3);
+    const variants = validateRemixVariants(response.variants, requestedCount);
     const currentRequest = buildRequest(form);
     if (
       form.model !== request.model ||
@@ -1742,7 +1746,37 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         "The model or conditioning changed while Remix was running. Remix again.";
       return;
     }
-    form.batchSize = 3;
+    if (requestedCount === 1) {
+      const selected = variants[0]!;
+      form.prompt = selected.prompt;
+      form.originalPrompt = response.root_prompt ?? response.source_prompt;
+      quickExpansionOriginal.value = response.source_prompt;
+      bakeStyleNegative(stylePreset ?? "", form.family);
+      form.stylePreset = "";
+      quickExpansionSnapshot.value = {
+        requestToken: token,
+        originalPrompt: response.root_prompt ?? response.source_prompt,
+        expandedPrompt: selected.prompt,
+        model: form.model,
+        family: form.family,
+        task,
+        stylePreset,
+        selectedHostPolicy: stickyTarget.value,
+        route: { ...route, target: { ...route.target } },
+        promptTransform: {
+          operation: "remix",
+          ...(response.root_prompt ? { root_prompt: response.root_prompt } : {}),
+          source_prompt: response.source_prompt,
+          source_kind: response.source_kind,
+          task,
+          dimensions: [...selected.dimensions],
+        },
+      };
+      preparedBatch.value = null;
+      void nextTick(() => composerRef.value?.focus?.());
+      return;
+    }
+    form.batchSize = requestedCount;
     const batch = createPreparedExpansionBatch(
       {
         kind: "remix",
@@ -1754,7 +1788,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model: form.model,
         family: form.family,
         task,
-        requestedCount: 3,
+        requestedCount,
         stylePreset,
         selectedHostPolicy: stickyTarget.value,
       },

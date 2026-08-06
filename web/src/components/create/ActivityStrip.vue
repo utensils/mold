@@ -30,6 +30,7 @@ const props = withDefaults(
     /** Durable sequence jobs merged into the same strip (mockup 1c: the
      * chain Jobs list merges with the activity strip). */
     sequences?: ActivityJobVM[];
+    /** Server-owned work discovered after a reload or in another client. */
     shared?: FleetActiveWork[];
   }>(),
   { sequences: () => [], shared: () => [] },
@@ -48,6 +49,7 @@ const emit = defineEmits<{
   open: [job: Job];
   "sequence-action": [action: ActivityAction, vm: ActivityJobVM];
   "show-history": [];
+  "shared-open": [row: FleetActiveWork];
 }>();
 
 /** Session-only sequence dismissals, keyed by VM key. Deliberately not
@@ -160,8 +162,8 @@ const active = computed(
     running.value.length > 0 ||
     queued.value.length > 0 ||
     partition.value.active.length > 0 ||
-    props.shared.length > 0 ||
     partition.value.attention.length > 0 ||
+    props.shared.length > 0 ||
     digest.value !== null,
 );
 </script>
@@ -182,7 +184,11 @@ const active = computed(
       </button>
     </div>
 
-    <LiveActivityList :rows="shared" />
+    <LiveActivityList
+      :rows="shared"
+      interactive
+      @select="emit('shared-open', $event)"
+    />
 
     <div v-for="job in running" :key="job.id" class="activity__running">
       <button

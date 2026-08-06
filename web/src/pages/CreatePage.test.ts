@@ -26,6 +26,10 @@ import {
   setSequenceHandoff,
   takeSequenceHandoff,
 } from "../composables/useSequenceHandoff";
+import {
+  setGenerationHandoff,
+  takeGenerationHandoff,
+} from "../composables/useGenerationHandoff";
 import { ApiHttpError } from "../api";
 import { ApiError } from "@studio/api/client";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
@@ -277,6 +281,7 @@ describe("CreatePage layout and behavior", () => {
     setActivePinia(createPinia());
     chainJobsTesting.reset();
     takeSequenceHandoff();
+    takeGenerationHandoff();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
@@ -341,6 +346,36 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
       "md:grid-cols-[minmax(0,1fr)_340px]",
     );
+  });
+
+  it("applies settings selected from recovered Now developing work", async () => {
+    enterSequenceMode();
+    setGenerationHandoff({
+      seedPinned: true,
+      metadata: {
+        version: "1",
+        model: "flux-dev",
+        prompt: "recovered lighthouse",
+        seed: 42,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 1024,
+      } as OutputMetadata,
+    });
+
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(useSequenceDraftStore().output).toBe("single");
+    expect(useGenerateForm().state.value).toMatchObject({
+      prompt: "recovered lighthouse",
+      seedMode: "static",
+      seed: 42,
+      steps: 20,
+      guidance: 3.5,
+    });
+    expect(takeGenerationHandoff()).toBeNull();
   });
 
   it("uses a human-readable catalog model in the completed generation caption", async () => {

@@ -25,6 +25,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useComposerStore } from "../../stores/composer";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useLiveActivityStore } from "../../stores/liveActivity";
+import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 
 /**
  * Create activity strip (Mold Studio) — present tense only.
@@ -48,6 +49,7 @@ const toasts = useToastStore();
 const composer = useComposerStore();
 const draft = useSequenceDraftStore();
 const liveActivity = useLiveActivityStore();
+const openLiveWork = useOpenLiveWork();
 
 function selectPrint(job: Job) {
   generation.select(job.clientId);
@@ -313,7 +315,7 @@ function deleteConfirmed() {
       </button>
     </div>
 
-    <LiveActivityList :rows="sharedRows" />
+    <LiveActivityList :rows="sharedRows" interactive @select="openLiveWork" />
 
     <!-- In-flight sequence rows (merged jobs surface) -->
     <SequenceJobRow
