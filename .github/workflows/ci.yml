@@ -369,6 +369,12 @@ jobs:
             ~/.cudaforge
             ${{ github.workspace }}/.flash-attn-kernels
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # candle-flash-attn canonicalizes CANDLE_FLASH_ATTN_BUILD_DIR and panics
+      # if it is missing rather than creating it, so it has to exist before the
+      # first cargo invocation. This runs after the cache restore: on a warm
+      # run the directory is already populated and mkdir -p is a no-op.
+      - name: Create the kernel build directory
+        run: mkdir -p "$CANDLE_FLASH_ATTN_BUILD_DIR"
       # `--all-targets` on `-p mold-ai` would NOT compile mold-inference's test
       # module (it builds that crate as a plain dependency lib), so the gate has
       # to name the inference crate directly to cover its `#[cfg(test)]` code.
