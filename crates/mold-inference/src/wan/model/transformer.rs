@@ -736,7 +736,23 @@ impl WanTransformer {
     ///
     /// Returns the predicted flow at `[batch, out_dim, frames, height, width]`.
     pub fn forward(&self, x: &Tensor, timestep: &Tensor, context: &Tensor) -> Result<Tensor> {
-        let (batch, channels, frames, height, width) = x.dims5()?;
+        let rope = self.rope_freqs_for(x)?;
+        self.forward_with_rope(x, timestep, context, &rope)
+    }
+
+    /// Build the rotation tables for a latent's patch grid.
+    ///
+    /// Split out so a denoise loop can hoist this above the step loop: the
+    /// tables depend only on the grid shape, which is fixed for the whole
+    /// sampling run, and at 720p they cost ~38 MB plus a few million
+    /// `f64`->`f32` conversions per call.
+    pub fn rope_freqs_for(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
+        let grid = self.patch_grid(x)?;
+        self.rope.freqs(grid.0, grid.1, grid.2, x.device())
+    }
+
+    fn patch_grid(&self, x: &Tensor) -> Result<(usize, usize, usize)> {
+        let (_, channels, frames, height, width) = x.dims5()?;
         if channels != self.config.in_dim {
             bail!(
                 "Wan DiT: expected {} latent channels, got {channels}",
@@ -750,9 +766,27 @@ impl WanTransformer {
                 self.config.patch_size
             );
         }
-        let grid = (frames / pt, height / ph, width / pw);
+        Ok((frames / pt, height / ph, width / pw))
+    }
 
-        let (cos, sin) = self.rope.freqs(grid.0, grid.1, grid.2, x.device())?;
+    /// [`Self::forward`] with the rotation tables supplied by the caller.
+    pub fn forward_with_rope(
+        &self,
+        x: &Tensor,
+        timestep: &Tensor,
+        context: &Tensor,
+        rope: &(Tensor, Tensor),
+    ) -> Result<Tensor> {
+        let batch = x.dim(0)?;
+        let grid = self.patch_grid(x)?;
+        let (cos, sin) = (&rope.0, &rope.1);
+        let expected_tokens = grid.0 * grid.1 * grid.2;
+        if cos.dim(0)? != expected_tokens {
+            bail!(
+                "Wan DiT: rotation tables cover {} tokens but this latent has {expected_tokens}",
+                cos.dim(0)?
+            );
+        }
         let mut hidden = self.patchify(x)?.to_dtype(self.dtype)?;
         let (temb, timestep_proj) = self.embed_timestep(timestep, batch)?;
 
@@ -764,7 +798,7 @@ impl WanTransformer {
         )?;
 
         for block in &self.blocks {
-            hidden = block.forward(&hidden, &context, &timestep_proj, &cos, &sin)?;
+            hidden = block.forward(&hidden, &context, &timestep_proj, cos, sin)?;
         }
 
         // Head: a 2-entry modulation table over the *unprojected* time

@@ -4774,7 +4774,10 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
 /// (`Wan2.2/wan/configs/shared_config.py`). Applied when a request leaves
 /// `negative_prompt` unset: these checkpoints were tuned against it, and an
 /// empty uncond quietly degrades CFG quality.
-const WAN_DEFAULT_NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+/// Upstream's tuned Chinese negative prompt, shared by every Wan preset
+/// (`Wan2.2/wan/configs/shared_config.py`). The manifests plant it in their
+/// defaults; the engine falls back to it when a request arrives without one.
+pub const WAN_DEFAULT_NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
 
 /// Shared Wan component files: the UMT5-XXL text encoder (identical across
 /// every Wan 2.1/2.2 variant — Comfy-Org's safetensors repack of upstream's
@@ -4802,9 +4805,8 @@ fn shared_wan_files() -> Vec<ModelFile> {
 }
 
 /// Wan 2.1/2.2 video manifests (ComfyUI-repack weight layout — the format the
-/// GGUF/LoRA ecosystem shares). Hidden until the Wan engine lands: the files
-/// are pullable and the contracts are advertised, but `mold run` has no
-/// factory arm yet, so listing them would offer a model that cannot load.
+/// GGUF/LoRA ecosystem shares). Text-to-video is live; image conditioning on
+/// TI2V-5B follows in a later layer.
 fn wan_manifests() -> Vec<ModelManifest> {
     let defaults_480p = ManifestDefaults {
         // ComfyUI's proven Wan 2.1 recipe (30 steps, cfg 6, uni_pc); upstream
@@ -4863,7 +4865,7 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults_480p,
-            hidden: true,
+            hidden: false,
         },
         ModelManifest {
             name: "wan22-ti2v-5b:fp16".to_string(),
@@ -4895,7 +4897,7 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults_ti2v,
-            hidden: true,
+            hidden: false,
         },
     ]
 }
@@ -6205,8 +6207,8 @@ mod tests {
             let manifest = find_manifest(name).unwrap_or_else(|| panic!("{name} must resolve"));
             assert_eq!(manifest.family, "wan");
             assert!(
-                manifest.hidden,
-                "{name} stays hidden until the engine lands"
+                !manifest.hidden,
+                "{name} is listable now that the wan engine exists"
             );
             for component in [
                 ModelComponent::Transformer,

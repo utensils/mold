@@ -405,6 +405,43 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         ),
     },
     FamilyBatchCapability {
+        family: "wan",
+        aliases: &[],
+        backends: BackendApplicability {
+            cuda: BackendQualification::Supported,
+            metal: BackendQualification::Unsupported,
+            cpu: BackendQualification::CorrectnessOnly,
+        },
+        placement: ComponentPlacementCapability {
+            // UMT5-XXL is 11.4 GB at fp16 and is dropped before denoise, so it
+            // can be encoded on CPU when the GPU is tight.
+            text_encoder_cpu: true,
+            vae_cpu: false,
+            audio_components_cpu: false,
+        },
+        // Block streaming is not wired for the Wan DiT yet; the 1.3B and 5B
+        // checkpoints fit a 24 GB card whole once the encoder is gone.
+        block_offload: false,
+        tiled_vae: TiledVaeCapability::Unsupported,
+        execution: SINGLETON,
+        determinism: EXACT,
+        seed_contract: CPU_SEED,
+        media: MediaKind::Video,
+        workflows: WorkflowCapabilities {
+            // Text-to-video only in this layer; I2V/TI2V conditioning, chained
+            // clips, generated audio, and LoRA all arrive later.
+            source: false,
+            edit_references: false,
+            lora: false,
+            generated_audio: false,
+            chain: false,
+        },
+        tier1: TIER1,
+        tier2: deep(
+            "crates/mold-inference/src/wan/pipeline.rs::tiny_end_to_end_denoise_and_decode_produces_frames",
+        ),
+    },
+    FamilyBatchCapability {
         family: "wuerstchen",
         aliases: &["wuerstchen-v2"],
         backends: PORTABLE_BACKENDS,
@@ -488,6 +525,7 @@ mod tests {
             "qwen-image-edit",
             "ltx-video",
             "ltx2",
+            "wan",
             "wuerstchen",
         ];
         assert_eq!(

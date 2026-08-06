@@ -17,6 +17,7 @@ const FACTORY_FAMILIES: &[&str] = &[
     "qwen-image-edit",
     "ltx-video",
     "ltx2",
+    "wan",
     "wuerstchen",
 ];
 
@@ -257,6 +258,23 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             MediaKind::Image,
             WorkflowCapabilities {
                 source: true,
+                edit_references: false,
+                lora: false,
+                generated_audio: false,
+                chain: false,
+            },
+        ),
+        (
+            "wan",
+            ComponentPlacementCapability {
+                text_encoder_cpu: true,
+                vae_cpu: false,
+                audio_components_cpu: false,
+            },
+            false,
+            MediaKind::Video,
+            WorkflowCapabilities {
+                source: false,
                 edit_references: false,
                 lora: false,
                 generated_audio: false,
