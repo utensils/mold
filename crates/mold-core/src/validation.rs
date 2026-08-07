@@ -1441,7 +1441,7 @@ fn validate_generate_request_after_activation(
                     .to_string(),
             );
         }
-        if req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty()) {
+        if req.lora.is_some() || req.loras.is_some() {
             return Err("MiniMax H3 does not support LoRA".to_string());
         }
         if req.upscale_model.is_some() {
@@ -1465,6 +1465,14 @@ fn validate_generate_request_after_activation(
         {
             return Err("source_image must be a PNG or JPEG image".to_string());
         }
+        if req.source_image.is_some()
+            && (!req.strength.is_finite() || !(0.0..=1.0).contains(&req.strength))
+        {
+            return Err(format!(
+                "strength ({}) must be a finite value in range [0.0, 1.0] when source_image is provided",
+                req.strength
+            ));
+        }
         if req
             .edit_images
             .as_ref()
@@ -1472,12 +1480,24 @@ fn validate_generate_request_after_activation(
         {
             return Err("edit_images must contain only PNG or JPEG images".to_string());
         }
+        if req.edit_images.as_ref().is_some_and(Vec::is_empty) {
+            return Err("edit_images must not be empty when provided".to_string());
+        }
         if req.keyframes.as_ref().is_some_and(|keyframes| {
             keyframes
                 .iter()
                 .any(|keyframe| !is_valid_image_format(&keyframe.image))
         }) {
             return Err("keyframes must contain only PNG or JPEG images".to_string());
+        }
+        if req.keyframes.as_ref().is_some_and(Vec::is_empty) {
+            return Err("keyframes must not be empty when provided".to_string());
+        }
+        if req.extend_overlap_frames.is_some() {
+            return Err(
+                "extend_overlap_frames requires extend_video or extend_video_path, which MiniMax H3 does not support"
+                    .to_string(),
+            );
         }
         crate::minimax_h3::validate_request_contract(req, task)
             .map(|_| ())
@@ -3058,6 +3078,59 @@ mod tests {
             validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
                 .unwrap_err();
         assert!(error.contains("does not support LoRA"), "got: {error}");
+
+        req.lora = None;
+        req.loras = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("does not support LoRA"), "got: {error}");
+    }
+
+    #[test]
+    fn h3_post_activation_preserves_source_and_extend_invariants() {
+        for strength in [-1.0, 1.01, f64::NAN] {
+            let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+            req.source_image = Some(png_bytes());
+            req.strength = strength;
+            let error =
+                validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                    .unwrap_err();
+            assert!(error.contains("finite value in range"), "got: {error}");
+        }
+
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.extend_overlap_frames = Some(9);
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("extend_overlap_frames requires extend_video"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_empty_conditioning_collections() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.edit_images = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("edit_images must not be empty"),
+            "got: {error}"
+        );
+
+        req.edit_images = None;
+        req.keyframes = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("keyframes must not be empty"),
+            "got: {error}"
+        );
     }
 
     #[test]
