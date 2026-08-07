@@ -332,6 +332,8 @@ pub struct ExecutionSemanticConfig {
     pub qwen2_variant: Option<String>,
     pub qwen2_text_encoder_mode: Option<String>,
     pub ltx2_gemma_variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h3_factory_authority_sha256: Option<String>,
     pub attention_backend: SemanticAttentionBackend,
     pub attention_chunk: SemanticAttentionChunk,
     pub vae_tiling: SemanticVaeTiling,
@@ -497,6 +499,7 @@ impl ExecutionSemanticConfig {
             selected_qwen3_paths: _,
             selected_qwen2_path: _,
             selected_gemma_paths: _,
+            h3_factory_authority,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -523,6 +526,9 @@ impl ExecutionSemanticConfig {
             qwen2_variant: qwen2_variant.clone(),
             qwen2_text_encoder_mode: qwen2_text_encoder_mode.clone(),
             ltx2_gemma_variant: ltx2_gemma_variant.clone(),
+            h3_factory_authority_sha256: h3_factory_authority
+                .as_ref()
+                .map(|authority| authority.identity_sha256().to_string()),
             attention_backend: match attention_backend {
                 mold_inference::attention::AttentionBackend::Math => SemanticAttentionBackend::Math,
                 mold_inference::attention::AttentionBackend::Flash => {
@@ -3556,6 +3562,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_qwen3_paths,
             selected_qwen2_path,
             selected_gemma_paths,
+            h3_factory_authority,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -3563,8 +3570,8 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             vae_dtype,
         } = self.0;
 
-        formatter
-            .debug_struct("FrozenEngineConfig")
+        let mut debug = formatter.debug_struct("FrozenEngineConfig");
+        debug
             .field("family", family)
             .field("is_schnell", is_schnell)
             .field("is_turbo", is_turbo)
@@ -3577,7 +3584,11 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             .field("selected_t5_path", selected_t5_path)
             .field("selected_qwen3_paths", selected_qwen3_paths)
             .field("selected_qwen2_path", selected_qwen2_path)
-            .field("selected_gemma_paths", selected_gemma_paths)
+            .field("selected_gemma_paths", selected_gemma_paths);
+        if let Some(authority) = h3_factory_authority {
+            debug.field("h3_factory_authority", &authority.identity_sha256());
+        }
+        debug
             .field("runtime_environment", runtime_environment)
             .field("attention_backend", attention_backend)
             .field("attention_chunk", attention_chunk)
@@ -5621,6 +5632,7 @@ mod tests {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,
             attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
@@ -5682,6 +5694,7 @@ mod tests {
                 qwen2_variant: None,
                 qwen2_text_encoder_mode: None,
                 ltx2_gemma_variant: None,
+                h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
                 vae_tiling: SemanticVaeTiling::Auto,

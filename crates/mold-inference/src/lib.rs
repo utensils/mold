@@ -18,6 +18,7 @@ pub mod expand;
 mod factory;
 pub mod flux;
 pub mod flux2;
+mod h3_factory;
 mod image;
 pub(crate) mod img2img;
 pub mod img_utils;
@@ -69,6 +70,10 @@ pub use factory::{
 };
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;
+pub use h3_factory::{
+    FrozenH3FactoryAuthority, H3FactoryAuthorityInput, H3FactoryComponentAuthority,
+    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
+};
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;

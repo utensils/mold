@@ -11,12 +11,12 @@ use mold_core::minimax_h3::{self, GenerationReferencePreparedShape};
 use mold_core::{GenerateRequest, GpuBackend};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-pub(crate) const H3_ADMISSION_SCHEMA_VERSION: u32 = 1;
+pub(crate) const H3_ADMISSION_SCHEMA_VERSION: u32 = 2;
 pub(crate) const H3_MAIN_BLOCK_COUNT: usize = 50;
 pub(crate) const H3_QWEN_SELECTED_LANGUAGE_LAYERS: u32 = 50;
 pub(crate) const H3_QWEN_MODEL_MAX_ROWS: u64 = 262_144;
@@ -825,6 +825,7 @@ impl H3QualifiedRuntimeFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3AdmissionDevice {
     pub id: String,
+    pub ordinal: usize,
     pub backend: GpuBackend,
     pub compute_capability: Option<(u16, u16)>,
     pub available_vram_bytes: u64,
@@ -926,9 +927,12 @@ pub(crate) struct H3MemoryBreakdown {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct H3FrozenExecutionPlan {
     pub schema_version: u32,
+    pub canonical_model: String,
     pub task: H3FrozenTask,
     pub layout: H3PublishedLayout,
     pub device_id: String,
+    pub device_ordinal: usize,
+    pub compute_capability: (u16, u16),
     pub checkpoint_fingerprint: String,
     pub config_fingerprint: String,
     pub header_fingerprint: String,
@@ -1263,9 +1267,16 @@ pub(crate) fn plan_h3_admission(
     let artifact_fingerprint = fingerprint(artifacts)?;
     let mut plan = H3FrozenExecutionPlan {
         schema_version: H3_ADMISSION_SCHEMA_VERSION,
+        canonical_model: artifacts.model.clone(),
         task,
         layout: artifacts.layout,
         device_id: device.id.clone(),
+        device_ordinal: device.ordinal,
+        compute_capability: device.compute_capability.ok_or_else(|| {
+            H3AdmissionError::DeviceUnsupported(
+                "H3 CUDA admission requires an exact compute capability".to_string(),
+            )
+        })?,
         checkpoint_fingerprint: checkpoint.checkpoint_fingerprint.clone(),
         config_fingerprint: checkpoint.config_fingerprint.clone(),
         header_fingerprint: checkpoint.header_fingerprint.clone(),
@@ -1335,6 +1346,191 @@ pub(crate) fn plan_h3_admission(
     plan.execution_fingerprint = fingerprint(&plan)?;
     plan.validate_execution_fingerprint()?;
     Ok(plan)
+}
+
+/// Bind a fully admitted server plan into the inference factory without
+/// exposing paths or bytes and without activating an H3 loader.
+///
+/// Construction is transactional: `engine_config` is mutated only after the
+/// execution fingerprint, exact CUDA route, component set, attention evidence,
+/// streaming policy, and layout-specific quantization all agree.
+pub(crate) fn bind_h3_factory_authority(
+    plan: &H3FrozenExecutionPlan,
+    artifacts: &H3ArtifactInventory,
+    checkpoint: &H3CheckpointMemoryFacts,
+    device: &H3AdmissionDevice,
+    engine_config: &mut mold_inference::FrozenEngineConfig,
+) -> Result<(), H3AdmissionError> {
+    plan.validate_execution_fingerprint()?;
+    artifacts.validate_landed()?;
+    checkpoint.validate(artifacts)?;
+    let compute_capability = device.compute_capability.ok_or_else(|| {
+        H3AdmissionError::DeviceUnsupported(
+            "H3 factory binding requires an exact CUDA compute capability".to_string(),
+        )
+    })?;
+    if plan.schema_version != H3_ADMISSION_SCHEMA_VERSION
+        || plan.canonical_model != artifacts.model
+        || plan.task != artifacts.task
+        || plan.layout != artifacts.layout
+        || plan.device_id != device.id
+        || plan.device_ordinal != device.ordinal
+        || plan.compute_capability != compute_capability
+        || device.backend != GpuBackend::Cuda
+        || plan.checkpoint_fingerprint != checkpoint.checkpoint_fingerprint
+        || plan.config_fingerprint != checkpoint.config_fingerprint
+        || plan.header_fingerprint != checkpoint.header_fingerprint
+        || plan.adaln != checkpoint.adaln
+        || plan.quantization != checkpoint.quantization
+        || plan.artifact_fingerprint != fingerprint(artifacts)?
+    {
+        return Err(H3AdmissionError::InvalidRuntimeFacts(
+            "H3 server admission and factory authorities disagree".to_string(),
+        ));
+    }
+    if plan.task != H3FrozenTask::Fl2va {
+        return Err(H3AdmissionError::InvalidRuntimeFacts(
+            "the current H3 Candle factory authority is FL2VA-only".to_string(),
+        ));
+    }
+    if !minimax_h3::is_family(&engine_config.family) {
+        return Err(H3AdmissionError::InvalidRuntimeFacts(
+            "H3 admission cannot bind a non-H3 frozen engine family".to_string(),
+        ));
+    }
+    let conditioner_placement = match plan.qwen_placement {
+        H3QwenPlacement::AssignedGpuThenDrop => {
+            mold_inference::H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        }
+        H3QwenPlacement::HostCpuThenDrop => {
+            mold_inference::H3FactoryConditionerPlacement::HostCpuThenDrop
+        }
+    };
+    let quantization = match (&plan.quantization, &plan.adaln) {
+        (H3QuantizationPolicy::None, H3AdaLnPolicy::FullProjection) => {
+            mold_inference::H3FactoryQuantizationAuthority::OfficialBf16
+        }
+        (
+            H3QuantizationPolicy::Int8ConvrotNvfp4Awq {
+                transformer_policy_fingerprint,
+                qwen_policy_fingerprint,
+            },
+            H3AdaLnPolicy::PrunedCurve {
+                table_fingerprint, ..
+            },
+        ) => mold_inference::H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256: transformer_policy_fingerprint.clone(),
+            qwen_policy_sha256: qwen_policy_fingerprint.clone(),
+            pruned_adaln_table_sha256: table_fingerprint.clone(),
+        },
+        _ => {
+            return Err(H3AdmissionError::InvalidCheckpointFacts(
+                "H3 factory layout, AdaLN, and quantization authorities disagree".to_string(),
+            ));
+        }
+    };
+    let components = h3_factory_component_authorities(plan, artifacts, checkpoint)?;
+    let authority = mold_inference::FrozenH3FactoryAuthority::new_contract_only(
+        mold_inference::H3FactoryAuthorityInput {
+            model: artifacts.model.clone(),
+            device_id: plan.device_id.clone(),
+            device_ordinal: plan.device_ordinal,
+            compute_capability,
+            execution_fingerprint: plan.execution_fingerprint.clone(),
+            conditioner_placement,
+            qwen_parameter_bytes: checkpoint.qwen_device_bytes,
+            qwen_activation_workspace_bytes: plan.memory.qwen_activation_bytes,
+            resident_block_count: plan.resident_block_count,
+            prefetch_depth: plan.prefetch_depth,
+            attention_backend: engine_config.attention_backend,
+            attention_chunk: engine_config.attention_chunk,
+            attention_kernel_identity: plan.attention.kernel_identity.clone(),
+            attention_qualification_sha256: plan.attention.qualification_fingerprint.clone(),
+            attention_full_noncausal: plan.attention.full_noncausal,
+            attention_lossless: plan.attention.lossless,
+            attention_head_count: plan.attention.head_count,
+            attention_head_dim: plan.attention.head_dim,
+            block_offload: true,
+            quantization,
+            components,
+        },
+    )
+    .map_err(|error| H3AdmissionError::InvalidRuntimeFacts(error.to_string()))?;
+    engine_config.h3_factory_authority = Some(authority);
+    Ok(())
+}
+
+fn h3_factory_component_authorities(
+    plan: &H3FrozenExecutionPlan,
+    artifacts: &H3ArtifactInventory,
+    checkpoint: &H3CheckpointMemoryFacts,
+) -> Result<Vec<mold_inference::H3FactoryComponentAuthority>, H3AdmissionError> {
+    use mold_inference::H3FactoryComponentRole as FactoryRole;
+
+    let mut grouped = BTreeMap::<FactoryRole, Vec<&H3ArtifactFact>>::new();
+    for artifact in &artifacts.artifacts {
+        let role = match &artifact.role {
+            H3ArtifactRole::QwenShard(_) | H3ArtifactRole::ProcessorAsset(_) => {
+                FactoryRole::Conditioner
+            }
+            H3ArtifactRole::TransformerShard(_)
+            | H3ArtifactRole::TaskConfig(_)
+            | H3ArtifactRole::VideoScheduler
+            | H3ArtifactRole::AudioScheduler
+            | H3ArtifactRole::QuantizationSidecar
+            | H3ArtifactRole::PrunedAdaLnTable => FactoryRole::Transformer,
+            H3ArtifactRole::VideoVaeShard(_) => FactoryRole::VisualVae,
+            H3ArtifactRole::AudioVae => FactoryRole::AudioVae,
+            H3ArtifactRole::SharedConfig(_) => {
+                if artifact.source_path.starts_with("text_encoder/") {
+                    FactoryRole::Conditioner
+                } else if artifact.source_path.starts_with("vae/") {
+                    FactoryRole::VisualVae
+                } else if artifact.source_path.starts_with("audio_vae/") {
+                    FactoryRole::AudioVae
+                } else {
+                    FactoryRole::Transformer
+                }
+            }
+        };
+        grouped.entry(role).or_default().push(artifact);
+    }
+
+    [
+        FactoryRole::Conditioner,
+        FactoryRole::Transformer,
+        FactoryRole::VisualVae,
+        FactoryRole::AudioVae,
+    ]
+    .into_iter()
+    .map(|role| {
+        let members = grouped.get(&role).ok_or_else(|| {
+            H3AdmissionError::InvalidArtifactFacts(format!(
+                "H3 factory component {role:?} has no landed artifacts"
+            ))
+        })?;
+        let role_id = match role {
+            FactoryRole::Conditioner => "conditioner",
+            FactoryRole::Transformer => "transformer",
+            FactoryRole::VisualVae => "visual-vae",
+            FactoryRole::AudioVae => "audio-vae",
+        };
+        let content_sha256 = fingerprint(&(
+            "mold.minimax-h3.logical-component-content.v1",
+            role_id,
+            members,
+        ))?;
+        let validation_sha256 = fingerprint(&(
+            "mold.minimax-h3.logical-component-validation.v1",
+            role_id,
+            plan,
+            checkpoint,
+            members,
+        ))?;
+        mold_inference::H3FactoryComponentAuthority::new(role, content_sha256, validation_sha256)
+            .map_err(|error| H3AdmissionError::InvalidArtifactFacts(error.to_string()))
+    })
+    .collect()
 }
 
 fn choose_streaming(
@@ -1489,7 +1685,7 @@ fn fingerprint(value: &impl Serialize) -> Result<String, H3AdmissionError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| H3AdmissionError::InvalidRuntimeFacts(error.to_string()))?;
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.admission.v1\0");
+    hash.update(b"mold.minimax-h3.admission.v2\0");
     hash.update(bytes);
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -1657,6 +1853,7 @@ mod tests {
     fn cuda(vram: u64) -> H3AdmissionDevice {
         H3AdmissionDevice {
             id: "gpu-0".to_string(),
+            ordinal: 0,
             backend: GpuBackend::Cuda,
             compute_capability: Some((8, 9)),
             available_vram_bytes: vram,
@@ -2096,6 +2293,185 @@ mod tests {
         tampered.memory.predicted_vram_peak_bytes -= 1;
         let error = tampered.validate_execution_fingerprint().unwrap_err();
         assert!(matches!(error, H3AdmissionError::InvalidRuntimeFacts(_)));
+    }
+
+    #[test]
+    fn admitted_fl2va_plan_binds_exact_factory_route_and_component_authority() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let device = cuda(24 * GIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut engine_config = mold_inference::FrozenEngineConfig::resolve(
+            minimax_h3::FL2VA_COMFY,
+            &mold_core::Config::default(),
+        );
+        engine_config.family = minimax_h3::FAMILY.to_string();
+
+        bind_h3_factory_authority(&plan, &inventory, &checkpoint, &device, &mut engine_config)
+            .unwrap();
+        let authority = engine_config.h3_factory_authority.as_ref().unwrap();
+        assert_eq!(plan.canonical_model, minimax_h3::FL2VA_COMFY);
+        assert_eq!(authority.canonical_model(), minimax_h3::FL2VA_COMFY);
+        assert_eq!(authority.device_id(), plan.device_id);
+        assert_eq!(authority.device_ordinal(), plan.device_ordinal);
+        assert_eq!(plan.compute_capability, (8, 9));
+        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(
+            authority.execution_fingerprint(),
+            plan.execution_fingerprint
+        );
+        assert_eq!(
+            authority.attention_qualification_sha256(),
+            runtime.qualification_fingerprint
+        );
+        assert_eq!(
+            authority.attention_backend(),
+            engine_config.attention_backend
+        );
+        assert_eq!(authority.attention_chunk(), engine_config.attention_chunk);
+        assert_eq!(
+            authority.qwen_parameter_bytes(),
+            checkpoint.qwen_device_bytes
+        );
+        assert_eq!(
+            authority.qwen_activation_workspace_bytes(),
+            plan.memory.qwen_activation_bytes
+        );
+        assert_eq!(
+            authority.resident_block_count(),
+            plan.resident_block_count as usize
+        );
+        assert_eq!(authority.prefetch_depth(), plan.prefetch_depth as usize);
+        assert_eq!(authority.component_set_identity_sha256().len(), 64);
+        assert!(authority.block_offload());
+        assert!(matches!(
+            authority.quantization(),
+            mold_inference::H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq { .. }
+        ));
+        let semantic =
+            crate::execution_plan::ExecutionSemanticConfig::from_frozen(&engine_config).unwrap();
+        assert_eq!(
+            semantic.h3_factory_authority_sha256.as_deref(),
+            Some(authority.identity_sha256())
+        );
+        assert!(!minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available);
+    }
+
+    #[test]
+    fn official_bf16_admission_binds_without_inheriting_comfy_quantization() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_OFFICIAL);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let device = cuda(160 * GIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_OFFICIAL, 124);
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 512 * GIB,
+                available_bytes: 512 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut engine_config = mold_inference::FrozenEngineConfig::resolve(
+            minimax_h3::FL2VA_OFFICIAL,
+            &mold_core::Config::default(),
+        );
+        engine_config.family = minimax_h3::FAMILY.to_string();
+
+        bind_h3_factory_authority(&plan, &inventory, &checkpoint, &device, &mut engine_config)
+            .unwrap();
+        let authority = engine_config.h3_factory_authority.as_ref().unwrap();
+        assert_eq!(authority.canonical_model(), minimax_h3::FL2VA_OFFICIAL);
+        assert_eq!(authority.compute_capability(), (8, 9));
+        assert!(matches!(
+            authority.quantization(),
+            mold_inference::H3FactoryQuantizationAuthority::OfficialBf16
+        ));
+    }
+
+    #[test]
+    fn mutated_admission_or_component_facts_never_partially_bind_the_factory() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let device = cuda(24 * GIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut engine_config = mold_inference::FrozenEngineConfig::resolve(
+            minimax_h3::FL2VA_COMFY,
+            &mold_core::Config::default(),
+        );
+        engine_config.family = minimax_h3::FAMILY.to_string();
+
+        let mut rerouted = plan.clone();
+        rerouted.device_ordinal += 1;
+        assert!(bind_h3_factory_authority(
+            &rerouted,
+            &inventory,
+            &checkpoint,
+            &device,
+            &mut engine_config,
+        )
+        .is_err());
+        assert!(engine_config.h3_factory_authority.is_none());
+
+        let mut changed_device = device.clone();
+        changed_device.compute_capability = Some((9, 0));
+        assert!(bind_h3_factory_authority(
+            &plan,
+            &inventory,
+            &checkpoint,
+            &changed_device,
+            &mut engine_config,
+        )
+        .is_err());
+        assert!(engine_config.h3_factory_authority.is_none());
+
+        let mut changed_artifacts = inventory.clone();
+        changed_artifacts.artifacts[0].content_sha256 = sha(254);
+        assert!(bind_h3_factory_authority(
+            &plan,
+            &changed_artifacts,
+            &checkpoint,
+            &device,
+            &mut engine_config,
+        )
+        .is_err());
+        assert!(engine_config.h3_factory_authority.is_none());
     }
 
     #[test]
