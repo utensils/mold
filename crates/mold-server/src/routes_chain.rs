@@ -813,7 +813,8 @@ pub(crate) fn validate_and_normalize_chain_family(
     } else {
         mold_core::validation::Ltx2SpatialComposition::SinglePass
     };
-    mold_core::validate_generation_dimensions_composed(
+    mold_core::validate_generation_dimensions_for_model(
+        &req.model,
         req.width,
         req.height,
         (!family.is_empty()).then_some(family.as_str()),
@@ -1788,6 +1789,22 @@ mod tests {
 
         validate_and_normalize_chain_family(&config, &mut request)
             .expect("custom 32px-aligned LTX-2 canvas should be admitted");
+    }
+
+    /// Dimension admission on the chain route is per model, not per family:
+    /// `wan22-ti2v-5b`'s 2.2 VAE needs a 32px grid, so a 16px-only canvas is
+    /// named as off-grid instead of surviving to a later check.
+    #[test]
+    fn chain_preflight_rejects_wan22_ti2v_5b_16px_canvas() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "wan22-ti2v-5b".into();
+        request.width = 1280;
+        request.height = 720;
+        let config = mold_core::Config::default();
+
+        let error = validate_and_normalize_chain_family(&config, &mut request)
+            .expect_err("the 5B must reject a canvas off its 32px grid");
+        assert!(error.error.contains("multiples of 32"), "{}", error.error);
     }
 
     struct HandlerFailingExecutor;
