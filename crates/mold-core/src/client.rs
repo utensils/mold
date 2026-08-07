@@ -25,23 +25,26 @@ const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 pub struct MoldClient {
     base_url: String,
     client: Client,
+    api_key_configured: bool,
 }
 
 impl MoldClient {
     pub fn new(base_url: &str) -> Self {
-        let client = build_client(None);
+        let (client, api_key_configured) = build_client(None);
         Self {
             base_url: normalize_host(base_url),
             client,
+            api_key_configured,
         }
     }
 
     /// Create a client with an explicit API key for authentication.
     pub fn with_api_key(base_url: &str, api_key: String) -> Self {
-        let client = build_client(Some(&api_key));
+        let (client, api_key_configured) = build_client(Some(&api_key));
         Self {
             base_url: normalize_host(base_url),
             client,
+            api_key_configured,
         }
     }
 
@@ -49,11 +52,17 @@ impl MoldClient {
         let base_url =
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
-        let client = build_client(api_key.as_deref());
+        let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
             client,
+            api_key_configured,
         }
+    }
+
+    /// Whether this client actually installed a non-empty API-key header.
+    pub fn has_api_key(&self) -> bool {
+        self.api_key_configured
     }
 
     /// Create a request-bound MiniMax H3 reference upload session.
@@ -1497,15 +1506,17 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
 }
 
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
-fn build_client(api_key: Option<&str>) -> Client {
+fn build_client(api_key: Option<&str>) -> (Client, bool) {
     let mut builder = Client::builder();
+    let mut api_key_configured = false;
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
         match reqwest::header::HeaderValue::from_str(key) {
-            Ok(val) => {
+            Ok(val) if !key.trim().is_empty() => {
                 headers.insert("x-api-key", val);
+                api_key_configured = true;
             }
-            Err(_) => {
+            _ => {
                 eprintln!(
                     "warning: MOLD_API_KEY contains characters invalid for an HTTP header; \
                      authentication header will not be sent"
@@ -1514,7 +1525,10 @@ fn build_client(api_key: Option<&str>) -> Client {
         }
         builder = builder.default_headers(headers);
     }
-    builder.build().unwrap_or_else(|_| Client::new())
+    match builder.build() {
+        Ok(client) => (client, api_key_configured),
+        Err(_) => (Client::new(), false),
+    }
 }
 
 /// Normalize a host string into a full URL.
@@ -1604,6 +1618,19 @@ mod tests {
     fn test_new_trims_trailing_slash() {
         let client = MoldClient::new("http://localhost:7680/");
         assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn api_key_state_tracks_only_an_installed_header() {
+        assert!(!MoldClient::new("http://localhost:7680").has_api_key());
+        assert!(
+            MoldClient::with_api_key("http://localhost:7680", "sekrit".to_string()).has_api_key()
+        );
+        assert!(!MoldClient::with_api_key("http://localhost:7680", "".to_string()).has_api_key());
+        assert!(
+            !MoldClient::with_api_key("http://localhost:7680", "bad\nkey".to_string())
+                .has_api_key()
+        );
     }
 
     #[test]
@@ -1770,7 +1797,9 @@ mod tests {
                     "mime_type": "image/png",
                     "width": 1,
                     "height": 1
-                }
+                },
+                "request_scope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "session_complete": true
             })))
             .expect(1)
             .mount(&server)
@@ -1793,7 +1822,9 @@ mod tests {
                     "mime_type": "image/png",
                     "width": 16,
                     "height": 16
-                }
+                },
+                "request_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "session_complete": true
             })))
             .expect(1)
             .mount(&server)
@@ -1817,7 +1848,9 @@ mod tests {
                     "duration_ms": 2000,
                     "sample_rate": 32000,
                     "channels": 2
-                }
+                },
+                "request_scope_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "session_complete": true
             })))
             .expect(1)
             .mount(&server)

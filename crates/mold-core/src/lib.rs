@@ -24,9 +24,11 @@ pub mod manifest;
 pub mod media_paths;
 pub mod minimax_h3;
 pub mod model_policy;
+pub mod reference_upload;
 pub mod removal;
 pub mod runpod;
 pub mod safetensors_probe;
+pub mod secure_file;
 pub mod time;
 pub mod types;
 pub mod validation;
@@ -60,6 +62,7 @@ pub use model_policy::{
     MINIMAX_H3_AUTHORIZATION_ISSUE_URL, MINIMAX_H3_AUTHORIZATION_REQUIRED,
     MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
 };
+pub use reference_upload::{ReferenceUploadLease, ReferenceUploadSource};
 pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;

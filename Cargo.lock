@@ -3174,6 +3174,7 @@ dependencies = [
  "dirs 6.0.0",
  "hf-hub",
  "indicatif 0.17.11",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
