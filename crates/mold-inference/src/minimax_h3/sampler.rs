@@ -317,6 +317,13 @@ pub(crate) fn euler_step(sample: &Tensor, velocity: &Tensor, step: H3FlowStep) -
             output_dtype.as_str()
         );
     }
+    let velocity_dtype = velocity.dtype();
+    if !matches!(velocity_dtype, DType::F16 | DType::BF16 | DType::F32) {
+        bail!(
+            "MiniMax H3 velocity must use f16, bf16, or f32, got {}",
+            velocity_dtype.as_str()
+        );
+    }
 
     // Match `1 - timestep.to(dtype=sample.dtype)` before the model output
     // promotes the x0 expression to FP32.
@@ -350,12 +357,52 @@ pub(crate) fn euler_step_pair(
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Tensor};
+    use serde::Deserialize;
 
     use super::{
         euler_step, euler_step_pair, unique_consecutive, H3DualSchedule, H3FlowStep, H3StepCount,
         H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP, H3_DEFAULT_GRID_POINTS, H3_VIDEO_SHIFT,
         H3_VISUAL_CONDITION_TIMESTEP,
     };
+
+    #[derive(Debug, Deserialize)]
+    struct SyntheticFixture {
+        scheduler: SyntheticScheduler,
+        coupled_update: SyntheticCoupledUpdate,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SyntheticScheduler {
+        grid_points: usize,
+        transformer_evaluations: usize,
+        video_shift: f32,
+        audio_shift: f32,
+        video_sigmas: Vec<f32>,
+        audio_sigmas: Vec<f32>,
+        video_timesteps: Vec<f32>,
+        audio_timesteps: Vec<f32>,
+        terminal_zero_included: bool,
+        ancestral_noise_reinjected: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SyntheticCoupledUpdate {
+        step_index: usize,
+        sample: Vec<f32>,
+        video_velocity: Vec<f32>,
+        audio_velocity: Vec<f32>,
+        video_next: Vec<f32>,
+        audio_next: Vec<f32>,
+        velocity_sign: String,
+        update_dtype: String,
+    }
+
+    fn synthetic_fixture() -> SyntheticFixture {
+        serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/minimax_h3/synthetic-v1.json"
+        ))
+        .expect("the checked-in MiniMax H3 synthetic fixture must be valid")
+    }
 
     fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
         assert_eq!(actual.len(), expected.len());
@@ -391,18 +438,20 @@ mod tests {
 
     #[test]
     fn weight_free_synthetic_v1_matches_the_pinned_oracle() {
-        // The exact float32 values in
-        // tests/fixtures/minimax_h3/synthetic-v1.json, captured from
-        // diffusers-minimax-h3@9c6a68c without model weights.
-        let schedule = H3DualSchedule::new(4).unwrap();
+        let fixture = synthetic_fixture();
+        let authority = &fixture.scheduler;
+        assert_eq!(authority.video_shift, H3_VIDEO_SHIFT);
+        assert_eq!(authority.audio_shift, H3_AUDIO_SHIFT);
+        assert!(authority.terminal_zero_included);
+        assert!(!authority.ancestral_noise_reinjected);
+
+        let schedule = H3DualSchedule::new(authority.grid_points).unwrap();
         assert_eq!(
-            schedule.video_sigmas(),
-            &[1.0, 0.959_999_9, 0.857_142_8, 0.0]
+            schedule.counts().transformer_evaluations,
+            authority.transformer_evaluations
         );
-        assert_eq!(
-            schedule.audio_sigmas(),
-            &[1.0, 0.857_142_8, 0.599_999_96, 0.0]
-        );
+        assert_eq!(schedule.video_sigmas(), authority.video_sigmas);
+        assert_eq!(schedule.audio_sigmas(), authority.audio_sigmas);
 
         let steps: Vec<_> = schedule.steps().collect();
         assert_eq!(
@@ -410,32 +459,38 @@ mod tests {
                 .iter()
                 .map(|step| step.video.timestep)
                 .collect::<Vec<_>>(),
-            vec![0.0, 0.040_000_08, 0.142_857_2]
+            authority.video_timesteps
         );
         assert_eq!(
             steps
                 .iter()
                 .map(|step| step.audio.timestep)
                 .collect::<Vec<_>>(),
-            vec![0.0, 0.142_857_2, 0.400_000_04]
+            authority.audio_timesteps
         );
 
+        let update = &fixture.coupled_update;
+        assert_eq!(update.velocity_sign, "data-ward-plus");
+        assert_eq!(update.update_dtype, "float32");
         let device = Device::Cpu;
-        let sample_values = [0.25f32, -0.5, 1.0, -2.0];
-        let video = Tensor::new(&sample_values, &device).unwrap();
-        let audio = Tensor::new(&sample_values, &device).unwrap();
-        let video_velocity = Tensor::new(&[0.5f32, 0.25, -1.5, 2.0], &device).unwrap();
-        let audio_velocity = Tensor::new(&[-0.25f32, 0.75, 0.5, -1.0], &device).unwrap();
+        let video = Tensor::new(update.sample.as_slice(), &device).unwrap();
+        let audio = Tensor::new(update.sample.as_slice(), &device).unwrap();
+        let video_velocity = Tensor::new(update.video_velocity.as_slice(), &device).unwrap();
+        let audio_velocity = Tensor::new(update.audio_velocity.as_slice(), &device).unwrap();
+        let step = steps
+            .get(update.step_index)
+            .copied()
+            .expect("fixture step must exist in its schedule");
         let (video, audio) =
-            euler_step_pair(&video, &audio, &video_velocity, &audio_velocity, steps[1]).unwrap();
+            euler_step_pair(&video, &audio, &video_velocity, &audio_velocity, step).unwrap();
         assert_close(
             &video.to_vec1::<f32>().unwrap(),
-            &[0.301_428_56, -0.474_285_72, 0.845_714_4, -1.794_285_8],
+            &update.video_next,
             f32::EPSILON,
         );
         assert_close(
             &audio.to_vec1::<f32>().unwrap(),
-            &[0.185_714_29, -0.307_142_85, 1.128_571_5, -2.257_143],
+            &update.audio_next,
             f32::EPSILON,
         );
     }
@@ -633,6 +688,10 @@ mod tests {
             timestep: 0.25,
         };
         assert!(euler_step(&sample, &velocity, inconsistent_timestep).is_err());
+
+        let integer_velocity = Tensor::new(&[1u8], &device).unwrap();
+        let valid = H3DualSchedule::new(2).unwrap().steps().next().unwrap();
+        assert!(euler_step(&sample, &integer_velocity, valid.video).is_err());
     }
 
     #[cfg(feature = "cuda")]
