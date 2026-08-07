@@ -171,9 +171,6 @@ impl FrozenH3FactoryAuthority {
     pub fn new_contract_only(input: H3FactoryAuthorityInput) -> Result<Self> {
         let model_contract = contract::capability_contract_for_model(&input.model)
             .ok_or_else(|| anyhow!("{:?} has no MiniMax H3 capability contract", input.model))?;
-        if model_contract.task != Task::Fl2va {
-            bail!("the current MiniMax H3 Candle factory authority is FL2VA-only");
-        }
         if model_contract.generation.runtime_available {
             bail!(
                 "contract-only MiniMax H3 factory authority cannot be created for a runnable contract"
@@ -294,6 +291,10 @@ impl FrozenH3FactoryAuthority {
         self.backend_plan.canonical_model()
     }
 
+    pub const fn task(&self) -> Task {
+        self.backend_plan.task()
+    }
+
     pub fn device_id(&self) -> &str {
         self.backend_plan.device_id()
     }
@@ -366,7 +367,7 @@ impl FrozenH3FactoryAuthority {
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
         if request_contract.canonical_model != self.canonical_model()
-            || request_contract.task != Task::Fl2va
+            || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
         {
@@ -384,11 +385,10 @@ impl FrozenH3FactoryAuthority {
             bail!("MiniMax H3 factory authority uses an unsupported schema version");
         }
         self.backend_plan.validate()?;
-        if self.backend_plan.task() != Task::Fl2va
-            || self.backend_plan.block_streaming().resident_block_count > 50
+        if self.backend_plan.block_streaming().resident_block_count > 50
             || self.backend_plan.block_streaming().prefetch_depth > 2
         {
-            bail!("MiniMax H3 factory authority changed its task or streaming bounds");
+            bail!("MiniMax H3 factory authority changed its streaming bounds");
         }
         if self.attention_kernel_identity.trim().is_empty()
             || !self.attention_full_noncausal
@@ -427,6 +427,7 @@ impl FrozenH3FactoryAuthority {
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
         if !contract::is_family(family)
             || request_contract.canonical_model != self.canonical_model()
+            || request_contract.task != self.task()
             || gpu_ordinal != self.device_ordinal
             || offload != self.block_offload
             || attention_backend != self.attention_backend
@@ -501,9 +502,9 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
-    fn authority() -> FrozenH3FactoryAuthority {
+    fn authority_for(model: &str) -> FrozenH3FactoryAuthority {
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: contract::FL2VA_COMFY.into(),
+            model: model.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
             compute_capability: (8, 9),
@@ -546,6 +547,10 @@ mod tests {
             .collect(),
         })
         .unwrap()
+    }
+
+    fn authority() -> FrozenH3FactoryAuthority {
+        authority_for(contract::FL2VA_COMFY)
     }
 
     #[test]
@@ -600,8 +605,26 @@ mod tests {
     }
 
     #[test]
-    fn ref2va_and_missing_components_remain_unconstructable() {
-        let mut input = H3FactoryAuthorityInput {
+    fn ref2va_contract_authority_is_distinct_while_missing_components_fail_closed() {
+        let ref2va = authority_for(contract::REF2VA_COMFY);
+        assert_eq!(ref2va.task(), Task::Ref2va);
+        assert_eq!(ref2va.canonical_model(), contract::REF2VA_COMFY);
+        assert_ne!(ref2va.identity_sha256(), authority().identity_sha256());
+        let error = ref2va
+            .validate_for_dispatch(
+                contract::REF2VA_COMFY,
+                contract::FAMILY,
+                0,
+                true,
+                AttentionBackend::Flash,
+                AttentionChunkPolicy::Off,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("registry remains runtime unavailable"));
+
+        let input = H3FactoryAuthorityInput {
             model: contract::REF2VA_COMFY.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
@@ -628,8 +651,6 @@ mod tests {
             },
             components: Vec::new(),
         };
-        assert!(FrozenH3FactoryAuthority::new_contract_only(input.clone()).is_err());
-        input.model = contract::FL2VA_COMFY.into();
         assert!(FrozenH3FactoryAuthority::new_contract_only(input).is_err());
     }
 }

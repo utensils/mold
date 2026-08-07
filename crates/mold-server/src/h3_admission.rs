@@ -448,6 +448,36 @@ impl H3PreparedRequestShape {
         qwen_output_text_rows: u64,
         qwen_vision_rows: u64,
     ) -> Result<(H3FrozenTask, Self), H3AdmissionError> {
+        Self::from_request_with_reference_authority(
+            request,
+            qwen_output_text_rows,
+            qwen_vision_rows,
+            false,
+        )
+    }
+
+    /// Build admission authority from the payload-free descriptor request
+    /// retained after authenticated Ref2VA ingress. Descriptor authorities are
+    /// invalid at the public boundary but are the only valid queue/worker form.
+    pub(crate) fn from_resolved_prepared_request(
+        request: &GenerateRequest,
+        qwen_output_text_rows: u64,
+        qwen_vision_rows: u64,
+    ) -> Result<(H3FrozenTask, Self), H3AdmissionError> {
+        Self::from_request_with_reference_authority(
+            request,
+            qwen_output_text_rows,
+            qwen_vision_rows,
+            true,
+        )
+    }
+
+    fn from_request_with_reference_authority(
+        request: &GenerateRequest,
+        qwen_output_text_rows: u64,
+        qwen_vision_rows: u64,
+        resolved_references: bool,
+    ) -> Result<(H3FrozenTask, Self), H3AdmissionError> {
         let contract =
             minimax_h3::capability_contract_for_model(&request.model).ok_or_else(|| {
                 H3AdmissionError::RequestContract(format!(
@@ -455,8 +485,12 @@ impl H3PreparedRequestShape {
                     request.model
                 ))
             })?;
-        minimax_h3::validate_request_contract(request, contract.task)
-            .map_err(|error| H3AdmissionError::RequestContract(error.to_string()))?;
+        if resolved_references {
+            minimax_h3::validate_resolved_request_contract(request, contract.task)
+        } else {
+            minimax_h3::validate_request_contract(request, contract.task)
+        }
+        .map_err(|error| H3AdmissionError::RequestContract(error.to_string()))?;
         if qwen_output_text_rows == 0 || qwen_output_text_rows > H3_QWEN_MODEL_MAX_ROWS {
             return Err(H3AdmissionError::RequestContract(format!(
                 "H3 Qwen output rows must be 1..={H3_QWEN_MODEL_MAX_ROWS}, got {qwen_output_text_rows}"
@@ -464,7 +498,8 @@ impl H3PreparedRequestShape {
         }
         let width = u64::from(request.width);
         let height = u64::from(request.height);
-        let frames = u64::from(request.frames.unwrap_or(minimax_h3::MIN_FRAMES));
+        let target_frames = request.frames.unwrap_or(minimax_h3::MIN_FRAMES);
+        let frames = u64::from(target_frames);
         let video_latent_frames = frames
             .checked_sub(u64::from(minimax_h3::FRAME_OFFSET))
             .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?
@@ -496,26 +531,23 @@ impl H3PreparedRequestShape {
             .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?
             / 3;
 
-        let reference_shapes = request
-            .references
-            .as_deref()
-            .map(minimax_h3::reference_prepared_shapes)
-            .transpose()
-            .map_err(|error| H3AdmissionError::RequestContract(error.to_string()))?
-            .unwrap_or_default();
-        let reference_metadata = request
-            .references
-            .as_deref()
-            .unwrap_or_default()
+        let references = request.references.as_deref().unwrap_or_default();
+        let reference_shapes =
+            minimax_h3::reference_prepared_shapes_for_target(references, target_frames)
+                .map_err(|error| H3AdmissionError::RequestContract(error.to_string()))?;
+        let reference_metadata = references
             .iter()
+            .zip(&reference_shapes)
             .enumerate()
-            .map(|(index, reference)| {
-                reference.redacted_metadata(index).ok_or_else(|| {
+            .map(|(index, (reference, shape))| {
+                let mut metadata = reference.redacted_metadata(index).ok_or_else(|| {
                     H3AdmissionError::RequestContract(format!(
                         "reference {} lacks a validated digest or prepared shape",
                         index + 1
                     ))
-                })
+                })?;
+                metadata.prepared_shape = Some(shape.clone());
+                Ok(metadata)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let reference_fingerprint =
@@ -1480,11 +1512,6 @@ pub(crate) fn bind_h3_factory_authority(
             "H3 server admission and factory authorities disagree".to_string(),
         ));
     }
-    if plan.task != H3FrozenTask::Fl2va {
-        return Err(H3AdmissionError::InvalidRuntimeFacts(
-            "the current H3 Candle factory authority is FL2VA-only".to_string(),
-        ));
-    }
     if !minimax_h3::is_family(&engine_config.family) {
         return Err(H3AdmissionError::InvalidRuntimeFacts(
             "H3 admission cannot bind a non-H3 frozen engine family".to_string(),
@@ -1548,6 +1575,11 @@ pub(crate) fn bind_h3_factory_authority(
         },
     )
     .map_err(|error| H3AdmissionError::InvalidRuntimeFacts(error.to_string()))?;
+    if H3FrozenTask::from(authority.task()) != plan.task {
+        return Err(H3AdmissionError::InvalidRuntimeFacts(
+            "H3 factory task authority changed during binding".to_string(),
+        ));
+    }
     engine_config.h3_factory_authority = Some(authority);
     Ok(())
 }
@@ -2133,6 +2165,46 @@ mod tests {
     }
 
     #[test]
+    fn ref2va_admission_fingerprint_and_rows_use_the_frozen_target_duration() {
+        let reference = GenerationReference::Video {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/synthetic/not-read/long-reference.mp4".to_string(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("long-reference.mp4".to_string()),
+                sha256: Some(sha(19)),
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 1280,
+            height: 720,
+            frame_count: Some(360),
+            duration_ms: 15_000,
+            fps: 24.0,
+            has_audio: true,
+            audio_duration_ms: Some(15_000),
+            audio_sample_count: Some(480_000),
+            audio_sample_rate: Some(32_000),
+            audio_channels: Some(2),
+        };
+        let mut short_request = request(minimax_h3::REF2VA_COMFY, 124);
+        short_request.references = Some(vec![reference.clone()]);
+        let (_, short) =
+            H3PreparedRequestShape::from_prepared_request(&short_request, 128, 512).unwrap();
+        let mut long_request = request(minimax_h3::REF2VA_COMFY, 362);
+        long_request.references = Some(vec![reference]);
+        let (_, long) =
+            H3PreparedRequestShape::from_prepared_request(&long_request, 128, 512).unwrap();
+
+        assert_eq!(short.reference_shapes[0].normalized_video_frames, Some(124));
+        assert_eq!(long.reference_shapes[0].normalized_video_frames, Some(360));
+        assert!(short.rows.condition_visual_rows < long.rows.condition_visual_rows);
+        assert!(short.rows.condition_audio_rows < long.rows.condition_audio_rows);
+        assert_ne!(short.reference_fingerprint, long.reference_fingerprint);
+        assert_eq!(short.conditioning_fingerprint, short.reference_fingerprint);
+        assert_eq!(long.conditioning_fingerprint, long.reference_fingerprint);
+    }
+
+    #[test]
     fn pinned_full_and_curated_stacks_charge_every_physical_artifact() {
         let official =
             H3ArtifactInventory::pending_from_manifest(minimax_h3::FL2VA_OFFICIAL).unwrap();
@@ -2530,6 +2602,65 @@ mod tests {
             Some(authority.identity_sha256())
         );
         assert!(!minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available);
+    }
+
+    #[test]
+    fn admitted_ref2va_plan_binds_exact_task_route_and_reference_authority() {
+        let inventory = landed_inventory(minimax_h3::REF2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let device = cuda(24 * GIB);
+        let mut request = request(minimax_h3::REF2VA_COMFY, 124);
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: Some(sha(17)),
+            },
+            mime_type: "image/png".to_string(),
+            width: 1024,
+            height: 768,
+        }]);
+        assert!(H3PreparedRequestShape::from_prepared_request(&request, 128, 1_024).is_err());
+        let (task, shape) =
+            H3PreparedRequestShape::from_resolved_prepared_request(&request, 128, 1_024).unwrap();
+        let reference_fingerprint = shape.reference_fingerprint.clone();
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut engine_config = mold_inference::FrozenEngineConfig::resolve(
+            minimax_h3::REF2VA_COMFY,
+            &mold_core::Config::default(),
+        );
+        engine_config.family = minimax_h3::FAMILY.to_string();
+
+        bind_h3_factory_authority(&plan, &inventory, &checkpoint, &device, &mut engine_config)
+            .unwrap();
+        let authority = engine_config.h3_factory_authority.as_ref().unwrap();
+        assert_eq!(plan.task, H3FrozenTask::Ref2va);
+        assert_eq!(authority.task(), minimax_h3::Task::Ref2va);
+        assert_eq!(authority.canonical_model(), minimax_h3::REF2VA_COMFY);
+        assert_eq!(authority.device_id(), plan.device_id);
+        assert_eq!(
+            authority.execution_fingerprint(),
+            plan.execution_fingerprint
+        );
+        assert_eq!(plan.shape.reference_fingerprint, reference_fingerprint);
+        assert!(!minimax_h3::capabilities(minimax_h3::Task::Ref2va).runtime_available);
+        assert!(
+            minimax_h3::runnable_capability_contract_for_model(minimax_h3::REF2VA_COMFY).is_none()
+        );
     }
 
     #[test]

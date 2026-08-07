@@ -926,6 +926,21 @@ impl GenerationReference {
         })
     }
 
+    /// Redacted metadata for the exact generated duration that will consume
+    /// this reference. Long reference video/audio is truncated to the target
+    /// duration, so its prepared shape must not inherit the 362-frame planning
+    /// ceiling when a shorter request is queued or persisted.
+    pub fn redacted_metadata_for_target(
+        &self,
+        index: usize,
+        target_frames: u32,
+    ) -> Option<GenerationReferenceMetadata> {
+        let mut metadata = self.redacted_metadata(index)?;
+        metadata.prepared_shape =
+            Some(crate::minimax_h3::reference_prepared_shape_for_target(self, target_frames).ok()?);
+        Some(metadata)
+    }
+
     /// Preserve ordered reference metadata even if an internal caller bypassed
     /// request validation. Public ingress rejects a missing digest; this
     /// fallback keeps the offending entry visible instead of silently dropping
@@ -1030,6 +1045,20 @@ impl GenerationReference {
                 prepared_shape,
             },
         }
+    }
+
+    /// Lossless counterpart to [`Self::redacted_metadata_for_target`].
+    /// Invalid internal callers retain the reference entry, but never publish
+    /// a prepared shape for a different generated duration.
+    pub fn redacted_metadata_lossless_for_target(
+        &self,
+        index: usize,
+        target_frames: u32,
+    ) -> GenerationReferenceMetadata {
+        let mut metadata = self.redacted_metadata_lossless(index);
+        metadata.prepared_shape =
+            crate::minimax_h3::reference_prepared_shape_for_target(self, target_frames).ok();
+        metadata
     }
 }
 
@@ -1891,10 +1920,13 @@ impl OutputMetadata {
         };
         let references = req.references.as_ref().and_then(|references| {
             (!references.is_empty()).then(|| {
+                let target_frames = req.frames.unwrap_or(crate::minimax_h3::MIN_FRAMES);
                 references
                     .iter()
                     .enumerate()
-                    .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+                    .map(|(index, reference)| {
+                        reference.redacted_metadata_lossless_for_target(index, target_frames)
+                    })
                     .collect::<Vec<_>>()
             })
         });
@@ -4470,6 +4502,58 @@ mod tests {
         assert_eq!(
             metadata.edit_image_sha256s.as_deref(),
             Some(expected.as_slice())
+        );
+    }
+
+    #[test]
+    fn h3_output_metadata_freezes_reference_shape_for_requested_frames() {
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "short synchronized print",
+            "model": crate::minimax_h3::REF2VA_COMFY,
+            "width": crate::minimax_h3::DEFAULT_WIDTH,
+            "height": crate::minimax_h3::DEFAULT_HEIGHT,
+            "steps": crate::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "batch_size": 1,
+            "frames": crate::minimax_h3::MIN_FRAMES,
+            "fps": crate::minimax_h3::FIXED_FPS,
+            "output_format": "mp4"
+        }))
+        .unwrap();
+        let reference = GenerationReference::Audio {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("long.wav".to_string()),
+                sha256: Some("11".repeat(32)),
+            },
+            mime_type: "audio/wav".to_string(),
+            duration_ms: 15_000,
+            sample_rate: 32_000,
+            channels: 2,
+            sample_count: Some(480_000),
+        };
+        req.references = Some(vec![reference.clone()]);
+
+        let short = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        let short_shape = short.references.unwrap()[0].prepared_shape.clone().unwrap();
+        assert_eq!(
+            short_shape,
+            crate::minimax_h3::reference_prepared_shape_for_target(
+                &reference,
+                crate::minimax_h3::MIN_FRAMES,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            short_shape,
+            crate::minimax_h3::reference_prepared_shape(&reference).unwrap()
+        );
+
+        req.frames = Some(crate::minimax_h3::MAX_FRAMES);
+        let long = OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(
+            long.references.unwrap()[0].prepared_shape.as_ref(),
+            Some(&crate::minimax_h3::reference_prepared_shape(&reference).unwrap())
         );
     }
 

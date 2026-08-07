@@ -178,6 +178,68 @@ impl ResolvedReferenceSet {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+
+    /// Bind the payload-free queued request back to the private staged files
+    /// immediately before inference. The order, complete probed metadata, and
+    /// aggregate fingerprint must all still match; paths never enter the
+    /// request, scheduler plan, logs, SSE, or gallery metadata.
+    pub fn inference_bindings(
+        &self,
+        request: &mold_core::GenerateRequest,
+        cancellation: Option<&mold_inference::InferenceCancellationToken>,
+    ) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+        let references = request
+            .references
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("resolved references lost their queued descriptors"))?;
+        anyhow::ensure!(
+            references.len() == self.entries.len(),
+            "resolved reference count changed before inference"
+        );
+        let queued_metadata = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            mold_core::generation_reference_fingerprint(&queued_metadata) == self.fingerprint,
+            "resolved reference fingerprint changed before inference"
+        );
+        self.entries
+            .iter()
+            .zip(queued_metadata)
+            .map(|(entry, queued)| {
+                anyhow::ensure!(
+                    entry.metadata == queued,
+                    "resolved reference {} changed before inference",
+                    entry.metadata.index
+                );
+                let file = crate::batch_transaction::open_regular_file_no_follow(&entry.path)
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "failed to safely open resolved reference {}",
+                            entry.metadata.index
+                        )
+                    })?;
+                mold_inference::GenerationReferenceBinding::from_opened_file(
+                    entry.metadata.clone(),
+                    file,
+                    MAX_REFERENCE_UPLOAD_FILE_BYTES,
+                    cancellation,
+                )
+                .map_err(|error| {
+                    if mold_inference::is_inference_cancelled(&error) {
+                        error
+                    } else {
+                        anyhow::anyhow!(
+                            "failed to verify resolved reference {}",
+                            entry.metadata.index
+                        )
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 impl Drop for ResolvedReferenceSet {
@@ -187,6 +249,23 @@ impl Drop for ResolvedReferenceSet {
                 tracing::warn!("failed to remove private reference staging: {error}");
             }
         }
+    }
+}
+
+pub(crate) fn inference_bindings_for_request(
+    request: &mold_core::GenerateRequest,
+    resolved: Option<&ResolvedReferenceSet>,
+    cancellation: Option<&mold_inference::InferenceCancellationToken>,
+) -> anyhow::Result<Vec<mold_inference::GenerationReferenceBinding>> {
+    match (request.references.is_some(), resolved) {
+        (false, None) => Ok(Vec::new()),
+        (true, Some(resolved)) => resolved.inference_bindings(request, cancellation),
+        (true, None) => anyhow::bail!(
+            "reference-bearing generation reached inference without private resolved media"
+        ),
+        (false, Some(_)) => anyhow::bail!(
+            "private resolved media reached inference without queued reference descriptors"
+        ),
     }
 }
 
@@ -1797,6 +1876,7 @@ mod tests {
             "steps": minimax_h3::DEFAULT_STEPS,
             "guidance": 0.0,
             "batch_size": 1,
+            "strength": 1.0,
             "frames": minimax_h3::MIN_FRAMES,
             "fps": minimax_h3::FIXED_FPS,
             "output_format": "mp4"
@@ -1811,6 +1891,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ReferenceUploadStore::at(dir.path().join("cache"));
         let bytes = png_bytes();
+        let expected_bytes = bytes.clone();
         let byte_count = bytes.len() as u64;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
@@ -1842,7 +1923,9 @@ mod tests {
         assert!(complete.metadata.prepared_shape.is_some());
 
         let mut final_request = request(png_reference(
-            GenerationReferenceAuthority::Upload { handle },
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
             Some(complete.metadata.sha256.clone()),
         ));
         let resolved = store
@@ -1857,9 +1940,92 @@ mod tests {
             final_request.references.as_ref().unwrap()[0].media(),
             GenerationReferenceAuthority::Descriptor
         ));
+        let (task, prepared) =
+            crate::h3_admission::H3PreparedRequestShape::from_resolved_prepared_request(
+                &final_request,
+                128,
+                1_024,
+            )
+            .unwrap();
+        assert_eq!(task, crate::h3_admission::H3FrozenTask::Ref2va);
+        assert_eq!(prepared.reference_fingerprint, resolved.fingerprint());
         assert!(!format!("{resolved:?}").contains(dir.path().to_string_lossy().as_ref()));
+        let bindings = resolved.inference_bindings(&final_request, None).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].metadata(), &complete.metadata);
+        let debug = format!("{bindings:?}");
+        assert!(!debug.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!debug.contains(&handle));
+        let cancellation = mold_inference::InferenceCancellationToken::default();
+        cancellation.cancel();
+        let cancelled = resolved
+            .inference_bindings(&final_request, Some(&cancellation))
+            .unwrap_err();
+        assert!(mold_inference::is_inference_cancelled(&cancelled));
+
+        // Binding hashes and retains the exact no-follow handle. Replacing the
+        // staged pathname after dispatch cannot alter the bytes decoded under
+        // the frozen digest, and a later bind fails closed on the replacement.
+        let staged = resolved.entries()[0].path.clone();
+        let displaced = staged.with_extension("displaced");
+        std::fs::rename(&staged, &displaced).unwrap();
+        std::fs::write(&staged, b"different replacement bytes").unwrap();
+        let mut bound = bindings[0].file();
+        bound.seek(SeekFrom::Start(0)).unwrap();
+        let mut observed = Vec::new();
+        bound.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, expected_bytes);
+        let replacement_error = resolved
+            .inference_bindings(&final_request, None)
+            .unwrap_err();
+        let replacement_message = format!("{replacement_error:#}");
+        assert!(!replacement_message.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!replacement_message.contains(&handle));
+
+        // Even the lower-level safe-open error includes the private path.
+        // A non-regular replacement must remain client-safe at this boundary.
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        let open_error = resolved
+            .inference_bindings(&final_request, None)
+            .unwrap_err();
+        let open_message = format!("{open_error:#}");
+        assert!(!open_message.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(!open_message.contains(&handle));
+
+        let mut changed = final_request.clone();
+        if let GenerationReference::Image { provenance, .. } =
+            &mut changed.references.as_mut().unwrap()[0]
+        {
+            provenance.name = Some("changed.png".to_string());
+        }
+        assert!(resolved.inference_bindings(&changed, None).is_err());
+        drop(bindings);
         drop(resolved);
         assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn inference_binding_presence_must_match_payload_free_request() {
+        let plain: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "plain",
+            "model": minimax_h3::FL2VA_COMFY,
+            "width": 32,
+            "height": 32,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        assert!(inference_bindings_for_request(&plain, None, None)
+            .unwrap()
+            .is_empty());
+
+        let reference_request = request(png_reference(
+            GenerationReferenceAuthority::Descriptor,
+            Some("11".repeat(32)),
+        ));
+        assert!(inference_bindings_for_request(&reference_request, None, None).is_err());
     }
 
     #[tokio::test]

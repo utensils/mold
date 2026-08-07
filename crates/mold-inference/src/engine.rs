@@ -1,6 +1,10 @@
 use anyhow::Result;
 use mold_core::GenerateRequest;
 use mold_core::GenerateResponse;
+use mold_core::GenerationReferenceMetadata;
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::{Deref, DerefMut};
 
 use crate::progress::{InferenceCancellationToken, ProgressCallback};
@@ -25,6 +29,116 @@ pub enum LoadStrategy {
 pub struct BatchExecutionCapability {
     pub native_batch_sizes: &'static [usize],
     pub cooperative_cancellation: bool,
+}
+
+/// One request-scoped, server-resolved media authority for generation.
+///
+/// This value is deliberately not serializable and its `Debug` implementation
+/// exposes no private staging path. Public requests and durable metadata keep
+/// only [`GenerationReferenceMetadata`]; the server opens the staged regular
+/// file without following symlinks, then this binding hashes and retains that
+/// exact handle for as long as the queued job is alive. Decoders must consume
+/// [`Self::file`] and never reopen a pathname.
+pub struct GenerationReferenceBinding {
+    metadata: GenerationReferenceMetadata,
+    file: File,
+}
+
+impl GenerationReferenceBinding {
+    pub fn from_opened_file(
+        metadata: GenerationReferenceMetadata,
+        mut file: File,
+        maximum_bytes: u64,
+        cancellation: Option<&InferenceCancellationToken>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            metadata.index > 0,
+            "generation reference index must be one-based"
+        );
+        anyhow::ensure!(
+            metadata.sha256.len() == 64
+                && metadata.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "generation reference digest must be SHA-256"
+        );
+        let file_metadata = file.metadata()?;
+        anyhow::ensure!(
+            file_metadata.is_file(),
+            "generation reference binding requires an opened regular file"
+        );
+        anyhow::ensure!(
+            maximum_bytes > 0 && file_metadata.len() > 0 && file_metadata.len() <= maximum_bytes,
+            "generation reference binding exceeds its frozen byte limit"
+        );
+        if let Some(cancellation) = cancellation {
+            cancellation.checkpoint()?;
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut observed_bytes = 0_u64;
+        loop {
+            if let Some(cancellation) = cancellation {
+                cancellation.checkpoint()?;
+            }
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            observed_bytes = observed_bytes
+                .checked_add(u64::try_from(read)?)
+                .ok_or_else(|| anyhow::anyhow!("generation reference byte count overflowed"))?;
+            anyhow::ensure!(
+                observed_bytes <= maximum_bytes,
+                "generation reference binding exceeds its frozen byte limit"
+            );
+            digest.update(&buffer[..read]);
+        }
+        anyhow::ensure!(
+            observed_bytes == file_metadata.len(),
+            "generation reference binding changed size during verification"
+        );
+        if let Some(cancellation) = cancellation {
+            cancellation.checkpoint()?;
+        }
+        let observed = format!("{:x}", digest.finalize());
+        anyhow::ensure!(
+            observed.eq_ignore_ascii_case(&metadata.sha256),
+            "generation reference binding digest differs from staged media"
+        );
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Self { metadata, file })
+    }
+
+    pub fn metadata(&self) -> &GenerationReferenceMetadata {
+        &self.metadata
+    }
+
+    /// The already-opened, content-verified media authority.
+    ///
+    /// Implementations may seek/read this handle directly or duplicate its
+    /// descriptor for a decoder. Reopening the former staging pathname would
+    /// discard the content identity proved by this binding.
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(metadata: GenerationReferenceMetadata) -> Self {
+        Self {
+            metadata,
+            file: tempfile::tempfile().expect("create synthetic reference handle"),
+        }
+    }
+}
+
+impl std::fmt::Debug for GenerationReferenceBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GenerationReferenceBinding")
+            .field("metadata", &self.metadata)
+            .field("file", &"<opened regular file>")
+            .finish()
+    }
 }
 
 impl BatchExecutionCapability {
@@ -61,6 +175,22 @@ impl BatchExecutionCapability {
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
+    /// Generate with private, request-scoped reference media bound by the
+    /// authenticated server ingress path. Engines fail closed by default so a
+    /// reference-bearing request can never silently degrade into text-only
+    /// generation.
+    fn generate_with_reference_bindings(
+        &mut self,
+        req: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+    ) -> Result<GenerateResponse> {
+        anyhow::ensure!(
+            bindings.is_empty(),
+            "model '{}' does not consume resolved generation references",
+            self.model_name()
+        );
+        self.generate(req)
+    }
     fn model_name(&self) -> &str;
     fn is_loaded(&self) -> bool;
     /// Load model weights. Called automatically on first generate if not yet loaded.
@@ -271,7 +401,75 @@ pub(crate) fn seeded_randn(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
+
+    fn reference_binding_metadata(bytes: &[u8]) -> GenerationReferenceMetadata {
+        let mut digest = Sha256::new();
+        digest.update(bytes);
+        GenerationReferenceMetadata {
+            kind: mold_core::GenerationReferenceKind::Image,
+            index: 1,
+            name: Some("reference.png".to_string()),
+            sha256: format!("{:x}", digest.finalize()),
+            mime_type: "image/png".to_string(),
+            width: Some(1),
+            height: Some(1),
+            frame_count: None,
+            duration_ms: None,
+            fps: None,
+            has_audio: false,
+            audio_duration_ms: None,
+            audio_sample_count: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+            sample_rate: None,
+            channels: None,
+            sample_count: None,
+            prepared_shape: None,
+        }
+    }
+
+    fn reference_binding_file(bytes: &[u8]) -> File {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn reference_binding_is_bounded_and_cooperatively_cancellable() {
+        let bytes = b"bounded reference bytes";
+        let metadata = reference_binding_metadata(bytes);
+        let binding = GenerationReferenceBinding::from_opened_file(
+            metadata.clone(),
+            reference_binding_file(bytes),
+            bytes.len() as u64,
+            None,
+        )
+        .unwrap();
+        assert_eq!(binding.metadata(), &metadata);
+
+        let oversized = GenerationReferenceBinding::from_opened_file(
+            metadata.clone(),
+            reference_binding_file(bytes),
+            bytes.len() as u64 - 1,
+            None,
+        )
+        .unwrap_err();
+        assert!(oversized.to_string().contains("frozen byte limit"));
+
+        let cancellation = InferenceCancellationToken::default();
+        cancellation.cancel();
+        let cancelled = GenerationReferenceBinding::from_opened_file(
+            metadata,
+            reference_binding_file(bytes),
+            bytes.len() as u64,
+            Some(&cancellation),
+        )
+        .unwrap_err();
+        assert!(crate::progress::is_inference_cancelled(&cancelled));
+    }
 
     #[test]
     fn batch_execution_capability_rejects_invalid_native_sizes() {

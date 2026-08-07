@@ -1315,6 +1315,27 @@ fn violation(code: &'static str, message: impl Into<String>) -> ContractError {
 /// helper is intentionally available for table tests and future engine work;
 /// it does not authorize H3 or bypass the compliance gate.
 pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mode, ContractError> {
+    validate_request_contract_with_reference_authority(req, task, false)
+}
+
+/// Validate the internal, payload-free request retained after authenticated
+/// Ref2VA ingress has resolved every media authority to a private binding.
+///
+/// This does not authorize H3 execution. It differs from
+/// [`validate_request_contract`] only by requiring descriptor authorities for
+/// Ref2VA, so a queued request never needs to carry server-local paths.
+pub fn validate_resolved_request_contract(
+    req: &GenerateRequest,
+    task: Task,
+) -> Result<Mode, ContractError> {
+    validate_request_contract_with_reference_authority(req, task, true)
+}
+
+fn validate_request_contract_with_reference_authority(
+    req: &GenerateRequest,
+    task: Task,
+    resolved_references: bool,
+) -> Result<Mode, ContractError> {
     let fps = req.fps.unwrap_or(FIXED_FPS);
     if fps != FIXED_FPS {
         return Err(violation(
@@ -1466,7 +1487,12 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
                     "Ref2VA requires at least one ordered reference",
                 )
             })?;
-            if let Err(error) = validate_references(references) {
+            let reference_validation = if resolved_references {
+                validate_reference_descriptors(references)
+            } else {
+                validate_references(references)
+            };
+            if let Err(error) = reference_validation {
                 return Err(violation(error.code, error.message));
             }
             Ok(Mode::ReferenceToAudioVideo)
@@ -2454,6 +2480,30 @@ mod tests {
         assert_eq!(
             validate_request_contract(&req, Task::Ref2va).unwrap(),
             Mode::ReferenceToAudioVideo
+        );
+        let mut resolved = req.clone();
+        if let GenerationReference::Image {
+            media, provenance, ..
+        } = &mut resolved.references.as_mut().unwrap()[0]
+        {
+            *media = GenerationReferenceAuthority::Descriptor;
+            provenance.sha256 = Some("A".repeat(64));
+        }
+        assert_eq!(
+            validate_request_contract(&resolved, Task::Ref2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY"
+        );
+        assert_eq!(
+            validate_resolved_request_contract(&resolved, Task::Ref2va).unwrap(),
+            Mode::ReferenceToAudioVideo
+        );
+        assert_eq!(
+            validate_resolved_request_contract(&req, Task::Ref2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_PREVIEW_MEDIA"
         );
         req.enable_audio = Some(false);
         assert_eq!(
