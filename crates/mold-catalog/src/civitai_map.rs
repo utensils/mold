@@ -181,6 +181,11 @@ pub const CIVITAI_BASE_MODELS: &[&str] = &[
 pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
     use Family::*;
     use Kind::*;
+    if family == MinimaxH3 {
+        // Family taxonomy is registered for exact classification and policy
+        // enforcement, but there is no runnable H3 engine in this build.
+        return false;
+    }
     match kind {
         // Supporting assets and adapters are installable when the family has
         // a compatible runtime. They are not standalone generation models, so

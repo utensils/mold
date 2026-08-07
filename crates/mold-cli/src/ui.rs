@@ -20,6 +20,7 @@ pub(crate) fn family_label(family: &str) -> &str {
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         "ltx-video" | "ltx_video" => "LTX Video",
         "ltx2" => "LTX-2",
+        "minimax-h3" | "minimax_h3" | "minimaxh3" => "MiniMax H3",
         "controlnet" => "ControlNet",
         "qwen3-expand" => "Expand",
         "upscaler" => "Upscaler",
@@ -40,6 +41,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "ltx-video" | "ltx_video" => padded.red().to_string(),
         "ltx2" => padded.truecolor(255, 140, 80).to_string(),
+        "minimax-h3" | "minimax_h3" | "minimaxh3" => padded.truecolor(80, 190, 255).to_string(),
         "controlnet" => padded.bright_red().to_string(),
         "qwen3-expand" => padded.bright_cyan().to_string(),
         "upscaler" => padded.bright_purple().to_string(),
@@ -65,6 +67,9 @@ pub(crate) fn format_family(family: &str) -> String {
             | "ltx-video"
             | "ltx_video"
             | "ltx2"
+            | "minimax-h3"
+            | "minimax_h3"
+            | "minimaxh3"
             | "controlnet"
             | "qwen3-expand"
             | "upscaler"

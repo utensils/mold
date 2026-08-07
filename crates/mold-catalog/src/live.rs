@@ -1216,6 +1216,22 @@ fn looks_like_wan(id_lower: &str) -> bool {
     ANCHORED.iter().any(|needle| id_lower.contains(needle))
 }
 
+/// Match an H3 family token without swallowing adjacent words or versions.
+/// Repository names such as `MiniMax-H3-FL2VA` are valid, while
+/// `notminimax-h3` and `minimax-h30` are unrelated lookalikes.
+fn looks_like_minimax_h3(id_lower: &str) -> bool {
+    ["minimax-h3", "minimax_h3", "minimaxh3"]
+        .into_iter()
+        .any(|needle| {
+            id_lower.match_indices(needle).any(|(start, matched)| {
+                let before = id_lower[..start].chars().next_back();
+                let after = id_lower[start + matched.len()..].chars().next();
+                before.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+                    && after.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+            })
+        })
+}
+
 /// Wan's sub-family, inferred from a repo id.
 ///
 /// The HF normalizers pass `sub_family: None` on the grounds that single-file
@@ -1258,7 +1274,9 @@ pub fn family_from_hf(
     // Repo-id substring match — the load-bearing path. HF doesn't
     // expose a canonical "model family" tag, so id-substring + curated
     // seed list is the cleanest signal.
-    let family = if id_lower.contains("flux.2") || id_lower.contains("flux-2") {
+    let family = if looks_like_minimax_h3(&id_lower) {
+        Family::MinimaxH3
+    } else if id_lower.contains("flux.2") || id_lower.contains("flux-2") {
         Family::Flux2
     } else if id_lower.contains("flux.1")
         || id_lower.contains("flux-1")
@@ -1300,6 +1318,7 @@ pub fn family_from_hf(
                 // Safe as an exact tag where it is unsafe as a substring:
                 // a repo that tags itself `wan` is claiming the family.
                 "wan" => Some(Family::Wan),
+                "minimax-h3" | "minimax_h3" | "minimaxh3" => Some(Family::MinimaxH3),
                 _ => continue,
             };
             break;

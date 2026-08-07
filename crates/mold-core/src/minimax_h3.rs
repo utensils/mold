@@ -1,0 +1,1997 @@
+//! Static MiniMax H3 contracts.
+//!
+//! H3 is intentionally *not* a runnable Mold family yet.  The compliance gate
+//! in `model_policy` remains the first authority for every public ingress.  This
+//! module records the immutable model/layout/request facts needed by the later
+//! engine work without weakening that gate or claiming that weights can run.
+
+use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest};
+use crate::{GenerateRequest, OutputFormat, MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL};
+
+pub const FAMILY: &str = "minimax-h3";
+pub const FAMILY_ALIASES: &[&str] = &["minimax-h3", "minimax_h3", "minimaxh3"];
+
+pub const OFFICIAL_REPO: &str = "MiniMaxAI/MiniMax-H3";
+pub const OFFICIAL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
+pub const COMFY_REPO: &str = "Comfy-Org/MiniMax-H3";
+pub const COMFY_REVISION: &str = "eb8a16107c595128b3a578f82d2ce2f75920c355";
+pub const COMFY_IMPLEMENTATION_REPO: &str = "Comfy-Org/ComfyUI";
+pub const COMFY_IMPLEMENTATION_REVISION: &str = "a464ac33588ae182f81a090d910cfbf21e255b73";
+pub const OFFICIAL_IMPLEMENTATION_REPO: &str = "MiniMax-AI/MiniMax-H3";
+pub const OFFICIAL_IMPLEMENTATION_REVISION: &str = "8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea";
+pub const DIFFUSERS_REFERENCE_REPO: &str = "huggingface/diffusers";
+pub const DIFFUSERS_REFERENCE_REVISION: &str = "9c6a68c32b3b2a64db91800b624d33cec6e25ab8";
+pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
+
+pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
+pub const REF2VA_OFFICIAL: &str = "minimax-h3-ref2va:official-bf16";
+pub const FL2VA_COMFY: &str = "minimax-h3-fl2va:comfy-pruned-int8";
+pub const REF2VA_COMFY: &str = "minimax-h3-ref2va:comfy-pruned-int8";
+
+pub const DEFAULT_WIDTH: u32 = 1344;
+pub const DEFAULT_HEIGHT: u32 = 768;
+pub const DEFAULT_STEPS: u32 = 50;
+pub const FIXED_FPS: u32 = 24;
+pub const MIN_DURATION_SECONDS: u32 = 5;
+pub const MAX_DURATION_SECONDS: u32 = 15;
+pub const MIN_FRAMES: u32 = 124;
+pub const MAX_FRAMES: u32 = 362;
+pub const FRAME_STEP: u32 = 17;
+pub const FRAME_OFFSET: u32 = 5;
+pub const DIMENSION_ALIGNMENT: u32 = 32;
+/// Short edge used by the released checkpoint's aspect-ratio resolver.
+pub const CANVAS_SHORT_EDGE: u32 = 768;
+/// Pre-rounding area budget used by the released checkpoint.
+pub const CANVAS_MAX_PIXELS: u64 = 768 * 1344;
+/// Largest post-rounding canvas produced by the official resolver over the
+/// supported 1:4 through 4:1 aspect range.
+///
+/// The official algorithm applies the area budget first, then rounds both axes
+/// independently to 32 pixels. That final rounding is explicitly allowed to
+/// exceed [`CANVAS_MAX_PIXELS`]; the 576x1856 (and transposed) canvas is the
+/// largest result at 1,069,056 pixels. Advertising the pre-rounding budget as a
+/// hard request ceiling would reject a canvas produced by the oracle itself.
+pub const MAX_PIXELS: u64 = 576 * 1856;
+pub const MIN_ASPECT_RATIO: f64 = 0.25;
+pub const MAX_ASPECT_RATIO: f64 = 4.0;
+pub const NATIVE_BATCH_SIZES: &[u32] = &[1];
+pub const CONDITION_POSTERIOR_SEED: u64 = 42;
+pub const AUDIO_SAMPLE_RATE_HZ: u32 = 32_000;
+pub const AUDIO_CHANNELS: u32 = 2;
+
+/// Seed-domain version. Changing stream names/order or seed derivation must
+/// mint a new version rather than silently changing seeded outputs.
+pub const NOISE_DOMAIN_VERSION: &str = "mold.minimax-h3.noise.v1";
+pub const NOISE_STREAMS: &[&str] = &[
+    "condition-posterior",
+    "condition-noise",
+    "target-video",
+    "target-audio",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoiseSeedSource {
+    /// A fresh generator is recreated for each visual condition.
+    FixedFreshPerVisualCondition(u64),
+    /// The generator seeded from the request, shared in the declared draw order.
+    RequestSeed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoiseDrawCardinality {
+    PerVisualCondition,
+    Once,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoiseDrawContract {
+    pub name: &'static str,
+    pub seed_source: NoiseSeedSource,
+    pub cardinality: NoiseDrawCardinality,
+}
+
+/// Ordering is part of the seeded-output contract. The condition posterior is
+/// deliberately outside the request generator: official preprocessing creates
+/// a fresh seed-42 generator for every visual condition. Condition noise then
+/// consumes the request generator in packed-condition order, followed by target
+/// video and target audio noise.
+pub const NOISE_DRAWS: &[NoiseDrawContract] = &[
+    NoiseDrawContract {
+        name: NOISE_STREAMS[0],
+        seed_source: NoiseSeedSource::FixedFreshPerVisualCondition(CONDITION_POSTERIOR_SEED),
+        cardinality: NoiseDrawCardinality::PerVisualCondition,
+    },
+    NoiseDrawContract {
+        name: NOISE_STREAMS[1],
+        seed_source: NoiseSeedSource::RequestSeed,
+        cardinality: NoiseDrawCardinality::PerVisualCondition,
+    },
+    NoiseDrawContract {
+        name: NOISE_STREAMS[2],
+        seed_source: NoiseSeedSource::RequestSeed,
+        cardinality: NoiseDrawCardinality::Once,
+    },
+    NoiseDrawContract {
+        name: NOISE_STREAMS[3],
+        seed_source: NoiseSeedSource::RequestSeed,
+        cardinality: NoiseDrawCardinality::Once,
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Task {
+    Fl2va,
+    Ref2va,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    OfficialBf16,
+    ComfyPrunedInt8ConvrotNvfp4Awq,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    TextToAudioVideo,
+    FirstFrameToAudioVideo,
+    LastFrameToAudioVideo,
+    FirstAndLastFrameToAudioVideo,
+    ReferenceToAudioVideo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendQualification {
+    /// The implementation target is CUDA, but no runnable engine is registered.
+    ContractTarget,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendApplicability {
+    pub cuda: BackendQualification,
+    pub metal: BackendQualification,
+    pub cpu: BackendQualification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    pub runtime_available: bool,
+    pub backends: BackendApplicability,
+    pub native_batch_sizes: &'static [u32],
+    pub modes: &'static [Mode],
+    pub synchronized_audio: bool,
+    pub audio_disable_supported: bool,
+    pub audio_sample_rate_hz: u32,
+    pub audio_channels: u32,
+    pub fixed_fps: u32,
+    pub min_duration_seconds: u32,
+    pub max_duration_seconds: u32,
+    pub frame_step: u32,
+    pub frame_offset: u32,
+    pub min_frames: u32,
+    pub max_frames: u32,
+    pub dimension_alignment: u32,
+    pub default_dimensions: (u32, u32),
+    pub min_aspect_ratio: (u32, u32),
+    pub max_aspect_ratio: (u32, u32),
+    pub max_pixels: u64,
+    pub noise_domain_version: &'static str,
+    pub noise_streams: &'static [&'static str],
+    pub noise_draws: &'static [NoiseDrawContract],
+}
+
+const FL2VA_MODES: &[Mode] = &[
+    Mode::TextToAudioVideo,
+    Mode::FirstFrameToAudioVideo,
+    Mode::LastFrameToAudioVideo,
+    Mode::FirstAndLastFrameToAudioVideo,
+];
+const REF2VA_MODES: &[Mode] = &[Mode::ReferenceToAudioVideo];
+pub const ALL_MODES: &[Mode] = &[
+    Mode::TextToAudioVideo,
+    Mode::FirstFrameToAudioVideo,
+    Mode::LastFrameToAudioVideo,
+    Mode::FirstAndLastFrameToAudioVideo,
+    Mode::ReferenceToAudioVideo,
+];
+
+pub const fn capabilities(task: Task) -> Capabilities {
+    Capabilities {
+        runtime_available: false,
+        backends: BackendApplicability {
+            cuda: BackendQualification::ContractTarget,
+            metal: BackendQualification::Unsupported,
+            cpu: BackendQualification::Unsupported,
+        },
+        native_batch_sizes: NATIVE_BATCH_SIZES,
+        modes: match task {
+            Task::Fl2va => FL2VA_MODES,
+            Task::Ref2va => REF2VA_MODES,
+        },
+        synchronized_audio: true,
+        audio_disable_supported: false,
+        audio_sample_rate_hz: AUDIO_SAMPLE_RATE_HZ,
+        audio_channels: AUDIO_CHANNELS,
+        fixed_fps: FIXED_FPS,
+        min_duration_seconds: MIN_DURATION_SECONDS,
+        max_duration_seconds: MAX_DURATION_SECONDS,
+        frame_step: FRAME_STEP,
+        frame_offset: FRAME_OFFSET,
+        min_frames: MIN_FRAMES,
+        max_frames: MAX_FRAMES,
+        dimension_alignment: DIMENSION_ALIGNMENT,
+        default_dimensions: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        min_aspect_ratio: (1, 4),
+        max_aspect_ratio: (4, 1),
+        max_pixels: MAX_PIXELS,
+        noise_domain_version: NOISE_DOMAIN_VERSION,
+        noise_streams: NOISE_STREAMS,
+        noise_draws: NOISE_DRAWS,
+    }
+}
+
+/// Exact per-model capability authority for later server/surface advertising.
+///
+/// This contract is intentionally not serialized while H3 is policy-hidden.
+/// Callers that advertise *runnable* models must use
+/// [`runnable_capability_contract_for_model`], which returns `None` until an
+/// engine is registered and qualified. Keeping task and layout in this typed
+/// value prevents UI/server code from guessing modes from family strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCapabilityContract {
+    pub canonical_model: &'static str,
+    pub task: Task,
+    pub layout: Layout,
+    pub generation: Capabilities,
+}
+
+pub fn capability_contract_for_model(model: &str) -> Option<ModelCapabilityContract> {
+    let canonical_model = resolve_model_name(model)?;
+    let task = task_for_model(canonical_model)?;
+    let layout = layout_for_model(canonical_model)?;
+    Some(ModelCapabilityContract {
+        canonical_model,
+        task,
+        layout,
+        generation: capabilities(task),
+    })
+}
+
+/// Runtime-advertising boundary. This stays `None` for every H3 identity until
+/// the engine, device qualification, and shipping policy are all real.
+pub fn runnable_capability_contract_for_model(model: &str) -> Option<ModelCapabilityContract> {
+    let contract = capability_contract_for_model(model)?;
+    contract.generation.runtime_available.then_some(contract)
+}
+
+pub fn canonical_family(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    FAMILY_ALIASES
+        .contains(&normalized.as_str())
+        .then_some(FAMILY)
+}
+
+pub fn is_family(value: &str) -> bool {
+    canonical_family(value).is_some()
+}
+
+pub fn repo_revision(repo: &str) -> Option<&'static str> {
+    match repo {
+        OFFICIAL_REPO => Some(OFFICIAL_REVISION),
+        COMFY_REPO => Some(COMFY_REVISION),
+        _ => None,
+    }
+}
+
+pub fn task_for_model(model: &str) -> Option<Task> {
+    let canonical = resolve_model_name(model)?;
+    if canonical.starts_with("minimax-h3-ref2va:") {
+        Some(Task::Ref2va)
+    } else if canonical.starts_with("minimax-h3-fl2va:") {
+        Some(Task::Fl2va)
+    } else {
+        None
+    }
+}
+
+pub fn layout_for_model(model: &str) -> Option<Layout> {
+    let canonical = resolve_model_name(model)?;
+    if canonical.ends_with(":official-bf16") {
+        Some(Layout::OfficialBf16)
+    } else if canonical.ends_with(":comfy-pruned-int8") {
+        Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
+    } else {
+        None
+    }
+}
+
+pub fn resolve_model_name(input: &str) -> Option<&'static str> {
+    let normalized = input.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "minimax-h3" | "minimaxh3" | "minimax-h3-fl2va" => Some(FL2VA_COMFY),
+        "minimax-h3-ref2va" => Some(REF2VA_COMFY),
+        value if value == FL2VA_OFFICIAL => Some(FL2VA_OFFICIAL),
+        value if value == REF2VA_OFFICIAL => Some(REF2VA_OFFICIAL),
+        value if value == FL2VA_COMFY => Some(FL2VA_COMFY),
+        value if value == REF2VA_COMFY => Some(REF2VA_COMFY),
+        _ => None,
+    }
+}
+
+pub const fn valid_frame_count(frames: u32) -> bool {
+    frames >= MIN_FRAMES
+        && frames <= MAX_FRAMES
+        && frames >= FRAME_OFFSET
+        && (frames - FRAME_OFFSET).is_multiple_of(FRAME_STEP)
+}
+
+pub fn recommended_frames(frames: u32) -> u32 {
+    if frames <= MIN_FRAMES {
+        return MIN_FRAMES;
+    }
+    if frames >= MAX_FRAMES {
+        return MAX_FRAMES;
+    }
+    let lower = FRAME_OFFSET + ((frames - FRAME_OFFSET) / FRAME_STEP) * FRAME_STEP;
+    let upper = (lower + FRAME_STEP).min(MAX_FRAMES);
+    if frames - lower <= upper - frames {
+        lower.max(MIN_FRAMES)
+    } else {
+        upper
+    }
+}
+
+pub fn recommended_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    }
+    let aspect = (width as f64 / height as f64).clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
+    let short_edge = f64::from(CANVAS_SHORT_EDGE);
+    let (mut target_width, mut target_height) = if aspect >= 1.0 {
+        (short_edge * aspect, short_edge)
+    } else {
+        (short_edge, short_edge / aspect)
+    };
+    let area = target_width * target_height;
+    if area > CANVAS_MAX_PIXELS as f64 {
+        let scale = (CANVAS_MAX_PIXELS as f64 / area).sqrt();
+        target_width *= scale;
+        target_height *= scale;
+    }
+    let round_axis = |axis: f64| {
+        ((axis / f64::from(DIMENSION_ALIGNMENT))
+            .round_ties_even()
+            .max(1.0) as u32)
+            * DIMENSION_ALIGNMENT
+    };
+    (round_axis(target_width), round_axis(target_height))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractError {
+    pub code: &'static str,
+    pub message: String,
+    pub recommended_frames: Option<u32>,
+    pub recommended_dimensions: Option<(u32, u32)>,
+}
+
+impl std::fmt::Display for ContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ContractError {}
+
+fn violation(code: &'static str, message: impl Into<String>) -> ContractError {
+    ContractError {
+        code,
+        message: message.into(),
+        recommended_frames: None,
+        recommended_dimensions: None,
+    }
+}
+
+/// Validate the H3-specific part of a normalized generation request.
+///
+/// Public generation paths must call `require_model_activation` first.  This
+/// helper is intentionally available for table tests and future engine work;
+/// it does not authorize H3 or bypass the compliance gate.
+pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mode, ContractError> {
+    let fps = req.fps.unwrap_or(FIXED_FPS);
+    if fps != FIXED_FPS {
+        return Err(violation(
+            "MINIMAX_H3_FIXED_FPS",
+            format!("MiniMax H3 requires {FIXED_FPS} fps; received {fps}"),
+        ));
+    }
+
+    let frames = req.frames.unwrap_or(MIN_FRAMES);
+    if !valid_frame_count(frames) {
+        let mut error = violation(
+            "MINIMAX_H3_FRAME_GRID",
+            format!(
+                "MiniMax H3 frames must be {FRAME_STEP}n+{FRAME_OFFSET} from {MIN_FRAMES} through {MAX_FRAMES}; received {frames}"
+            ),
+        );
+        error.recommended_frames = Some(recommended_frames(frames));
+        return Err(error);
+    }
+
+    if req.width == 0
+        || req.height == 0
+        || !req.width.is_multiple_of(DIMENSION_ALIGNMENT)
+        || !req.height.is_multiple_of(DIMENSION_ALIGNMENT)
+        || u64::from(req.width) * u64::from(req.height) > MAX_PIXELS
+        || !(MIN_ASPECT_RATIO..=MAX_ASPECT_RATIO).contains(&(req.width as f64 / req.height as f64))
+    {
+        let mut error = violation(
+            "MINIMAX_H3_DIMENSIONS",
+            format!(
+                "MiniMax H3 dimensions must be positive multiples of {DIMENSION_ALIGNMENT}, at most {MAX_PIXELS} pixels, with aspect ratio in [{MIN_ASPECT_RATIO}, {MAX_ASPECT_RATIO}]"
+            ),
+        );
+        error.recommended_dimensions = Some(recommended_dimensions(req.width, req.height));
+        return Err(error);
+    }
+
+    if req.enable_audio == Some(false) {
+        return Err(violation(
+            "MINIMAX_H3_SYNCHRONIZED_AUDIO_REQUIRED",
+            "MiniMax H3 always generates synchronized audio; enable_audio=false is unsupported",
+        ));
+    }
+    if req
+        .output_format
+        .is_some_and(|format| format != OutputFormat::Mp4)
+    {
+        return Err(violation(
+            "MINIMAX_H3_MP4_REQUIRED",
+            "MiniMax H3 synchronized audio-video output requires mp4",
+        ));
+    }
+    if req.guidance != 0.0 {
+        return Err(violation(
+            "MINIMAX_H3_NO_CFG",
+            "MiniMax H3 does not use classifier-free guidance; guidance must be 0",
+        ));
+    }
+    if req
+        .negative_prompt
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(violation(
+            "MINIMAX_H3_NO_NEGATIVE_PROMPT",
+            "MiniMax H3 has no negative-prompt branch",
+        ));
+    }
+    if req.source_video.is_some()
+        || req.source_video_path.is_some()
+        || req.audio_file.is_some()
+        || req.audio_file_path.is_some()
+        || req.retake_range.is_some()
+        || req.is_extend()
+    {
+        return Err(violation(
+            "MINIMAX_H3_CONDITIONING_UNSUPPORTED",
+            "MiniMax H3 supports text, FL2VA boundary frames, or Ref2VA references; source video/audio, retake, and extend are unsupported",
+        ));
+    }
+
+    match task {
+        Task::Ref2va => {
+            if req.source_image.is_some() || req.keyframes.as_ref().is_some_and(|v| !v.is_empty()) {
+                return Err(violation(
+                    "MINIMAX_H3_TASK_MISMATCH",
+                    "Ref2VA accepts reference inputs, not FL2VA boundary frames",
+                ));
+            }
+            if req
+                .edit_images
+                .as_ref()
+                .is_none_or(|items| items.is_empty())
+            {
+                return Err(violation(
+                    "MINIMAX_H3_REFERENCE_REQUIRED",
+                    "Ref2VA requires at least one reference image",
+                ));
+            }
+            Ok(Mode::ReferenceToAudioVideo)
+        }
+        Task::Fl2va => {
+            if req
+                .edit_images
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                return Err(violation(
+                    "MINIMAX_H3_TASK_MISMATCH",
+                    "FL2VA does not accept Ref2VA reference inputs",
+                ));
+            }
+            let last = frames - 1;
+            let mut first = req.source_image.is_some();
+            let mut end = false;
+            for keyframe in req.keyframes.as_deref().unwrap_or_default() {
+                match keyframe.frame {
+                    0 if !first => first = true,
+                    0 => {
+                        return Err(violation(
+                            "MINIMAX_H3_DUPLICATE_BOUNDARY",
+                            "FL2VA received more than one first-frame condition",
+                        ))
+                    }
+                    frame if frame == last && !end => end = true,
+                    frame if frame == last => {
+                        return Err(violation(
+                            "MINIMAX_H3_DUPLICATE_BOUNDARY",
+                            "FL2VA received more than one last-frame condition",
+                        ))
+                    }
+                    frame => {
+                        return Err(violation(
+                            "MINIMAX_H3_BOUNDARY_FRAME_REQUIRED",
+                            format!(
+                                "FL2VA keyframes may target only frame 0 or final frame {last}; received {frame}"
+                            ),
+                        ))
+                    }
+                }
+            }
+            Ok(match (first, end) {
+                (false, false) => Mode::TextToAudioVideo,
+                (true, false) => Mode::FirstFrameToAudioVideo,
+                (false, true) => Mode::LastFrameToAudioVideo,
+                (true, true) => Mode::FirstAndLastFrameToAudioVideo,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactRole {
+    TaskTransformer,
+    Qwen3VlConditioner,
+    VideoVae,
+    AudioVae,
+    Processor,
+    VideoScheduler,
+    AudioScheduler,
+    SharedConfig,
+    TaskConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestContract<'a> {
+    pub manifest_name: &'a str,
+    pub task: Task,
+    pub layout: Layout,
+    pub source_repo: &'static str,
+    pub source_revision: &'static str,
+    pub license_url: &'static str,
+    pub license_sha256: &'static str,
+    pub implementation_repo: &'static str,
+    pub implementation_revision: &'static str,
+    pub diffusers_reference_repo: &'static str,
+    pub diffusers_reference_revision: &'static str,
+    pub shared_identity_scheme: &'static str,
+    pub runtime_available: bool,
+}
+
+pub fn manifest_contract(manifest: &ModelManifest) -> Option<ManifestContract<'_>> {
+    if manifest.family != FAMILY {
+        return None;
+    }
+    let task = task_for_model(&manifest.name)?;
+    let layout = layout_for_model(&manifest.name)?;
+    let (source_repo, source_revision, implementation_repo, implementation_revision) = match layout
+    {
+        Layout::OfficialBf16 => (
+            OFFICIAL_REPO,
+            OFFICIAL_REVISION,
+            OFFICIAL_IMPLEMENTATION_REPO,
+            OFFICIAL_IMPLEMENTATION_REVISION,
+        ),
+        Layout::ComfyPrunedInt8ConvrotNvfp4Awq => (
+            COMFY_REPO,
+            COMFY_REVISION,
+            COMFY_IMPLEMENTATION_REPO,
+            COMFY_IMPLEMENTATION_REVISION,
+        ),
+    };
+    Some(ManifestContract {
+        manifest_name: &manifest.name,
+        task,
+        layout,
+        source_repo,
+        source_revision,
+        license_url: MINIMAX_H3_LICENSE_URL,
+        license_sha256: LICENSE_SHA256,
+        implementation_repo,
+        implementation_revision,
+        diffusers_reference_repo: DIFFUSERS_REFERENCE_REPO,
+        diffusers_reference_revision: DIFFUSERS_REFERENCE_REVISION,
+        shared_identity_scheme: "hf-repo+revision+path+sha256",
+        runtime_available: capabilities(task).runtime_available,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArtifactIdentity<'a> {
+    pub source_repo: &'a str,
+    pub source_revision: &'static str,
+    pub source_path: &'a str,
+    pub sha256: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactContract<'a> {
+    pub identity: ArtifactIdentity<'a>,
+    pub role: ArtifactRole,
+    pub license_url: &'static str,
+    pub license_sha256: &'static str,
+    pub dtype: &'static str,
+    pub shape: &'static str,
+    pub compatible_tasks: &'static [Task],
+}
+
+const BOTH_TASKS: &[Task] = &[Task::Fl2va, Task::Ref2va];
+const FL2VA_ONLY: &[Task] = &[Task::Fl2va];
+const REF2VA_ONLY: &[Task] = &[Task::Ref2va];
+
+pub fn artifact_contract<'a>(
+    manifest: &'a ModelManifest,
+    file: &'a ModelFile,
+) -> Option<ArtifactContract<'a>> {
+    if manifest.family != FAMILY {
+        return None;
+    }
+    if !manifest.files.iter().any(|candidate| {
+        candidate.hf_repo == file.hf_repo
+            && candidate.hf_filename == file.hf_filename
+            && candidate.component == file.component
+            && candidate.size_bytes == file.size_bytes
+            && candidate.gated == file.gated
+            && candidate.sha256 == file.sha256
+    }) {
+        return None;
+    }
+    let task = task_for_model(&manifest.name)?;
+    let layout = layout_for_model(&manifest.name)?;
+    let compatible_tasks = if matches!(
+        file.component,
+        ModelComponent::Transformer | ModelComponent::TransformerShard | ModelComponent::TaskConfig
+    ) {
+        match task {
+            Task::Fl2va => FL2VA_ONLY,
+            Task::Ref2va => REF2VA_ONLY,
+        }
+    } else {
+        BOTH_TASKS
+    };
+    let (role, dtype, shape) = match file.component {
+        ModelComponent::Transformer | ModelComponent::TransformerShard => (
+            ArtifactRole::TaskTransformer,
+            match layout {
+                Layout::OfficialBf16 => "bf16",
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "int8-convrot-pruned",
+            },
+            "50 blocks; hidden=5376; 56 heads x 128",
+        ),
+        ModelComponent::TextEncoder => (
+            ArtifactRole::Qwen3VlConditioner,
+            match layout {
+                Layout::OfficialBf16 => "bf16",
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "nvfp4-awq",
+            },
+            "Qwen3-VL-32B; H3 hidden-state contract",
+        ),
+        ModelComponent::Vae => (
+            ArtifactRole::VideoVae,
+            match layout {
+                Layout::OfficialBf16 => "fp32",
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "fp16",
+            },
+            "24 latent channels; spatial /16; temporal 17->5 (+2)",
+        ),
+        ModelComponent::AudioVae => (
+            ArtifactRole::AudioVae,
+            "fp32",
+            "32 kHz stereo; 40 latent rows/second",
+        ),
+        ModelComponent::Processor => (
+            ArtifactRole::Processor,
+            "data",
+            "Qwen3-VL tokenizer/processor",
+        ),
+        ModelComponent::VideoScheduler => (
+            ArtifactRole::VideoScheduler,
+            "config",
+            "rectified-flow Euler; video shift=12",
+        ),
+        ModelComponent::AudioScheduler => (
+            ArtifactRole::AudioScheduler,
+            "config",
+            "rectified-flow Euler; audio shift=3",
+        ),
+        ModelComponent::ModelConfig => (
+            ArtifactRole::SharedConfig,
+            "config",
+            "official module config",
+        ),
+        ModelComponent::TaskConfig => (
+            ArtifactRole::TaskConfig,
+            "config",
+            "task transformer config/index",
+        ),
+        _ => return None,
+    };
+    Some(ArtifactContract {
+        identity: ArtifactIdentity {
+            source_repo: &file.hf_repo,
+            source_revision: repo_revision(&file.hf_repo)?,
+            source_path: &file.hf_filename,
+            sha256: file.sha256?,
+        },
+        role,
+        license_url: MINIMAX_H3_LICENSE_URL,
+        license_sha256: LICENSE_SHA256,
+        dtype,
+        shape,
+        compatible_tasks,
+    })
+}
+
+fn file(
+    repo: &str,
+    filename: &str,
+    component: ModelComponent,
+    size_bytes: u64,
+    sha256: &'static str,
+) -> ModelFile {
+    ModelFile {
+        hf_repo: repo.to_string(),
+        hf_filename: filename.to_string(),
+        component,
+        size_bytes,
+        gated: false,
+        sha256: Some(sha256),
+    }
+}
+
+const FL2VA_TRANSFORMER: &[(u64, &str)] = &[
+    (
+        4_825_958_704,
+        "2d847200c45c09dd7f973c1b096663068408ef851ee0b3711d059b6dc5dcd028",
+    ),
+    (
+        4_702_158_032,
+        "2c4d362eddd2802180ac9c744849eb9ba8d9c8b984bdf9822cb02ed004b29184",
+    ),
+    (
+        4_933_368_192,
+        "949c5aafbbfa5654da730a6a7fafd75adb164d0857b095a30e8bb6d390887d69",
+    ),
+    (
+        4_567_069_608,
+        "eef7616790105ee839766bb2027203bf2c0d87c6aa038dca84145a8675f5ce28",
+    ),
+    (
+        4_702_158_080,
+        "43fdf42d638e8bc6745f713fae80c93bb301807a1a5ae7249344ce28e202a494",
+    ),
+    (
+        4_933_368_232,
+        "6442510b34d173653f0cce5c964b935395a8f7accf0b9cc0aa31aec59805239d",
+    ),
+    (
+        4_567_069_608,
+        "29f48f535c91dac76496ca821eeb16ca24bc4caf3f0cae8b920a89b1f966da6d",
+    ),
+    (
+        4_702_158_080,
+        "c711b096c764bd60f0b8b6ad49518bfab6d614fb788c725add8741c0674a4cd8",
+    ),
+    (
+        4_933_368_232,
+        "44428defe3976cbb87635ad200b958199e739986697cd29fdf27aeb7294b5944",
+    ),
+    (
+        4_567_069_608,
+        "3d44939c374c9da382e9c6877e1946adf7b84e08c7a881c068f228d6849411c9",
+    ),
+    (
+        4_702_158_080,
+        "224d24430b58127a5577721084e0e704a0e74ec96dd7c35bc6fc0994ebd87c33",
+    ),
+    (
+        4_933_368_232,
+        "48fa2bd8fe134eef565ab2464f1c2589a6657cba0d14283dfc06b532f8961f3c",
+    ),
+    (
+        4_567_069_608,
+        "be5b4b1809f9d546ffd4b3fcf41e5c1e02b819125caa6bc105c109b04c051bd3",
+    ),
+    (
+        4_644_161_920,
+        "8fbd5e6c1fb1df7ce988ca90f3d59e7610e465c7517e4b344eda4a214ba4b97d",
+    ),
+];
+
+const REF2VA_TRANSFORMER: &[(u64, &str)] = &[
+    (
+        4_825_958_704,
+        "7a3fcad885f51560e550b2e84c9a8d8b35e62996cfd9076937e992bd23478df9",
+    ),
+    (
+        4_702_158_032,
+        "1638ae1dc8ae26c4ba43ad28a6d851ad8983847324bb2b468719c7c81f219706",
+    ),
+    (
+        4_933_368_192,
+        "1ef3c4954ffe5a664c2e3028e2a3241190d9c159dce6ba1136002c6af1db5353",
+    ),
+    (
+        4_567_069_608,
+        "12d92f2975cfd5c5b786126385c52e5bf64884d4b4d6e60c3ef5d857c3f7469f",
+    ),
+    (
+        4_702_158_080,
+        "304d41ce03d59ac94bceb055935bf4e034df0badf8b0df4ded327c08a288a4cc",
+    ),
+    (
+        4_933_368_232,
+        "12a134b7c76d86edbe8fa2dc315f6cdaf4e1aca1b6ea4dfe4cad92df03d42eeb",
+    ),
+    (
+        4_567_069_608,
+        "b96395261359937c00fb42f4eb29306dc59b1a3368eeba52af4fb66e3e142c69",
+    ),
+    (
+        4_702_158_080,
+        "1897a6bf3b4fc834bb82d73ca02a7afc7d38c07f50ec5382cd54cd2f91b604d1",
+    ),
+    (
+        4_933_368_232,
+        "edfb38235adc96b99f55a401849befce59075a745e99c2d8c63ff358dd36443d",
+    ),
+    (
+        4_567_069_608,
+        "f8710775cf3413670edd7e23861b650a3431a71a6cc14cb1080623ab6b052385",
+    ),
+    (
+        4_702_158_080,
+        "9e18acc09f84edb5b34df9628efa15cfcab8bb76e8e20c1c2e979a107a0f7215",
+    ),
+    (
+        4_933_368_232,
+        "ea2e18228f8bdba1a4e0f32b155e4586df055997c45356213d05b971ba13e2f4",
+    ),
+    (
+        4_567_069_608,
+        "1e12083b1875678f7414ff55b09cd8bb1c30b861243f9bb7ff1e75b6ad3f1bdc",
+    ),
+    (
+        4_644_161_920,
+        "b340f44b5690cc745d48ae399381ec15b26a4fe25d483f677ccb4960dadb50d4",
+    ),
+];
+
+const TEXT_ENCODER: &[(u64, &str)] = &[
+    (
+        4_932_328_944,
+        "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb",
+    ),
+    (
+        4_875_990_528,
+        "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa",
+    ),
+    (
+        4_875_990_552,
+        "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940",
+    ),
+    (
+        4_875_990_584,
+        "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f",
+    ),
+    (
+        4_875_990_584,
+        "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2",
+    ),
+    (
+        4_875_990_584,
+        "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974",
+    ),
+    (
+        4_875_990_584,
+        "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934",
+    ),
+    (
+        4_875_990_584,
+        "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f",
+    ),
+    (
+        4_875_990_584,
+        "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47",
+    ),
+    (
+        4_875_990_584,
+        "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f",
+    ),
+    (
+        4_875_990_584,
+        "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f",
+    ),
+    (
+        4_875_990_584,
+        "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e",
+    ),
+    (
+        4_875_990_584,
+        "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c",
+    ),
+    (
+        3_270_697_008,
+        "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
+    ),
+];
+
+fn official_shared_files() -> Vec<ModelFile> {
+    let mut files: Vec<_> = TEXT_ENCODER
+        .iter()
+        .enumerate()
+        .map(|(index, (size, sha))| {
+            file(
+                OFFICIAL_REPO,
+                &format!("text_encoder/model-{:05}-of-00014.safetensors", index + 1),
+                ModelComponent::TextEncoder,
+                *size,
+                sha,
+            )
+        })
+        .collect();
+    files.extend([
+        file(
+            OFFICIAL_REPO,
+            "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+            ModelComponent::Vae,
+            5_061_033_024,
+            "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+            ModelComponent::Vae,
+            4_955_986_528,
+            "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+            ModelComponent::Vae,
+            398_539_336,
+            "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "audio_vae/diffusion_pytorch_model.safetensors",
+            ModelComponent::AudioVae,
+            605_429_340,
+            "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "model_index.json",
+            ModelComponent::ModelConfig,
+            2_936,
+            "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "modular_model_index.json",
+            ModelComponent::ModelConfig,
+            2_935,
+            "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "text_encoder/config.json",
+            ModelComponent::ModelConfig,
+            1_474,
+            "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "text_encoder/model.safetensors.index.json",
+            ModelComponent::ModelConfig,
+            97_831,
+            "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "vae/config.json",
+            ModelComponent::ModelConfig,
+            2_011,
+            "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "vae/diffusion_pytorch_model.safetensors.index.json",
+            ModelComponent::ModelConfig,
+            74_228,
+            "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "audio_vae/config.json",
+            ModelComponent::ModelConfig,
+            2_271,
+            "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "scheduler/scheduler_config.json",
+            ModelComponent::VideoScheduler,
+            97,
+            "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "audio_scheduler/scheduler_config.json",
+            ModelComponent::AudioScheduler,
+            96,
+            "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/chat_template.json",
+            ModelComponent::Processor,
+            5_499,
+            "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/merges.txt",
+            ModelComponent::Processor,
+            1_671_839,
+            "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/preprocessor_config.json",
+            ModelComponent::Processor,
+            390,
+            "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/tokenizer.json",
+            ModelComponent::Processor,
+            7_032_403,
+            "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/tokenizer_config.json",
+            ModelComponent::Processor,
+            11_003,
+            "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/video_preprocessor_config.json",
+            ModelComponent::Processor,
+            385,
+            "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        ),
+        file(
+            OFFICIAL_REPO,
+            "processor/vocab.json",
+            ModelComponent::Processor,
+            2_776_833,
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        ),
+    ]);
+    files
+}
+
+fn official_files(task: Task) -> Vec<ModelFile> {
+    let (directory, shards) = match task {
+        Task::Fl2va => ("transformer", FL2VA_TRANSFORMER),
+        Task::Ref2va => ("transformer_ref", REF2VA_TRANSFORMER),
+    };
+    let mut files: Vec<_> = shards
+        .iter()
+        .enumerate()
+        .map(|(index, (size, sha))| {
+            file(
+                OFFICIAL_REPO,
+                &format!(
+                    "{directory}/diffusion_pytorch_model-{:05}-of-00014.safetensors",
+                    index + 1
+                ),
+                ModelComponent::TransformerShard,
+                *size,
+                sha,
+            )
+        })
+        .collect();
+    files.push(official_task_config(task));
+    files.push(file(
+        OFFICIAL_REPO,
+        &format!("{directory}/diffusion_pytorch_model.safetensors.index.json"),
+        ModelComponent::TaskConfig,
+        64_488,
+        "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e",
+    ));
+    files.extend(official_shared_files());
+    files
+}
+
+/// The task architecture config is valid for both the official and Comfy
+/// weight layouts. It is deliberately separate from each task's sharded
+/// weight index: the latter describes only the official BF16 files and must
+/// never be attached to a Comfy single-file transformer.
+fn official_task_config(task: Task) -> ModelFile {
+    let directory = match task {
+        Task::Fl2va => "transformer",
+        Task::Ref2va => "transformer_ref",
+    };
+    file(
+        OFFICIAL_REPO,
+        &format!("{directory}/config.json"),
+        ModelComponent::TaskConfig,
+        546,
+        "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae",
+    )
+}
+
+/// Pinned non-weight runtime assets reused by the Comfy layouts.
+///
+/// ComfyUI supplies equivalent tokenizer code/data from its Python package,
+/// but Mold is a standalone binary and cannot assume that package exists.
+/// Reuse the official model's exact processor and architecture/scheduler
+/// files. Root model indexes and sharded-weight indexes are excluded because
+/// they describe the official BF16 weight graph, not the Comfy layout.
+fn official_runtime_support_files() -> Vec<ModelFile> {
+    official_shared_files()
+        .into_iter()
+        .filter(|file| match file.component {
+            ModelComponent::Processor
+            | ModelComponent::VideoScheduler
+            | ModelComponent::AudioScheduler => true,
+            ModelComponent::ModelConfig => matches!(
+                file.hf_filename.as_str(),
+                "text_encoder/config.json" | "vae/config.json" | "audio_vae/config.json"
+            ),
+            _ => false,
+        })
+        .collect()
+}
+
+fn comfy_files(task: Task) -> Vec<ModelFile> {
+    let (filename, transformer_sha) = match task {
+        Task::Fl2va => (
+            "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+        ),
+        Task::Ref2va => (
+            "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+        ),
+    };
+    let mut files = vec![
+        file(
+            COMFY_REPO,
+            filename,
+            ModelComponent::Transformer,
+            20_970_379_616,
+            transformer_sha,
+        ),
+        file(
+            COMFY_REPO,
+            "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            ModelComponent::TextEncoder,
+            15_687_142_551,
+            "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+        ),
+        file(
+            COMFY_REPO,
+            "vae/minimax_h3_video_vae_fp16.safetensors",
+            ModelComponent::Vae,
+            5_207_808_496,
+            "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        ),
+        file(
+            COMFY_REPO,
+            "vae/minimax_h3_audio_vae_fp32.safetensors",
+            ModelComponent::AudioVae,
+            605_254_808,
+            "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        ),
+    ];
+    files.push(official_task_config(task));
+    files.extend(official_runtime_support_files());
+    files
+}
+
+fn defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: DEFAULT_STEPS,
+        guidance: 0.0,
+        width: DEFAULT_WIDTH,
+        height: DEFAULT_HEIGHT,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: Some(MIN_FRAMES),
+        fps: Some(FIXED_FPS),
+    }
+}
+
+/// Hidden manifests used for exact identity, storage, and future engine work.
+/// They must remain hidden while `capabilities(...).runtime_available` is false.
+pub(crate) fn manifests() -> Vec<ModelManifest> {
+    [
+        (FL2VA_OFFICIAL, Task::Fl2va, Layout::OfficialBf16),
+        (REF2VA_OFFICIAL, Task::Ref2va, Layout::OfficialBf16),
+        (
+            FL2VA_COMFY,
+            Task::Fl2va,
+            Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+        ),
+        (
+            REF2VA_COMFY,
+            Task::Ref2va,
+            Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, task, layout)| ModelManifest {
+        name: name.to_string(),
+        family: FAMILY.to_string(),
+        description: match (task, layout) {
+            (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (compliance-gated; runtime unavailable)",
+            (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (compliance-gated; runtime unavailable)",
+            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (compliance-gated; runtime unavailable)",
+            (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (compliance-gated; runtime unavailable)",
+        }
+        .to_string(),
+        files: match layout {
+            Layout::OfficialBf16 => official_files(task),
+            Layout::ComfyPrunedInt8ConvrotNvfp4Awq => comfy_files(task),
+        },
+        defaults: defaults(),
+        hidden: true,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{find_manifest, storage_path};
+
+    fn request() -> GenerateRequest {
+        GenerateRequest {
+            prompt: "a lighthouse in a storm".into(),
+            negative_prompt: None,
+            model: FL2VA_COMFY.into(),
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            steps: DEFAULT_STEPS,
+            guidance: 0.0,
+            seed: Some(42),
+            batch_size: 1,
+            output_format: Some(OutputFormat::Mp4),
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            source_image_name: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            prompt_transform: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            lora: None,
+            frames: Some(MIN_FRAMES),
+            fps: Some(FIXED_FPS),
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            extend_video: None,
+            extend_video_path: None,
+            extend_overlap_frames: None,
+            keyframes: None,
+            hdr_exr_dir: None,
+            hdr_exr_full_float: false,
+            pipeline: None,
+            ic_lora_control: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            guidance_overrides: None,
+            placement: None,
+        }
+    }
+
+    #[test]
+    fn aliases_resolve_to_explicit_practical_variants() {
+        assert_eq!(resolve_model_name("minimax-h3"), Some(FL2VA_COMFY));
+        assert_eq!(resolve_model_name("minimax_h3_ref2va"), Some(REF2VA_COMFY));
+        assert_eq!(canonical_family("MiniMax_H3"), Some(FAMILY));
+        assert_eq!(canonical_family("h3"), None);
+        for alias in FAMILY_ALIASES {
+            assert_eq!(
+                crate::ExpandTask::for_family(alias),
+                crate::ExpandTask::TextToVideo
+            );
+        }
+        for lookalike in [
+            "notminimax-h3",
+            "minimax-h30",
+            "minimax-h3-ref2va-extra",
+            "other:minimax-h3-fl2va:official-bf16",
+        ] {
+            assert_eq!(resolve_model_name(lookalike), None, "{lookalike}");
+            assert_eq!(task_for_model(lookalike), None, "{lookalike}");
+            assert_eq!(layout_for_model(lookalike), None, "{lookalike}");
+        }
+    }
+
+    #[test]
+    fn timing_grid_accepts_the_three_documented_nominal_durations() {
+        for frames in [124, 243, 362] {
+            assert!(valid_frame_count(frames), "{frames}");
+        }
+        for frames in [123, 125, 361, 363] {
+            assert!(!valid_frame_count(frames), "{frames}");
+        }
+        assert_eq!(recommended_frames(125), 124);
+        assert_eq!(recommended_frames(350), 345);
+        assert_eq!(recommended_frames(u32::MAX), MAX_FRAMES);
+    }
+
+    #[test]
+    fn fl2va_modes_are_derived_only_from_boundary_frames() {
+        let mut req = request();
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::TextToAudioVideo
+        );
+
+        req.source_image = Some(vec![1]);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::FirstFrameToAudioVideo
+        );
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: MIN_FRAMES - 1,
+            image: vec![2],
+        }]);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::FirstAndLastFrameToAudioVideo
+        );
+
+        req.source_image = None;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va).unwrap(),
+            Mode::LastFrameToAudioVideo
+        );
+        req.keyframes.as_mut().unwrap()[0].frame = 17;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_BOUNDARY_FRAME_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn ref2va_and_synchronized_audio_fail_closed() {
+        let mut req = request();
+        assert_eq!(
+            validate_request_contract(&req, Task::Ref2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_REQUIRED"
+        );
+        req.edit_images = Some(vec![vec![1]]);
+        assert_eq!(
+            validate_request_contract(&req, Task::Ref2va).unwrap(),
+            Mode::ReferenceToAudioVideo
+        );
+        req.enable_audio = Some(false);
+        assert_eq!(
+            validate_request_contract(&req, Task::Ref2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_SYNCHRONIZED_AUDIO_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn invalid_timing_and_canvas_errors_include_recommendations() {
+        let mut req = request();
+        req.frames = Some(125);
+        let error = validate_request_contract(&req, Task::Fl2va).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_FRAME_GRID");
+        assert_eq!(error.recommended_frames, Some(124));
+
+        req.frames = Some(MAX_FRAMES);
+        req.width = 1056;
+        req.height = 1056;
+        let error = validate_request_contract(&req, Task::Fl2va).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_DIMENSIONS");
+        let (width, height) = error.recommended_dimensions.unwrap();
+        assert!(width.is_multiple_of(DIMENSION_ALIGNMENT));
+        assert!(height.is_multiple_of(DIMENSION_ALIGNMENT));
+        assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+        assert_eq!((width, height), (768, 768));
+    }
+
+    #[test]
+    fn fixed_fps_frame_bounds_and_every_canvas_rule_fail_explicitly() {
+        for fps in [1, 23, 25, 120] {
+            let mut req = request();
+            req.fps = Some(fps);
+            assert_eq!(
+                validate_request_contract(&req, Task::Fl2va)
+                    .unwrap_err()
+                    .code,
+                "MINIMAX_H3_FIXED_FPS",
+                "fps={fps}"
+            );
+        }
+
+        for frames in [107, 125, 379] {
+            let mut req = request();
+            req.frames = Some(frames);
+            assert_eq!(
+                validate_request_contract(&req, Task::Fl2va)
+                    .unwrap_err()
+                    .code,
+                "MINIMAX_H3_FRAME_GRID",
+                "frames={frames}"
+            );
+        }
+
+        for (width, height, rule) in [
+            (0, DEFAULT_HEIGHT, "positive"),
+            (DEFAULT_WIDTH - 1, DEFAULT_HEIGHT, "alignment"),
+            (1056, 1056, "area"),
+            (160, 768, "minimum aspect"),
+            (1344, 256, "maximum aspect"),
+        ] {
+            let mut req = request();
+            req.width = width;
+            req.height = height;
+            assert_eq!(
+                validate_request_contract(&req, Task::Fl2va)
+                    .unwrap_err()
+                    .code,
+                "MINIMAX_H3_DIMENSIONS",
+                "{rule}: {width}x{height}"
+            );
+        }
+
+        for (width, height) in [
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            (DEFAULT_HEIGHT, DEFAULT_WIDTH),
+            (1024, 1024),
+            (256, 1024),
+            (1024, 256),
+        ] {
+            let mut req = request();
+            req.width = width;
+            req.height = height;
+            assert!(
+                validate_request_contract(&req, Task::Fl2va).is_ok(),
+                "valid canvas {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_recommendations_match_the_official_short_edge_area_then_round_order() {
+        for ((aspect_width, aspect_height), expected) in [
+            ((21, 9), (1536, 672)),
+            ((16, 9), (1344, 768)),
+            ((4, 3), (1024, 768)),
+            ((1, 1), (768, 768)),
+            ((3, 4), (768, 1024)),
+            ((9, 16), (768, 1344)),
+            ((4, 1), (2016, 512)),
+            ((1, 4), (512, 2016)),
+        ] {
+            assert_eq!(
+                recommended_dimensions(aspect_width, aspect_height),
+                expected,
+                "aspect {aspect_width}:{aspect_height}"
+            );
+        }
+
+        // The oracle's independent post-budget rounding may exceed the
+        // pre-rounding area. 7:23 is one ratio that reaches the exact envelope.
+        let rounded = recommended_dimensions(7, 23);
+        assert_eq!(rounded, (576, 1856));
+        assert_eq!(u64::from(rounded.0) * u64::from(rounded.1), MAX_PIXELS);
+    }
+
+    #[test]
+    fn capabilities_are_truthful_before_runtime_exists() {
+        for task in [Task::Fl2va, Task::Ref2va] {
+            let caps = capabilities(task);
+            assert!(!caps.runtime_available);
+            assert_eq!(caps.native_batch_sizes, &[1]);
+            assert_eq!(caps.backends.cuda, BackendQualification::ContractTarget);
+            assert_eq!(caps.backends.metal, BackendQualification::Unsupported);
+            assert_eq!(caps.backends.cpu, BackendQualification::Unsupported);
+            assert!(caps.synchronized_audio);
+            assert!(!caps.audio_disable_supported);
+            assert_eq!(caps.audio_sample_rate_hz, 32_000);
+            assert_eq!(caps.audio_channels, 2);
+            assert_eq!(
+                (caps.min_duration_seconds, caps.max_duration_seconds),
+                (5, 15)
+            );
+            assert_eq!(caps.default_dimensions, (1344, 768));
+            assert_eq!(caps.min_aspect_ratio, (1, 4));
+            assert_eq!(caps.max_aspect_ratio, (4, 1));
+            assert_eq!(caps.noise_domain_version, NOISE_DOMAIN_VERSION);
+            assert_eq!(caps.noise_streams, NOISE_STREAMS);
+            assert_eq!(
+                caps.noise_draws,
+                &[
+                    NoiseDrawContract {
+                        name: NOISE_STREAMS[0],
+                        seed_source: NoiseSeedSource::FixedFreshPerVisualCondition(42),
+                        cardinality: NoiseDrawCardinality::PerVisualCondition,
+                    },
+                    NoiseDrawContract {
+                        name: NOISE_STREAMS[1],
+                        seed_source: NoiseSeedSource::RequestSeed,
+                        cardinality: NoiseDrawCardinality::PerVisualCondition,
+                    },
+                    NoiseDrawContract {
+                        name: NOISE_STREAMS[2],
+                        seed_source: NoiseSeedSource::RequestSeed,
+                        cardinality: NoiseDrawCardinality::Once,
+                    },
+                    NoiseDrawContract {
+                        name: NOISE_STREAMS[3],
+                        seed_source: NoiseSeedSource::RequestSeed,
+                        cardinality: NoiseDrawCardinality::Once,
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn per_model_capability_authority_covers_five_modes_without_advertising_runtime() {
+        let cases = [
+            (
+                FL2VA_OFFICIAL,
+                Task::Fl2va,
+                Layout::OfficialBf16,
+                FL2VA_MODES,
+            ),
+            (
+                REF2VA_OFFICIAL,
+                Task::Ref2va,
+                Layout::OfficialBf16,
+                REF2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                REF2VA_COMFY,
+                Task::Ref2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                REF2VA_MODES,
+            ),
+        ];
+        let mut observed_modes = Vec::new();
+        for (model, task, layout, modes) in cases {
+            let contract = capability_contract_for_model(model).unwrap();
+            assert_eq!(contract.canonical_model, model);
+            assert_eq!(contract.task, task);
+            assert_eq!(contract.layout, layout);
+            assert_eq!(contract.generation.modes, modes);
+            assert!(!contract.generation.runtime_available);
+            assert_eq!(contract.generation.native_batch_sizes, &[1]);
+            assert_eq!(
+                contract.generation.backends,
+                BackendApplicability {
+                    cuda: BackendQualification::ContractTarget,
+                    metal: BackendQualification::Unsupported,
+                    cpu: BackendQualification::Unsupported,
+                }
+            );
+            assert!(contract.generation.synchronized_audio);
+            assert!(runnable_capability_contract_for_model(model).is_none());
+            observed_modes.extend_from_slice(modes);
+        }
+        observed_modes.sort_by_key(|mode| *mode as u8);
+        observed_modes.dedup();
+        assert_eq!(observed_modes, ALL_MODES);
+
+        for alias in FAMILY_ALIASES {
+            assert!(capability_contract_for_model(alias).is_some());
+            assert!(runnable_capability_contract_for_model(alias).is_none());
+        }
+
+        let advertised = crate::build_model_catalog(&crate::Config::default(), None, false);
+        assert!(advertised.iter().all(|model| model.family != FAMILY));
+    }
+
+    #[test]
+    fn manifests_are_hidden_pinned_and_cannot_mix_task_transformers() {
+        let fl_official = find_manifest(FL2VA_OFFICIAL).unwrap();
+        let ref_official = find_manifest(REF2VA_OFFICIAL).unwrap();
+        let fl_comfy = find_manifest(FL2VA_COMFY).unwrap();
+        let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
+        for manifest in [fl_official, ref_official, fl_comfy, ref_comfy] {
+            assert!(manifest.hidden);
+            let contract = manifest_contract(manifest).unwrap();
+            assert!(!contract.runtime_available);
+            assert_eq!(contract.license_url, MINIMAX_H3_LICENSE_URL);
+            assert_eq!(contract.license_sha256, LICENSE_SHA256);
+            assert_eq!(
+                contract.source_revision,
+                repo_revision(contract.source_repo).unwrap()
+            );
+            assert_eq!(
+                contract.shared_identity_scheme,
+                "hf-repo+revision+path+sha256"
+            );
+            assert!(!contract.implementation_revision.is_empty());
+            assert_eq!(contract.diffusers_reference_repo, DIFFUSERS_REFERENCE_REPO);
+            assert_eq!(
+                contract.diffusers_reference_revision,
+                DIFFUSERS_REFERENCE_REVISION
+            );
+            for artifact in &manifest.files {
+                let metadata = artifact_contract(manifest, artifact).unwrap();
+                assert_eq!(
+                    Some(metadata.identity.source_revision),
+                    repo_revision(metadata.identity.source_repo)
+                );
+                assert_eq!(metadata.identity.source_path, artifact.hf_filename);
+                assert_eq!(Some(metadata.identity.sha256), artifact.sha256);
+                assert_eq!(metadata.license_url, MINIMAX_H3_LICENSE_URL);
+                assert_eq!(metadata.license_sha256, LICENSE_SHA256);
+            }
+            let task_transformer = manifest
+                .files
+                .iter()
+                .find(|artifact| {
+                    matches!(
+                        artifact.component,
+                        ModelComponent::Transformer | ModelComponent::TransformerShard
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                artifact_contract(manifest, task_transformer)
+                    .unwrap()
+                    .identity
+                    .source_repo,
+                contract.source_repo
+            );
+        }
+
+        let task_files = |manifest: &ModelManifest| {
+            manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    matches!(
+                        artifact_contract(manifest, file).map(|metadata| metadata.role),
+                        Some(ArtifactRole::TaskTransformer | ArtifactRole::TaskConfig)
+                    )
+                })
+                .map(|file| file.hf_filename.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert!(task_files(fl_official).is_disjoint(&task_files(ref_official)));
+        assert!(task_files(fl_comfy).is_disjoint(&task_files(ref_comfy)));
+
+        let ref_transformer = ref_comfy
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Transformer)
+            .unwrap();
+        assert!(artifact_contract(fl_comfy, ref_transformer).is_none());
+    }
+
+    #[test]
+    fn every_variant_has_a_complete_standalone_component_graph() {
+        let required_roles = [
+            ArtifactRole::TaskTransformer,
+            ArtifactRole::Qwen3VlConditioner,
+            ArtifactRole::VideoVae,
+            ArtifactRole::AudioVae,
+            ArtifactRole::Processor,
+            ArtifactRole::VideoScheduler,
+            ArtifactRole::AudioScheduler,
+            ArtifactRole::SharedConfig,
+            ArtifactRole::TaskConfig,
+        ];
+        for manifest_name in [FL2VA_OFFICIAL, REF2VA_OFFICIAL, FL2VA_COMFY, REF2VA_COMFY] {
+            let manifest = find_manifest(manifest_name).unwrap();
+            for role in required_roles {
+                assert!(
+                    manifest.files.iter().any(|file| {
+                        artifact_contract(manifest, file)
+                            .is_some_and(|contract| contract.role == role)
+                    }),
+                    "{manifest_name} is missing {role:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn comfy_reuses_exact_official_runtime_assets_without_official_weight_indexes() {
+        for (official_name, comfy_name) in [
+            (FL2VA_OFFICIAL, FL2VA_COMFY),
+            (REF2VA_OFFICIAL, REF2VA_COMFY),
+        ] {
+            let official = find_manifest(official_name).unwrap();
+            let comfy = find_manifest(comfy_name).unwrap();
+            let reused = comfy
+                .files
+                .iter()
+                .filter(|file| file.hf_repo == OFFICIAL_REPO)
+                .collect::<Vec<_>>();
+            assert_eq!(reused.len(), 13);
+            for file in reused {
+                assert!(!matches!(
+                    file.hf_filename.as_str(),
+                    "model_index.json" | "modular_model_index.json"
+                ));
+                assert!(!file.hf_filename.ends_with("safetensors.index.json"));
+                let same = official
+                    .files
+                    .iter()
+                    .find(|candidate| {
+                        candidate.hf_repo == file.hf_repo
+                            && candidate.hf_filename == file.hf_filename
+                            && candidate.component == file.component
+                            && candidate.size_bytes == file.size_bytes
+                            && candidate.gated == file.gated
+                            && candidate.sha256 == file.sha256
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{comfy_name} reused asset is not exact in {official_name}: {}",
+                            file.hf_filename
+                        )
+                    });
+                assert_eq!(
+                    artifact_contract(comfy, file).unwrap().identity,
+                    artifact_contract(official, same).unwrap().identity
+                );
+                assert_eq!(storage_path(comfy, file), storage_path(official, same));
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_metadata_requires_exact_pinned_file_membership() {
+        let manifest = find_manifest(FL2VA_COMFY).unwrap();
+        let original = manifest.files.first().unwrap();
+
+        let mut wrong_size = original.clone();
+        wrong_size.size_bytes += 1;
+        assert!(artifact_contract(manifest, &wrong_size).is_none());
+
+        let mut wrong_gate = original.clone();
+        wrong_gate.gated = !wrong_gate.gated;
+        assert!(artifact_contract(manifest, &wrong_gate).is_none());
+    }
+
+    #[test]
+    fn shared_components_have_one_storage_identity_per_layout() {
+        for (fl_name, ref_name) in [
+            (FL2VA_OFFICIAL, REF2VA_OFFICIAL),
+            (FL2VA_COMFY, REF2VA_COMFY),
+        ] {
+            let fl = find_manifest(fl_name).unwrap();
+            let reference = find_manifest(ref_name).unwrap();
+            let shared = |manifest: &ModelManifest| {
+                manifest
+                    .files
+                    .iter()
+                    .filter(|file| {
+                        artifact_contract(manifest, file)
+                            .is_some_and(|metadata| metadata.compatible_tasks == BOTH_TASKS)
+                    })
+                    .map(|file| {
+                        let identity = artifact_contract(manifest, file).unwrap().identity;
+                        (
+                            identity.source_repo.to_string(),
+                            identity.source_revision.to_string(),
+                            identity.source_path.to_string(),
+                            identity.sha256.to_string(),
+                            storage_path(manifest, file),
+                        )
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(shared(fl), shared(reference));
+        }
+    }
+
+    #[test]
+    fn artifact_dtypes_are_exact_per_concrete_layout() {
+        let assert_dtype = |manifest_name: &str, component: ModelComponent, expected: &str| {
+            let manifest = find_manifest(manifest_name).unwrap();
+            let matches = manifest
+                .files
+                .iter()
+                .filter(|file| file.component == component)
+                .map(|file| artifact_contract(manifest, file).unwrap().dtype)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(matches, std::collections::BTreeSet::from([expected]));
+        };
+
+        for manifest in [FL2VA_OFFICIAL, REF2VA_OFFICIAL] {
+            assert_dtype(manifest, ModelComponent::TransformerShard, "bf16");
+            assert_dtype(manifest, ModelComponent::TextEncoder, "bf16");
+            assert_dtype(manifest, ModelComponent::Vae, "fp32");
+            assert_dtype(manifest, ModelComponent::AudioVae, "fp32");
+        }
+        for manifest in [FL2VA_COMFY, REF2VA_COMFY] {
+            assert_dtype(manifest, ModelComponent::Transformer, "int8-convrot-pruned");
+            assert_dtype(manifest, ModelComponent::TextEncoder, "nvfp4-awq");
+            assert_dtype(manifest, ModelComponent::Vae, "fp16");
+            assert_dtype(manifest, ModelComponent::AudioVae, "fp32");
+        }
+    }
+
+    #[test]
+    fn request_wire_round_trip_preserves_contract_then_public_admission_stays_gated() {
+        let mut req = request();
+        req.output_format = None;
+        req.normalise_output_format(Some(FAMILY));
+        assert_eq!(req.output_format, Some(OutputFormat::Mp4));
+
+        let wire = serde_json::to_value(&req).unwrap();
+        let parsed: GenerateRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+        assert_eq!(
+            validate_request_contract(&parsed, Task::Fl2va).unwrap(),
+            Mode::TextToAudioVideo
+        );
+
+        let error = crate::validate_generate_request_with_family(&parsed, Some(FAMILY))
+            .expect_err("public admission must remain compliance-gated");
+        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn rust_contract_pins_match_the_revision_locked_conformance_authority() {
+        let conformance: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/minimax_h3/conformance-manifest.json"
+        )))
+        .unwrap();
+        let source_revision = |id: &str| {
+            conformance["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["id"] == id)
+                .and_then(|source| source["revision"].as_str())
+                .unwrap()
+        };
+        assert_eq!(source_revision("minimax-official-model"), OFFICIAL_REVISION);
+        assert_eq!(source_revision("comfy-checkpoints"), COMFY_REVISION);
+        assert_eq!(
+            source_revision("minimax-official-code"),
+            OFFICIAL_IMPLEMENTATION_REVISION
+        );
+        assert_eq!(source_revision("comfyui"), COMFY_IMPLEMENTATION_REVISION);
+        assert_eq!(source_revision("diffusers"), DIFFUSERS_REFERENCE_REVISION);
+        assert_eq!(
+            conformance["numerical_authority"]["precision"],
+            "official-bf16-fp32-mixed"
+        );
+        assert_eq!(conformance["day_zero_contract"]["fps"], FIXED_FPS);
+        assert_eq!(conformance["day_zero_contract"]["frame_step"], FRAME_STEP);
+        assert_eq!(
+            conformance["day_zero_contract"]["frame_offset"],
+            FRAME_OFFSET
+        );
+        assert_eq!(
+            conformance["day_zero_contract"]["nominal_15_second_frames"],
+            MAX_FRAMES
+        );
+        let synthetic: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/minimax_h3/synthetic-v1.json"
+        )))
+        .unwrap();
+        let noise_order = synthetic["noise_allocation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|draw| draw["domain"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(noise_order, NOISE_STREAMS);
+
+        let pin = |id: &str| {
+            conformance["component_indexes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == id)
+                .unwrap()
+        };
+        assert_eq!(pin("official-license")["sha256"], LICENSE_SHA256);
+        for (id, manifest_name, path) in [
+            ("official-model-index", FL2VA_OFFICIAL, "model_index.json"),
+            (
+                "official-modular-index",
+                FL2VA_OFFICIAL,
+                "modular_model_index.json",
+            ),
+            (
+                "official-fl2va-transformer-index",
+                FL2VA_OFFICIAL,
+                "transformer/diffusion_pytorch_model.safetensors.index.json",
+            ),
+            (
+                "official-ref2va-transformer-index",
+                REF2VA_OFFICIAL,
+                "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+            ),
+            (
+                "official-text-encoder-index",
+                FL2VA_OFFICIAL,
+                "text_encoder/model.safetensors.index.json",
+            ),
+            (
+                "official-video-vae-index",
+                FL2VA_OFFICIAL,
+                "vae/diffusion_pytorch_model.safetensors.index.json",
+            ),
+            (
+                "official-audio-vae-config",
+                FL2VA_OFFICIAL,
+                "audio_vae/config.json",
+            ),
+        ] {
+            let manifest = find_manifest(manifest_name).unwrap();
+            let artifact = manifest
+                .files
+                .iter()
+                .find(|file| file.hf_filename == path)
+                .unwrap_or_else(|| panic!("missing {path} in {manifest_name}"));
+            assert_eq!(pin(id)["relative_path"], path);
+            assert_eq!(pin(id)["sha256"].as_str(), artifact.sha256);
+        }
+    }
+}

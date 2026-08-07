@@ -655,6 +655,7 @@ fn installed_catalog_models(
                 default_guidance: guidance,
                 default_frames: frames,
                 default_fps: fps,
+                min_frames: mold_core::validation::min_frames_for_family(&sidecar.family),
                 max_frames: mold_core::validation::max_frames_for_family_at_fps(
                     &sidecar.family,
                     fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
@@ -666,6 +667,7 @@ fn installed_catalog_models(
                     &sidecar.family,
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
+                frame_offset: mold_core::validation::frame_offset_for_family(&sidecar.family),
                 // Per model, through the same helper the manifest catalog
                 // uses. An installed `cv:` / `hf:` checkpoint has no spatial
                 // upsampler, so it advertises the single-pass ceiling and
@@ -1233,6 +1235,7 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         | ModelComponent::TransformerShard
         | ModelComponent::LowNoiseTransformer => "transformer",
         ModelComponent::Vae => "vae",
+        ModelComponent::AudioVae => "audio_vae",
         ModelComponent::SpatialUpscaler => "spatial_upscaler",
         ModelComponent::TemporalUpscaler => "temporal_upscaler",
         ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora => "distilled_lora",
@@ -1241,7 +1244,12 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         ModelComponent::T5Tokenizer
         | ModelComponent::ClipTokenizer
         | ModelComponent::ClipTokenizer2
-        | ModelComponent::TextTokenizer => "tokenizer",
+        | ModelComponent::TextTokenizer
+        | ModelComponent::Processor => "tokenizer",
+        ModelComponent::VideoScheduler
+        | ModelComponent::AudioScheduler
+        | ModelComponent::ModelConfig
+        | ModelComponent::TaskConfig => "config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => "upscaler",
     }
@@ -1254,6 +1262,7 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::TransformerShard => "transformer shard",
         ModelComponent::LowNoiseTransformer => "low-noise transformer",
         ModelComponent::Vae => "vae",
+        ModelComponent::AudioVae => "audio vae",
         ModelComponent::SpatialUpscaler => "spatial upscaler",
         ModelComponent::TemporalUpscaler => "temporal upscaler",
         ModelComponent::DistilledLora => "distilled lora",
@@ -1266,6 +1275,11 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::ClipTokenizer2 => "clip-g tokenizer",
         ModelComponent::TextEncoder => "text encoder",
         ModelComponent::TextTokenizer => "text tokenizer",
+        ModelComponent::Processor => "processor",
+        ModelComponent::VideoScheduler => "video scheduler",
+        ModelComponent::AudioScheduler => "audio scheduler",
+        ModelComponent::ModelConfig => "model config",
+        ModelComponent::TaskConfig => "task config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => filename,
     }
