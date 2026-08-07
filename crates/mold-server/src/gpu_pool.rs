@@ -2776,6 +2776,7 @@ mod tests {
             keyframes: Some(vec![mold_core::types::KeyframeCondition {
                 frame: 0,
                 image: vec![0x89, 0x50, 0x4e, 0x47],
+                name: None,
             }]),
             ..base.clone()
         };

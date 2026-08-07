@@ -9,6 +9,7 @@ import {
   minimaxH3AuthoringCapabilities,
   minimaxH3AuthoringError,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3Mode,
   minimaxH3ReferenceBudget,
   minimaxH3ReferenceDraftsFromMetadata,
@@ -215,7 +216,7 @@ describe("MiniMax H3 Studio authority", () => {
       output_format: "mp4",
       source_image: "FIRST",
       source_image_name: "first.png",
-      keyframes: [{ frame: 123, image: "LAST" }],
+      keyframes: [{ frame: 123, image: "LAST", name: "last.png" }],
     });
     expect(request).not.toHaveProperty("negative_prompt");
     expect(request).not.toHaveProperty("loras");
@@ -295,5 +296,22 @@ describe("MiniMax H3 Studio authority", () => {
     expect(MINIMAX_H3_RESYNTHESIS_GUIDANCE).toContain("newly synthesized");
     expect(MINIMAX_H3_RESYNTHESIS_GUIDANCE).toContain("not pixel-aligned");
     expect(MINIMAX_H3_RESYNTHESIS_GUIDANCE).toContain("no denoise-strength");
+  });
+
+  it("restores only an actual final-frame keyframe when frame count is known", () => {
+    expect(
+      minimaxH3ClosingBoundaryFromMetadata(124, [
+        { frame: 0, name: "opening.png", sha256: "a".repeat(64) },
+      ]),
+    ).toBeNull();
+    expect(
+      minimaxH3ClosingBoundaryFromMetadata(124, [
+        { frame: 123, name: "closing.png", sha256: "b".repeat(64) },
+      ]),
+    ).toMatchObject({
+      filename: "closing.png",
+      data: "",
+      sha256: "b".repeat(64),
+    });
   });
 });

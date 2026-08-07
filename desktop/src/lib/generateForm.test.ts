@@ -126,7 +126,7 @@ describe("buildRequest — MiniMax H3 authoring", () => {
       output_format: "mp4",
       source_image: "FIRST",
       source_image_name: "first.png",
-      keyframes: [{ frame: 361, image: "LAST" }],
+      keyframes: [{ frame: 361, image: "LAST", name: "last.png" }],
     });
     expect(request.enable_audio).toBeUndefined();
     expect(request.negative_prompt).toBeUndefined();
@@ -255,10 +255,10 @@ describe("buildRequest — LTX-2 advanced video", () => {
     expect(req.spatial_upscale).toBe("x1-5");
     expect(req.temporal_upscale).toBe("x2");
     expect(req.source_video).toBe("VIDEOB64");
-    // Keyframe wire shape is { frame, image: base64 } — no filename on the wire.
+    // Names are provenance only; the engine still consumes frame + bytes.
     expect(req.keyframes).toEqual([
-      { frame: 0, image: "K0" },
-      { frame: 24, image: "K1" },
+      { frame: 0, image: "K0", name: "k0.png" },
+      { frame: 24, image: "K1", name: "k1.png" },
     ]);
   });
 
@@ -834,7 +834,7 @@ describe("applyMetadataToForm", () => {
     expect(form.seed).toBe("42");
   });
 
-  it("preserves H3 opening-frame provenance while requiring reattachment", () => {
+  it("preserves H3 boundary provenance while requiring reattachment", () => {
     const form = newGenerateForm();
     applyMetadataToForm(
       form,
@@ -845,6 +845,8 @@ describe("applyMetadataToForm", () => {
         output_format: "mp4",
         source_image_name: "opening.png",
         source_image_sha256: "a".repeat(64),
+        frames: 124,
+        keyframes: [{ frame: 123, name: "closing.png", sha256: "b".repeat(64) }],
       },
       [],
     );
@@ -852,6 +854,11 @@ describe("applyMetadataToForm", () => {
       filename: "opening.png",
       data: "",
       sha256: "a".repeat(64),
+    });
+    expect(form.h3Authoring?.lastFrame).toMatchObject({
+      filename: "closing.png",
+      data: "",
+      sha256: "b".repeat(64),
     });
   });
 

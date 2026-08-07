@@ -612,6 +612,7 @@ fn build_keyframes(images: Vec<Vec<u8>>, frames: u32) -> Vec<KeyframeCondition> 
         .map(|(index, image)| KeyframeCondition {
             frame: u32::try_from(index).unwrap_or(0) * last_frame / denominator,
             image,
+            name: None,
         })
         .collect()
 }
@@ -1208,10 +1209,12 @@ mod tests {
             KeyframeCondition {
                 frame: 0,
                 image: vec![0x89, b'P', b'N', b'G'],
+                name: None,
             },
             KeyframeCondition {
                 frame: 24,
                 image: vec![0xFF, 0xD8],
+                name: None,
             },
         ];
         let range = TimeRange {

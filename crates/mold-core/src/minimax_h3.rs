@@ -2447,6 +2447,7 @@ mod tests {
         req.keyframes = Some(vec![crate::KeyframeCondition {
             frame: MIN_FRAMES - 1,
             image: vec![2],
+            name: None,
         }]);
         assert_eq!(
             validate_request_contract(&req, Task::Fl2va).unwrap(),

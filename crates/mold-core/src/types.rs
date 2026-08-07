@@ -1062,11 +1062,8 @@ impl GenerationReference {
     }
 }
 
-fn redacted_reference_name(provenance: &GenerationReferenceProvenance) -> Option<String> {
-    provenance
-        .name
-        .as_deref()
-        .map(str::trim)
+fn redacted_media_name(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
         .filter(|name| {
             !name.is_empty()
                 && name.len() <= crate::minimax_h3::MAX_REFERENCE_NAME_BYTES
@@ -1076,6 +1073,10 @@ fn redacted_reference_name(provenance: &GenerationReferenceProvenance) -> Option
                 && !name.chars().any(char::is_control)
         })
         .map(str::to_owned)
+}
+
+fn redacted_reference_name(provenance: &GenerationReferenceProvenance) -> Option<String> {
+    redacted_media_name(provenance.name.as_deref())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1364,6 +1365,10 @@ pub struct KeyframeCondition {
     pub frame: u32,
     #[serde(with = "base64_required")]
     pub image: Vec<u8>,
+    /// Display-only provenance label for this keyframe. The engine ignores it;
+    /// saved metadata retains only a sanitized name and content digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -1781,6 +1786,16 @@ pub struct ImageData {
     pub index: u32,
 }
 
+/// Byte-free provenance for a keyframe conditioning input. Additive on
+/// `OutputMetadata`; legacy rows omit the field entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeyframeMetadata {
+    pub frame: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
     pub prompt: String,
@@ -1829,6 +1844,10 @@ pub struct OutputMetadata {
     /// upload handles, API keys, or server/client filesystem paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<Vec<GenerationReferenceMetadata>>,
+    /// Ordered, byte-free keyframe provenance. FL2VA clients use the entry at
+    /// `frames - 1` to restore the closing-frame reattachment requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<Vec<KeyframeMetadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1930,6 +1949,23 @@ impl OutputMetadata {
                     .collect::<Vec<_>>()
             })
         });
+        let keyframes = req.keyframes.as_ref().and_then(|keyframes| {
+            (!keyframes.is_empty()).then(|| {
+                keyframes
+                    .iter()
+                    .map(|keyframe| {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&keyframe.image);
+                        KeyframeMetadata {
+                            frame: keyframe.frame,
+                            name: redacted_media_name(keyframe.name.as_deref()),
+                            sha256: format!("{:x}", hasher.finalize()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
         Self {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
@@ -1971,6 +2007,7 @@ impl OutputMetadata {
                 })
             }),
             references,
+            keyframes,
             scheduler,
             output_format: req.output_format,
             cfg_plus: req.cfg_plus,
@@ -3722,6 +3759,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 0,
             image: vec![2],
+            name: None,
         }]);
         assert_eq!(
             ExpandTask::for_generation("ltx2", &req),
@@ -3731,6 +3769,7 @@ mod tests {
         req.keyframes.as_mut().unwrap().push(KeyframeCondition {
             frame: 8,
             image: vec![3],
+            name: None,
         });
         assert_eq!(
             ExpandTask::for_generation("ltx2", &req),
@@ -4472,6 +4511,41 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.source_image_name, None);
         assert_eq!(legacy.source_image_sha256, None);
+    }
+
+    #[test]
+    fn output_metadata_records_byte_free_keyframe_provenance() {
+        let req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "end on the painted doorway",
+            "model": "minimax-h3-fl2va:official-bf16",
+            "width": 768,
+            "height": 512,
+            "steps": 30,
+            "frames": 124,
+            "keyframes": [{
+                "frame": 123,
+                "image": "Y2xvc2luZw==",
+                "name": "closing.png"
+            }]
+        }))
+        .unwrap();
+
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        let keyframes = metadata.keyframes.as_ref().unwrap();
+        assert_eq!(keyframes.len(), 1);
+        assert_eq!(keyframes[0].frame, 123);
+        assert_eq!(keyframes[0].name.as_deref(), Some("closing.png"));
+        assert_eq!(
+            keyframes[0].sha256,
+            "6f9a48800d2f3095e8a310a4317e009a5dc222e11c45b34ec8d5544feebb8277"
+        );
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(!serialized.contains("Y2xvc2luZw=="));
+
+        let mut legacy_value = serde_json::to_value(&metadata).unwrap();
+        legacy_value.as_object_mut().unwrap().remove("keyframes");
+        let legacy: OutputMetadata = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(legacy.keyframes, None);
     }
 
     #[test]

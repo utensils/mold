@@ -484,7 +484,13 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
       delete next.source_image_name;
     }
     next.keyframes = state.lastFrame
-      ? [{ frame: frames - 1, image: state.lastFrame.data }]
+      ? [
+          {
+            frame: frames - 1,
+            image: state.lastFrame.data,
+            name: state.lastFrame.filename,
+          },
+        ]
       : undefined;
     if (!state.lastFrame) delete next.keyframes;
   }
@@ -564,5 +570,36 @@ export function minimaxH3BoundaryFromSourceMetadata(
     height: 0,
     data: "",
     sha256: sha256?.trim() || null,
+  };
+}
+
+export interface MinimaxH3KeyframeMetadataLike {
+  frame: number;
+  name?: string | null;
+  sha256: string;
+}
+
+/** Recreate-safe FL2VA closing-frame provenance. Prefer the exact final-frame
+ * entry; accept one singleton only when the closing role is unambiguous. */
+export function minimaxH3ClosingBoundaryFromMetadata(
+  frames: number | null | undefined,
+  keyframes: readonly MinimaxH3KeyframeMetadataLike[] | null | undefined,
+): MinimaxH3BoundaryImage | null {
+  if (!keyframes?.length) return null;
+  const finalFrame = frames == null ? null : frames - 1;
+  const closing =
+    finalFrame == null
+      ? keyframes.length === 1
+        ? keyframes[0]!
+        : null
+      : (keyframes.find((keyframe) => keyframe.frame === finalFrame) ?? null);
+  if (!closing) return null;
+  return {
+    filename: closing.name?.trim() || "Last frame",
+    mimeType: "image/*",
+    width: 0,
+    height: 0,
+    data: "",
+    sha256: closing.sha256.trim() || null,
   };
 }

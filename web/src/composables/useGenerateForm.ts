@@ -42,6 +42,7 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   serializeMinimaxH3Authoring,
@@ -412,6 +413,13 @@ export function applyMetadataToForm(
           ? minimaxH3BoundaryFromSourceMetadata(
               metadata.source_image_name,
               metadata.source_image_sha256,
+            )
+          : null,
+      lastFrame:
+        minimaxH3TaskForModel(metadata.model) === "fl2va"
+          ? minimaxH3ClosingBoundaryFromMetadata(
+              metadata.frames,
+              metadata.keyframes,
             )
           : null,
       references: minimaxH3ReferenceDraftsFromMetadata(metadata.references),
@@ -789,6 +797,7 @@ export function useGenerateForm(): UseGenerateForm {
                 ? s.keyframes.map((k) => ({
                     frame: k.frame,
                     image: k.image.base64,
+                    name: k.image.filename,
                   }))
                 : undefined,
               pipeline: s.icLoraControl

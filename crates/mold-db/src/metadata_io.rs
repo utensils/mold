@@ -118,6 +118,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         source_image_sha256: None,
         edit_image_sha256s: None,
         references: None,
+        keyframes: None,
         scheduler: None,
         output_format: None,
         cfg_plus: None,

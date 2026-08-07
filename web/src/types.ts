@@ -69,6 +69,8 @@ export interface OutputMetadata {
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
   references?: GenerationReferenceMetadata[] | null;
+  /** Ordered byte-free keyframe provenance (newer servers only). */
+  keyframes?: KeyframeMetadata[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
@@ -791,6 +793,13 @@ export interface KeyframeConditionState {
 export interface KeyframeConditionWire {
   frame: number;
   image: string;
+  name?: string | null;
+}
+
+export interface KeyframeMetadata {
+  frame: number;
+  name?: string | null;
+  sha256: string;
 }
 
 export interface ExpandFormState {

@@ -879,8 +879,8 @@ describe("useGenerateForm", () => {
     expect(wire.source_video).toBe("VIDEO");
     expect(wire.source_video_path).toBeUndefined();
     expect(wire.keyframes).toEqual([
-      { frame: 0, image: "FIRST" },
-      { frame: 24, image: "LAST" },
+      { frame: 0, image: "FIRST", name: "first.png" },
+      { frame: 24, image: "LAST", name: "last.png" },
     ]);
     expect(wire.pipeline).toBe("keyframe");
     expect(wire.retake_range).toEqual({
@@ -1385,7 +1385,7 @@ describe("generate form serialization helpers", () => {
     ]);
   });
 
-  it("applyMetadataToForm preserves H3 opening-frame provenance without bytes", () => {
+  it("applyMetadataToForm preserves H3 boundary provenance without bytes", () => {
     const next = applyMetadataToForm(makeForm(), {
       prompt: "new synchronized shot",
       model: "minimax-h3-fl2va:official-bf16",
@@ -1397,12 +1397,19 @@ describe("generate form serialization helpers", () => {
       output_format: "mp4",
       source_image_name: "opening.png",
       source_image_sha256: "a".repeat(64),
+      frames: 124,
+      keyframes: [{ frame: 123, name: "closing.png", sha256: "b".repeat(64) }],
       version: "0.1.0",
     });
     expect(next.h3Authoring?.firstFrame).toMatchObject({
       filename: "opening.png",
       data: "",
       sha256: "a".repeat(64),
+    });
+    expect(next.h3Authoring?.lastFrame).toMatchObject({
+      filename: "closing.png",
+      data: "",
+      sha256: "b".repeat(64),
     });
   });
 

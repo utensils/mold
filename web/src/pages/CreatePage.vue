@@ -166,8 +166,10 @@ import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import {
   MINIMAX_H3_PROMPT_PLACEHOLDER,
+  emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
+  minimaxH3TaskForModel,
 } from "@studio/lib/minimaxH3Authoring";
 import {
   modelDisplayName,
@@ -3122,7 +3124,7 @@ function openJob(job: Job) {
   form.state.value.sourceVideoPath = request.source_video_path ?? "";
   form.state.value.keyframes = (request.keyframes ?? []).map((keyframe) => ({
     frame: keyframe.frame,
-    image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
+    image: image(keyframe.image, keyframe.name ?? `Keyframe ${keyframe.frame}`),
   }));
   form.state.value.pipeline = request.pipeline ?? null;
   form.state.value.icLoraControl = request.ic_lora_control ?? null;
@@ -3132,6 +3134,36 @@ function openJob(job: Job) {
   form.state.value.guidanceOverrides = guidanceOverridesFromWire(
     request.guidance_overrides,
   );
+  if (minimaxH3TaskForModel(request.model)) {
+    form.state.value.h3Authoring = emptyMinimaxH3AuthoringState();
+    form.state.value.h3Authoring.references = (request.references ?? []).map(
+      (reference) => ({
+        reference: JSON.parse(JSON.stringify(reference)),
+      }),
+    );
+    if (request.source_image) {
+      form.state.value.h3Authoring.firstFrame = {
+        filename: request.source_image_name ?? "First frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: request.source_image,
+      };
+    }
+    const finalFrame = (request.frames ?? 1) - 1;
+    const last = request.keyframes?.find(
+      (keyframe) => keyframe.frame === finalFrame,
+    );
+    if (last) {
+      form.state.value.h3Authoring.lastFrame = {
+        filename: last.name ?? "Last frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: last.image,
+      };
+    }
+  }
 }
 
 function closeDrawer() {

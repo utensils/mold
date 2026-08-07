@@ -46,6 +46,7 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   serializeMinimaxH3Authoring,
@@ -497,6 +498,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       req.keyframes = form.keyframes.map<KeyframeConditionWire>((k) => ({
         frame: k.frame,
         image: k.image.base64,
+        name: k.image.filename,
       }));
     }
     if (form.icLoraControl) {
@@ -642,6 +644,13 @@ export function applyMetadataToForm(
             metadata.source_image_sha256,
           )
         : null,
+    lastFrame:
+      minimaxH3TaskForModel(metadata.model) === "fl2va"
+        ? minimaxH3ClosingBoundaryFromMetadata(
+            metadata.frames ?? metadata.video_frames,
+            metadata.keyframes,
+          )
+        : null,
     references: minimaxH3ReferenceDraftsFromMetadata(metadata.references),
   };
 }
@@ -724,7 +733,10 @@ export function applyRequestToForm(
     : null;
   form.keyframes = (request.keyframes ?? []).map((keyframe) => ({
     frame: keyframe.frame,
-    image: { filename: `Keyframe ${keyframe.frame}`, base64: keyframe.image },
+    image: {
+      filename: keyframe.name ?? `Keyframe ${keyframe.frame}`,
+      base64: keyframe.image,
+    },
   }));
   form.pipeline = request.pipeline ?? null;
   form.icLoraControl = request.ic_lora_control ?? null;
@@ -750,7 +762,7 @@ export function applyRequestToForm(
     const last = request.keyframes?.find((keyframe) => keyframe.frame === finalFrame);
     if (last) {
       form.h3Authoring.lastFrame = {
-        filename: "Last frame",
+        filename: last.name ?? "Last frame",
         mimeType: "image/*",
         width: 0,
         height: 0,

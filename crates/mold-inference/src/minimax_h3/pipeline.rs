@@ -2002,6 +2002,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 123,
             image: png(80, 48, [40, 50, 60]),
+            name: None,
         }]);
         let prepared = prepared(&req);
         assert_eq!(prepared.geometry.mode, Mode::FirstAndLastFrameToAudioVideo);
@@ -2071,6 +2072,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 123,
             image: png(80, 48, [40, 50, 60]),
+            name: None,
         }]);
         let prepared = prepared(&req);
         assert_eq!(prepared.geometry.mode, Mode::LastFrameToAudioVideo);
@@ -2122,6 +2124,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 123,
             image: png(32, 32, [40, 50, 60]),
+            name: None,
         }]);
         let prepared = prepared(&req);
         let mut backend = SyntheticBackend::new();

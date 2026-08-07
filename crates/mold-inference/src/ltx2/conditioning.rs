@@ -292,6 +292,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 8,
             image: fake_png_bytes(),
+            name: None,
         }]);
         req.source_video = Some(fake_mp4_bytes());
         req.audio_file = Some(fake_wav_bytes());
@@ -325,10 +326,12 @@ mod tests {
             KeyframeCondition {
                 frame: 8,
                 image: fake_png_bytes(),
+                name: None,
             },
             KeyframeCondition {
                 frame: 16,
                 image: fake_png_bytes(),
+                name: None,
             },
         ]);
 
