@@ -2147,7 +2147,9 @@ mod tests {
             height: 100,
         };
         assert_eq!(
-            validate_references(&[descriptor.clone()]).unwrap_err().code,
+            validate_references(std::slice::from_ref(&descriptor))
+                .unwrap_err()
+                .code,
             "MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY"
         );
         validate_reference_descriptors(&[descriptor]).unwrap();
