@@ -290,7 +290,15 @@ pub fn validate_audio_safetensors(
     validate_header_and_file_len(&header, file_len, config, layout)
 }
 
-pub fn load_validated_audio_vae(
+/// Validate the exact audio-VAE tensor contract, then construct the FP32
+/// model from mmaped safetensors.
+///
+/// # Safety
+///
+/// The checkpoint path must remain immutable and valid for the complete
+/// lifetime of the returned [`AudioVae`]. Mutating, replacing, or truncating
+/// the file while Candle's mmap is live may cause undefined behavior.
+pub unsafe fn load_validated_audio_vae(
     path: impl AsRef<Path>,
     config: AudioVaeConfig,
     layout: AudioTensorLayout,
@@ -300,6 +308,8 @@ pub fn load_validated_audio_vae(
     config.validate_execution_dtype(requested_dtype)?;
     let path = path.as_ref();
     validate_audio_safetensors(path, &config, layout)?;
+    // SAFETY: forwarded from this function's caller after the header and file
+    // length were validated immediately above.
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)? };
     if layout == AudioTensorLayout::ComfyFolded {
         validate_comfy_normalization_values(&vb, &config)?;
@@ -764,15 +774,21 @@ mod tests {
             std::process::id()
         ));
         candle::safetensors::save(&tensors, &path)?;
-        let loaded = load_validated_audio_vae(
-            &path,
-            config,
-            AudioTensorLayout::ComfyFolded,
-            DType::F32,
-            &Device::Cpu,
-        );
+        // SAFETY: this test owns the temporary file and does not mutate or
+        // remove it until after the returned model has been dropped below.
+        let loaded = unsafe {
+            load_validated_audio_vae(
+                &path,
+                config,
+                AudioTensorLayout::ComfyFolded,
+                DType::F32,
+                &Device::Cpu,
+            )
+        };
+        let passed = loaded.is_ok();
+        drop(loaded);
         let _ = std::fs::remove_file(&path);
-        assert!(loaded.is_ok());
+        assert!(passed);
         Ok(())
     }
 }
