@@ -165,12 +165,20 @@ impl PipelineChoice {
     }
 }
 
-/// Classify a model family: returns `Some("ltx-video")`, `Some("ltx2")`, or
-/// `None` for anything that isn't a recognized video-producing family.
+/// Classify a model family without making it discoverable or runnable.
+///
+/// H3 remains absent from the visible model catalog while its runtime and
+/// compliance gates are closed. Keeping its timing/container semantics here
+/// means an authorized future server can advertise it without Discord falling
+/// back to still-image defaults.
 pub fn video_family(family: &str) -> Option<&str> {
-    match family {
-        "ltx-video" | "ltx2" | "wan" => Some(family),
-        _ => None,
+    if mold_core::minimax_h3::is_family(family) {
+        Some(mold_core::minimax_h3::FAMILY)
+    } else {
+        match family {
+            "ltx-video" | "ltx2" | "wan" => Some(family),
+            _ => None,
+        }
     }
 }
 
@@ -232,9 +240,20 @@ fn resolve_video_timing(
         return Ok((frames, fps));
     };
 
-    let resolved_fps = fps
-        .or_else(|| defaults.and_then(|value| value.default_fps))
-        .unwrap_or(24);
+    let is_h3 = mold_core::minimax_h3::is_family(family);
+    if is_h3 && fps.is_some_and(|value| value != mold_core::minimax_h3::FIXED_FPS) {
+        return Err(format!(
+            "MiniMax H3 requires {} FPS.",
+            mold_core::minimax_h3::FIXED_FPS
+        ));
+    }
+
+    let resolved_fps = if is_h3 {
+        mold_core::minimax_h3::FIXED_FPS
+    } else {
+        fps.or_else(|| defaults.and_then(|value| value.default_fps))
+            .unwrap_or(24)
+    };
     if resolved_fps == 0 {
         return Err("Video FPS must be at least 1.".to_string());
     }
@@ -247,6 +266,12 @@ fn resolve_video_timing(
     };
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err("Duration must be a positive number of seconds.".to_string());
+    }
+    if is_h3 && seconds < f64::from(mold_core::minimax_h3::MIN_DURATION_SECONDS) {
+        return Err(format!(
+            "MiniMax H3 duration must be at least {} seconds.",
+            mold_core::minimax_h3::MIN_DURATION_SECONDS
+        ));
     }
 
     let max_runtime_seconds = defaults
@@ -264,13 +289,29 @@ fn resolve_video_timing(
         .or_else(|| mold_core::validation::frame_step_for_family(family))
         .unwrap_or(1)
         .max(1);
+    let offset = defaults
+        .and_then(|value| value.frame_offset)
+        .or_else(|| mold_core::validation::frame_offset_for_family(family))
+        .unwrap_or(1)
+        .max(1);
     let requested_frames = seconds * f64::from(resolved_fps);
     if requested_frames > f64::from(u32::MAX) {
         return Err("Duration is too large.".to_string());
     }
-    let frames_on_grid = ((((requested_frames.max(1.0) - 1.0) / f64::from(step)).round() as u32)
-        .saturating_mul(step))
-    .saturating_add(1);
+    let frames_on_grid = if requested_frames <= f64::from(offset) {
+        offset
+    } else {
+        (((requested_frames - f64::from(offset)) / f64::from(step)).round() as u32)
+            .saturating_mul(step)
+            .saturating_add(offset)
+    };
+    let min_frames = mold_core::validation::min_frames_for_family(family).unwrap_or(offset);
+    if frames_on_grid < min_frames {
+        return Err(format!(
+            "Duration for this model must be at least {:.1} seconds.",
+            f64::from(min_frames) / f64::from(resolved_fps)
+        ));
+    }
 
     let max_frames = if let Some(runtime_seconds) = max_runtime_seconds {
         let raw = runtime_seconds
@@ -288,10 +329,12 @@ fn resolve_video_timing(
             .or_else(|| mold_core::validation::max_frames_for_family_at_fps(family, resolved_fps))
             .unwrap_or(u32::MAX)
     };
-    let max_frames_on_grid = if max_frames <= 1 {
-        1
+    let max_frames_on_grid = if max_frames < offset {
+        max_frames
+    } else if max_frames == offset {
+        offset
     } else {
-        max_frames - ((max_frames - 1) % step)
+        max_frames - ((max_frames - offset) % step)
     };
     if frames_on_grid > max_frames_on_grid {
         return Err(format!(
@@ -318,9 +361,15 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
 
     let is_video_family = params.family.and_then(video_family).is_some();
     let is_ltx2 = params.family == Some("ltx2");
+    let is_h3 = params.family.is_some_and(mold_core::minimax_h3::is_family);
 
     // Video families always deliver MP4 or GIF. Image models stay PNG.
-    let output_format = if is_video_family {
+    let output_format = if is_h3 {
+        // H3 always emits synchronized audio and its contract requires an MP4
+        // container. This does not activate the hidden family; it only keeps
+        // the request builder from manufacturing an invalid future request.
+        OutputFormat::Mp4
+    } else if is_video_family {
         params
             .video_format
             .map(VideoFormat::to_output_format)
@@ -336,12 +385,20 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
             params
                 .frames
                 .or_else(|| params.defaults.and_then(|value| value.default_frames))
-                .unwrap_or(25),
+                .unwrap_or(if is_h3 {
+                    mold_core::minimax_h3::MIN_FRAMES
+                } else {
+                    25
+                }),
         )
     } else {
         params.frames
     };
-    let fps = if is_video_family {
+    let fps = if is_h3 {
+        // This is a final defense for callers that bypass the slash-command
+        // timing resolver. H3's audio/video clock is fixed at 24 FPS.
+        Some(mold_core::minimax_h3::FIXED_FPS)
+    } else if is_video_family {
         Some(
             params
                 .fps
@@ -352,20 +409,48 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         params.fps
     };
 
-    // LTX-2 audio only flows through MP4 container.
-    let enable_audio = if is_ltx2 { params.audio } else { None };
+    // Optional LTX-2 audio follows the user override; H3 audio is inherent.
+    let enable_audio = if is_h3 {
+        Some(true)
+    } else if is_ltx2 {
+        params.audio
+    } else {
+        None
+    };
 
     GenerateRequest {
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
         guidance_overrides: None,
         prompt: params.prompt.to_string(),
-        negative_prompt: params.negative_prompt.map(|s| s.to_string()),
+        negative_prompt: if is_h3 {
+            None
+        } else {
+            params.negative_prompt.map(|s| s.to_string())
+        },
         model: params.model.to_string(),
-        width: params.width.unwrap_or(def_w),
-        height: params.height.unwrap_or(def_h),
-        steps: params.steps.unwrap_or(def_steps),
-        guidance: params.guidance.unwrap_or(def_guidance),
+        width: params.width.unwrap_or(if is_h3 {
+            mold_core::minimax_h3::DEFAULT_WIDTH
+        } else {
+            def_w
+        }),
+        height: params.height.unwrap_or(if is_h3 {
+            mold_core::minimax_h3::DEFAULT_HEIGHT
+        } else {
+            def_h
+        }),
+        steps: params.steps.unwrap_or(if is_h3 {
+            mold_core::minimax_h3::DEFAULT_STEPS
+        } else {
+            def_steps
+        }),
+        // H3 has no CFG path; an explicit Discord override cannot weaken the
+        // model contract even when this builder is called independently.
+        guidance: if is_h3 {
+            0.0
+        } else {
+            params.guidance.unwrap_or(def_guidance)
+        },
         seed: params.seed,
         batch_size: 1,
         output_format: Some(output_format),
@@ -376,7 +461,11 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         references: None,
         source_image: params.source_image,
         source_image_name: None,
-        strength: params.strength.unwrap_or(0.75),
+        strength: if is_h3 {
+            1.0
+        } else {
+            params.strength.unwrap_or(0.75)
+        },
         mask_image: None,
         control_image: None,
         control_model: None,
@@ -483,10 +572,19 @@ fn validate_inline_media_lengths(sizes: impl IntoIterator<Item = u64>) -> Result
 /// width/height when the user didn't supply explicit values — otherwise the
 /// server would `resize_exact` a landscape photo into a square default.
 /// Fits the source into the model's default canvas via the shared
-/// aspect-preserving helper used by the CLI and server, on the grid the
-/// server advertises for the model (`dimension_alignment` — 32 for
-/// `wan22-ti2v-5b`, 16 elsewhere; older servers omit it and keep 16).
-fn fit_attachment_dims(w: u32, h: u32, defaults: Option<&mold_core::ModelDefaults>) -> (u32, u32) {
+/// aspect-preserving helper used by the CLI and server. H3 owns a stricter
+/// 32px canvas contract and its official short-edge/area rounding authority;
+/// other models use the grid advertised by the server (`dimension_alignment`
+/// is 32 for `wan22-ti2v-5b`, 16 elsewhere, and omitted by older servers).
+fn fit_attachment_dims(
+    w: u32,
+    h: u32,
+    defaults: Option<&mold_core::ModelDefaults>,
+    family: Option<&str>,
+) -> (u32, u32) {
+    if family.is_some_and(mold_core::minimax_h3::is_family) {
+        return mold_core::minimax_h3::recommended_dimensions(w, h);
+    }
     let (model_w, model_h) = defaults
         .map(|d| (d.default_width, d.default_height))
         .unwrap_or((1024, 1024));
@@ -849,7 +947,7 @@ pub async fn generate(
                 source_image.as_ref().and_then(|a| a.height),
             ) {
                 (Some(w), Some(h)) => {
-                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults);
+                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults, family);
                     (Some(sw), Some(sh))
                 }
                 _ => (width, height),
@@ -1079,6 +1177,127 @@ mod tests {
             resolve_video_timing(Some("ltx2"), Some(&defs), None, Some(30), Some(10.0)).unwrap(),
             (Some(297), Some(30))
         );
+    }
+
+    #[test]
+    fn h3_duration_uses_its_five_offset_frame_grid() {
+        let defs = mold_core::ModelDefaults {
+            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
+            max_runtime_seconds: Some(mold_core::minimax_h3::MAX_DURATION_SECONDS),
+            max_frames_absolute: Some(mold_core::minimax_h3::MAX_FRAMES),
+            frame_step: Some(mold_core::minimax_h3::FRAME_STEP),
+            frame_offset: Some(mold_core::minimax_h3::FRAME_OFFSET),
+            ..defaults()
+        };
+
+        assert_eq!(
+            resolve_video_timing(
+                Some(mold_core::minimax_h3::FAMILY),
+                Some(&defs),
+                None,
+                None,
+                Some(5.0),
+            )
+            .unwrap(),
+            (Some(124), Some(24))
+        );
+        assert_eq!(
+            resolve_video_timing(
+                Some(mold_core::minimax_h3::FAMILY),
+                Some(&defs),
+                None,
+                None,
+                Some(15.0),
+            )
+            .unwrap(),
+            (Some(362), Some(24))
+        );
+        assert_eq!(
+            resolve_video_timing(
+                Some(mold_core::minimax_h3::FAMILY),
+                Some(&defs),
+                None,
+                None,
+                Some(4.9),
+            )
+            .unwrap_err(),
+            "MiniMax H3 duration must be at least 5 seconds."
+        );
+    }
+
+    #[test]
+    fn h3_rejects_explicit_non_fixed_fps_on_both_timing_paths() {
+        let duration_error = resolve_video_timing(
+            Some(mold_core::minimax_h3::FAMILY),
+            None,
+            None,
+            Some(30),
+            Some(5.0),
+        )
+        .unwrap_err();
+        let frames_error = resolve_video_timing(
+            Some("minimax_h3"),
+            None,
+            Some(mold_core::minimax_h3::MIN_FRAMES),
+            Some(30),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(duration_error, "MiniMax H3 requires 24 FPS.");
+        assert_eq!(frames_error, "MiniMax H3 requires 24 FPS.");
+    }
+
+    #[test]
+    fn h3_request_builder_preserves_mandatory_av_contract() {
+        let defs = mold_core::ModelDefaults {
+            default_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
+            default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
+            default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+            default_steps: mold_core::minimax_h3::DEFAULT_STEPS,
+            default_guidance: 0.0,
+            frame_step: Some(mold_core::minimax_h3::FRAME_STEP),
+            frame_offset: Some(mold_core::minimax_h3::FRAME_OFFSET),
+            ..defaults()
+        };
+        let req = build_generate_request(BuildParams {
+            family: Some("minimax_h3"),
+            defaults: Some(&defs),
+            // Neither a user-selected GIF nor a false audio flag may weaken
+            // H3's synchronized MP4 contract.
+            video_format: Some(VideoFormat::Gif),
+            audio: Some(false),
+            strength: Some(0.25),
+            fps: Some(30),
+            guidance: Some(7.5),
+            negative_prompt: Some("stale negative"),
+            ..base_params("a quiet shoreline", mold_core::minimax_h3::FL2VA_COMFY)
+        });
+
+        assert_eq!(req.output_format, Some(OutputFormat::Mp4));
+        assert_eq!(req.enable_audio, Some(true));
+        assert_eq!(req.frames, Some(124));
+        assert_eq!(req.fps, Some(24));
+        assert_eq!(req.steps, 50);
+        assert_eq!(req.guidance, 0.0);
+        assert_eq!(req.strength, 1.0);
+        assert_eq!(req.negative_prompt, None);
+
+        let without_server_defaults = build_generate_request(BuildParams {
+            family: Some(mold_core::minimax_h3::FAMILY),
+            ..base_params("a quiet shoreline", mold_core::minimax_h3::FL2VA_COMFY)
+        });
+        assert_eq!(
+            (
+                without_server_defaults.width,
+                without_server_defaults.height
+            ),
+            (1344, 768)
+        );
+        assert_eq!(without_server_defaults.frames, Some(124));
+        assert_eq!(without_server_defaults.fps, Some(24));
     }
 
     #[test]
@@ -1351,15 +1570,27 @@ mod tests {
     fn fit_attachment_dims_preserves_aspect_ratio() {
         let d = defaults_1024();
         // Landscape photo is no longer squashed to a square.
-        assert_eq!(fit_attachment_dims(1920, 1080, Some(&d)), (1024, 576));
+        assert_eq!(
+            fit_attachment_dims(1920, 1080, Some(&d), Some("flux")),
+            (1024, 576)
+        );
         // Portrait keeps its orientation.
-        assert_eq!(fit_attachment_dims(1080, 1920, Some(&d)), (576, 1024));
+        assert_eq!(
+            fit_attachment_dims(1080, 1920, Some(&d), Some("flux")),
+            (576, 1024)
+        );
         // Square source fills the model's native square.
-        assert_eq!(fit_attachment_dims(1000, 1000, Some(&d)), (1024, 1024));
+        assert_eq!(
+            fit_attachment_dims(1000, 1000, Some(&d), Some("flux")),
+            (1024, 1024)
+        );
         // Missing defaults fall back to a 1024x1024 canvas.
-        assert_eq!(fit_attachment_dims(1920, 1080, None), (1024, 576));
+        assert_eq!(
+            fit_attachment_dims(1920, 1080, None, Some("flux")),
+            (1024, 576)
+        );
         // Output always lands on the 16px grid.
-        let (w, h) = fit_attachment_dims(777, 513, Some(&d));
+        let (w, h) = fit_attachment_dims(777, 513, Some(&d), Some("flux"));
         assert_eq!((w % 16, h % 16), (0, 0));
     }
 
@@ -1377,7 +1608,10 @@ mod tests {
             dimension_alignment: Some(32),
             ..defaults_1024()
         };
-        assert_eq!(fit_attachment_dims(1617, 1000, Some(&five_b)), (1120, 704));
+        assert_eq!(
+            fit_attachment_dims(1617, 1000, Some(&five_b), Some("wan")),
+            (1120, 704)
+        );
 
         let fourteen_b = mold_core::ModelDefaults {
             default_width: 1280,
@@ -1386,7 +1620,7 @@ mod tests {
             ..defaults_1024()
         };
         assert_eq!(
-            fit_attachment_dims(1617, 1000, Some(&fourteen_b)),
+            fit_attachment_dims(1617, 1000, Some(&fourteen_b), Some("wan")),
             (1136, 704)
         );
 
@@ -1397,7 +1631,7 @@ mod tests {
             ..defaults_1024()
         };
         assert_eq!(
-            fit_attachment_dims(1617, 1000, Some(&unadvertised)),
+            fit_attachment_dims(1617, 1000, Some(&unadvertised), Some("wan")),
             (1136, 704)
         );
     }
@@ -1418,6 +1652,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn h3_attachment_dims_use_the_official_32px_canvas_authority() {
+        for (source_width, source_height) in [(1920, 1080), (1080, 1920)] {
+            let (width, height) = fit_attachment_dims(
+                source_width,
+                source_height,
+                Some(&defaults_1024()),
+                Some("minimax_h3"),
+            );
+            assert_eq!((width % 32, height % 32), (0, 0));
+            assert_eq!(
+                (width, height),
+                mold_core::minimax_h3::recommended_dimensions(source_width, source_height)
+            );
+        }
+    }
     // --- autocomplete ranking ---
 
     fn mk_model(name: &str, family: &str, downloaded: bool) -> ModelInfoExtended {
@@ -1544,6 +1794,13 @@ mod tests {
         assert_eq!(video_family("ltx-video"), Some("ltx-video"));
         assert_eq!(video_family("ltx2"), Some("ltx2"));
         assert_eq!(video_family("wan"), Some("wan"));
+        for alias in mold_core::minimax_h3::FAMILY_ALIASES {
+            assert_eq!(
+                video_family(alias),
+                Some(mold_core::minimax_h3::FAMILY),
+                "alias {alias}"
+            );
+        }
         assert!(video_family("flux").is_none());
         assert!(video_family("sdxl").is_none());
     }

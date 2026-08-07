@@ -200,7 +200,7 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             if caps.supports_video_upscale {
                 fields.push(ParamField::Pipeline);
             }
-            if caps.supports_audio {
+            if caps.supports_audio && !caps.audio_required {
                 fields.push(ParamField::Audio);
             }
             if caps.supports_video_upscale {
@@ -573,6 +573,19 @@ mod tests {
         assert!(!legacy_fields.contains(&ParamField::RescaleScale));
         assert!(!legacy_fields.contains(&ParamField::ModalityScale));
         assert!(!legacy_fields.contains(&ParamField::GuidanceSkip));
+    }
+
+    #[test]
+    fn h3_video_section_does_not_offer_an_audio_disable_control() {
+        let h3 = capabilities_for_family(mold_core::minimax_h3::FAMILY);
+        let fields = section_fields(AdvSection::Video, &h3);
+
+        assert!(fields.contains(&ParamField::Frames));
+        assert!(fields.contains(&ParamField::Fps));
+        assert!(!fields.contains(&ParamField::Audio));
+        assert!(!fields.contains(&ParamField::Pipeline));
+        assert!(!fields.contains(&ParamField::SpatialUpscale));
+        assert!(!fields.contains(&ParamField::TemporalUpscale));
     }
 
     #[test]

@@ -167,6 +167,11 @@ pub async fn run_generation(
     api_key: Option<String>,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
+    // Canonicalize before batching and provenance capture so metadata/history
+    // describe the exact request that was sent, not hidden stale UI state.
+    let config = mold_core::Config::load_or_default();
+    let (params, negative_prompt) =
+        canonicalize_generation_authority(params, negative_prompt, &config);
     let prepared_prompts = params.prepared_prompts.clone();
     let prepared_transforms = params.prepared_prompt_transforms.clone();
     let batch = if prepared_prompts.is_empty() {
@@ -640,11 +645,30 @@ async fn run_local_generation(
     }
 }
 
+fn canonicalize_generation_authority(
+    mut params: GenerateParams,
+    mut negative_prompt: Option<String>,
+    config: &mold_core::Config,
+) -> (GenerateParams, Option<String>) {
+    let family = crate::model_info::family_for_model(&params.model, config);
+    crate::app::normalize_generate_params_for_family(&mut params, &family);
+    if mold_core::minimax_h3::is_family(&family) {
+        negative_prompt = None;
+    }
+    (params, negative_prompt)
+}
+
 fn build_request(
     params: &GenerateParams,
     prompt: &str,
     negative_prompt: &Option<String>,
 ) -> GenerateRequest {
+    let config = mold_core::Config::load_or_default();
+    let (normalized_params, normalized_negative_prompt) =
+        canonicalize_generation_authority(params.clone(), negative_prompt.clone(), &config);
+    let params = &normalized_params;
+    let family = crate::model_info::family_for_model(&params.model, &config);
+
     let lora = params.lora_path.as_ref().map(|path| LoraWeight {
         path: path.clone(),
         scale: params.lora_scale,
@@ -665,9 +689,6 @@ fn build_request(
         .as_ref()
         .and_then(|p| std::fs::read(p).ok());
 
-    let family = mold_core::manifest::find_manifest(&params.model)
-        .map(|m| m.family.as_str().to_string())
-        .unwrap_or_default();
     let (edit_images, source_image, strength, mask_image) = if family == "qwen-image-edit" {
         (
             source_image.clone().map(|image| vec![image]),
@@ -695,7 +716,7 @@ fn build_request(
         hdr_exr_full_float: false,
         guidance_overrides: params.guidance_overrides.clone().into_option(),
         prompt: prompt.to_string(),
-        negative_prompt: negative_prompt.clone(),
+        negative_prompt: normalized_negative_prompt,
         model: params.model.clone(),
         width: params.width,
         height: params.height,
@@ -704,7 +725,7 @@ fn build_request(
         seed: params.seed,
         batch_size: params.batch,
         output_format: Some(params.format),
-        embed_metadata: Some(mold_core::Config::load_or_default().effective_embed_metadata(None)),
+        embed_metadata: Some(config.effective_embed_metadata(None)),
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
@@ -1068,6 +1089,75 @@ mod tests {
             build_request(&params, "p", &None).guidance_overrides,
             Some(params.guidance_overrides.clone())
         );
+    }
+
+    #[test]
+    fn build_request_reasserts_h3_authority_over_stale_shared_fields() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        let readable_path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        params.model = mold_core::minimax_h3::FL2VA_COMFY.into();
+        params.frames = 25;
+        params.fps = 30;
+        params.format = mold_core::OutputFormat::Png;
+        params.enable_audio = Some(false);
+        params.guidance = 7.5;
+        params.strength = 0.25;
+        params.scheduler = Some(mold_core::Scheduler::Ddim);
+        params.lora_path = Some("stale.safetensors".into());
+        params.source_image_path = Some(readable_path.clone());
+        params.mask_image_path = Some(readable_path.clone());
+        params.control_image_path = Some(readable_path);
+        params.control_model = Some("stale-control".into());
+        params.pipeline = Some(mold_core::Ltx2PipelineMode::TwoStage);
+        params.spatial_upscale = Some(mold_core::Ltx2SpatialUpscale::X1_5);
+        params.temporal_upscale = Some(mold_core::Ltx2TemporalUpscale::X2);
+        params.guidance_overrides = mold_core::Ltx2GuidanceOverrides {
+            stg_scale: Some(1.5),
+            ..Default::default()
+        };
+        params.upscale_model = Some("stale-upscaler".into());
+
+        let (canonical_params, canonical_negative) = canonicalize_generation_authority(
+            params.clone(),
+            Some("stale negative".into()),
+            &config,
+        );
+        let snapshot = GenerationMetadataSnapshot::new(
+            canonical_params.clone(),
+            "p".into(),
+            canonical_negative.clone(),
+        );
+        let request = build_request(&canonical_params, "p", &canonical_negative);
+
+        assert_eq!(request.frames, Some(mold_core::minimax_h3::MIN_FRAMES));
+        assert_eq!(request.fps, Some(mold_core::minimax_h3::FIXED_FPS));
+        assert_eq!(request.output_format, Some(mold_core::OutputFormat::Mp4));
+        assert_eq!(request.enable_audio, Some(true));
+        assert_eq!(request.guidance, 0.0);
+        assert_eq!(request.strength, 1.0);
+        assert_eq!(request.negative_prompt, None);
+        assert_eq!(request.scheduler, None);
+        assert_eq!(request.lora, None);
+        assert_eq!(request.source_image, None);
+        assert_eq!(request.mask_image, None);
+        assert_eq!(request.control_image, None);
+        assert_eq!(request.control_model, None);
+        assert_eq!(request.pipeline, None);
+        assert_eq!(request.spatial_upscale, None);
+        assert_eq!(request.temporal_upscale, None);
+        assert_eq!(request.guidance_overrides, None);
+        assert_eq!(request.upscale_model, None);
+        assert_eq!(snapshot.negative_prompt, request.negative_prompt);
+        assert_eq!(snapshot.params.frames, request.frames.unwrap());
+        assert_eq!(snapshot.params.fps, request.fps.unwrap());
+        assert_eq!(Some(snapshot.params.format), request.output_format);
+        assert_eq!(snapshot.params.enable_audio, request.enable_audio);
+        assert_eq!(snapshot.params.guidance, request.guidance);
+        assert_eq!(snapshot.params.strength, request.strength);
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub struct ModelCapabilities {
     pub supports_video: bool,
     /// Whether the model can emit synchronized audio with video.
     pub supports_audio: bool,
+    /// Whether synchronized audio is inherent and cannot be disabled.
+    pub audio_required: bool,
     /// Whether the model supports LTX-2 latent spatial/temporal upscaling.
     pub supports_video_upscale: bool,
     /// Default scheduler for UNet-based models.
@@ -31,6 +33,26 @@ pub struct ModelCapabilities {
 
 /// Determine model capabilities from family name.
 pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
+    if mold_core::minimax_h3::is_family(family) {
+        // Static form-shape knowledge only. H3 remains hidden and every H3
+        // identity remains server-gated, so recognizing aliases here cannot
+        // make the family selectable or runnable.
+        return ModelCapabilities {
+            supports_negative_prompt: false,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: false,
+            supports_video: true,
+            supports_audio: true,
+            audio_required: true,
+            supports_video_upscale: false,
+            default_scheduler: None,
+        };
+    }
     match family {
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => ModelCapabilities {
             supports_negative_prompt: true,
@@ -43,6 +65,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -57,6 +80,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -71,6 +95,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -85,6 +110,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -99,6 +125,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -113,6 +140,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -127,6 +155,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -141,6 +170,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -155,6 +185,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -169,6 +200,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: true,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -183,6 +215,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: true,
             supports_audio: true,
+            audio_required: false,
             supports_video_upscale: true,
             default_scheduler: None,
         },
@@ -205,6 +238,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: true,
             supports_video: true,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -219,6 +253,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_lora: false,
             supports_video: false,
             supports_audio: false,
+            audio_required: false,
             supports_video_upscale: false,
             default_scheduler: None,
         },
@@ -236,10 +271,16 @@ pub fn capabilities_for_model(
     advertised_guidance: Option<mold_core::GuidanceCapabilities>,
 ) -> ModelCapabilities {
     let mut caps = capabilities_for_family(family);
-    caps.supports_negative_prompt = advertised_guidance
-        .unwrap_or_else(|| mold_core::GuidanceCapabilities::for_recipe(family, model, None))
-        .supports_negative_prompt;
-    if advertised_audio_support == Some(false) {
+    // H3 has no unconditional/CFG branch. Contradictory checkpoint metadata
+    // may not expose an editor for conditioning the model cannot consume.
+    if !mold_core::minimax_h3::is_family(family) {
+        caps.supports_negative_prompt = advertised_guidance
+            .unwrap_or_else(|| mold_core::GuidanceCapabilities::for_recipe(family, model, None))
+            .supports_negative_prompt;
+    }
+    // Checkpoint metadata can narrow optional audio (LTX-2), but may never
+    // weaken H3's inherent synchronized-audio contract.
+    if advertised_audio_support == Some(false) && !caps.audio_required {
         caps.supports_audio = false;
     }
     if family == "wan" {
@@ -417,13 +458,21 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_audio_fact_can_disable_ltx2_audio_without_enabling_other_families() {
+    fn checkpoint_audio_fact_narrows_optional_audio_but_not_mandatory_h3_audio() {
         assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None).supports_audio);
         assert!(capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None).supports_audio);
         assert!(!capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None).supports_audio);
         assert!(
             !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None).supports_audio
         );
+        let mandatory_h3 = capabilities_for_model(
+            mold_core::minimax_h3::FAMILY,
+            mold_core::minimax_h3::FL2VA_COMFY,
+            Some(false),
+            None,
+        );
+        assert!(mandatory_h3.supports_audio);
+        assert!(mandatory_h3.audio_required);
     }
 
     #[test]
@@ -497,5 +546,34 @@ mod tests {
         let caps = capabilities_for_family("ltx2");
         assert!(caps.supports_video);
         assert!(!caps.supports_negative_prompt);
+    }
+
+    #[test]
+    fn h3_exposes_only_its_static_synchronized_av_fields() {
+        for family in [mold_core::minimax_h3::FAMILY, "minimax_h3", "minimaxh3"] {
+            let caps = capabilities_for_family(family);
+            assert!(caps.supports_video);
+            assert!(caps.supports_audio);
+            assert!(caps.audio_required);
+            assert!(!caps.supports_negative_prompt);
+            assert!(!caps.supports_scheduler);
+            assert!(!caps.supports_img2img);
+            assert!(!caps.supports_source_image);
+            assert!(!caps.supports_strength);
+            assert!(!caps.supports_mask);
+            assert!(!caps.supports_controlnet);
+            assert!(!caps.supports_lora);
+            assert!(!caps.supports_video_upscale);
+        }
+
+        let contradictory = capabilities_for_model(
+            "minimax_h3",
+            mold_core::minimax_h3::FL2VA_COMFY,
+            Some(false),
+            Some(mold_core::GuidanceCapabilities::ADJUSTABLE_CFG),
+        );
+        assert!(contradictory.audio_required);
+        assert!(contradictory.supports_audio);
+        assert!(!contradictory.supports_negative_prompt);
     }
 }
