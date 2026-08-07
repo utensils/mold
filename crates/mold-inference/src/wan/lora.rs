@@ -25,14 +25,29 @@
 //! [`crate::flux::lora`]'s `read_alpha_scalar` — before that fix these
 //! adapters loaded at 8x strength with no error.
 //!
+//! Mainstream community adapters — Kijai's Wan 2.1 lightx2v extractions,
+//! `lightx2v/Wan2.2-Distill-Loras`, musubi-tuner Civitai files — additionally
+//! carry **full-weight deltas**: `{stem}.diff` for the weight and
+//! `{stem}.diff_b` for the bias. The reference for their semantics is ComfyUI
+//! `comfy/lora.py` (a464ac33588): `.diff`/`.diff_b` become plain additive
+//! patches (comfy/lora.py:72-82) and are applied as
+//! `weight += strength * diff` with **no alpha/rank term**
+//! (comfy/lora.py:483-487) — the alpha feeds only the low-rank adapter
+//! loaders (comfy/lora.py:41-58). A full delta has no rank, so strength
+//! applies directly; reusing the pair scale would apply the shipped alpha-8
+//! files at 8x.
+//!
 //! An adapter reaches the weights two ways, decided by the checkpoint's
-//! container rather than by the adapter. Against bf16 or fp8 safetensors,
-//! [`WanLoraBackend`] merges `W + scale*(B @ A)` as each tensor is read, so the
-//! merged tensor is the only copy that is ever resident. Against GGUF, nothing
-//! merges: [`WanQuantizedLoraLinear`] hangs the same arithmetic off the
-//! projection as a parallel low-rank branch, because taking a delta into a
-//! quantized weight means requantizing it — minutes per expert, and most of the
-//! delta rounded away. That type carries the measurements.
+//! container rather than by the adapter. Against bf16 safetensors,
+//! [`WanLoraBackend`] merges `W + scale*(B @ A)` and `W + scale*diff` as each
+//! tensor is read, so the merged tensor is the only copy that is ever
+//! resident. Against GGUF, a quantized weight never merges — that means
+//! requantizing it, minutes per expert with most of the delta rounded away —
+//! so [`WanQuantizedLoraLinear`] hangs the arithmetic off the projection as a
+//! parallel branch (low-rank for pairs, dense for `.diff`), while `.diff_b`
+//! merges into the bias and norm `.diff`s into their tensors directly because
+//! those are stored unquantized. fp8-scaled safetensors refuse every adapter
+//! stack up front (see `from_safetensors_with_loras`).
 
 use std::collections::HashMap;
 
@@ -45,19 +60,38 @@ use crate::flux::lora::{classify_lora_key, LoraDirection};
 /// Prefix every shipped Wan LoRA puts on its keys.
 const WAN_LORA_PREFIX: &str = "diffusion_model.";
 
-/// Suffixes that mark a Wan 2.1-era Lightning adapter, which carries
-/// full-weight deltas this loader deliberately does not apply.
-const FULL_DELTA_SUFFIXES: &[&str] = &[".diff", ".diff_b"];
-
-/// One low-rank patch for one base tensor: `W' = W + scale * (B @ A)`.
+/// One patch for one base tensor.
 #[derive(Debug, Clone)]
-struct WanLoraPatch {
-    /// `[rank, in_features]`.
-    a: Tensor,
-    /// `[out_features, rank]`.
-    b: Tensor,
-    /// `user_scale * alpha / rank`, already folded.
-    scale: f64,
+enum WanLoraPatch {
+    /// `W' = W + scale * (B @ A)`.
+    LowRank {
+        /// `[rank, in_features]`.
+        a: Tensor,
+        /// `[out_features, rank]`.
+        b: Tensor,
+        /// `user_scale * alpha / rank`, already folded.
+        scale: f64,
+    },
+    /// `W' = W + scale * diff` (`.diff` on a weight, `.diff_b` on a bias).
+    Delta {
+        /// Same shape as the base tensor.
+        diff: Tensor,
+        /// The user strength ONLY. The kohya `alpha / rank` convention never
+        /// applies here: a full-weight delta has no rank, and ComfyUI's
+        /// `calculate_weight` adds `strength * diff` directly
+        /// (comfy/lora.py:483-487) while the alpha it read at
+        /// comfy/lora.py:41-44 goes only to the low-rank adapter loaders.
+        scale: f64,
+    },
+}
+
+#[cfg(test)]
+impl WanLoraPatch {
+    fn scale(&self) -> f64 {
+        match self {
+            Self::LowRank { scale, .. } | Self::Delta { scale, .. } => *scale,
+        }
+    }
 }
 
 /// Every patch an adapter stack contributes, keyed by the **bare checkpoint
@@ -137,9 +171,29 @@ impl WanLoraRegistry {
         let device = base.device().clone();
         let mut merged = base.to_dtype(DType::F32)?;
         for patch in patches {
-            let a = patch.a.to_device(&device)?.to_dtype(DType::F32)?;
-            let b = patch.b.to_device(&device)?.to_dtype(DType::F32)?;
-            merged = merged.add(&b.matmul(&a)?.affine(patch.scale, 0.0)?)?;
+            match patch {
+                WanLoraPatch::LowRank { a, b, scale } => {
+                    let a = a.to_device(&device)?.to_dtype(DType::F32)?;
+                    let b = b.to_device(&device)?.to_dtype(DType::F32)?;
+                    merged = merged.add(&b.matmul(&a)?.affine(*scale, 0.0)?)?;
+                }
+                WanLoraPatch::Delta { diff, scale } => {
+                    // ComfyUI logs and skips a shape-mismatched diff
+                    // (comfy/lora.py:484-485). mold refuses instead: skipping
+                    // would ship a partially-applied adapter, the exact
+                    // silent-drop hazard this loader exists to prevent.
+                    if diff.dims() != merged.dims() {
+                        candle_core::bail!(
+                            "Wan LoRA delta for `{name}` is {:?} but the checkpoint tensor is \
+                             {:?} — the adapter was trained against a different Wan checkpoint",
+                            diff.dims(),
+                            merged.dims()
+                        );
+                    }
+                    let diff = diff.to_device(&device)?.to_dtype(DType::F32)?;
+                    merged = merged.add(&diff.affine(*scale, 0.0)?)?;
+                }
+            }
         }
         merged.to_dtype(dtype)
     }
@@ -159,26 +213,11 @@ impl WanLoraRegistry {
         let tensors = candle_core::safetensors::load(path, &Device::Cpu)
             .with_context(|| format!("failed to read Wan LoRA {}", path.display()))?;
 
-        // Refuse the 2.1-era format outright. Loading only its low-rank half
-        // would silently drop hundreds of full-weight deltas and produce a
-        // subtly wrong model rather than an error.
-        let full_deltas = tensors
-            .keys()
-            .filter(|name| FULL_DELTA_SUFFIXES.iter().any(|s| name.ends_with(*s)))
-            .count();
-        if full_deltas > 0 {
-            bail!(
-                "{} is a Wan 2.1-era Lightning adapter: it carries {full_deltas} full-weight \
-                 `.diff`/`.diff_b` tensors alongside its low-rank pairs, and mold would have to \
-                 ignore them. Use the Wan 2.2 rank-64 distill (pure low-rank with an alpha) \
-                 instead.",
-                path.display()
-            );
-        }
-
         let mut down: HashMap<String, Tensor> = HashMap::new();
         let mut up: HashMap<String, Tensor> = HashMap::new();
         let mut alphas: HashMap<String, f64> = HashMap::new();
+        let mut weight_deltas: HashMap<String, Tensor> = HashMap::new();
+        let mut bias_deltas: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in &tensors {
             if let Some((direction, stem)) = classify_lora_key(name) {
                 let Some(stem) = canonical_stem(stem) else {
@@ -193,6 +232,16 @@ impl WanLoraRegistry {
                     if let Some(value) = crate::flux::lora::read_alpha_scalar(tensor) {
                         alphas.insert(stem, value);
                     }
+                }
+            } else if let Some(stem) = name.strip_suffix(".diff") {
+                // Full-weight delta on `{stem}.weight` (comfy/lora.py:72-76).
+                if let Some(stem) = canonical_stem(stem) {
+                    weight_deltas.insert(stem, tensor.clone());
+                }
+            } else if let Some(stem) = name.strip_suffix(".diff_b") {
+                // Bias delta on `{stem}.bias` (comfy/lora.py:78-82).
+                if let Some(stem) = canonical_stem(stem) {
+                    bias_deltas.insert(stem, tensor.clone());
                 }
             }
         }
@@ -244,7 +293,7 @@ impl WanLoraRegistry {
             self.patches
                 .entry(format!("{stem}.weight"))
                 .or_default()
-                .push(WanLoraPatch {
+                .push(WanLoraPatch::LowRank {
                     a,
                     b: b.clone(),
                     scale,
@@ -252,14 +301,61 @@ impl WanLoraRegistry {
             paired += 1;
         }
 
-        if paired == 0 {
+        // Full-weight deltas take the user strength directly — never the
+        // alpha, even when the same stem carries one for its low-rank pair.
+        // ComfyUI applies `strength * diff` with no alpha/rank term
+        // (comfy/lora.py:483-487); an alpha-scaled delta would land at 8x on
+        // the shipped alpha-8 files.
+        let mut deltas = 0usize;
+        for (stem, diff) in weight_deltas {
+            self.patches
+                .entry(weight_delta_key(&stem))
+                .or_default()
+                .push(WanLoraPatch::Delta {
+                    diff,
+                    scale: lora.scale,
+                });
+            deltas += 1;
+        }
+        for (stem, diff) in bias_deltas {
+            self.patches
+                .entry(format!("{stem}.bias"))
+                .or_default()
+                .push(WanLoraPatch::Delta {
+                    diff,
+                    scale: lora.scale,
+                });
+            deltas += 1;
+        }
+
+        if paired == 0 && deltas == 0 {
             bail!(
-                "no Wan LoRA pairs found in {} — expected `{WAN_LORA_PREFIX}blocks.N.<module>.\
-                 lora_down/lora_up.weight` keys",
+                "no Wan LoRA pairs or `.diff`/`.diff_b` deltas found in {} — expected \
+                 `{WAN_LORA_PREFIX}blocks.N.<module>.lora_down/lora_up.weight` or \
+                 `... .diff`/`.diff_b` keys",
                 path.display()
             );
         }
         Ok(())
+    }
+}
+
+/// The checkpoint key a `.diff` for `stem` lands on.
+///
+/// Almost every Wan tensor lives under `{stem}.weight`, but the AdaLN
+/// modulation tables are BARE parameters — the checkpoint keys are
+/// `blocks.N.modulation` and `head.modulation`, with no `.weight` suffix
+/// (they load through `WanWeights::tensor`, not a linear). Kijai's Wan 2.1
+/// lightx2v extractions ship `.diff` deltas for exactly those stems, so
+/// appending `.weight` would invent a tensor no checkpoint has and
+/// `ensure_targets_present` would fail-closed a valid adapter. `.diff_b`
+/// keeps its unconditional `.bias` mapping: a bare parameter has no bias to
+/// delta.
+fn weight_delta_key(stem: &str) -> String {
+    if stem.ends_with(".modulation") {
+        stem.to_string()
+    } else {
+        format!("{stem}.weight")
     }
 }
 
@@ -283,21 +379,38 @@ fn canonical_stem(stem: &str) -> Option<String> {
     recognized.then(|| stem.to_string())
 }
 
-/// One adapter's low-rank pair, resident on the execution device.
+/// One adapter's patch for a quantized projection, resident on the execution
+/// device.
 ///
 /// Kept separate from [`WanLoraPatch`], whose tensors stay on the host: the
 /// registry is built once per request and the branch is built once per module
 /// that the checkpoint actually has.
-struct WanLoraBranch {
-    /// `[rank, in_features]`.
-    a: Tensor,
-    /// `[out_features, rank]`.
-    b: Tensor,
-    scale: f64,
+enum WanLoraBranch {
+    /// `y += scale * ((x @ A^T) @ B^T)`.
+    LowRank {
+        /// `[rank, in_features]`.
+        a: Tensor,
+        /// `[out_features, rank]`.
+        b: Tensor,
+        scale: f64,
+    },
+    /// `y += scale * (x @ diff^T)` — a full-weight `.diff` on a quantized
+    /// projection. The merge-vs-branch reasoning on
+    /// [`WanQuantizedLoraLinear`] applies with the same force here: merging
+    /// would requantize the whole tensor, and ComfyUI-GGUF likewise patches
+    /// the per-forward dequantized copy rather than the stored weight
+    /// (`city96/ComfyUI-GGUF ops.py:176-190`). Cost: the delta resident in
+    /// F32 and one extra dense matmul on the patched projection.
+    Dense {
+        /// `[in_features, out_features]` — pre-transposed once at build.
+        delta_t: Tensor,
+        scale: f64,
+    },
 }
 
-/// A quantized projection with its adapters applied as a parallel low-rank
-/// branch: `y = QMatMul(x) + scale * ((x @ A^T) @ B^T)`.
+/// A quantized projection with its adapters applied as parallel branches:
+/// `y = QMatMul(x) + scale * ((x @ A^T) @ B^T)` for low-rank pairs, plus
+/// `scale * (x @ diff^T)` for full-weight deltas.
 ///
 /// **Why a branch and not a merge.** The other two weight sources merge
 /// `W + scale*(B @ A)` into the weight as it is read, because they can: a bf16
@@ -337,39 +450,74 @@ impl candle_core::Module for WanQuantizedLoraLinear {
             // `x` is [batch, tokens, in] and the adapter is 2-D, so the
             // broadcast form is the one that does not materialize a per-batch
             // copy of the adapter.
-            let hidden = x.broadcast_matmul(&branch.a.t()?)?;
-            out = out.add(
-                &hidden
-                    .broadcast_matmul(&branch.b.t()?)?
-                    .affine(branch.scale, 0.0)?,
-            )?;
+            match branch {
+                WanLoraBranch::LowRank { a, b, scale } => {
+                    let hidden = x.broadcast_matmul(&a.t()?)?;
+                    out = out.add(&hidden.broadcast_matmul(&b.t()?)?.affine(*scale, 0.0)?)?;
+                }
+                WanLoraBranch::Dense { delta_t, scale } => {
+                    out = out.add(&x.broadcast_matmul(delta_t)?.affine(*scale, 0.0)?)?;
+                }
+            }
         }
         Ok(out)
     }
 }
 
-/// Build the linear for `key`, attaching a low-rank branch per patch.
+/// Build the quantized linear the GGUF `vb` points at, applying the registry.
 ///
-/// Returns the bare quantized linear untouched when nothing patches `key`,
-/// which is the case for every tensor outside the 400 the distills target.
-pub(crate) fn attach_quantized_branches(
+/// Three patch routes, matching what GGUF actually stores: weight pairs and
+/// weight deltas become parallel branches on the quantized `QMatMul` (see
+/// [`WanLoraBranch`]), while `.diff_b` merges straight into the bias here —
+/// GGUF biases are unquantized, so the merge is as lossless as on the
+/// safetensors path. Returns the bare quantized linear untouched when nothing
+/// patches this projection, which is the case for every tensor outside the
+/// 400 the distills target.
+pub(crate) fn quantized_linear(
     registry: &WanLoraRegistry,
-    key: &str,
-    base: mold_candle::quantized_nn::Linear,
-    device: &Device,
+    vb: &mold_candle::quantized::VarBuilder,
+    in_dim: usize,
+    out_dim: usize,
 ) -> candle_core::Result<std::sync::Arc<dyn candle_core::Module + Send + Sync>> {
-    let Some(patches) = registry.patches.get(key) else {
+    let weight = vb.get((out_dim, in_dim), "weight")?;
+    let bias = vb.get(out_dim, "bias")?.dequantize(vb.device())?;
+    let bias = registry.merge_into(&vb.key("bias"), bias)?;
+    let base = mold_candle::quantized_nn::Linear::from_arc(weight, Some(bias))?;
+
+    let weight_key = vb.key("weight");
+    let Some(patches) = registry.patches.get(&weight_key) else {
         return Ok(std::sync::Arc::new(base));
     };
+    let device = vb.device();
     let mut branches = Vec::with_capacity(patches.len());
     for patch in patches {
-        branches.push(WanLoraBranch {
-            // The GGUF path computes in F32 (`QMatMul` dequantizes into it),
-            // so the adapter is staged at F32 once rather than cast per step.
-            a: patch.a.to_device(device)?.to_dtype(DType::F32)?,
-            b: patch.b.to_device(device)?.to_dtype(DType::F32)?,
-            scale: patch.scale,
-        });
+        // The GGUF path computes in F32 (`QMatMul` dequantizes into it), so
+        // the adapter is staged at F32 once rather than cast per step.
+        match patch {
+            WanLoraPatch::LowRank { a, b, scale } => branches.push(WanLoraBranch::LowRank {
+                a: a.to_device(device)?.to_dtype(DType::F32)?,
+                b: b.to_device(device)?.to_dtype(DType::F32)?,
+                scale: *scale,
+            }),
+            WanLoraPatch::Delta { diff, scale } => {
+                if diff.dims() != [out_dim, in_dim] {
+                    candle_core::bail!(
+                        "Wan LoRA delta for `{weight_key}` is {:?} but the projection is \
+                         [{out_dim}, {in_dim}] — the adapter was trained against a different \
+                         Wan checkpoint",
+                        diff.dims()
+                    );
+                }
+                branches.push(WanLoraBranch::Dense {
+                    delta_t: diff
+                        .to_device(device)?
+                        .to_dtype(DType::F32)?
+                        .t()?
+                        .contiguous()?,
+                    scale: *scale,
+                });
+            }
+        }
     }
     Ok(std::sync::Arc::new(WanQuantizedLoraLinear {
         base,
@@ -519,7 +667,7 @@ mod tests {
         let registry = WanLoraRegistry::load(&[lora(&path, 1.0)]).unwrap();
         assert_eq!(registry.tensor_count(), 1);
         let patch = &registry.patches["blocks.0.self_attn.q.weight"][0];
-        assert_eq!(patch.scale, 4.0, "alpha 8 / rank 2 = 4.0");
+        assert_eq!(patch.scale(), 4.0, "alpha 8 / rank 2 = 4.0");
     }
 
     /// The same file with an F32 alpha must behave identically — the fix is
@@ -531,7 +679,7 @@ mod tests {
         write_wan_lora(&path, Some((SafeDtype::F32, f32_bytes(&[8.0]))));
         let registry = WanLoraRegistry::load(&[lora(&path, 1.0)]).unwrap();
         assert_eq!(
-            registry.patches["blocks.0.self_attn.q.weight"][0].scale,
+            registry.patches["blocks.0.self_attn.q.weight"][0].scale(),
             4.0
         );
     }
@@ -544,7 +692,7 @@ mod tests {
         write_wan_lora(&path, None);
         let registry = WanLoraRegistry::load(&[lora(&path, 0.75)]).unwrap();
         assert_eq!(
-            registry.patches["blocks.0.self_attn.q.weight"][0].scale,
+            registry.patches["blocks.0.self_attn.q.weight"][0].scale(),
             0.75
         );
     }
@@ -583,46 +731,300 @@ mod tests {
         }
     }
 
-    /// 2.1-era adapters must be refused by name, not partially applied.
+    // -----------------------------------------------------------------------
+    // Full-weight deltas: `.diff` / `.diff_b`
+    //
+    // The reference is ComfyUI `comfy/lora.py` (a464ac33588, 2026-08-07):
+    // `{stem}.diff` patches the weight and `{stem}.diff_b` patches the bias
+    // (comfy/lora.py:72-82), and `calculate_weight` applies
+    // `weight += strength * diff` with **no alpha/rank term**
+    // (comfy/lora.py:483-487) — the alpha read at comfy/lora.py:41-44 feeds
+    // only the low-rank adapter loaders.
+    // -----------------------------------------------------------------------
+
+    /// The merged tensors must equal the hand-computed `W + strength * diff`
+    /// and `b + strength * diff_b`.
     #[test]
-    fn wan21_full_delta_adapters_are_rejected() {
+    fn diff_and_diff_b_apply_as_hand_computed_full_weight_deltas() {
+        let device = Device::Cpu;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wan21_style.safetensors");
+        let path = dir.path().join("deltas.safetensors");
+        let diff: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let diff_b = [0.5f32, -0.5, 1.0, 0.0];
         write_tensors(
             &path,
             &[
                 (
-                    "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+                    "diffusion_model.blocks.0.self_attn.q.diff",
                     SafeDtype::F32,
-                    vec![2, 4],
-                    f32_bytes(&[0.0; 8]),
-                ),
-                (
-                    "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
-                    SafeDtype::F32,
-                    vec![4, 2],
-                    f32_bytes(&[0.0; 8]),
-                ),
-                (
-                    "diffusion_model.blocks.0.self_attn.norm_q.diff",
-                    SafeDtype::F32,
-                    vec![4],
-                    f32_bytes(&[0.0; 4]),
+                    vec![4, 4],
+                    f32_bytes(&diff),
                 ),
                 (
                     "diffusion_model.blocks.0.self_attn.q.diff_b",
                     SafeDtype::F32,
                     vec![4],
-                    f32_bytes(&[0.0; 4]),
+                    f32_bytes(&diff_b),
                 ),
             ],
         );
-        let error = WanLoraRegistry::load(&[lora(&path, 1.0)])
+        let registry = WanLoraRegistry::load(&[lora(&path, 0.25)]).unwrap();
+        assert_eq!(registry.tensor_count(), 2);
+
+        let base = Tensor::ones((4, 4), DType::F32, &device).unwrap();
+        let merged = registry.apply("blocks.0.self_attn.q.weight", base).unwrap();
+        let got: Vec<f32> = merged.flatten_all().unwrap().to_vec1().unwrap();
+        let want: Vec<f32> = diff.iter().map(|d| 1.0 + 0.25 * d).collect();
+        assert_eq!(got, want);
+
+        let bias = Tensor::ones(4, DType::F32, &device).unwrap();
+        let merged_bias = registry.apply("blocks.0.self_attn.q.bias", bias).unwrap();
+        assert_eq!(
+            merged_bias.to_vec1::<f32>().unwrap(),
+            vec![1.125, 0.875, 1.25, 1.0]
+        );
+    }
+
+    /// A full-weight delta has no rank, so the kohya `alpha/rank` convention
+    /// must not touch it even when the very same stems carry alphas for their
+    /// low-rank pairs — ComfyUI applies `strength * diff` directly
+    /// (comfy/lora.py:483-487). A loader that reused the pair scale would
+    /// apply the shipped alpha-8 files at 8x.
+    #[test]
+    fn alpha_never_rescales_full_weight_deltas() {
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wan21_lightning_style.safetensors");
+        write_tensors(
+            &path,
+            &[
+                // A clean rank-2 pair with alpha 8 — pair scale stays
+                // user * alpha / rank.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+                    SafeDtype::F32,
+                    vec![2, 4],
+                    f32_bytes(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+                    SafeDtype::F32,
+                    vec![4, 2],
+                    f32_bytes(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.alpha",
+                    SafeDtype::I64,
+                    vec![],
+                    8i64.to_le_bytes().to_vec(),
+                ),
+                // A bias delta on the SAME stem as the alpha-carrying pair.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.diff_b",
+                    SafeDtype::F32,
+                    vec![4],
+                    f32_bytes(&[1.0, 1.0, 1.0, 1.0]),
+                ),
+                // A norm delta whose stem ALSO carries an alpha of its own.
+                (
+                    "diffusion_model.blocks.0.self_attn.norm_q.diff",
+                    SafeDtype::F32,
+                    vec![4],
+                    f32_bytes(&[1.0, 2.0, 3.0, 4.0]),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.norm_q.alpha",
+                    SafeDtype::I64,
+                    vec![],
+                    8i64.to_le_bytes().to_vec(),
+                ),
+            ],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 0.5)]).unwrap();
+        assert_eq!(registry.tensor_count(), 3);
+
+        // Pair: 0.5 * 8 / 2 = 2.0 on the picked diagonal entries.
+        let weight = registry
+            .apply(
+                "blocks.0.self_attn.q.weight",
+                Tensor::zeros((4, 4), DType::F32, &device).unwrap(),
+            )
+            .unwrap();
+        let got: Vec<f32> = weight.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(got[0], 2.0, "the pair keeps its alpha/rank scale");
+        assert_eq!(got[5], 2.0);
+
+        // Bias delta: exactly 0.5 * diff_b — the stem's alpha 8 must not
+        // multiply in (that would be 4.0).
+        let bias = registry
+            .apply(
+                "blocks.0.self_attn.q.bias",
+                Tensor::zeros(4, DType::F32, &device).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(bias.to_vec1::<f32>().unwrap(), vec![0.5; 4]);
+
+        // Norm delta: exactly 0.5 * diff despite its own alpha.
+        let norm = registry
+            .apply(
+                "blocks.0.self_attn.norm_q.weight",
+                Tensor::zeros(4, DType::F32, &device).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(norm.to_vec1::<f32>().unwrap(), vec![0.5, 1.0, 1.5, 2.0]);
+    }
+
+    /// Kijai-style norm-delta files carry no pairs at all; they must load.
+    #[test]
+    fn an_all_delta_adapter_loads_without_any_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("norm_only.safetensors");
+        write_tensors(
+            &path,
+            &[(
+                "diffusion_model.blocks.0.self_attn.norm_q.diff",
+                SafeDtype::F32,
+                vec![4],
+                f32_bytes(&[0.1; 4]),
+            )],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 1.0)]).unwrap();
+        assert_eq!(registry.tensor_count(), 1);
+    }
+
+    /// A delta whose shape does not match the checkpoint tensor must refuse
+    /// the merge and name the tensor — ComfyUI logs and skips the mismatch
+    /// (comfy/lora.py:484-485), but skipping ships a partially-applied
+    /// adapter, which is the silent-drop hazard this loader exists to refuse.
+    #[test]
+    fn a_delta_with_the_wrong_shape_is_refused_with_the_tensor_name() {
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrong_shape.safetensors");
+        write_tensors(
+            &path,
+            &[(
+                "diffusion_model.blocks.0.self_attn.q.diff",
+                SafeDtype::F32,
+                vec![2, 2],
+                f32_bytes(&[0.0; 4]),
+            )],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 1.0)]).unwrap();
+        let error = registry
+            .apply(
+                "blocks.0.self_attn.q.weight",
+                Tensor::zeros((4, 4), DType::F32, &device).unwrap(),
+            )
             .unwrap_err()
             .to_string();
-        assert!(error.contains("2.1-era"), "{error}");
-        assert!(error.contains("full-weight"), "{error}");
-        assert!(error.contains('2'), "the count must be named: {error}");
+        assert!(error.contains("blocks.0.self_attn.q.weight"), "{error}");
+        assert!(error.contains("[2, 2]"), "{error}");
+        assert!(error.contains("[4, 4]"), "{error}");
+    }
+
+    /// A `.diff_b` aimed at a module the checkpoint has no bias for — a
+    /// 2.1-shape delta against a 2.2 checkpoint, say — must fail closed via
+    /// the same target check the pairs use.
+    #[test]
+    fn a_diff_b_naming_a_biasless_module_is_refused_before_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("biasless.safetensors");
+        write_tensors(
+            &path,
+            &[(
+                "diffusion_model.blocks.0.self_attn.norm_q.diff_b",
+                SafeDtype::F32,
+                vec![4],
+                f32_bytes(&[0.0; 4]),
+            )],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 1.0)]).unwrap();
+        let error = registry
+            .ensure_targets_present(
+                |name| name != "blocks.0.self_attn.norm_q.bias",
+                std::path::Path::new("checkpoint.safetensors"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocks.0.self_attn.norm_q.bias"), "{error}");
+    }
+
+    /// Wan's AdaLN modulation tables are BARE parameters — the checkpoint
+    /// keys are `blocks.N.modulation` and `head.modulation`, with no
+    /// `.weight` suffix — and Kijai's Wan 2.1 lightx2v extractions ship
+    /// `.diff` deltas for exactly those stems. Routing them to
+    /// `{stem}.weight` invents a tensor no checkpoint has, and the
+    /// fail-closed target check then rejects the whole (valid) adapter.
+    #[test]
+    fn a_modulation_diff_targets_the_bare_checkpoint_key() {
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modulation.safetensors");
+        let block_diff = synth(11, 6 * 4);
+        let head_diff = synth(13, 2 * 4);
+        write_tensors(
+            &path,
+            &[
+                (
+                    "diffusion_model.blocks.0.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 6, 4],
+                    f32_bytes(&block_diff),
+                ),
+                (
+                    "diffusion_model.head.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 2, 4],
+                    f32_bytes(&head_diff),
+                ),
+            ],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 0.5)]).unwrap();
+        assert_eq!(registry.tensor_count(), 2);
+
+        // The patches must land on the bare keys the checkpoint actually has.
+        registry
+            .ensure_targets_present(
+                |name| name == "blocks.0.modulation" || name == "head.modulation",
+                std::path::Path::new("checkpoint.safetensors"),
+            )
+            .expect("modulation deltas must target the bare checkpoint keys");
+
+        // And apply there: W + strength * diff, hand-computed.
+        let base = Tensor::ones((1, 6, 4), DType::F32, &device).unwrap();
+        let merged = registry.apply("blocks.0.modulation", base).unwrap();
+        let got: Vec<f32> = merged.flatten_all().unwrap().to_vec1().unwrap();
+        let want: Vec<f32> = block_diff.iter().map(|d| 1.0 + 0.5 * d).collect();
+        assert_eq!(got, want);
+
+        let head_base = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let head_merged = registry.apply("head.modulation", head_base).unwrap();
+        let head_got: Vec<f32> = head_merged.flatten_all().unwrap().to_vec1().unwrap();
+        let head_want: Vec<f32> = head_diff.iter().map(|d| 0.5 * d).collect();
+        assert_eq!(head_got, head_want);
+
+        // The bare-key routing must not weaken fail-closed: a genuinely bogus
+        // stem still refuses the adapter.
+        let bogus = dir.path().join("bogus.safetensors");
+        write_tensors(
+            &bogus,
+            &[(
+                "diffusion_model.blocks.7.modulation.diff",
+                SafeDtype::F32,
+                vec![1, 6, 4],
+                f32_bytes(&block_diff),
+            )],
+        );
+        let bogus_registry = WanLoraRegistry::load(&[lora(&bogus, 0.5)]).unwrap();
+        let error = bogus_registry
+            .ensure_targets_present(
+                |name| name == "blocks.0.modulation" || name == "head.modulation",
+                std::path::Path::new("checkpoint.safetensors"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocks.7.modulation"), "{error}");
     }
 
     /// A half-written adapter must be refused, not partially applied.
@@ -917,6 +1319,134 @@ mod tests {
         );
     }
 
+    /// Full-weight deltas must reach the transformer through the same
+    /// `SimpleBackend` interception as the pairs — including the bias, which
+    /// no low-rank patch ever touched before deltas existed.
+    #[test]
+    fn transformer_load_merges_diff_and_diff_b_through_the_backend() {
+        use crate::wan::model::transformer::{WanTransformer, WanTransformerConfig};
+        use candle_nn::{VarBuilder, VarMap};
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = dir.path().join("tiny_wan.safetensors");
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        varmap.save(&checkpoint).unwrap();
+
+        let target = "blocks.0.self_attn.q.weight";
+        let (base, base_bias) = {
+            let data = varmap.data().lock().unwrap();
+            (
+                data[target].as_tensor().clone(),
+                data["blocks.0.self_attn.q.bias"].as_tensor().clone(),
+            )
+        };
+        let (out_features, in_features) = base.dims2().unwrap();
+
+        let lora_path = dir.path().join("delta_adapter.safetensors");
+        write_tensors(
+            &lora_path,
+            &[
+                (
+                    "diffusion_model.blocks.0.self_attn.q.diff",
+                    SafeDtype::F32,
+                    vec![out_features, in_features],
+                    f32_bytes(&synth(7, out_features * in_features)),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.diff_b",
+                    SafeDtype::F32,
+                    vec![out_features],
+                    f32_bytes(&synth(9, out_features)),
+                ),
+            ],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&lora_path, 0.5)]).unwrap();
+        assert_eq!(registry.tensor_count(), 2);
+
+        let bare = WanTransformer::from_safetensors_with_loras(
+            std::slice::from_ref(&checkpoint),
+            config.clone(),
+            &device,
+            dtype,
+            &WanLoraRegistry::default(),
+        )
+        .unwrap();
+        let merged = WanTransformer::from_safetensors_with_loras(
+            std::slice::from_ref(&checkpoint),
+            config.clone(),
+            &device,
+            dtype,
+            &registry,
+        )
+        .unwrap();
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+        let bare_out = bare.forward(&x, &timestep, &context).unwrap();
+        let merged_out = merged.forward(&x, &timestep, &context).unwrap();
+        assert!(
+            max_abs_diff(&bare_out, &merged_out) > 1e-4,
+            "the deltas must reach the forward"
+        );
+
+        // Hand-check the registry's own arithmetic on both tensors.
+        let expected = registry.apply(target, base.clone()).unwrap();
+        let base_v: Vec<f32> = base.flatten_all().unwrap().to_vec1().unwrap();
+        let expected_v: Vec<f32> = expected.flatten_all().unwrap().to_vec1().unwrap();
+        let diff = synth(7, out_features * in_features);
+        assert_eq!(expected_v[0], base_v[0] + 0.5 * diff[0]);
+        let expected_bias = registry
+            .apply("blocks.0.self_attn.q.bias", base_bias.clone())
+            .unwrap();
+        let bias_v: Vec<f32> = base_bias.to_vec1().unwrap();
+        let expected_bias_v: Vec<f32> = expected_bias.to_vec1().unwrap();
+        let diff_b = synth(9, out_features);
+        assert_eq!(expected_bias_v[0], bias_v[0] + 0.5 * diff_b[0]);
+
+        // A bias-only adapter must also change the forward: before deltas
+        // existed no patch ever landed on a bias, so this is the tensor a
+        // wrong key layout would silently miss.
+        let bias_only = dir.path().join("bias_only.safetensors");
+        write_tensors(
+            &bias_only,
+            &[(
+                "diffusion_model.blocks.0.self_attn.q.diff_b",
+                SafeDtype::F32,
+                vec![out_features],
+                f32_bytes(&vec![0.25f32; out_features]),
+            )],
+        );
+        let bias_registry = WanLoraRegistry::load(&[lora(&bias_only, 1.0)]).unwrap();
+        let bias_merged = WanTransformer::from_safetensors_with_loras(
+            &[checkpoint],
+            config,
+            &device,
+            dtype,
+            &bias_registry,
+        )
+        .unwrap();
+        let bias_out = bias_merged.forward(&x, &timestep, &context).unwrap();
+        assert!(
+            max_abs_diff(&bare_out, &bias_out) > 1e-6,
+            "a bias delta must reach the forward"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // GGUF: adapters as parallel low-rank branches
     // -----------------------------------------------------------------------
@@ -1089,6 +1619,138 @@ mod tests {
         assert!(
             max_abs_diff(&branched, &bare) > 1e-3,
             "the adapter must actually reach the GGUF forward"
+        );
+    }
+
+    /// Full-weight deltas on GGUF: a `.diff` on a quantized projection rides
+    /// as a dense parallel branch (`y += strength * diff @ x` — merging would
+    /// requantize), a `.diff_b` merges into the unquantized F32 bias, and a
+    /// `.diff` on a norm merges into the eagerly dequantized tensor. At a
+    /// lossless F32 GGUF quantization all three must make the GGUF forward
+    /// agree with the merged safetensors forward to f32 round-off.
+    #[test]
+    fn gguf_delta_branches_and_bias_merges_equal_the_merged_safetensors_forward() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let safetensors_path = dir.path().join("tiny.safetensors");
+        varmap.save(&safetensors_path).unwrap();
+        let gguf_path = dir.path().join("tiny.gguf");
+        write_gguf(&gguf_path, &varmap, |_| GgmlDType::F32);
+
+        let dim = config.dim;
+        let adapter = dir.path().join("delta_adapter.safetensors");
+        write_tensors(
+            &adapter,
+            &[
+                // A pair coexisting with the deltas, so the low-rank and dense
+                // branches stack on one projection.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+                    SafeDtype::F32,
+                    vec![2, dim],
+                    f32_bytes(&synth(1, 2 * dim)),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+                    SafeDtype::F32,
+                    vec![dim, 2],
+                    f32_bytes(&synth(2, dim * 2)),
+                ),
+                (
+                    "diffusion_model.blocks.0.self_attn.q.alpha",
+                    SafeDtype::I64,
+                    vec![],
+                    8i64.to_le_bytes().to_vec(),
+                ),
+                // Dense square delta on the same projection.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.diff",
+                    SafeDtype::F32,
+                    vec![dim, dim],
+                    f32_bytes(&synth(3, dim * dim)),
+                ),
+                // Bias delta — merges into the unquantized F32 bias.
+                (
+                    "diffusion_model.blocks.0.self_attn.q.diff_b",
+                    SafeDtype::F32,
+                    vec![dim],
+                    f32_bytes(&synth(4, dim)),
+                ),
+                // Non-square dense delta: ffn.0 is [ffn_dim, dim].
+                (
+                    "diffusion_model.blocks.0.ffn.0.diff",
+                    SafeDtype::F32,
+                    vec![config.ffn_dim, dim],
+                    f32_bytes(&synth(5, config.ffn_dim * dim)),
+                ),
+                // Norm delta — GGUF reads norms as eagerly dequantized
+                // tensors, so this exercises the `merge_into` arm.
+                (
+                    "diffusion_model.blocks.0.self_attn.norm_q.diff",
+                    SafeDtype::F32,
+                    vec![dim],
+                    f32_bytes(&synth(6, dim)),
+                ),
+                // Modulation delta — the checkpoint key is BARE
+                // (`blocks.0.modulation`, no `.weight`), stored unquantized
+                // in GGUF and merged through the same `tensor()` hook as the
+                // norms on both weight sources.
+                (
+                    "diffusion_model.blocks.0.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 6, dim],
+                    f32_bytes(&synth(7, 6 * dim)),
+                ),
+            ],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&adapter, 0.5)]).unwrap();
+        assert_eq!(registry.tensor_count(), 5);
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+        let run = |model: &WanTransformer| model.forward(&x, &timestep, &context).unwrap();
+
+        let merged = run(&WanTransformer::from_safetensors_with_loras(
+            &[safetensors_path],
+            config.clone(),
+            &device,
+            dtype,
+            &registry,
+        )
+        .unwrap());
+        let branched = run(&WanTransformer::from_gguf_with_loras(
+            &gguf_path,
+            config.clone(),
+            &device,
+            &registry,
+        )
+        .unwrap());
+        let bare = run(&WanTransformer::from_gguf(&gguf_path, config, &device).unwrap());
+
+        let err = max_abs_diff(&branched, &merged);
+        assert!(
+            err < 1e-4,
+            "the delta branch and the merge must be the same function, diverged by {err:e}"
+        );
+        assert!(
+            max_abs_diff(&branched, &bare) > 1e-3,
+            "the deltas must actually reach the GGUF forward"
         );
     }
 
