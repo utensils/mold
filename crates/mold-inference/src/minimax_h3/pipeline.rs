@@ -12,9 +12,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use image::{imageops, ImageReader, RgbImage};
 use mold_candle::minimax_h3::{
-    patchify_h3_video, unpack_h3_audio, unpatchify_h3_video, ConditionEncodeMode,
-    EndpointResizePlan, H3ForwardInput, H3FrozenPackedLayout, H3Modality, H3ModalityTag,
-    H3PackedLayout, H3TransformerOutput, StereoLatents, StereoWaveform, VisualTemporalGeometry,
+    patchify_h3_video, unpack_h3_audio, unpatchify_h3_video, AudioSoundtrackAssociation,
+    ConditionEncodeMode, EndpointResizePlan, H3ForwardInput, H3FrozenPackedLayout, H3Modality,
+    H3ModalityTag, H3PackedLayout, H3TransformerOutput, StereoLatents, StereoWaveform,
+    VisualTemporalGeometry,
 };
 use mold_core::minimax_h3::{
     self as contract, Mode, Task, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE_HZ, CONDITION_POSTERIOR_SEED,
@@ -26,7 +27,7 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 use serde::Serialize;
 
-use super::sampler::{euler_step_pair, H3DualSchedule};
+use super::sampler::{euler_step_pair, H3DualSchedule, H3_VISUAL_CONDITION_TIMESTEP};
 use crate::engine::rand_seed;
 use crate::ltx_video::video_enc::{self, Mp4StreamEncoder};
 #[cfg(feature = "mp4")]
@@ -40,7 +41,6 @@ const VIDEO_VAE_SPATIAL_COMPRESSION: usize = 16;
 const VIDEO_PATCH: [usize; 3] = [1, 2, 2];
 const AUDIO_LATENTS_PER_SECOND: usize = 40;
 const AUDIO_SAMPLES_PER_LATENT: usize = 800;
-const VISUAL_CONDITION_LEVEL: f32 = 0.999;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -522,7 +522,7 @@ pub(crate) fn prepare_request(
     for (index, (anchor, bytes)) in raw.into_iter().enumerate() {
         let decoded = decode_endpoint(bytes)
             .with_context(|| format!("failed to decode {} H3 endpoint", anchor.as_str()))?;
-        let prepared = resize_endpoint(decoded, anchor, index, &geometry)?;
+        let prepared = resize_endpoint(decoded, anchor, index, &geometry, progress)?;
         endpoints.push(prepared);
         control.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::EndpointPreprocess,
@@ -563,8 +563,9 @@ pub(crate) fn execute_staged(
     let mut control = PipelineControl { progress, observer };
 
     phase_boundary(&mut control, H3PipelinePhase::PromptEncode, false)?;
-    ensure_identity(backend, &frozen_identity)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     let text = backend.encode_text(&prepared.prompt, &prepared.endpoints, &mut control)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     text.validate(&device)?;
     phase_boundary(&mut control, H3PipelinePhase::PromptEncode, true)?;
 
@@ -584,12 +585,13 @@ pub(crate) fn execute_staged(
     })?;
     let mut conditions = Vec::with_capacity(prepared.endpoints.len());
     for (index, endpoint) in prepared.endpoints.iter().enumerate() {
-        ensure_identity(backend, &frozen_identity)?;
+        ensure_identity(backend, &frozen_identity, &device)?;
         let condition = backend.encode_visual_condition(
             endpoint,
             ConditionEncodeMode::OfficialFreshSeed42,
             &mut control,
         )?;
+        ensure_identity(backend, &frozen_identity, &device)?;
         validate_condition_latent(&condition, &prepared.geometry)?;
         conditions.push(condition);
         control.checkpoint(H3PipelineEvent {
@@ -633,8 +635,8 @@ pub(crate) fn execute_staged(
         let noise = request_noise.draw("condition-noise", index, condition.dims(), &device)?;
         let condition = condition.to_device(&device)?.to_dtype(DType::F32)?;
         let noised = condition
-            .affine(f64::from(VISUAL_CONDITION_LEVEL), 0.0)?
-            .add(&noise.affine(f64::from(1.0 - VISUAL_CONDITION_LEVEL), 0.0)?)?;
+            .affine(f64::from(H3_VISUAL_CONDITION_TIMESTEP), 0.0)?
+            .add(&noise.affine(f64::from(1.0 - H3_VISUAL_CONDITION_TIMESTEP), 0.0)?)?;
         condition_rows.push(patchify_h3_video(&noised, VIDEO_PATCH)?);
         control.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::NoiseAllocation,
@@ -684,7 +686,7 @@ pub(crate) fn execute_staged(
         total: counts.transformer_evaluations,
     })?;
     for step in schedule.steps() {
-        ensure_identity(backend, &frozen_identity)?;
+        ensure_identity(backend, &frozen_identity, &device)?;
         let timesteps = Tensor::from_slice(
             &[
                 step.row_timesteps.generated_video,
@@ -704,6 +706,7 @@ pub(crate) fn execute_staged(
             &frozen_layout,
             &mut control,
         )?;
+        ensure_identity(backend, &frozen_identity, &device)?;
         validate_transformer_output(&output, &video_rows, &audio_rows)?;
 
         let generated =
@@ -761,15 +764,17 @@ pub(crate) fn execute_staged(
     )?;
 
     phase_boundary(&mut control, H3PipelinePhase::VisualDecode, false)?;
-    ensure_identity(backend, &frozen_identity)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     let mut sink = H3VideoEncodeSink::new(&prepared.geometry)?;
     backend.decode_video(&video_latents, &mut sink, &mut control)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     let encoded_video = sink.finish()?;
     phase_boundary(&mut control, H3PipelinePhase::VisualDecode, true)?;
 
     phase_boundary(&mut control, H3PipelinePhase::AudioDecode, false)?;
-    ensure_identity(backend, &frozen_identity)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     let waveform = backend.decode_audio(&audio_latents, &mut control)?;
+    ensure_identity(backend, &frozen_identity, &device)?;
     validate_waveform(&waveform, prepared.geometry.audio_latents_per_channel)?;
     phase_boundary(&mut control, H3PipelinePhase::AudioDecode, true)?;
 
@@ -1012,27 +1017,188 @@ fn decode_endpoint(bytes: &[u8]) -> Result<RgbImage> {
         .to_rgb8())
 }
 
+const PILLOW_RESAMPLE_PRECISION_BITS: u32 = 22;
+
+struct PillowResampleCoefficients {
+    start: usize,
+    values: Vec<i32>,
+}
+
+fn pillow_lanczos(x: f64) -> f64 {
+    fn sinc(mut x: f64) -> f64 {
+        if x == 0.0 {
+            return 1.0;
+        }
+        x *= std::f64::consts::PI;
+        x.sin() / x
+    }
+
+    if (-3.0..3.0).contains(&x) {
+        sinc(x) * sinc(x / 3.0)
+    } else {
+        0.0
+    }
+}
+
+/// Pillow's U8 LANCZOS coefficient generation and fixed-point rounding.
+///
+/// H3's pinned preprocessing authority uses `PIL.Image.Resampling.LANCZOS`.
+/// The `image` crate's similarly named Lanczos3 filter uses different edge and
+/// quantization rules, which changes the endpoint tensor before seed-42 VAE
+/// sampling. See Diffusers `before_encoder.py` lines 134-158 at
+/// `9c6a68c32b3b2a64db91800b624d33cec6e25ab8` and Pillow `Resample.c` lines
+/// 65-87, 183-284, 344-363, and 446-463.
+fn pillow_resample_coefficients(
+    input: usize,
+    output: usize,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<PillowResampleCoefficients>> {
+    if input == 0 || output == 0 {
+        bail!("Pillow-compatible H3 resize dimensions must be non-zero");
+    }
+    let scale = input as f64 / output as f64;
+    let filter_scale = scale.max(1.0);
+    let support = 3.0 * filter_scale;
+    let coefficient_scale = f64::from(1_u32 << PILLOW_RESAMPLE_PRECISION_BITS);
+
+    (0..output)
+        .map(|destination| {
+            checkpoint()?;
+            let center = (destination as f64 + 0.5) * scale;
+            // Match Pillow's C casts, which truncate toward zero before
+            // clamping the bounds to the source image.
+            let start = ((center - support + 0.5) as isize).max(0) as usize;
+            let end = ((center + support + 0.5) as isize).clamp(0, input as isize) as usize;
+            if end <= start {
+                bail!("Pillow-compatible H3 resize produced an empty filter window");
+            }
+            let mut weights = (start..end)
+                .map(|source| pillow_lanczos((source as f64 - center + 0.5) / filter_scale))
+                .collect::<Vec<_>>();
+            let sum = weights.iter().sum::<f64>();
+            if sum != 0.0 {
+                for weight in &mut weights {
+                    *weight /= sum;
+                }
+            }
+            let values = weights
+                .into_iter()
+                .map(|weight| {
+                    let scaled = weight * coefficient_scale;
+                    if weight < 0.0 {
+                        (scaled - 0.5) as i32
+                    } else {
+                        (scaled + 0.5) as i32
+                    }
+                })
+                .collect();
+            Ok(PillowResampleCoefficients { start, values })
+        })
+        .collect()
+}
+
+fn pillow_resample_channel(samples: impl Iterator<Item = (u8, i32)>) -> u8 {
+    let accumulator = samples.fold(
+        1_i64 << (PILLOW_RESAMPLE_PRECISION_BITS - 1),
+        |total, (sample, coefficient)| total + i64::from(sample) * i64::from(coefficient),
+    );
+    (accumulator >> PILLOW_RESAMPLE_PRECISION_BITS).clamp(0, 255) as u8
+}
+
+fn pillow_lanczos_resize(
+    source: &RgbImage,
+    width: u32,
+    height: u32,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<RgbImage> {
+    let source_width =
+        usize::try_from(source.width()).context("source width does not fit usize")?;
+    let source_height =
+        usize::try_from(source.height()).context("source height does not fit usize")?;
+    let target_width = usize::try_from(width).context("target width does not fit usize")?;
+    let target_height = usize::try_from(height).context("target height does not fit usize")?;
+    let source_bytes = source.as_raw();
+
+    let horizontal = if source_width == target_width {
+        source_bytes.clone()
+    } else {
+        let coefficients = pillow_resample_coefficients(source_width, target_width, checkpoint)?;
+        let output_len = checked_product(
+            &[target_width, source_height, 3],
+            "Pillow-compatible H3 horizontal resize",
+        )?;
+        let mut output = vec![0_u8; output_len];
+        for y in 0..source_height {
+            checkpoint()?;
+            for (x, filter) in coefficients.iter().enumerate() {
+                for channel in 0..3 {
+                    output[(y * target_width + x) * 3 + channel] =
+                        pillow_resample_channel(filter.values.iter().enumerate().map(
+                            |(offset, &coefficient)| {
+                                (
+                                    source_bytes
+                                        [(y * source_width + filter.start + offset) * 3 + channel],
+                                    coefficient,
+                                )
+                            },
+                        ));
+                }
+            }
+        }
+        output
+    };
+
+    let output = if source_height == target_height {
+        horizontal
+    } else {
+        let coefficients = pillow_resample_coefficients(source_height, target_height, checkpoint)?;
+        let output_len = checked_product(
+            &[target_width, target_height, 3],
+            "Pillow-compatible H3 vertical resize",
+        )?;
+        let mut output = vec![0_u8; output_len];
+        for (y, filter) in coefficients.iter().enumerate() {
+            checkpoint()?;
+            for x in 0..target_width {
+                for channel in 0..3 {
+                    output[(y * target_width + x) * 3 + channel] =
+                        pillow_resample_channel(filter.values.iter().enumerate().map(
+                            |(offset, &coefficient)| {
+                                (
+                                    horizontal[((filter.start + offset) * target_width + x) * 3
+                                        + channel],
+                                    coefficient,
+                                )
+                            },
+                        ));
+                }
+            }
+        }
+        output
+    };
+
+    RgbImage::from_raw(width, height, output)
+        .ok_or_else(|| anyhow!("Pillow-compatible H3 resize produced an invalid RGB image"))
+}
+
 fn resize_endpoint(
     source: RgbImage,
     anchor: H3EndpointAnchor,
     packed_index: usize,
     geometry: &H3Fl2VaGeometry,
+    progress: &ProgressReporter,
 ) -> Result<H3PreparedEndpoint> {
     let source_width = source.width();
     let source_height = source.height();
     let target_width = u32::try_from(geometry.width).context("H3 width does not fit u32")?;
     let target_height = u32::try_from(geometry.height).context("H3 height does not fit u32")?;
+    let mut checkpoint = || progress.checkpoint().map_err(Into::into);
     let (image, resize) = if (source_width, source_height) == (target_width, target_height) {
         (source, H3EndpointResize::Identity)
     } else if packed_index == 0 {
         let plan = EndpointResizePlan::geometry_anchor(geometry.width, geometry.height)?;
         (
-            imageops::resize(
-                &source,
-                target_width,
-                target_height,
-                imageops::FilterType::Lanczos3,
-            ),
+            pillow_lanczos_resize(&source, target_width, target_height, &mut checkpoint)?,
             H3EndpointResize::GeometryAnchor(plan),
         )
     } else {
@@ -1053,12 +1219,12 @@ fn resize_endpoint(
         else {
             unreachable!("follower plan is always cover-crop")
         };
-        let resized = imageops::resize(
+        let resized = pillow_lanczos_resize(
             &source,
             u32::try_from(resized_width).context("resized width does not fit u32")?,
             u32::try_from(resized_height).context("resized height does not fit u32")?,
-            imageops::FilterType::Lanczos3,
-        );
+            &mut checkpoint,
+        )?;
         (
             imageops::crop_imm(
                 &resized,
@@ -1351,18 +1517,20 @@ fn validate_transformer_output(
 
 fn validate_waveform(waveform: &StereoWaveform, latent_rows: usize) -> Result<()> {
     let (batch, channels, samples) = waveform.samples().dims3()?;
-    let minimum = latent_rows
+    let expected = latent_rows
         .checked_mul(AUDIO_SAMPLES_PER_LATENT)
         .ok_or_else(|| anyhow!("H3 decoded audio sample count overflow"))?;
     if waveform.samples().dtype() != DType::F32
         || batch != 1
         || channels != AUDIO_CHANNELS as usize
-        || samples < minimum
+        || samples != expected
+        || waveform.association() != AudioSoundtrackAssociation::Generated
     {
         bail!(
-            "MiniMax H3 audio decoder must emit F32 [1,2,samples >= {minimum}], got {:?} {:?}",
+            "MiniMax H3 audio decoder must emit the generated F32 timeline [1,2,{expected}], got {:?} {:?} {:?}",
             waveform.samples().dtype(),
-            waveform.samples().dims()
+            waveform.samples().dims(),
+            waveform.association()
         );
     }
     Ok(())
@@ -1400,9 +1568,13 @@ fn phase_boundary(
     })
 }
 
-fn ensure_identity(backend: &dyn H3Fl2VaBackend, frozen: &H3PipelineBackendIdentity) -> Result<()> {
+fn ensure_identity(
+    backend: &dyn H3Fl2VaBackend,
+    frozen: &H3PipelineBackendIdentity,
+    frozen_device: &Device,
+) -> Result<()> {
     let current = backend.identity();
-    if &current != frozen {
+    if &current != frozen || !backend.device().same_device(frozen_device) {
         bail!(
             "MiniMax H3 backend identity changed from {:?} to {:?}; implicit reroute is forbidden",
             frozen,
@@ -1462,7 +1634,9 @@ mod tests {
     use mold_core::{KeyframeCondition, OutputFormat};
 
     use super::*;
-    use crate::progress::{is_inference_cancelled, InferenceCancellationToken, ProgressReporter};
+    use crate::progress::{
+        is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressReporter,
+    };
 
     fn request() -> GenerateRequest {
         GenerateRequest {
@@ -1554,6 +1728,7 @@ mod tests {
         forwards: usize,
         decoded_video: bool,
         decoded_audio: bool,
+        reroute_after_audio_decode: bool,
         condition_values: Arc<Mutex<Vec<f32>>>,
         condition_rows_to_watch: usize,
         observed_condition_rows: Vec<Vec<f32>>,
@@ -1571,6 +1746,7 @@ mod tests {
                 forwards: 0,
                 decoded_video: false,
                 decoded_audio: false,
+                reroute_after_audio_decode: false,
                 condition_values: Arc::new(Mutex::new(Vec::new())),
                 condition_rows_to_watch: 0,
                 observed_condition_rows: Vec::new(),
@@ -1703,7 +1879,7 @@ mod tests {
                 total: 1,
             })?;
             self.decoded_audio = true;
-            StereoWaveform::new(
+            let waveform = StereoWaveform::new(
                 Tensor::zeros(
                     (1, 2, 207 * AUDIO_SAMPLES_PER_LATENT),
                     DType::F32,
@@ -1711,8 +1887,11 @@ mod tests {
                 )?,
                 AUDIO_SAMPLE_RATE_HZ as usize,
                 AudioSoundtrackAssociation::Generated,
-            )
-            .map_err(Into::into)
+            )?;
+            if self.reroute_after_audio_decode {
+                self.identity.device_id = "other-gpu".into();
+            }
+            Ok(waveform)
         }
     }
 
@@ -1795,6 +1974,51 @@ mod tests {
         ));
         assert_eq!(prepared.endpoints[0].pixels.dims(), [1, 3, 1, 32, 32]);
         assert_eq!(prepared.endpoints[1].pixels.dims(), [1, 3, 1, 32, 32]);
+    }
+
+    #[test]
+    fn endpoint_resize_matches_pillow_lanczos_pixels() {
+        let source = RgbImage::from_raw(
+            5,
+            7,
+            (0..7)
+                .flat_map(|y| {
+                    (0..5).flat_map(move |x| {
+                        (0..3).map(move |channel| (x * 37 + y * 19 + channel * 53) as u8)
+                    })
+                })
+                .collect(),
+        )
+        .unwrap();
+        let resized = pillow_lanczos_resize(&source, 8, 4, &mut || Ok(())).unwrap();
+        assert_eq!(
+            resized.into_raw(),
+            vec![
+                6, 57, 110, 18, 71, 125, 47, 100, 153, 71, 125, 168, 91, 142, 210, 115, 165, 243,
+                144, 207, 188, 158, 228, 138, 36, 90, 144, 51, 104, 152, 80, 132, 183, 103, 153,
+                225, 124, 186, 244, 148, 214, 192, 174, 191, 77, 186, 172, 6, 71, 124, 169, 85,
+                138, 216, 114, 168, 231, 139, 190, 125, 157, 220, 40, 182, 206, 15, 222, 74, 52,
+                244, 0, 84, 104, 157, 221, 118, 167, 183, 147, 203, 103, 166, 252, 25, 203, 172,
+                20, 221, 16, 67, 156, 16, 99, 111, 67, 107,
+            ]
+        );
+    }
+
+    #[test]
+    fn endpoint_resize_polls_cancellation_between_work_rows() {
+        let source = RgbImage::from_pixel(64, 64, Rgb([10, 20, 30]));
+        let mut polls = 0;
+        let error = pillow_lanczos_resize(&source, 96, 32, &mut || {
+            polls += 1;
+            if polls == 4 {
+                Err(anyhow::Error::new(InferenceCancelled))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(polls, 4);
+        assert!(is_inference_cancelled(&error));
     }
 
     #[test]
@@ -2043,6 +2267,50 @@ mod tests {
     }
 
     #[test]
+    fn backend_identity_cannot_change_during_final_audio_decode() {
+        let mut backend = SyntheticBackend::new();
+        backend.reroute_after_audio_decode = true;
+        let error = execute_staged(
+            &prepared(&request()),
+            &mut backend,
+            &ProgressReporter::default(),
+            &mut NoopH3PipelineObserver,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("implicit reroute is forbidden"));
+    }
+
+    #[test]
+    fn decoded_audio_must_match_the_exact_generated_timeline() {
+        let latent_rows = 207;
+        let overlong = StereoWaveform::new(
+            Tensor::zeros(
+                (1, 2, latent_rows * AUDIO_SAMPLES_PER_LATENT + 1),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap(),
+            AUDIO_SAMPLE_RATE_HZ as usize,
+            AudioSoundtrackAssociation::Generated,
+        )
+        .unwrap();
+        assert!(validate_waveform(&overlong, latent_rows).is_err());
+
+        let unrelated = StereoWaveform::new(
+            Tensor::zeros(
+                (1, 2, latent_rows * AUDIO_SAMPLES_PER_LATENT),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap(),
+            AUDIO_SAMPLE_RATE_HZ as usize,
+            AudioSoundtrackAssociation::StandaloneReference { reference_index: 0 },
+        )
+        .unwrap();
+        assert!(validate_waveform(&unrelated, latent_rows).is_err());
+    }
+
+    #[test]
     fn block_progress_can_be_reported_without_changing_phase_totals() {
         let _ = H3BlockProgress {
             stack: H3BlockStack::Transformer,
@@ -2088,6 +2356,26 @@ mod tests {
                 contract::DIMENSION_ALIGNMENT
             ),
             (17, 5, 32)
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn generated_channel_major_waveform_interleaves_left_then_right() {
+        let waveform = StereoWaveform::new(
+            Tensor::from_vec(
+                vec![1.0f32, 2.0, 3.0, 10.0, 20.0, 30.0],
+                (1, 2, 3),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            AUDIO_SAMPLE_RATE_HZ as usize,
+            AudioSoundtrackAssociation::Generated,
+        )
+        .unwrap();
+        assert_eq!(
+            interleaved_pcm(&waveform).unwrap(),
+            [1.0, 10.0, 2.0, 20.0, 3.0, 30.0]
         );
     }
 

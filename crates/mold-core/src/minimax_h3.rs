@@ -1212,6 +1212,12 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
             "MiniMax H3 has no negative-prompt branch",
         ));
     }
+    if req.strength != 1.0 {
+        return Err(violation(
+            "MINIMAX_H3_FIXED_STRENGTH",
+            "MiniMax H3 generation has no denoise-strength control; strength must be 1",
+        ));
+    }
     if req.source_video.is_some()
         || req.source_video_path.is_some()
         || req.audio_file.is_some()
@@ -1227,6 +1233,7 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
     if req.mask_image.is_some()
         || req.control_image.is_some()
         || req.control_model.is_some()
+        || req.control_scale != 1.0
         || req.cfg_plus.is_some()
         || req.lora.is_some()
         || req.loras.as_ref().is_some_and(|items| !items.is_empty())
@@ -1234,13 +1241,15 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
         || req.ic_lora_control.is_some()
         || req.hdr_exr_dir.is_some()
         || req.hdr_exr_full_float
+        || req.upscale_model.is_some()
         || req.spatial_upscale.is_some()
         || req.temporal_upscale.is_some()
         || req.guidance_overrides.is_some()
+        || req.extend_overlap_frames.is_some()
     {
         return Err(violation(
             "MINIMAX_H3_FOREIGN_PIPELINE_FIELD",
-            "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, upscale-stage, or guidance-override fields",
+            "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, post/upscale-stage, extend-overlap, or guidance-override fields",
         ));
     }
     if req.source_image.is_none() && req.source_image_name.is_some() {
@@ -2305,6 +2314,42 @@ mod tests {
                 .unwrap_err()
                 .code,
             "MINIMAX_H3_ORPHAN_SOURCE_NAME"
+        );
+
+        req.source_image_name = None;
+        req.strength = 0.75;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FIXED_STRENGTH"
+        );
+
+        req.strength = 1.0;
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".into());
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
+        );
+
+        req.upscale_model = None;
+        req.control_scale = 0.5;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
+        );
+
+        req.control_scale = 1.0;
+        req.extend_overlap_frames = Some(17);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
         );
     }
 
