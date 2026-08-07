@@ -1356,6 +1356,16 @@ pub fn validate_generate_request_with_family(
     family_hint: Option<&str>,
 ) -> Result<(), String> {
     crate::require_model_activation(&req.model, family_hint).map_err(|error| error.to_string())?;
+    validate_generate_request_after_activation(req, family_hint)
+}
+
+/// Shape/feature validation after the caller has passed the model-activation
+/// authority. Kept private so tests can prove the future authorized H3 path
+/// without exposing a compliance-gate bypass to production callers.
+fn validate_generate_request_after_activation(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
 
     if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
@@ -1410,6 +1420,69 @@ pub fn validate_generate_request_with_family(
                 neg.len()
             ));
         }
+    }
+    if family.is_some_and(crate::minimax_h3::is_family) {
+        let task = crate::minimax_h3::task_for_model(&req.model).ok_or_else(|| {
+            "MiniMax H3 requests must resolve an explicit FL2VA or Ref2VA task partition"
+                .to_string()
+        })?;
+        if req.mask_image.is_some() {
+            return Err("MiniMax H3 does not support mask_image".to_string());
+        }
+        if req.control_image.is_some() || req.control_model.is_some() {
+            return Err("MiniMax H3 does not support ControlNet inputs".to_string());
+        }
+        if req.cfg_plus.is_some() {
+            return Err("MiniMax H3 does not support cfg_plus".to_string());
+        }
+        if req.scheduler.is_some() {
+            return Err(
+                "MiniMax H3 uses its dedicated synchronized dual-shift schedule; scheduler overrides are unsupported"
+                    .to_string(),
+            );
+        }
+        if req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty()) {
+            return Err("MiniMax H3 does not support LoRA".to_string());
+        }
+        if req.upscale_model.is_some() {
+            return Err("MiniMax H3 does not support post-generation image upscaling".to_string());
+        }
+        if req.pipeline.is_some()
+            || req.ic_lora_control.is_some()
+            || req.retake_range.is_some()
+            || req.spatial_upscale.is_some()
+            || req.temporal_upscale.is_some()
+            || req.guidance_overrides.is_some()
+            || req.hdr_exr_dir.is_some()
+            || req.hdr_exr_full_float
+        {
+            return Err("MiniMax H3 does not accept LTX-2 pipeline controls".to_string());
+        }
+        if req
+            .source_image
+            .as_deref()
+            .is_some_and(|image| !is_valid_image_format(image))
+        {
+            return Err("source_image must be a PNG or JPEG image".to_string());
+        }
+        if req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| images.iter().any(|image| !is_valid_image_format(image)))
+        {
+            return Err("edit_images must contain only PNG or JPEG images".to_string());
+        }
+        if req.keyframes.as_ref().is_some_and(|keyframes| {
+            keyframes
+                .iter()
+                .any(|keyframe| !is_valid_image_format(&keyframe.image))
+        }) {
+            return Err("keyframes must contain only PNG or JPEG images".to_string());
+        }
+        crate::minimax_h3::validate_request_contract(req, task)
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
+        return Ok(());
     }
     let flux2_dev = is_flux2_dev_model(&req.model);
     if family == Some("qwen-image-edit") {
@@ -2909,6 +2982,82 @@ mod tests {
 
         let error = validate_generate_request_with_family(&req, Some("minimax-h3")).unwrap_err();
         assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    fn valid_h3_request(model: &str) -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = model.to_string();
+        req.width = crate::minimax_h3::DEFAULT_WIDTH;
+        req.height = crate::minimax_h3::DEFAULT_HEIGHT;
+        req.steps = crate::minimax_h3::DEFAULT_STEPS;
+        req.frames = Some(crate::minimax_h3::MIN_FRAMES);
+        req.fps = Some(crate::minimax_h3::FIXED_FPS);
+        req.output_format = Some(OutputFormat::Mp4);
+        req.enable_audio = Some(true);
+        req
+    }
+
+    #[test]
+    fn h3_post_activation_fl2va_accepts_first_and_last_boundary_frames() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.source_image = Some(png_bytes());
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: crate::minimax_h3::MIN_FRAMES - 1,
+            image: jpeg_bytes(),
+        }]);
+
+        assert!(
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_ref2va_accepts_image_references() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        req.edit_images = Some(vec![png_bytes(), jpeg_bytes()]);
+
+        assert!(
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_non_boundary_keyframes() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: 17,
+            image: png_bytes(),
+        }]);
+
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("only frame 0 or final frame"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_generic_scheduler_and_lora_overrides() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.scheduler = Some(crate::Scheduler::UniPc);
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("scheduler overrides"), "got: {error}");
+
+        req.scheduler = None;
+        req.lora = Some(crate::LoraWeight {
+            path: "/tmp/adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("does not support LoRA"), "got: {error}");
     }
 
     #[test]
