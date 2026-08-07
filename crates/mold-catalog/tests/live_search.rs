@@ -885,6 +885,8 @@ fn family_from_hf_id_substring() {
         ("black-forest-labs/FLUX.2-dev", Family::Flux2),
         ("Lightricks/LTX-Video-2.3", Family::Ltx2),
         ("Lightricks/LTX-Video", Family::LtxVideo),
+        ("MiniMaxAI/MiniMax-H3", Family::MinimaxH3),
+        ("someone/MiniMax-H3-FL2VA-finetune", Family::MinimaxH3),
         ("stabilityai/stable-diffusion-xl-base-1.0", Family::Sdxl),
         ("Tongyi-MAI/Z-Image-Turbo", Family::ZImage),
     ];
@@ -897,6 +899,12 @@ fn family_from_hf_id_substring() {
         family_from_hf("some-org/llama-3-instruct", &[], None).is_none(),
         "non-mold repos must return None"
     );
+    for id in ["someone/notminimax-h3", "someone/minimax-h30"] {
+        assert!(
+            family_from_hf(id, &[], None).is_none(),
+            "H3 lookalike {id} must not be classified"
+        );
+    }
 }
 
 /// Every spelling of Wan that the ecosystem actually ships must land on the

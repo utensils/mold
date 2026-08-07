@@ -96,6 +96,7 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
+                min_frames: crate::validation::min_frames_for_family(&manifest.family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &manifest.family,
                     model_cfg
@@ -109,6 +110,7 @@ pub fn build_model_catalog(
                     &manifest.family,
                 ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
+                frame_offset: crate::validation::frame_offset_for_family(&manifest.family),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -201,6 +203,7 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
+                min_frames: crate::validation::min_frames_for_family(&family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &family,
                     model_cfg
@@ -210,6 +213,7 @@ pub fn build_model_catalog(
                 max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(&family),
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
+                frame_offset: crate::validation::frame_offset_for_family(&family),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,

@@ -17,6 +17,34 @@ use crate::wan::pipeline::WanEngine;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
+/// Whether the frozen factory can construct a family today.
+///
+/// Contract-only families are explicit so static metadata work cannot be
+/// mistaken for a runnable engine registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactoryFamilyAvailability {
+    Runnable,
+    ContractOnly,
+}
+
+pub fn factory_family_availability(family: &str) -> Option<FactoryFamilyAvailability> {
+    if let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(family) {
+        Some(
+            if contract.generation.runtime_available
+                && crate::production_family_capability_for_family(family).is_some()
+            {
+                FactoryFamilyAvailability::Runnable
+            } else {
+                FactoryFamilyAvailability::ContractOnly
+            },
+        )
+    } else if crate::production_family_capability_for_family(family).is_some() {
+        Some(FactoryFamilyAvailability::Runnable)
+    } else {
+        None
+    }
+}
+
 /// Immutable inputs that may change the concrete engine constructed for a
 /// model. Scheduler-owned execution plans capture this once and pass it to
 /// [`create_engine_with_frozen_config`], so worker dispatch never consults a
@@ -631,6 +659,9 @@ pub fn create_engine_with_frozen_config(
             gpu_ordinal,
             shared_pool,
         ))),
+        family if mold_core::minimax_h3::is_family(family) => bail!(
+            "MiniMax H3 has a static contract but no runnable inference engine in this build"
+        ),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
@@ -749,6 +780,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn h3_aliases_are_factory_contract_only_not_production_capabilities() {
+        for alias in mold_core::minimax_h3::FAMILY_ALIASES {
+            assert_eq!(
+                factory_family_availability(alias),
+                Some(FactoryFamilyAvailability::ContractOnly)
+            );
+            assert!(crate::production_family_capability_for_family(alias).is_none());
+        }
+        assert_eq!(
+            factory_family_availability("flux"),
+            Some(FactoryFamilyAvailability::Runnable)
+        );
     }
 
     #[test]

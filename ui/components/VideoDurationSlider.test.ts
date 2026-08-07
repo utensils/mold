@@ -51,6 +51,27 @@ describe("VideoDurationSlider", () => {
     expect(wrapper.emitted("update:frames")).toBeUndefined();
   });
 
+  it("uses the advertised minimum and offset for H3's frame grid", () => {
+    const wrapper = mount(VideoDurationSlider, {
+      props: {
+        frames: 124,
+        fps: 24,
+        model: {
+          family: "minimax-h3",
+          min_frames: 124,
+          max_frames: 362,
+          frame_step: 17,
+          frame_offset: 5,
+        },
+      },
+    });
+
+    const slider = wrapper.get('input[type="range"]');
+    expect(slider.attributes("min")).toBe("124");
+    expect(slider.attributes("max")).toBe("362");
+    expect(slider.attributes("step")).toBe("17");
+  });
+
   it("reports an intentional long-chain duration without rewriting it", () => {
     const wrapper = mount(VideoDurationSlider, {
       props: {

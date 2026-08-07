@@ -290,6 +290,7 @@ pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
         // The flat global ceiling is the resource guard, and 257 sits on the
         // `4k+1` grid, so the advertised maximum is itself submittable.
         "wan" => Some(MAX_FRAMES_GLOBAL),
+        family if crate::minimax_h3::is_family(family) => Some(crate::minimax_h3::MAX_FRAMES),
         _ => None,
     }
 }
@@ -298,6 +299,18 @@ pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
 /// that have no per-model fps to hand.
 pub fn max_frames_for_family(family: &str) -> Option<u32> {
     max_frames_for_family_at_fps(family, LTX2_DEFAULT_FPS)
+}
+
+/// Minimum requestable frame count for families that impose one above the
+/// generic single-frame floor. `None` retains the historical minimum of one.
+pub fn min_frames_for_family(family: &str) -> Option<u32> {
+    crate::minimax_h3::is_family(family).then_some(crate::minimax_h3::MIN_FRAMES)
+}
+
+/// A family's mandatory frame rate, when the checkpoint does not support
+/// arbitrary FPS. `None` means callers may choose any otherwise-valid rate.
+pub fn fixed_fps_for_family(family: &str) -> Option<u32> {
+    crate::minimax_h3::is_family(family).then_some(crate::minimax_h3::FIXED_FPS)
 }
 
 /// Single-request runtime ceiling in seconds for families whose real limit is
@@ -311,14 +324,55 @@ pub fn max_frames_absolute_for_family(family: &str) -> Option<u32> {
     (family == "ltx2").then_some(LTX2_MAX_FRAMES_ABSOLUTE)
 }
 
-/// Frame-count grid for a family: valid counts are `k * step + 1`. The value
-/// `/api/models` advertises as `frame_step`; the validator consumes it.
+/// Step of the frame-count grid for a family. Pair with
+/// [`frame_offset_for_family`]; valid counts are `k * step + offset`.
 pub fn frame_step_for_family(family: &str) -> Option<u32> {
     match family {
         "ltx2" | "ltx-video" => Some(LTX2_TEMPORAL_SCALE),
         "wan" => Some(WAN_TEMPORAL_SCALE),
+        family if crate::minimax_h3::is_family(family) => Some(crate::minimax_h3::FRAME_STEP),
         _ => None,
     }
+}
+
+/// Offset of the frame-count grid. Existing video families use 1; MiniMax H3
+/// uses 5 (`17n+5`). `None` means the family has no temporal grid.
+pub fn frame_offset_for_family(family: &str) -> Option<u32> {
+    frame_step_for_family(family).map(|_| {
+        if crate::minimax_h3::is_family(family) {
+            crate::minimax_h3::FRAME_OFFSET
+        } else {
+            1
+        }
+    })
+}
+
+/// Validate family-specific temporal constraints that sit above the generic
+/// non-zero FPS/frame checks. Public admission calls this only after the model
+/// activation gate; keeping it factored lets the authority be tested without
+/// introducing a test-only authorization bypass.
+fn validate_family_video_timing_constraints(
+    frames: Option<u32>,
+    fps: Option<u32>,
+    family: Option<&str>,
+) -> Result<(), String> {
+    if let (Some(family), Some(fps)) = (family, fps) {
+        if let Some(fixed_fps) = fixed_fps_for_family(family) {
+            if fps != fixed_fps {
+                return Err(format!("{family} requires {fixed_fps} fps; received {fps}"));
+            }
+        }
+    }
+    if let (Some(family), Some(frames)) = (family, frames) {
+        if let Some(min_frames) = min_frames_for_family(family) {
+            if frames < min_frames {
+                return Err(format!(
+                    "frames ({frames}) must be >= {min_frames} for {family}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn megapixel_limit_label_for(limit: u64) -> String {
@@ -444,6 +498,7 @@ pub fn max_pixels_for_family_composed(
     match (family, composition) {
         (Some("ltx2"), Ltx2SpatialComposition::TiledTwoStage) => LTX2_COMPOSED_MAX_PIXELS,
         (Some("ltx2"), Ltx2SpatialComposition::SinglePass) => LTX2_MAX_PIXELS,
+        (Some(family), _) if crate::minimax_h3::is_family(family) => crate::minimax_h3::MAX_PIXELS,
         _ => MAX_PIXELS,
     }
 }
@@ -472,7 +527,9 @@ pub fn max_axis_pixels_for_family_composed(
 /// LTX video VAEs compress spatial dimensions by 32. Every other current
 /// family uses the shared 16px generation grid.
 pub fn dimension_alignment_for_family(family: Option<&str>) -> u32 {
-    if matches!(family, Some("ltx-video" | "ltx2")) {
+    if matches!(family, Some("ltx-video" | "ltx2"))
+        || family.is_some_and(crate::minimax_h3::is_family)
+    {
         32
     } else {
         16
@@ -1314,6 +1371,7 @@ pub fn validate_generate_request_with_family(
         Ltx2SpatialComposition::SinglePass
     };
     validate_generation_dimensions_composed(req.width, req.height, family, composition)?;
+    validate_family_video_timing_constraints(req.frames, req.fps, family)?;
     if composition == Ltx2SpatialComposition::TiledTwoStage {
         // The composed ceiling above is the x2 rung's. A request that names a
         // different rung reaches a different stage-1 shape, and only stage 1's
@@ -1486,12 +1544,13 @@ pub fn validate_generate_request_with_family(
             return Err("frames must be >= 1".to_string());
         }
         if let Some(step) = family.and_then(frame_step_for_family) {
-            if frames > 1 && (frames - 1) % step != 0 {
+            let offset = family.and_then(frame_offset_for_family).unwrap_or(1);
+            if frames < offset || !(frames - offset).is_multiple_of(step) {
                 return Err(format!(
-                    "frames ({frames}) must be {step}n+1 for this model family (e.g. {}, {}, {}, …)",
-                    step + 1,
-                    2 * step + 1,
-                    3 * step + 1,
+                    "frames ({frames}) must be {step}n+{offset} for this model family (e.g. {}, {}, {}, …)",
+                    step + offset,
+                    2 * step + offset,
+                    3 * step + offset,
                 ));
             }
         }
@@ -1529,8 +1588,15 @@ pub fn validate_generate_request_with_family(
                      Raise --fps, lower --frames, or render the shot as a multi-clip sequence"
                 ));
             }
-        } else if frames > MAX_FRAMES_GLOBAL {
-            return Err(format!("frames ({frames}) must be <= {MAX_FRAMES_GLOBAL}"));
+        } else {
+            let max_frames = family
+                .and_then(|family| {
+                    max_frames_for_family_at_fps(family, req.fps.unwrap_or(LTX2_DEFAULT_FPS).max(1))
+                })
+                .unwrap_or(MAX_FRAMES_GLOBAL);
+            if frames > max_frames {
+                return Err(format!("frames ({frames}) must be <= {max_frames}"));
+            }
         }
     }
     if let Some(keyframes) = &req.keyframes {
@@ -2034,6 +2100,14 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "ltx-video" => LTX_VIDEO_DIMS,
         "ltx2" => LTX2_DIMS,
         "wan" => WAN_DIMS,
+        family if crate::minimax_h3::is_family(family) => &[
+            (1536, 672),
+            (1344, 768),
+            (1024, 768),
+            (768, 768),
+            (768, 1024),
+            (768, 1344),
+        ],
         _ => &[],
     }
 }
@@ -3874,6 +3948,8 @@ mod tests {
         assert_eq!(frame_step_for_family("ltx2"), Some(8));
         assert_eq!(frame_step_for_family("ltx-video"), Some(8));
         assert_eq!(frame_step_for_family("flux"), None);
+        assert_eq!(min_frames_for_family("flux"), None);
+        assert_eq!(fixed_fps_for_family("flux"), None);
 
         // One grid step past the advertised ltx-video cap must be rejected,
         // and the rejection must quote the same cap the wire advertises.
@@ -3895,6 +3971,45 @@ mod tests {
         req.frames = Some(249); // first 8n+1 value past the 244-frame cap
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains(&cap.to_string()), "got: {err}");
+    }
+
+    #[test]
+    fn h3_post_activation_timing_authority_rejects_short_or_retimed_requests() {
+        assert_eq!(
+            min_frames_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MIN_FRAMES)
+        );
+        assert_eq!(
+            fixed_fps_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::FIXED_FPS)
+        );
+        assert_eq!(
+            max_frames_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MAX_FRAMES)
+        );
+
+        let short = validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::FRAME_OFFSET),
+            Some(crate::minimax_h3::FIXED_FPS),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .unwrap_err();
+        assert!(short.contains("124"), "got: {short}");
+
+        let retimed = validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::MIN_FRAMES),
+            Some(23),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .unwrap_err();
+        assert!(retimed.contains("24 fps"), "got: {retimed}");
+
+        assert!(validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::MIN_FRAMES),
+            Some(crate::minimax_h3::FIXED_FPS),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .is_ok());
     }
 
     /// Wan advertises a flat frame guard on the `4k+1` grid; the advertised
@@ -5285,6 +5400,7 @@ mod tests {
             ("qwen-image-edit", 1024, 1024),
             ("wuerstchen", 1024, 1024),
             ("ltx-video", 768, 512),
+            ("minimax-h3", 1344, 768),
         ];
         for (family, w, h) in families {
             let dims = recommended_dimensions(family);
@@ -5293,6 +5409,21 @@ mod tests {
                 "{family} native {w}x{h} missing from recommended list"
             );
         }
+    }
+
+    #[test]
+    fn h3_recommendations_are_the_official_product_ratios_on_the_oracle_canvas() {
+        assert_eq!(
+            recommended_dimensions(crate::minimax_h3::FAMILY),
+            &[
+                (1536, 672),
+                (1344, 768),
+                (1024, 768),
+                (768, 768),
+                (768, 1024),
+                (768, 1344),
+            ]
+        );
     }
 
     #[test]

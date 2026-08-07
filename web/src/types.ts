@@ -339,14 +339,18 @@ export interface ModelInfoExtended extends ModelDefaults {
   /** Model's own default frame rate (`/api/models`, additive) — LTX-Video
    * ships 30, LTX-2 24; absent on older servers and image models. */
   default_fps?: number | null;
+  /** Minimum requestable frame count; omitted means the legacy floor of one. */
+  min_frames?: number | null;
   /** Requestable single-shot frame ceiling at `default_fps`. */
   max_frames?: number | null;
   /** Duration-based ceiling; clients recompute max frames when FPS changes. */
   max_runtime_seconds?: number | null;
   /** FPS-independent resource guard paired with `max_runtime_seconds`. */
   max_frames_absolute?: number | null;
-  /** Valid frame counts are `k * frame_step + 1`. */
+  /** Valid frame counts are `k * frame_step + frame_offset` (offset defaults to 1). */
   frame_step?: number | null;
+  /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
+  frame_offset?: number | null;
 }
 
 export interface GpuInfo {

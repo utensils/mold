@@ -408,6 +408,10 @@ pub fn companions_for(
                 _ => push(&mut out, "wan21-vae"),
             }
         }
+        // H3 catalog installs remain policy-gated and have no independently
+        // runnable companion graph. Its hidden core manifests own the exact
+        // FL2VA/Ref2VA component layouts.
+        Family::MinimaxH3 => {}
         Family::QwenImage => {
             push(&mut out, "qwen-image-runtime");
         }

@@ -189,6 +189,35 @@ async fn raw_h3_catalog_routes_fail_before_upstream_lookup_or_download() {
     assert!(post_body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
 }
 
+#[tokio::test]
+async fn h3_search_identity_fails_before_any_upstream_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    let router = create_router(state);
+
+    for uri in [
+        "/api/catalog/search?family=minimax-h3&source=civitai",
+        "/api/catalog/search?q=MiniMax-H3&source=civitai",
+    ] {
+        let (status, body) = get(router.clone(), uri).await;
+        assert_eq!(status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS, "{body}");
+        assert!(body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    assert!(server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .is_empty());
+    server.verify().await;
+}
+
 #[test]
 fn resolved_catalog_metadata_cannot_hide_h3_behind_an_opaque_id() {
     let mut entry = hf_checkpoint("ordinary/repo");

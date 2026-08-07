@@ -88,6 +88,7 @@ fn defaults_from_manifest(
             &manifest.family,
         ),
         frame_step: mold_core::validation::frame_step_for_family(&manifest.family),
+        frame_offset: mold_core::validation::frame_offset_for_family(&manifest.family),
         ..Default::default()
     }
 }

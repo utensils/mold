@@ -63,7 +63,8 @@ pub use engine::{
 };
 pub use error::InferenceError;
 pub use factory::{
-    create_engine, create_engine_with_frozen_config, create_engine_with_pool, FrozenEngineConfig,
+    create_engine, create_engine_with_frozen_config, create_engine_with_pool,
+    factory_family_availability, FactoryFamilyAvailability, FrozenEngineConfig,
 };
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;

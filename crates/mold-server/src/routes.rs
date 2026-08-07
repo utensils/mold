@@ -4427,9 +4427,8 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,
-            families: mold_catalog::families::ALL_FAMILIES
-                .iter()
-                .map(|f| f.as_str().to_string())
+            families: mold_catalog::families::active_families()
+                .map(|family| family.as_str().to_string())
                 .collect::<Vec<_>>(),
             sort: mold_catalog::live::CatalogSort::WIRE_VALUES
                 .iter()
