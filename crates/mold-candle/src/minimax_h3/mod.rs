@@ -6,6 +6,7 @@
 
 mod artifacts;
 mod config;
+mod dit;
 mod loader;
 mod model;
 mod presentation;
@@ -41,6 +42,14 @@ pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
     H3_COMFY_SAFETENSORS_BYTES, H3_FULL_CHECKPOINT_BYTES, H3_FULL_LANGUAGE_LAYERS,
     H3_SELECTED_LANGUAGE_LAYERS,
+};
+pub use dit::{
+    audit_h3_checkpoint, expected_h3_weight_specs, pack_h3_audio, patchify_h3_video,
+    reorder_h3_grouped_qkv, unpack_h3_audio, unpatchify_h3_video, H3AdaLnMode, H3BlockProgress,
+    H3BlockStack, H3CheckpointComponent, H3CheckpointInventory, H3ForwardInput,
+    H3FrozenPackedLayout, H3LoadPlan, H3Modality, H3PackedLayout, H3PrecisionProfile, H3QkvLayout,
+    H3TensorSpec, H3Transformer, H3TransformerConfig, H3TransformerOutput, H3TransformerTask,
+    H3WeightAuditError, H3WeightAuditIssue, H3_MODALITY_COUNT,
 };
 pub use loader::{
     load_bf16_conditioner, load_prepared_bf16_conditioner, prepare_conditioner_assets,
