@@ -4975,7 +4975,9 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 // QuantStack's Q8_0 repack of the same 5B transformer:
                 // 5.4 GB against fp16's 10 GB, which is what reaches
                 // 8-12 GB-class cards (#794).
-                // VRAM peak: pending measurement (#794).
+                // VRAM peak: 18,460 MiB at the default 1280x704 x 121f
+                // (24 fps, 20 steps) on an RTX 4090 — small cards use
+                // reduced frames/resolution (#794).
                 files.push(ModelFile {
                     hf_repo: "QuantStack/Wan2.2-TI2V-5B-GGUF".to_string(),
                     hf_filename: "Wan2.2-TI2V-5B-Q8_0.gguf".to_string(),
@@ -5117,7 +5119,9 @@ fn a14b_expert_facts(task: A14bTask, tier: A14bTier, low_noise: bool) -> FileFac
         ),
         // The Q4_K_M pairs (#794). Sizes and hashes read from the Hugging
         // Face API (`lfs.oid`), like every row above.
-        // VRAM peak: pending measurement (#794).
+        // VRAM peaks on an RTX 4090 at the 4-step Lightning defaults
+        // (53f @ 16 fps): T2V 21,372 MiB at 832x480; I2V 19,580 MiB at
+        // 720x480 (#794).
         (A14bTask::T2v, A14bTier::Compact, false) => (
             9_650_090_496,
             "e0c490c6e316fd91ff52034e4ca66b825717e33ff11624585c0ccfcb5d410c59",
@@ -5185,8 +5189,9 @@ fn a14b_distill_facts(task: A14bTask, low_noise: bool) -> (&'static str, FileFac
 ///
 /// Both experts ship as separate files and exactly one is GPU-resident at a
 /// time, so the VRAM demand is the max over the pair rather than their sum —
-/// 10.8 GB at `:q5`, 15.4 GB at `:q8`, 9.65 GB at `:q4` (that tier's total
-/// VRAM peak: pending measurement (#794)). Disk is the sum.
+/// 10.8 GB at `:q5`, 15.4 GB at `:q8`, 9.65 GB at `:q4` (measured `:q4` total
+/// peaks on an RTX 4090 at the 53f Lightning defaults: T2V 21,372 MiB at
+/// 832x480, I2V 19,580 MiB at 720x480; #794). Disk is the sum.
 ///
 /// Resolution defaults to 480p because that is the acceptance target for this
 /// tier (#747: "81f 480p in ~1.5-3 min on a 4090"); 720p renders, but not in
@@ -5287,8 +5292,8 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             // activation arithmetic. 53 is also the reference space's own
             // default duration. Larger cards can simply pass --frames 81.
             // The Q4 pair's resident expert is ~1.1 GB smaller than Q5's, so
-            // 53 fits wherever Q5's does; its own measured envelope is
-            // pending (#794) — VRAM peak: pending measurement (#794).
+            // 53 fits wherever Q5's does — confirmed: the Q4 T2V default
+            // measured 21,372 MiB at 832x480 x 53f on an RTX 4090 (#794).
             frames: Some(match tier {
                 A14bTier::Fast | A14bTier::Compact => 53,
                 A14bTier::Quality => 33,
@@ -6734,8 +6739,8 @@ mod tests {
             // 81: the Q5 pair peaks at 23,975 MiB rendering 53 frames at
             // 832x480 (81 OOM'd at a 23.0 GB peak), and the Q8 pair's larger
             // resident expert moves its edge to ~33. The Q4 pair's expert is
-            // ~1.1 GB smaller than Q5's, so 53 fits wherever Q5's does; its
-            // own peak is pending measurement (#794). All stay on the 4n+1
+            // ~1.1 GB smaller than Q5's, so 53 fits wherever Q5's does — its
+            // measured T2V peak is 21,372 MiB (#794). All stay on the 4n+1
             // grid; bigger cards pass --frames 81 explicitly.
             let expected_frames = if name.ends_with(":q8") { 33 } else { 53 };
             assert_eq!(defaults.frames, Some(expected_frames), "{name}");
