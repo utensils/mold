@@ -90,6 +90,7 @@ pub async fn create_chain_job(
         let config = state.config.read().await;
         crate::routes_chain::require_chain_artifact_activation(&config, &req, None, None)?;
     }
+    crate::routes_chain::validate_chain_build_features(&req)?;
     let authority = crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?;
     crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
     let req = req
@@ -1419,6 +1420,41 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert!(chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn create_chain_job_keeps_h3_451_ahead_of_mp4_build_validation() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "private-checkpoint".into(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "private-checkpoint".into();
+        request.enable_audio = Some(true);
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        );
         assert!(chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
             .unwrap()
             .is_empty());

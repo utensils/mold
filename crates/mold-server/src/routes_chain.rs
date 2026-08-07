@@ -309,6 +309,7 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
         let config = state.config.read().await;
         require_chain_artifact_activation(&config, &req, None, None)?;
     }
+    validate_chain_build_features(&req)?;
     let authority = resolve_chain_model_authority(state, &req.model).await?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
     let mut req = req
