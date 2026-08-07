@@ -1336,6 +1336,17 @@ pub(crate) fn preparation_authority_fingerprint(
             .expect("redacted reference serialization is infallible")
             .as_slice(),
     );
+    let family = config.resolved_model_config(&request.model).family;
+    if let Some(authority) =
+        crate::h3_admission::preparation_authority_bytes(request, family.as_deref())
+    {
+        // This marker lands before runtime activation. It prevents prepared
+        // dependencies from surviving a change to H3 row accounting,
+        // one-device policy, Qwen truncation, or the host-memory floor even
+        // though the legal gate still rejects H3 before downloads/queueing.
+        hash.update(b"\0minimax-h3-admission-authority-v1\0");
+        hash.update(authority);
+    }
     format!("{:x}", hash.finalize())
 }
 

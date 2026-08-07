@@ -4,6 +4,7 @@
 //! sampler math plus a conditioner lifecycle that accepts only an already-
 //! frozen placement and issued component lease.
 
+pub(crate) mod offload;
 pub(crate) mod sampler;
 
 use anyhow::{anyhow, Result};
