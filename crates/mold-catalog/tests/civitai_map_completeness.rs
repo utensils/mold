@@ -37,8 +37,6 @@ fn wan_base_models_reach_the_right_vae_and_timing() {
     for (base_model, want_vae, want_frames, want_fps) in [
         ("Wan Video 1.3B t2v", "wan21-vae", 81, 16),
         ("Wan Video 14B t2v", "wan21-vae", 81, 16),
-        ("Wan Video 2.2 T2V-A14B", "wan21-vae", 81, 16),
-        ("Wan Video 2.2 I2V-A14B", "wan21-vae", 81, 16),
         // The one that differs, and the reason this test exists.
         ("Wan Video 2.2 TI2V-5B", "wan22-vae", 121, 24),
     ] {
@@ -86,6 +84,39 @@ fn wan_base_models_reach_the_right_vae_and_timing() {
             "{base_model} has no mold engine and must not map"
         );
         assert!(CIVITAI_DROPS.contains(&base_model), "{base_model}");
+    }
+}
+
+/// A14B is a two-expert pair, and the catalog cannot install a pair.
+///
+/// Civitai publishes the high- and low-noise experts as separate model
+/// versions; `from_civitai_version` picks one file and catalog resolution sets
+/// only `ModelConfig.transformer`, never `low_noise_transformer`. An installed
+/// row would denoise the entire schedule with whichever expert was pulled.
+/// The I2V half fails loudly — a 36-channel checkpoint with no partner is
+/// refused — but the T2V half is shape-indistinguishable from a single-expert
+/// 2.1 14B, so it would render silently wrong after ~11 GB of download.
+///
+/// The manifest tiers ship the pair and remain the supported route. Remove
+/// this only together with catalog expert pairing.
+#[test]
+fn a14b_rows_stay_unsupported_until_the_catalog_can_pair_experts() {
+    for base_model in ["Wan Video 2.2 T2V-A14B", "Wan Video 2.2 I2V-A14B"] {
+        assert!(
+            map_base_model(base_model).is_none(),
+            "{base_model} needs both experts; a single-version install renders wrong"
+        );
+        assert!(CIVITAI_DROPS.contains(&base_model), "{base_model}");
+    }
+
+    // The single-checkpoint Wan models are unaffected — this is a pairing
+    // limitation, not a family-wide one.
+    for base_model in [
+        "Wan Video 1.3B t2v",
+        "Wan Video 14B t2v",
+        "Wan Video 2.2 TI2V-5B",
+    ] {
+        assert!(map_base_model(base_model).is_some(), "{base_model}");
     }
 }
 

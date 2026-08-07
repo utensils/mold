@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
+  isImageConditionedVideoFamily,
 } from "./generationCapabilities";
 
 describe("baseGenerationCapabilities", () => {
@@ -47,6 +48,27 @@ describe("baseGenerationCapabilities", () => {
     // though the server would accept the request — which is how the A14B
     // fast tier's four-step distill would become unreachable from the UI.
     expect(baseGenerationCapabilities("wan").supportsLora).toBe(true);
+  });
+
+  it("separates image conditioning from the advanced-video panel", () => {
+    // Two independent questions that happened to have the same answer while
+    // LTX-2 was the only image-conditioned video family. Wan is the case that
+    // separates them, and a consumer that keeps deriving one from the other
+    // hides the source-image control for a family that requires it.
+    expect(isImageConditionedVideoFamily("wan")).toBe(true);
+    expect(isAdvancedVideoFamily("wan")).toBe(false);
+
+    for (const family of ["ltx2", "ltx-2"]) {
+      expect(isImageConditionedVideoFamily(family)).toBe(true);
+      expect(isAdvancedVideoFamily(family)).toBe(true);
+    }
+
+    // Plain ltx-video has no image-to-video path and would ignore an image.
+    expect(isImageConditionedVideoFamily("ltx-video")).toBe(false);
+    // Image families are not video-image-conditioned; they have their own
+    // source-image handling and must not be routed through this predicate.
+    expect(isImageConditionedVideoFamily("flux")).toBe(false);
+    expect(isImageConditionedVideoFamily("")).toBe(false);
   });
 
   it("returns independent scheduler option lists", () => {

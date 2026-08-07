@@ -99,26 +99,41 @@ reads the e4m3 flavour only.
 
 ## Discovery
 
-Wan models are installable from the catalog as well as by manifest name. Open
-**Models → Discover** in Mold Studio and search for `wan`, or install a specific
-entry directly:
+The models in the table above install by name. Community Wan fine-tunes are
+additionally discoverable in the catalog — open **Models → Discover** in Mold
+Studio and search for `wan`, then install the row, or pull a Civitai version id
+directly:
 
 ```bash
-mold pull hf:Wan-AI/Wan2.2-T2V-A14B
-mold pull cv:<version-id>
+mold pull wan22-t2v-a14b:q5   # manifest name — the A14B fast tier
+mold pull wan21-t2v-1.3b      # bare names resolve their default tag
+mold pull cv:<version-id>     # a catalog row
 ```
 
-Every Wan checkpoint in the wild ships the transformer alone, so an install
-also pulls the shared UMT5-XXL encoder and the matching VAE. Those are the same
-files the manifest models use, under `shared/wan/`, so a second Wan install
-reuses them.
+`mold pull` takes manifest names and catalog ids (`cv:…`, `hf:…`). A catalog id
+has to name a row the catalog actually supports, which is not the same as any
+Hugging Face repository — `hf:Wan-AI/Wan2.2-T2V-A14B`, for instance, is the
+upstream A14B pair and is not installable for the reason below. When in doubt,
+install from **Models → Discover**, which only lists rows this build can run.
 
-Two things the catalog deliberately does not offer. Wan 2.1 **image-to-video**
-entries are filtered out: they condition through a CLIP-vision cross-attention
-branch mold's transformer does not implement, so the download would install and
-then fail to generate. Wan 2.5 and 2.7 are later architectures with no mold
-engine and are filtered out for the same reason. Wan 2.1 text-to-video, both
-A14B experts, and TI2V-5B are all installable.
+Every Wan checkpoint in the wild ships the transformer alone, so a catalog
+install also pulls the shared UMT5-XXL encoder and the matching VAE. Those are
+the same files the manifest models use, under `shared/wan/`, so a second Wan
+install reuses them.
+
+What the catalog deliberately does not offer:
+
+- **Wan 2.1 image-to-video** conditions through a CLIP-vision cross-attention
+  branch mold's transformer does not implement, so the download would install
+  and then fail to generate.
+- **Wan 2.5 and 2.7** are later architectures with no mold engine.
+- **A14B** is a two-expert pair, and a catalog row installs one file. Civitai
+  publishes the high- and low-noise experts as separate versions, so an
+  installed row would denoise the whole schedule with whichever expert was
+  pulled. Use the manifest tiers above, which ship both experts.
+
+Wan 2.1 text-to-video at either size and TI2V-5B install from the catalog
+normally.
 
 ## Roadmap
 

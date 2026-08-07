@@ -242,7 +242,28 @@ pub fn capabilities_for_model(
     if advertised_audio_support == Some(false) {
         caps.supports_audio = false;
     }
+    if family == "wan" {
+        caps.supports_source_image = wan_model_takes_source_image(model);
+    }
     caps
+}
+
+/// Whether a Wan checkpoint reads a source image, from its name.
+///
+/// The family as a whole conditions on images, but individual checkpoints do
+/// not: `WanEngine::build_image_conditioning` refuses one outright on a
+/// text-to-video checkpoint ("this Wan checkpoint is text-to-video only"), and
+/// *requires* one on a 36-channel image-to-video checkpoint. Advertising the
+/// field family-wide offered an image on `wan21-t2v-1.3b` and
+/// `wan22-t2v-a14b` that the engine then rejected at generate time.
+///
+/// `i2v` is the discriminator and it subsumes `ti2v`, so one test covers both
+/// the 36-channel I2V checkpoints and TI2V-5B's latent-inpaint path. A name
+/// matching neither is treated as text-to-video: the overwhelming majority of
+/// community Wan fine-tunes are T2V, and withholding a control is recoverable
+/// where offering a rejected one is not.
+fn wan_model_takes_source_image(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("i2v")
 }
 
 /// Resolve the family string for a given model name using the config and manifest.
@@ -339,6 +360,40 @@ mod tests {
         assert!(
             !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None).supports_audio
         );
+    }
+
+    /// The family conditions on images; individual checkpoints do not. A
+    /// text-to-video checkpoint offered the source-image field would have it
+    /// rejected by `build_image_conditioning` at generate time, after the
+    /// user picked a file.
+    #[test]
+    fn wan_source_image_follows_the_selected_checkpoint() {
+        for model in [
+            "wan22-i2v-a14b:q5",
+            "wan22-i2v-a14b:q8",
+            // TI2V-5B conditions by pinning latent frame 0; `i2v` subsumes it.
+            "wan22-ti2v-5b:fp16",
+        ] {
+            assert!(
+                capabilities_for_model("wan", model, None, None).supports_source_image,
+                "{model} takes a source image"
+            );
+        }
+
+        for model in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-t2v-a14b:q5",
+            // An unrecognized name defaults to text-to-video.
+            "cv:12345",
+        ] {
+            assert!(
+                !capabilities_for_model("wan", model, None, None).supports_source_image,
+                "{model} is text-to-video; the engine rejects an image"
+            );
+        }
+
+        // Other families are untouched by the wan-specific narrowing.
+        assert!(capabilities_for_model("sdxl", "sdxl:fp16", None, None).supports_source_image);
     }
 
     #[test]

@@ -65,6 +65,22 @@ const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
  * controls — steps, guidance, negative — so it stays out.
  */
 const ADVANCED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2"]);
+/**
+ * Video families whose engine accepts a still image as conditioning.
+ *
+ * This is deliberately its own set rather than a synonym for
+ * `ADVANCED_VIDEO_FAMILIES`, even though the two held the same members until
+ * now. Desktop derived the source-image well from the advanced-video flag
+ * (`!supportsVideo || supportsAdvancedVideo`), which was indistinguishable
+ * from correct while LTX-2 was the only image-conditioned video family. Wan is
+ * the first that is image-conditioned *without* the advanced panel, and under
+ * that derivation its well vanished — including for `wan22-i2v-a14b`, which
+ * cannot generate at all without a source image.
+ *
+ * Plain `ltx-video` stays out: its engine has no image-to-video path and would
+ * silently ignore an attached image.
+ */
+const IMAGE_CONDITIONED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2", "wan"]);
 const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
 export const MAX_LORA_STACK = 4;
@@ -150,6 +166,17 @@ export function baseGenerationCapabilities(
 
 export function isAdvancedVideoFamily(family: string): boolean {
   return ADVANCED_VIDEO_FAMILIES.has(family.trim().toLowerCase());
+}
+
+/**
+ * Whether a video family's engine reads a still source image.
+ *
+ * Surfaces gate the source-image control on this, never on
+ * `isAdvancedVideoFamily` — the two answer different questions and only
+ * coincided while LTX-2 was the sole image-conditioned video family.
+ */
+export function isImageConditionedVideoFamily(family: string): boolean {
+  return IMAGE_CONDITIONED_VIDEO_FAMILIES.has(family.trim().toLowerCase());
 }
 
 export function isQwenImageEditFamily(family: string): boolean {

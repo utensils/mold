@@ -54,6 +54,22 @@ describe("generationCapabilitiesForFamily", () => {
     expect(generationCapabilitiesForFamily("ltx-video").supportsImg2img).toBe(false);
   });
 
+  it("keeps the source-image well for wan, which is video but not advanced-video", () => {
+    // `supportsImg2img` used to be derived as
+    // `!supportsVideo || supportsAdvancedVideo`, which is indistinguishable
+    // from correct while LTX-2 is the only image-conditioned video family.
+    // Wan is video, deliberately NOT advanced-video, and reads a source image
+    // — under the old derivation desktop and iPhone hid and cleared the well,
+    // which makes `wan22-i2v-a14b` impossible to drive: it cannot generate
+    // without a source image at all.
+    const wan = generationCapabilitiesForFamily("wan");
+    expect(wan.supportsVideo).toBe(true);
+    expect(wan.supportsAdvancedVideo).toBe(false);
+    expect(wan.supportsImg2img).toBe(true);
+    // Masks stay off for every video family, wan included.
+    expect(wan.supportsMask).toBe(false);
+  });
+
   it("keeps masks off video families even with img2img on", () => {
     expect(generationCapabilitiesForFamily("ltx2").supportsMask).toBe(false);
     expect(generationCapabilitiesForFamily("ltx-video").supportsMask).toBe(false);

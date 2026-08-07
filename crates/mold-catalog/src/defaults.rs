@@ -87,6 +87,21 @@ pub fn runtime_defaults_for_family(
                 frames: Some(121),
                 fps: Some(24),
             },
+            // The 1.3B has its own proven recipe — ComfyUI's Wan 2.1 template,
+            // which is what the shipped manifest uses. Without this arm a
+            // catalog-installed 1.3B renders at 20 steps / guidance 3.5 while
+            // the identical model installed by manifest renders at 30 / 6.0,
+            // so the same checkpoint produces materially different quality
+            // depending on how it was pulled.
+            Some("wan21-t2v-1.3b") => CatalogRuntimeDefaults {
+                width: 832,
+                height: 480,
+                steps: 30,
+                guidance: 6.0,
+                is_schnell: None,
+                frames: Some(81),
+                fps: Some(16),
+            },
             _ => CatalogRuntimeDefaults {
                 width: 832,
                 height: 480,
@@ -182,6 +197,19 @@ mod tests {
                 "{sub:?}"
             );
         }
+
+        // A catalog-installed checkpoint must render like the same model
+        // installed by manifest. The 1.3B's proven recipe is 30 steps at
+        // guidance 6.0 (ComfyUI's Wan 2.1 template, which the manifest ships);
+        // falling through to the family arm would give it 20 / 3.5.
+        let one_three_b = runtime_defaults_for_family("wan", Some("wan21-t2v-1.3b"));
+        assert_eq!((one_three_b.steps, one_three_b.guidance), (30, 6.0));
+        assert_eq!((one_three_b.width, one_three_b.height), (832, 480));
+        assert_eq!((one_three_b.frames, one_three_b.fps), (Some(81), Some(16)));
+
+        // The 14B-class fallback keeps the A14B tier's recipe.
+        let fallback = runtime_defaults_for_family("wan", Some("wan21-t2v-14b"));
+        assert_eq!((fallback.steps, fallback.guidance), (20, 3.5));
 
         // Every default sits on the family's 4n+1 frame grid.
         for sub in [Some("wan22-ti2v-5b"), None] {

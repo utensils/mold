@@ -119,6 +119,11 @@ fn ltx2_v2_single_file_uses_v2_vae() {
 /// VAE**, the same 16-channel file the 1.3B uses. Only TI2V-5B takes the
 /// 48-channel 2.2 VAE. A `starts_with("wan22")` rule would hand both A14B
 /// experts a VAE their DiT rejects, after a 10 GB download.
+///
+/// The A14B sub-families are exercised here even though no catalog row emits
+/// them today — those rows are dropped until the catalog can pair both
+/// experts. This keeps the routing rule correct and the trap documented for
+/// when pairing lands.
 #[test]
 fn wan_a14b_takes_the_2_1_vae_despite_its_2_2_name() {
     let names_for = |sub: Option<&str>| {
