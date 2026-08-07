@@ -827,6 +827,10 @@
     url = "https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz";
     hash = "sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==";
   };
+  "fake-indexeddb@6.2.5" = fetchurl {
+    url = "https://registry.npmjs.org/fake-indexeddb/-/fake-indexeddb-6.2.5.tgz";
+    hash = "sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==";
+  };
   "fast-glob@3.3.3" = fetchurl {
     url = "https://registry.npmjs.org/fast-glob/-/fast-glob-3.3.3.tgz";
     hash = "sha512-7MptL8U0cqcFdzIzwOTHoilX9x5BrNqye7Z/LuC7kCMRio1EMSyqRK3BEAUD7sXRq4iT4AzTVuZdhgQ2TCvYLg==";

@@ -32,6 +32,42 @@ bun -e '
       }
     }
   }
+
+  const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
+  const bunNix = await Bun.file("bun.nix").text();
+  const missing = [];
+  const mismatched = [];
+  for (const entry of Object.values(lock.packages ?? {})) {
+    if (!Array.isArray(entry)) continue;
+    const [resolved] = entry;
+    const integrity = entry.at(-1);
+    if (
+      typeof resolved !== "string" ||
+      typeof integrity !== "string" ||
+      !integrity.startsWith("sha512-")
+    ) {
+      continue;
+    }
+    const start = bunNix.indexOf(`  "${resolved}" = `);
+    if (start < 0) {
+      missing.push(resolved);
+      continue;
+    }
+    const end = bunNix.indexOf("\n  };", start);
+    const block = bunNix.slice(start, end < 0 ? undefined : end);
+    if (!block.includes(`hash = "${integrity}";`)) mismatched.push(resolved);
+  }
+  if (missing.length || mismatched.length) {
+    throw new Error(
+      [
+        "bun.nix is stale; run frontend-bun-lock (or bun2nix -o bun.nix)",
+        missing.length ? `missing: ${missing.sort().join(", ")}` : "",
+        mismatched.length ? `hash mismatch: ${mismatched.sort().join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
 '
 
 if grep -REn --include='*.ts' --include='*.vue' "@tauri-apps|from [\"']\.\./(web|desktop)|from [\"'].*(web|desktop)/" studio; then
