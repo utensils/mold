@@ -691,6 +691,7 @@ export type ExpandTask =
   | "retake"
   | "keyframe-interpolation"
   | "audio-driven-video"
+  | "reference-to-audio-video"
   | "text-to-audio";
 
 export interface ExpandRequestWire {
