@@ -1800,6 +1800,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_component_status_never_installs_unseen_catalog_ids() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let models_dir = root.path().join("models-that-do-not-exist");
         let state = AppState::for_tests();
         state.config.write().await.models_dir = models_dir.display().to_string();
@@ -1826,6 +1827,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_component_status_reads_pre_resolved_catalog_paths() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let transformer = root.path().join("model.safetensors");
         let vae = root.path().join("vae.safetensors");
         std::fs::write(&transformer, b"transformer").unwrap();
@@ -1961,6 +1963,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_catalog_resolution_is_cold_local_and_carries_overlay() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let config = flux2_catalog_config(root.path());
         for (dir, id) in [
             ("cv-2937936", "cv:2937936"),
@@ -2006,6 +2009,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_catalog_diagnostics_name_missing_or_unsafe_primary() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let config = flux2_catalog_config(root.path());
         for (dir, id, primary_rel) in [
             (
@@ -2042,6 +2046,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_catalog_diagnostics_fail_closed_on_malformed_sidecar() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let config = flux2_catalog_config(root.path());
         let install_dir = root.path().join("malformed");
         std::fs::create_dir_all(&install_dir).unwrap();
@@ -2077,6 +2082,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_catalog_diagnostics_name_missing_companions() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let config = Config {
             models_dir: root.path().display().to_string(),
             ..Default::default()
@@ -2116,6 +2122,7 @@ mod tests {
     #[tokio::test]
     async fn existing_only_manifest_component_status_honors_configured_paths() {
         let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
         let transformer = root.path().join("custom-unet.safetensors");
         let vae = root.path().join("custom-vae.safetensors");
         std::fs::write(&transformer, b"transformer").unwrap();
@@ -2230,6 +2237,7 @@ mod tests {
     struct IsolatedModelEnvironment {
         _lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _home: Option<tempfile::TempDir>,
     }
 
     impl IsolatedModelEnvironment {
@@ -2239,6 +2247,20 @@ mod tests {
 
         fn without_models_dir_override(home: &std::path::Path) -> Self {
             Self::with_models_dir_override(home, false)
+        }
+
+        /// Pins `MOLD_HOME` to a guard-owned tempdir separate from the test's
+        /// own root. Process-wide path caches initialize from the environment
+        /// on first touch and `create_dir_all` their target (see
+        /// `mold_core::download`'s models-dir cache), so a test that snapshots
+        /// its root for byte-identity must keep `MOLD_HOME` pointing elsewhere
+        /// or the first-touching test finds surprise directories in its
+        /// snapshot.
+        fn hermetic() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let mut environment = Self::with_models_dir_override(home.path(), false);
+            environment._home = Some(home);
+            environment
         }
 
         fn with_models_dir_override(home: &std::path::Path, set_models_dir: bool) -> Self {
@@ -2283,6 +2305,7 @@ mod tests {
             Self {
                 _lock: lock,
                 previous,
+                _home: None,
             }
         }
     }
