@@ -1515,6 +1515,9 @@ mod tests {
             "height": 768,
             "steps": 50,
             "guidance": 0.0,
+            // H3 always denoises the complete trajectory and therefore has no
+            // user-adjustable img2img-style strength control.
+            "strength": 1.0,
             "seed": 42,
             "batch_size": 1,
             "frames": frames,
