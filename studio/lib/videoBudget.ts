@@ -1,3 +1,5 @@
+import { MINIMAX_H3_MAX_FRAMES } from "./minimaxH3Authoring";
+
 /**
  * Client-side mirror of the LTX-2 temporal budget in
  * `crates/mold-core/src/validation.rs`.
@@ -84,5 +86,8 @@ export function maxFramesForFamilyAtFps(
   // limit. 257 also sits on Wan's `4k+1` grid, so the advertised maximum is
   // itself submittable.
   if (normalized === "wan") return MAX_FRAMES_GLOBAL;
+  if (["minimax-h3", "minimax_h3", "minimaxh3"].includes(normalized)) {
+    return MINIMAX_H3_MAX_FRAMES;
+  }
   return null;
 }

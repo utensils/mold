@@ -164,6 +164,11 @@ import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import {
+  MINIMAX_H3_PROMPT_PLACEHOLDER,
+  isMinimaxH3Identity,
+  minimaxH3AuthoringError,
+} from "@studio/lib/minimaxH3Authoring";
+import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
@@ -1154,7 +1159,10 @@ const currentModelLabel = computed(() =>
 );
 
 const currentFamily = computed(
-  () => currentModel.value?.family ?? form.state.value.modelFamily,
+  () =>
+    currentModel.value?.family ??
+    form.state.value.modelFamily ??
+    (isMinimaxH3Identity(null, form.state.value.model) ? "minimax-h3" : ""),
 );
 
 const capabilities = computed(() =>
@@ -1178,6 +1186,11 @@ const canSkipPrompt = computed(() =>
     extendVideo: form.state.value.extendVideo,
     extendVideoPath: form.state.value.extendVideoPath,
   }),
+);
+const requiredPromptPlaceholder = computed(() =>
+  isMinimaxH3Identity(currentFamily.value, form.state.value.model)
+    ? MINIMAX_H3_PROMPT_PLACEHOLDER
+    : "Describe the image you want to create…",
 );
 
 // Continuation rides the selected model's own `/api/models` row, which the
@@ -2160,6 +2173,16 @@ function validateSubmit(): boolean {
     composerError.value = "Pick a model to start.";
     return false;
   }
+  const h3Error = minimaxH3AuthoringError(
+    currentFamily.value,
+    form.state.value.model,
+    form.state.value.h3Authoring,
+  );
+  if (h3Error) {
+    composerError.value = h3Error;
+    showAdvanced.value = true;
+    return false;
+  }
   const pixels = form.state.value.width * form.state.value.height;
   const maxPixels = currentModel.value?.max_pixels ?? MAX_GENERATION_PIXELS;
   if (pixels > maxPixels) {
@@ -2467,7 +2490,13 @@ async function onSubmit(allowStaleQuick = false) {
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
-  if ("source_image" in req) {
+  // H3's dedicated FL2VA panel owns first/last endpoints. The legacy still
+  // preprocessor has no corresponding attachment and must never erase that
+  // serialized first-frame authority.
+  if (
+    "source_image" in req &&
+    !isMinimaxH3Identity(currentFamily.value, form.state.value.model)
+  ) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
@@ -3491,6 +3520,7 @@ onBeforeUnmount(() => {
             :busy="ordinarySubmitBlocked"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
+            :required-placeholder="requiredPromptPlaceholder"
             :history="promptHistory"
             @submit="onSubmit"
             @expand="onExpand"

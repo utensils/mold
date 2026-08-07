@@ -41,6 +41,21 @@ describe("model-specific audio capability", () => {
     applyModelDefaults(form, { ...ltx2Model(), name: "cv:3143864", supports_audio: false });
     expect(form.enableAudio).toBe(false);
   });
+
+  it("enters H3 on its advertised frame minimum", () => {
+    const form = newGenerateForm();
+    form.frames = 25;
+    applyModelDefaults(form, {
+      ...ltx2Model(),
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      default_frames: 124,
+      default_fps: 24,
+    });
+    expect(form.frames).toBe(124);
+    expect(form.fps).toBe(24);
+    expect(form.outputFormat).toBe("mp4");
+  });
 });
 
 describe("seedMode", () => {
@@ -67,6 +82,54 @@ describe("buildRequest — post-generate upscale", () => {
     form.prompt = "a ship";
     form.upscaleModel = "real-esrgan-x4plus";
     expect(buildRequest(form).upscale_model).toBeUndefined();
+  });
+});
+
+describe("buildRequest — MiniMax H3 authoring", () => {
+  it("serializes FL2VA endpoints and fixed AV parameters from the shared contract", () => {
+    const form = newGenerateForm();
+    form.model = "minimax-h3-fl2va:official-bf16";
+    // Exact prepared/retry snapshots can outlive their inventory row. The
+    // released model partition remains sufficient authority when family
+    // metadata is temporarily absent.
+    form.family = "";
+    form.prompt = "a synchronized shot";
+    form.frames = 360;
+    form.fps = 30;
+    form.guidance = 6;
+    form.outputFormat = "gif";
+    form.h3Authoring = {
+      firstFrame: {
+        filename: "first.png",
+        mimeType: "image/png",
+        width: 1280,
+        height: 720,
+        data: "FIRST",
+      },
+      lastFrame: {
+        filename: "last.png",
+        mimeType: "image/png",
+        width: 1280,
+        height: 720,
+        data: "LAST",
+      },
+      references: [],
+    };
+
+    const request = buildRequest(form);
+    expect(request).toMatchObject({
+      frames: 362,
+      fps: 24,
+      guidance: 0,
+      strength: 1,
+      batch_size: 1,
+      output_format: "mp4",
+      source_image: "FIRST",
+      source_image_name: "first.png",
+      keyframes: [{ frame: 361, image: "LAST" }],
+    });
+    expect(request.enable_audio).toBeUndefined();
+    expect(request.negative_prompt).toBeUndefined();
   });
 });
 
@@ -769,6 +832,27 @@ describe("applyMetadataToForm", () => {
     expect(form.prompt).toBe("a lighthouse at dusk");
     expect(form.negativePrompt).toBe("blurry, low quality");
     expect(form.seed).toBe("42");
+  });
+
+  it("preserves H3 opening-frame provenance while requiring reattachment", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        ...richImageMetadata(),
+        model: "minimax-h3-fl2va:official-bf16",
+        guidance: 0,
+        output_format: "mp4",
+        source_image_name: "opening.png",
+        source_image_sha256: "a".repeat(64),
+      },
+      [],
+    );
+    expect(form.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      data: "",
+      sha256: "a".repeat(64),
+    });
   });
 
   it("restores video params for an ltx2 print", () => {

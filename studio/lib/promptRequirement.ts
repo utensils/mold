@@ -22,6 +22,11 @@
  * disabling Generate on a request the server would happily admit.
  */
 
+import {
+  MINIMAX_H3_PROMPT_PLACEHOLDER,
+  isMinimaxH3Identity,
+} from "./minimaxH3Authoring";
+
 /** Families whose engines can render from visual conditioning alone. */
 const PROMPT_OPTIONAL_FAMILIES: ReadonlySet<string> = new Set([
   "ltx2",
@@ -46,6 +51,8 @@ export type PromptConditioningInput = {
   family?: string | null;
   /** Web form state. */
   modelFamily?: string | null;
+  /** Exact request identity remains available when family metadata is not. */
+  model?: string | null;
   sourceImage?: unknown;
   imageAttachments?: readonly unknown[] | null;
   keyframes?: readonly unknown[] | null;
@@ -55,7 +62,10 @@ export type PromptConditioningInput = {
   extendVideoPath?: string | null;
 };
 
-function conditioningFamily(input: PromptConditioningInput): string | null {
+function conditioningFamily(
+  input: PromptConditioningInput | null | undefined,
+): string | null {
+  if (!input) return null;
   return input.family ?? input.modelFamily ?? null;
 }
 
@@ -117,6 +127,9 @@ export function promptPlaceholder(
   input: PromptConditioningInput | null | undefined,
   requiredPlaceholder: string,
 ): string {
+  if (isMinimaxH3Identity(conditioningFamily(input), input?.model)) {
+    return MINIMAX_H3_PROMPT_PLACEHOLDER;
+  }
   return promptRequired(input)
     ? requiredPlaceholder
     : OPTIONAL_PROMPT_PLACEHOLDER;

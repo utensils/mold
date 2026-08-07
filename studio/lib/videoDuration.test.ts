@@ -9,6 +9,10 @@ import {
   videoFramesError,
   videoFrameStep,
   videoFrameOffset,
+  fixedVideoFps,
+  videoFrameGridError,
+  videoFrameGridLabel,
+  videoFramesError,
 } from "./videoDuration";
 
 const ltx2 = {
@@ -95,6 +99,16 @@ describe("video duration controls", () => {
     expect(maxVideoFrames(h3, 24)).toBe(362);
     expect(clampVideoFrames(5, 24, h3)).toBe(124);
     expect(framesForVideoDuration(1, 24, h3)).toBe(124);
+    expect(fixedVideoFps(h3)).toBe(24);
+    expect(videoFrameGridLabel(h3)).toBe("17n+5");
+    expect(videoFramesError(124, h3)).toBeNull();
+    expect(videoFramesError(130, h3)).toContain("17n+5");
+    expect(videoFramesError(379, h3)).toContain("between 124 and 362");
+  });
+
+  it("can validate a chain-routed exact grid without imposing the single-shot ceiling", () => {
+    expect(videoFramesError(1305, ltx2)).toContain("between 1 and 481");
+    expect(videoFrameGridError(1305, ltx2)).toBeNull();
   });
 
   it("prefers the server-advertised minimum over the family fallback", () => {

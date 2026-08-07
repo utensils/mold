@@ -45,6 +45,7 @@ import {
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
+import { minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
 import {
   clampClipsToMotionTail,
   isPrintOfChainJob,
@@ -2323,6 +2324,9 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
 // that quietly does nothing is exactly the dead end the prepared-expansion
 // invariant forbids.
 const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
+const h3AuthoringError = computed(() =>
+  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring),
+);
 
 const emptyCanvasGuidance = computed(() =>
   promptRequired(form)
@@ -2333,6 +2337,7 @@ const emptyCanvasGuidance = computed(() =>
 async function generate() {
   if (
     promptMissing.value ||
+    h3AuthoringError.value ||
     !form.model ||
     chainReject.value ||
     expansionRunning.value ||

@@ -87,4 +87,21 @@ describe("prompt remix contract", () => {
       conditioningFingerprint({ references: [second, first] }),
     );
   });
+
+  it("fingerprints H3 reference digests without synchronously hashing media bytes", () => {
+    const reference = (data: string, sha256: string) => ({
+      kind: "video",
+      media: { authority: "inline", data },
+      provenance: { name: "motion.mp4", sha256 },
+      duration_ms: 4_000,
+    });
+    expect(
+      conditioningFingerprint({ references: [reference("A", "same")] }),
+    ).toBe(conditioningFingerprint({ references: [reference("B", "same")] }));
+    expect(
+      conditioningFingerprint({ references: [reference("A", "first")] }),
+    ).not.toBe(
+      conditioningFingerprint({ references: [reference("A", "second")] }),
+    );
+  });
 });

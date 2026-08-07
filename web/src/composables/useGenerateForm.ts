@@ -37,6 +37,16 @@ import {
   guidanceOverridesFromWire,
   guidanceOverridesToWire,
 } from "@studio/lib/guidanceOverrides";
+import {
+  MINIMAX_H3_MIN_FRAMES,
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Family,
+  minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3ReferenceDraftsFromMetadata,
+  minimaxH3TaskForModel,
+  serializeMinimaxH3Authoring,
+  stripMinimaxH3AuthoringMedia,
+} from "@studio/lib/minimaxH3Authoring";
 
 /** The prompt actually sent to the server: the textarea content composed with
  * the active style preset (the shared kit substitutes a "{prompt}" template,
@@ -57,6 +67,7 @@ export function promptWithStyle(state: GenerateFormState): string {
  * pipeline, which sets the format itself when selected. Offering it as a free
  * choice would let a video request pick a container the server rejects. */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
+  if (isMinimaxH3Family(family)) return ["mp4"];
   return isVideoFamily(family)
     ? ["mp4", "gif", "apng", "webp"]
     : ["png", "jpeg", "webp"];
@@ -88,6 +99,9 @@ function selectedFamily(s: GenerateFormState): string {
   // This is only the fallback for a stored form whose `modelFamily` predates
   // the field; the server-supplied family above wins whenever it is present.
   if (s.model.startsWith("wan2") || s.model.startsWith("wan-")) return "wan";
+  if (s.model.startsWith("minimax-h3") || s.model.startsWith("minimax_h3")) {
+    return "minimax-h3";
+  }
   return "";
 }
 
@@ -141,6 +155,7 @@ function defaultForm(): GenerateFormState {
     placement: null,
     loras: [],
     enableAudio: null,
+    h3Authoring: emptyMinimaxH3AuthoringState(),
   };
 }
 
@@ -170,6 +185,7 @@ export function sanitizePersistedForm(
       ...k,
       image: stripMediaBytes(k.image),
     })),
+    h3Authoring: stripMinimaxH3AuthoringMedia(state.h3Authoring),
   };
   return sanitized;
 }
@@ -204,7 +220,9 @@ function modelDefaultsPatch(
     model.name,
   );
   if (capabilities.supportsVideo) {
-    next.frames ??= 25;
+    next.frames = isMinimaxH3Family(model.family)
+      ? (model.default_frames ?? MINIMAX_H3_MIN_FRAMES)
+      : (next.frames ?? model.default_frames ?? 25);
     // The model's advertised rate is applied like steps/guidance — it is only
     // absent-server/absent-field that leaves the current value in place.
     next.fps = defaultVideoFps(model, next.fps);
@@ -387,6 +405,17 @@ export function applyMetadataToForm(
     sourceVideo: null,
     extendVideo: null,
     keyframes: [],
+    h3Authoring: {
+      ...emptyMinimaxH3AuthoringState(),
+      firstFrame:
+        minimaxH3TaskForModel(metadata.model) === "fl2va"
+          ? minimaxH3BoundaryFromSourceMetadata(
+              metadata.source_image_name,
+              metadata.source_image_sha256,
+            )
+          : null,
+      references: minimaxH3ReferenceDraftsFromMetadata(metadata.references),
+    },
   };
 }
 
@@ -684,7 +713,7 @@ export function useGenerateForm(): UseGenerateForm {
       // something the server refuses. Doing it here rather than on the
       // pipeline transition keeps a user's source media intact if they switch
       // to `t2a` and back.
-      return stripAudioOnlyIncompatibleFields({
+      const request: GenerateRequestWire = {
         prompt: styled.prompt,
         ...(s.originalPrompt?.trim() &&
         s.originalPrompt.trim() !== styled.prompt
@@ -772,7 +801,15 @@ export function useGenerateForm(): UseGenerateForm {
               guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
             }
           : {}),
-      });
+      };
+      return stripAudioOnlyIncompatibleFields(
+        serializeMinimaxH3Authoring(
+          request,
+          family,
+          s.model,
+          s.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+        ),
+      );
     },
     isVideoFamily,
     supportsNegativePrompt,

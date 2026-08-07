@@ -206,6 +206,8 @@ export interface ModelEntry {
   frame_step?: number | null;
   /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
   frame_offset?: number | null;
+  /** Explicit runnable-contract boundary for future gated families. */
+  runtime_available?: boolean | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────

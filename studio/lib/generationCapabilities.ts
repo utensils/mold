@@ -1,7 +1,19 @@
+import {
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+} from "./minimaxH3Authoring";
+
+export { isMinimaxH3Family } from "./minimaxH3Authoring";
+
 export type GenerationScheduler =
   "default" | "ddim" | "euler-ancestral" | "unipc";
 
-export type SourceImageMode = "single" | "qwen-edit" | "references";
+export type SourceImageMode =
+  | "single"
+  | "qwen-edit"
+  | "references"
+  | "h3-boundaries"
+  | "ordered-references";
 
 export interface BaseGenerationCapabilities {
   supportsNegativePrompt: boolean;
@@ -41,6 +53,9 @@ const NO_NEGATIVE_PROMPT_FAMILIES = new Set([
   "qwen-image",
   "qwen_image",
   "qwen-image-edit",
+  "minimax-h3",
+  "minimax_h3",
+  "minimaxh3",
 ]);
 
 const SCHEDULER_FAMILIES = new Set([
@@ -51,14 +66,28 @@ const SCHEDULER_FAMILIES = new Set([
 ]);
 
 const CFG_PLUS_FAMILIES = new Set(["sd3", "sd3.5"]);
-const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2", "wan"]);
+const VIDEO_FAMILIES = new Set([
+  "ltx-video",
+  "ltx2",
+  "ltx-2",
+  "wan",
+  "minimax-h3",
+  "minimax_h3",
+  "minimaxh3",
+]);
 /**
  * Generated audio is LTX-2's alone. Wan is a video family with no audio
  * branch at all — its checkpoints ship no audio VAE and no vocoder — so it
  * belongs in `VIDEO_FAMILIES` and emphatically not here. Listing it would
  * surface an audio toggle whose request the server rejects before denoising.
  */
-const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
+const AUDIO_FAMILIES = new Set([
+  "ltx2",
+  "ltx-2",
+  "minimax-h3",
+  "minimax_h3",
+  "minimaxh3",
+]);
 /**
  * The families with a bespoke advanced-controls panel (LTX-2's guidance
  * overrides, STG, spatial/temporal rungs). Wan needs only the generic video
@@ -118,6 +147,8 @@ export function baseGenerationCapabilities(
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
   const flux2Dev = isFlux2DevModel(model);
+  const h3 = isMinimaxH3Identity(normalized, model);
+  const h3Ref2va = h3 && isMinimaxH3Ref2vaModel(model);
   const schedulerOptions = SCHEDULER_FAMILIES.has(normalized)
     ? SCHEDULER_OPTIONS.slice()
     : [];
@@ -136,31 +167,41 @@ export function baseGenerationCapabilities(
     ltx &&
     (fixedLtxPipeline || (!pipeline && normalizedModel.includes("distilled")));
   const advertisedDefault = !pipeline ? advertisedGuidance : null;
-  const fixedGuidance = advertisedDefault
-    ? !advertisedDefault.adjustable
-    : inferredFixedGuidance;
+  const fixedGuidance = h3
+    ? true
+    : advertisedDefault
+      ? !advertisedDefault.adjustable
+      : inferredFixedGuidance;
   return {
     supportsNegativePrompt:
       advertisedDefault?.supports_negative_prompt ??
       (!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) && !fixedGuidance),
     guidanceAdjustable: !fixedGuidance,
-    fixedGuidance: fixedGuidance ? (advertisedDefault?.fixed_scale ?? 1) : null,
+    fixedGuidance: fixedGuidance
+      ? h3
+        ? 0
+        : (advertisedDefault?.fixed_scale ?? 1)
+      : null,
     supportsScheduler: schedulerOptions.length > 0,
     schedulerOptions,
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
-    supportsVideo: VIDEO_FAMILIES.has(normalized),
-    supportsAudio: AUDIO_FAMILIES.has(normalized),
+    supportsVideo: h3 || VIDEO_FAMILIES.has(normalized),
+    supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
     supportsLora:
       !flux2Dev &&
       (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
-    sourceImageMode: flux2Dev
-      ? "references"
-      : qwenEdit
-        ? "qwen-edit"
-        : "single",
-    supportsMask: !qwenEdit && !flux2Dev,
-    forcesBatchSizeOne: qwenEdit,
+    sourceImageMode: h3Ref2va
+      ? "ordered-references"
+      : h3
+        ? "h3-boundaries"
+        : flux2Dev
+          ? "references"
+          : qwenEdit
+            ? "qwen-edit"
+            : "single",
+    supportsMask: !h3 && !qwenEdit && !flux2Dev,
+    forcesBatchSizeOne: h3 || qwenEdit,
   };
 }
 
@@ -186,4 +227,8 @@ export function isQwenImageEditFamily(family: string): boolean {
 export function isFlux2DevModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");
+}
+
+export function isMinimaxH3Ref2vaModel(model: string): boolean {
+  return minimaxH3TaskForModel(model) === "ref2va";
 }

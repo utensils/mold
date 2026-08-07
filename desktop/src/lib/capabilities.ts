@@ -20,6 +20,7 @@ import {
   isAdvancedVideoFamily,
   isFlux2DevModel,
   isImageConditionedVideoFamily,
+  isMinimaxH3Family,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
   type BaseGenerationCapabilities,
@@ -55,7 +56,8 @@ export function generationCapabilitiesForFamily(
     // correct only while LTX-2 was the sole image-conditioned video family:
     // Wan is video, is not advanced-video, and reads a source image — and
     // `wan22-i2v-a14b` cannot generate without one.
-    supportsImg2img: !shared.supportsVideo || isImageConditionedVideoFamily(family),
+    supportsImg2img:
+      !shared.supportsVideo || isImageConditionedVideoFamily(family) || isMinimaxH3Family(family),
     supportsMask: shared.supportsMask && !shared.supportsVideo,
     supportsAdvancedVideo,
   };
@@ -80,6 +82,7 @@ export function outputFormatsForFamily(family: string): OutputFormat[] {
   // `wav` is deliberately absent: it is valid only for LTX-2's audio-only
   // `t2a` pipeline, which sets the format itself. Offering it as a free choice
   // would let a video request pick a container the server rejects.
+  if (isMinimaxH3Family(family)) return ["mp4"];
   return isVideoFamily(family) ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"];
 }
 
@@ -100,6 +103,36 @@ export function pruneRequestForFamily(
 ): GenerateRequest {
   const caps = generationCapabilitiesForFamily(family, model);
   const next: GenerateRequest = { ...req };
+
+  // MiniMax H3 has its own final serializer in `minimaxH3Authoring`; do not
+  // project its first/last boundaries or ordered references through the
+  // legacy source/edit inverse below.
+  if (isMinimaxH3Family(family)) {
+    if (caps.sourceImageMode === "ordered-references") {
+      delete next.source_image;
+      delete next.source_image_name;
+      delete next.edit_images;
+      delete next.keyframes;
+    } else {
+      delete next.edit_images;
+      delete next.references;
+    }
+    delete next.negative_prompt;
+    delete next.scheduler;
+    delete next.cfg_plus;
+    delete next.mask_image;
+    delete next.control_image;
+    delete next.control_model;
+    delete next.control_scale;
+    delete next.loras;
+    delete next.lora;
+    delete next.upscale_model;
+    next.batch_size = 1;
+    next.guidance = 0;
+    next.strength = 1;
+    next.output_format = "mp4";
+    return next;
+  }
 
   if (!caps.supportsNegativePrompt) delete next.negative_prompt;
   if (!caps.supportsScheduler) delete next.scheduler;

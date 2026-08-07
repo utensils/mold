@@ -18,6 +18,12 @@ import {
   type GenerationTemplateMediaAsset,
   type TemplateMediaPersistence,
 } from "@studio/lib/templateMediaStore";
+import { redactGenerationReference } from "@studio/lib/generationReferences";
+import {
+  emptyMinimaxH3AuthoringState,
+  stripMinimaxH3AuthoringMedia,
+  type MinimaxH3BoundaryImage,
+} from "@studio/lib/minimaxH3Authoring";
 
 /** Storage key — MUST differ from the web SPA's `mold.generation.templates.v1`. */
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.desktop.generation.templates.v1";
@@ -26,7 +32,16 @@ export type GenerationTemplateSort = "updated-desc" | "updated-asc" | "name-asc"
 
 /** Human-facing labels for media present when the template was saved. */
 export type GenerationTemplateMediaField =
-  "source" | "mask" | "control" | "sourceVideo" | "keyframes" | "editImages" | "audioFile";
+  | "source"
+  | "mask"
+  | "control"
+  | "sourceVideo"
+  | "keyframes"
+  | "editImages"
+  | "audioFile"
+  | "h3FirstFrame"
+  | "h3LastFrame"
+  | "h3References";
 
 export interface GenerationTemplate {
   id: string;
@@ -51,6 +66,9 @@ const MEDIA_REFERENCE_LABELS: Record<GenerationTemplateMediaField, string> = {
   keyframes: "keyframes",
   editImages: "edit pictures",
   audioFile: "conditioning audio",
+  h3FirstFrame: "H3 first frame",
+  h3LastFrame: "H3 last frame",
+  h3References: "H3 ordered references",
 };
 
 export function formatTemplateMediaReferences(
@@ -66,9 +84,20 @@ export function unsnapshottedTemplateMediaReferences(
   const assets = template.mediaAssets ?? [];
   const hasSource = assets.some((asset) => asset.field === "sourceImage");
   const hasAttachments = assets.some((asset) => asset.field === "imageAttachments");
+  const hasH3FirstFrame = assets.some((asset) => asset.field === "h3FirstFrame");
+  const hasH3LastFrame = assets.some((asset) => asset.field === "h3LastFrame");
+  const hasH3References =
+    assets.filter((asset) => asset.field === "h3References").length ===
+    (template.form.h3Authoring?.references.length ?? 0);
   return template.mediaReferences.filter(
     (reference) =>
-      !((reference === "source" && hasSource) || (reference === "editImages" && hasAttachments)),
+      !(
+        (reference === "source" && hasSource) ||
+        (reference === "editImages" && hasAttachments) ||
+        (reference === "h3FirstFrame" && hasH3FirstFrame) ||
+        (reference === "h3LastFrame" && hasH3LastFrame) ||
+        (reference === "h3References" && hasH3References)
+      ),
   );
 }
 
@@ -101,6 +130,9 @@ export function collectTemplateMediaReferences(form: GenerateForm): GenerationTe
   if (form.sourceVideo) refs.push("sourceVideo");
   if (form.keyframes.length > 0) refs.push("keyframes");
   if (form.audioFile) refs.push("audioFile");
+  if (form.h3Authoring?.firstFrame) refs.push("h3FirstFrame");
+  if (form.h3Authoring?.lastFrame) refs.push("h3LastFrame");
+  if (form.h3Authoring?.references.length) refs.push("h3References");
   return refs;
 }
 
@@ -115,6 +147,7 @@ function stripTemplateForm(form: GenerateForm): GenerateForm {
   clone.sourceVideo = null;
   clone.keyframes = [];
   clone.audioFile = null;
+  clone.h3Authoring = stripMinimaxH3AuthoringMedia(clone.h3Authoring);
   return clone;
 }
 
@@ -213,6 +246,7 @@ export async function saveGenerationTemplateWithMedia(
 ): Promise<GenerationTemplate> {
   const timestamp = now();
   const id = templateId();
+  const h3 = form.h3Authoring ?? emptyMinimaxH3AuthoringState();
   const inputs = [
     ...(form.sourceImage
       ? [
@@ -229,6 +263,49 @@ export async function saveGenerationTemplateWithMedia(
       filename: `Reference ${index + 1}`,
       base64,
     })),
+    ...(h3.firstFrame?.data
+      ? [
+          {
+            field: "h3FirstFrame" as const,
+            filename: h3.firstFrame.filename,
+            kind: "upload" as const,
+            width: h3.firstFrame.width,
+            height: h3.firstFrame.height,
+            mime: h3.firstFrame.mimeType,
+            ...(h3.firstFrame.sha256 !== undefined ? { sha256: h3.firstFrame.sha256 } : {}),
+            base64: h3.firstFrame.data,
+          },
+        ]
+      : []),
+    ...(h3.lastFrame?.data
+      ? [
+          {
+            field: "h3LastFrame" as const,
+            filename: h3.lastFrame.filename,
+            kind: "upload" as const,
+            width: h3.lastFrame.width,
+            height: h3.lastFrame.height,
+            mime: h3.lastFrame.mimeType,
+            ...(h3.lastFrame.sha256 !== undefined ? { sha256: h3.lastFrame.sha256 } : {}),
+            base64: h3.lastFrame.data,
+          },
+        ]
+      : []),
+    ...h3.references.flatMap(({ reference }, index) =>
+      reference.media.authority === "inline" && reference.media.data
+        ? [
+            {
+              field: "h3References" as const,
+              index,
+              filename: reference.provenance?.name || `${reference.kind} reference ${index + 1}`,
+              kind: "upload" as const,
+              mime: reference.mime_type,
+              reference: redactGenerationReference(reference),
+              base64: reference.media.data,
+            },
+          ]
+        : [],
+    ),
   ];
   const mediaAssets = await persistGenerationTemplateMedia(id, inputs, persistence);
   const template: GenerationTemplate = {
@@ -269,6 +346,39 @@ export async function hydrateGenerationTemplate(
     .filter((asset) => asset.field === "imageAttachments")
     .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
   if (attachments.length) form.imageAttachments = attachments.map((asset) => asset.base64);
+  form.h3Authoring ??= emptyMinimaxH3AuthoringState();
+  const hydrateBoundary = (
+    field: "h3FirstFrame" | "h3LastFrame",
+  ): MinimaxH3BoundaryImage | null => {
+    const asset = media.find((candidate) => candidate.field === field);
+    if (!asset) return null;
+    return {
+      filename: asset.filename,
+      mimeType: asset.mime || "image/png",
+      width: asset.width ?? 0,
+      height: asset.height ?? 0,
+      data: asset.base64,
+      ...(asset.sha256 !== undefined ? { sha256: asset.sha256 } : {}),
+      draftId: asset.assetId,
+    };
+  };
+  const first = hydrateBoundary("h3FirstFrame");
+  const last = hydrateBoundary("h3LastFrame");
+  if (first) form.h3Authoring.firstFrame = first;
+  if (last) form.h3Authoring.lastFrame = last;
+  const h3References = media
+    .filter((asset) => asset.field === "h3References" && asset.reference)
+    .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+  for (const asset of h3References) {
+    const index = asset.index ?? 0;
+    form.h3Authoring.references[index] = {
+      reference: {
+        ...asset.reference!,
+        media: { authority: "inline", data: asset.base64 },
+      },
+      draftId: asset.assetId,
+    };
+  }
 
   const restoredSource = Boolean(source) && !missing.some((asset) => asset.field === "sourceImage");
   const expectedAttachments = assets.filter((asset) => asset.field === "imageAttachments").length;
@@ -276,13 +386,22 @@ export async function hydrateGenerationTemplate(
     expectedAttachments > 0 &&
     attachments.length === expectedAttachments &&
     !missing.some((asset) => asset.field === "imageAttachments");
+  const restoredH3First =
+    Boolean(first) && !missing.some((asset) => asset.field === "h3FirstFrame");
+  const restoredH3Last = Boolean(last) && !missing.some((asset) => asset.field === "h3LastFrame");
+  const restoredH3References =
+    h3References.length === form.h3Authoring.references.length &&
+    !missing.some((asset) => asset.field === "h3References");
   return {
     form,
     missingMediaReferences: template.mediaReferences.filter(
       (reference) =>
         !(
           (reference === "source" && restoredSource) ||
-          (reference === "editImages" && restoredAttachments)
+          (reference === "editImages" && restoredAttachments) ||
+          (reference === "h3FirstFrame" && restoredH3First) ||
+          (reference === "h3LastFrame" && restoredH3Last) ||
+          (reference === "h3References" && restoredH3References)
         ),
     ),
   };

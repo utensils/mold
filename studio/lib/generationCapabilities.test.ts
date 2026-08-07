@@ -41,6 +41,42 @@ describe("baseGenerationCapabilities", () => {
     expect(isAdvancedVideoFamily("wan")).toBe(false);
   });
 
+  it("gives H3 task partitions synchronized AV without generic controls", () => {
+    expect(
+      baseGenerationCapabilities(
+        "minimax-h3",
+        "minimax-h3-fl2va:comfy-pruned-int8",
+      ),
+    ).toMatchObject({
+      supportsVideo: true,
+      supportsAudio: true,
+      supportsNegativePrompt: false,
+      guidanceAdjustable: false,
+      fixedGuidance: 0,
+      supportsScheduler: false,
+      supportsCfgPlus: false,
+      supportsLora: false,
+      supportsControlNet: false,
+      sourceImageMode: "h3-boundaries",
+      supportsMask: false,
+      forcesBatchSizeOne: true,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "minimax_h3",
+        "minimax_h3_ref2va:official-bf16",
+      ).sourceImageMode,
+    ).toBe("ordered-references");
+    expect(
+      baseGenerationCapabilities("", "minimax-h3-ref2va:comfy-pruned-int8"),
+    ).toMatchObject({
+      supportsVideo: true,
+      supportsAudio: true,
+      sourceImageMode: "ordered-references",
+    });
+    expect(isAdvancedVideoFamily("minimax-h3")).toBe(false);
+  });
+
   it("offers wan the LoRA control its engine supports", () => {
     // Mirrors `workflows.lora: true` for the wan family in
     // `crates/mold-inference/src/batch.rs`. Without wan in

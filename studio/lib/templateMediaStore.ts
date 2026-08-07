@@ -3,8 +3,14 @@ import {
   getDraftMedia,
   putDurableMedia,
 } from "./draftMediaStore";
+import type { GenerationReference } from "./generationReferences";
 
-export type GenerationTemplateSourceField = "sourceImage" | "imageAttachments";
+export type GenerationTemplateSourceField =
+  | "sourceImage"
+  | "imageAttachments"
+  | "h3FirstFrame"
+  | "h3LastFrame"
+  | "h3References";
 
 export interface GenerationTemplateMediaAsset {
   assetId: string;
@@ -15,6 +21,9 @@ export interface GenerationTemplateMediaAsset {
   width?: number | null;
   height?: number | null;
   mime?: string | null;
+  sha256?: string | null;
+  /** Descriptor-only H3 reference shape. Media bytes remain in IndexedDB. */
+  reference?: GenerationReference;
 }
 
 export interface GenerationTemplateMediaInput extends Omit<
@@ -50,7 +59,15 @@ function assetIdFor(
   input: GenerationTemplateMediaInput,
 ): string {
   const suffix =
-    input.field === "sourceImage" ? "source" : `attachment-${input.index ?? 0}`;
+    input.field === "sourceImage"
+      ? "source"
+      : input.field === "imageAttachments"
+        ? `attachment-${input.index ?? 0}`
+        : input.field === "h3FirstFrame"
+          ? "h3-first-frame"
+          : input.field === "h3LastFrame"
+            ? "h3-last-frame"
+            : `h3-reference-${input.index ?? 0}`;
   return `template:${templateId}:${suffix}`;
 }
 

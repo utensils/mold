@@ -23,6 +23,7 @@ import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
@@ -46,7 +47,14 @@ import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
-import { snapVideoFrames, videoFrameStep } from "@studio/lib/videoDuration";
+import {
+  clampVideoFrames,
+  fixedVideoFps,
+  minVideoFrames,
+  snapVideoFrames,
+  videoFrameGridLabel,
+  videoFrameStep,
+} from "@studio/lib/videoDuration";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
@@ -59,6 +67,12 @@ import {
   parseCameraControlAvailability,
   isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
+import {
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  type MinimaxH3AuthoringState,
+} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -197,6 +211,18 @@ const caps = computed(() =>
   ),
 );
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
+const h3Task = computed(() =>
+  selectedModel.value ? minimaxH3TaskForModel(props.modelValue.model) : null,
+);
+const h3Family = computed(() =>
+  isMinimaxH3Identity(props.family, props.modelValue.model),
+);
+const h3Authoring = computed(
+  () => props.modelValue.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+);
+function setH3Authoring(value: MinimaxH3AuthoringState) {
+  patch({ h3Authoring: value });
+}
 const formats = computed(() => outputFormatsForFamily(props.family));
 
 const showScheduler = computed(
@@ -323,7 +349,7 @@ function clearControl() {
 // keyframes, retake, spatial/temporal). `supportsAudio` is true for
 // exactly those families, so it doubles as the suite gate; plain
 // ltx-video keeps just frames/fps/GIF.
-const showLtx2 = computed(() => caps.value.supportsAudio);
+const showLtx2 = computed(() => caps.value.supportsAudio && !h3Family.value);
 
 // ── Output & seed: exact size (snap to the 16px grid, like desktop) ───
 function snapDim(v: number): number {
@@ -361,9 +387,27 @@ function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
 }
 
+const videoContract = computed(
+  () => selectedModel.value ?? { family: props.family },
+);
+const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
+const frameStep = computed(() => videoFrameStep(videoContract.value));
+const frameMinimum = computed(() => minVideoFrames(videoContract.value));
+const fixedFps = computed(() => fixedVideoFps(videoContract.value));
+watch(
+  [fixedFps, () => props.modelValue.fps] as const,
+  ([fixed, current]) => {
+    if (fixed !== null && current !== fixed) patch({ fps: fixed });
+  },
+  { immediate: true },
+);
 function clampFrames(n: number): number {
-  if (!Number.isFinite(n)) return 25;
-  return snapVideoFrames(n, selectedModel.value ?? { family: props.family });
+  const value = Number.isFinite(n)
+    ? n
+    : (selectedModel.value?.default_frames ?? 25);
+  return fixedFps.value !== null
+    ? clampVideoFrames(value, fixedFps.value, videoContract.value)
+    : Math.max(frameMinimum.value, snapVideoFrames(value, videoContract.value));
 }
 
 // ── Reset (advanced fields only — prompt/model/shape/seed survive) ────
@@ -656,6 +700,26 @@ function setSequenceCameraMode(mode: string) {
       </template>
       <template v-else>
         <AccordionSection
+          v-if="h3Task"
+          icon="video"
+          :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
+          :summary="
+            h3Task === 'fl2va'
+              ? 'First, last, both, or text only'
+              : `${h3Authoring.references.length} in semantic order`
+          "
+          :open="true"
+          :header-interactive="false"
+          data-test="section-h3-authoring"
+        >
+          <MinimaxH3AuthoringPanel
+            :model-value="h3Authoring"
+            :task="h3Task"
+            @update:model-value="setH3Authoring"
+          />
+        </AccordionSection>
+
+        <AccordionSection
           v-if="showScheduler"
           icon="scheduler"
           title="Scheduler & sampling"
@@ -730,6 +794,7 @@ function setSequenceCameraMode(mode: string) {
         </AccordionSection>
 
         <AccordionSection
+          v-if="!h3Family"
           icon="image"
           :title="
             caps.sourceImageMode !== 'single'
@@ -1012,15 +1077,13 @@ function setSequenceCameraMode(mode: string) {
             />
           </div>
           <div class="adv__field">
-            <label class="adv__label"
-              >Frames ({{
-                videoFrameStep(selectedModel ?? { family })
-              }}n+1)</label
-            >
+            <label class="adv__label">Frames ({{ frameGridLabel }})</label>
             <input
               class="adv__input"
               data-test="video-frames"
               type="number"
+              :min="frameMinimum"
+              :step="frameStep"
               :value="modelValue.frames ?? 25"
               @change="
                 patch({
@@ -1031,8 +1094,8 @@ function setSequenceCameraMode(mode: string) {
               "
             />
             <p class="adv__hint">
-              Frames must be
-              {{ videoFrameStep(selectedModel ?? { family }) }}n+1.
+              Frames must follow {{ frameGridLabel
+              }}<template v-if="h3Family">, from 124 through 362</template>.
             </p>
           </div>
           <div class="adv__field">
@@ -1042,6 +1105,7 @@ function setSequenceCameraMode(mode: string) {
               data-test="video-fps"
               type="number"
               min="1"
+              :disabled="fixedFps !== null"
               :value="modelValue.fps ?? 24"
               @change="
                 patch({
@@ -1050,7 +1114,7 @@ function setSequenceCameraMode(mode: string) {
               "
             />
           </div>
-          <div class="adv__row">
+          <div v-if="!h3Family" class="adv__row">
             <span class="adv__label">GIF preview</span>
             <SwitchToggle
               :model-value="modelValue.gifPreview"

@@ -10,7 +10,16 @@ import type {
   ModelEntry,
 } from "../lib/api/types";
 import { generationCapabilitiesForFamily, MAX_LORA_STACK } from "../lib/capabilities";
-import { snapVideoFrames, videoFramesError, videoFrameStep } from "@studio/lib/videoDuration";
+import {
+  clampVideoFrames,
+  fixedVideoFps,
+  minVideoFrames,
+  videoFrameGridLabel,
+  videoFrameGridError,
+  videoFramesError,
+  videoFrameStep,
+  snapVideoFrames,
+} from "@studio/lib/videoDuration";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -55,6 +64,13 @@ import {
   isControlAdapterPipeline,
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import {
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  type MinimaxH3AuthoringState,
+} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -85,18 +101,38 @@ const emit = defineEmits<{
 }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const h3Task = computed(() =>
+  props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
+);
+const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.form.model));
+const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+function setH3Authoring(value: MinimaxH3AuthoringState): void {
+  props.form.h3Authoring = value;
+}
+const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
+const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
+const frameStep = computed(() => videoFrameStep(videoContract.value));
+const frameMinimum = computed(() => minVideoFrames(videoContract.value));
+const fixedFps = computed(() => fixedVideoFps(videoContract.value));
 const batchLocked = computed(
   () =>
     caps.value.forcesBatchSizeOne ||
     (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
 );
 const generationRequest = computed(() => buildRequest(props.form));
-const videoFrameContract = computed(() => props.selectedModel ?? { family: props.form.family });
 const frameError = computed(() =>
-  caps.value.supportsVideo ? videoFramesError(props.form.frames, videoFrameContract.value) : null,
+  caps.value.supportsVideo
+    ? fixedFps.value !== null
+      ? videoFramesError(props.form.frames, videoContract.value)
+      : videoFrameGridError(props.form.frames, videoContract.value)
+    : null,
 );
 const fpsError = computed(() =>
-  caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
+  caps.value.supportsVideo
+    ? fixedFps.value !== null && props.form.fps !== fixedFps.value
+      ? `FPS is fixed at ${fixedFps.value} for this model.`
+      : fpsValidationError(props.form.fps)
+    : null,
 );
 const chainDecision = computed<ChainRoutingDecision>(() =>
   caps.value.supportsVideo
@@ -132,6 +168,13 @@ const valid = computed(
 
 watch(valid, (next) => emit("validity-change", next), { immediate: true });
 watch(
+  [fixedFps, () => props.form.fps] as const,
+  ([fixed, current]) => {
+    if (fixed !== null && current !== fixed) props.form.fps = fixed;
+  },
+  { immediate: true },
+);
+watch(
   () => [caps.value.forcesBatchSizeOne, props.form.batchSize] as const,
   ([forced, batchSize]) => {
     const normalized = forced
@@ -156,7 +199,10 @@ function setBatch(raw: string): void {
 }
 
 function snapFramesField(): void {
-  props.form.frames = snapVideoFrames(props.form.frames, videoFrameContract.value);
+  props.form.frames =
+    fixedFps.value !== null
+      ? clampVideoFrames(props.form.frames, fixedFps.value, videoContract.value)
+      : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
 const schedulerLabels: Record<string, string> = {
@@ -554,6 +600,18 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       </label>
     </fieldset>
 
+    <fieldset v-if="h3Task" class="mobile-generate-section" data-test="mobile-h3-authoring">
+      <legend class="mobile-generate-legend">
+        {{ h3Task === "fl2va" ? "Frame endpoints" : "Ordered references" }}
+      </legend>
+      <MinimaxH3AuthoringPanel
+        :model-value="h3Authoring"
+        :task="h3Task"
+        touch-friendly
+        @update:model-value="setH3Authoring"
+      />
+    </fieldset>
+
     <fieldset
       v-if="caps.supportsVideo"
       class="mobile-generate-section mobile-generate-video-options"
@@ -572,21 +630,22 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       <div class="mobile-generate-field-grid">
         <label class="field mobile-generate-field">
           <span>Frames</span>
+          <small>{{ frameGridLabel }} grid</small>
           <input
             v-model.number="form.frames"
             class="control"
             data-test="mobile-frames"
             type="number"
             inputmode="numeric"
-            min="1"
-            :step="videoFrameStep(videoFrameContract)"
+            :min="frameMinimum"
+            :step="frameStep"
             :aria-invalid="frameError ? 'true' : undefined"
             :aria-describedby="frameError ? frameErrorId : undefined"
             @change="snapFramesField"
           />
         </label>
 
-        <label class="field mobile-generate-field">
+        <label v-if="caps.supportsAdvancedVideo" class="field mobile-generate-field">
           <span>Reference control</span>
           <select
             class="control"
@@ -616,6 +675,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             inputmode="numeric"
             min="1"
             max="60"
+            :disabled="fixedFps !== null"
             :aria-invalid="fpsError ? 'true' : undefined"
             :aria-describedby="fpsError ? fpsErrorId : undefined"
           />
@@ -665,7 +725,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         {{ chainDecision.reason }}
       </p>
 
-      <label v-if="caps.supportsAudio" class="mobile-generate-toggle-row">
+      <label v-if="caps.supportsAudio && !h3Family" class="mobile-generate-toggle-row">
         <span>
           <strong>Generate audio</strong>
           <small>Include a synchronized soundtrack when the model supports it.</small>
@@ -677,7 +737,10 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           data-test="mobile-enable-audio"
         />
       </label>
-      <p v-if="caps.supportsAudio && !audioOutputSupported" class="mobile-generate-validation">
+      <p
+        v-if="caps.supportsAudio && !h3Family && !audioOutputSupported"
+        class="mobile-generate-validation"
+      >
         Audio assets are not included with this checkpoint. Video generation remains available.
       </p>
       <p

@@ -75,6 +75,51 @@ describe("useGenerateForm", () => {
     });
   });
 
+  it("projects Ref2VA through the shared H3 request authority", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-ref2va:official-bf16";
+    form.state.value.modelFamily = "";
+    form.state.value.prompt = "resynthesize the performance";
+    form.state.value.frames = 130;
+    form.state.value.fps = 30;
+    form.state.value.guidance = 7;
+    form.state.value.outputFormat = "gif";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "IMAGE" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+        },
+      ],
+    };
+
+    const request = form.toRequest();
+    expect(request).toMatchObject({
+      frames: 124,
+      fps: 24,
+      guidance: 0,
+      strength: 1,
+      batch_size: 1,
+      output_format: "mp4",
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "IMAGE" },
+        },
+      ],
+    });
+    expect(request.negative_prompt).toBeUndefined();
+    expect(request.enable_audio).toBeUndefined();
+  });
+
   it("shares a singleton state across route remounts", () => {
     const first = useGenerateForm();
     first.state.value.prompt = "persistent cat";
@@ -368,6 +413,24 @@ describe("useGenerateForm", () => {
 
     expect(form.state.value.frames).toBe(49);
     expect(form.state.value.fps).toBe(30);
+  });
+
+  it("applyModelDefaults enters H3 on its valid minimum frame and fixed-fps contract", () => {
+    const form = useGenerateForm();
+    form.state.value.frames = 25;
+
+    form.applyModelDefaults(
+      makeModel({
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        default_frames: 124,
+        default_fps: 24,
+      }),
+    );
+
+    expect(form.state.value.frames).toBe(124);
+    expect(form.state.value.fps).toBe(24);
+    expect(form.state.value.outputFormat).toBe("mp4");
   });
 
   it("resetSettings restores the selected model's defaults", () => {
@@ -1320,6 +1383,27 @@ describe("generate form serialization helpers", () => {
       { path: "/loras/one.safetensors", scale: 0.8 },
       { path: "/loras/two.safetensors", scale: 1.1 },
     ]);
+  });
+
+  it("applyMetadataToForm preserves H3 opening-frame provenance without bytes", () => {
+    const next = applyMetadataToForm(makeForm(), {
+      prompt: "new synchronized shot",
+      model: "minimax-h3-fl2va:official-bf16",
+      seed: 42,
+      steps: 30,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      output_format: "mp4",
+      source_image_name: "opening.png",
+      source_image_sha256: "a".repeat(64),
+      version: "0.1.0",
+    });
+    expect(next.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      data: "",
+      sha256: "a".repeat(64),
+    });
   });
 
   it("does not infer camera motion from a metadata LoRA beyond the visible cap", () => {

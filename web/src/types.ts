@@ -3,6 +3,7 @@ import type {
   GenerationReference,
   GenerationReferenceMetadata,
 } from "@studio/lib/generationReferences";
+import type { MinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   Ltx2GuidanceOverrides,
@@ -373,6 +374,8 @@ export interface ModelInfoExtended extends ModelDefaults {
   frame_step?: number | null;
   /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
   frame_offset?: number | null;
+  /** Explicit runnable-contract boundary for future gated families. */
+  runtime_available?: boolean | null;
 }
 
 export interface GpuInfo {
@@ -897,6 +900,10 @@ export interface GenerateFormState {
    * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
    * forced to `null` so the wire stays clean. */
   enableAudio: boolean | null;
+  /** MiniMax H3 first/last endpoints or ordered heterogeneous references.
+   * Kept separate from legacy edit/source fields so no surface can flatten
+   * Ref2VA into image-only editing. */
+  h3Authoring?: MinimaxH3AuthoringState;
 }
 
 export interface Ltx2ControlAdapterInfo {

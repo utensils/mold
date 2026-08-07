@@ -51,6 +51,13 @@ export function expansionTaskForRequest(
   if (h3 && (request.references?.length ?? 0) > 0) {
     return "reference-to-audio-video";
   }
+  if (h3) {
+    const first = Boolean(request.source_image);
+    const last = (request.keyframes?.length ?? 0) > 0;
+    if (first && last) return "keyframe-interpolation";
+    if (first || last) return "image-to-video";
+    return "text-to-video";
+  }
   switch (request.pipeline) {
     case "t2a":
       return "text-to-audio";

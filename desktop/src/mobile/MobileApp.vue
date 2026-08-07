@@ -51,6 +51,7 @@ import {
   type OutputMode,
 } from "@studio/lib/sequence";
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
+import { isMinimaxH3Identity, minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
@@ -699,6 +700,10 @@ const caps = computed(() =>
     form.pipeline,
     selectedGenerationModel.value?.guidance_capabilities,
   ),
+);
+const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
+const h3AuthoringError = computed(() =>
+  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring),
 );
 const effectiveBatchSize = computed(() =>
   caps.value.forcesBatchSizeOne ||
@@ -3208,6 +3213,7 @@ async function generate(): Promise<void> {
     !resolutionValid.value ||
     !basicParametersValid.value ||
     !!mobileMediaBudgetError.value ||
+    !!h3AuthoringError.value ||
     preparingGeneration.value
   )
     return;
@@ -4664,6 +4670,14 @@ onBeforeUnmount(() => {
             >
               {{ mobileMediaBudgetError }}
             </p>
+            <p
+              v-if="h3AuthoringError"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-h3-authoring-error"
+            >
+              {{ h3AuthoringError }}
+            </p>
 
             <MobileSharedParams
               :form="form"
@@ -4743,7 +4757,7 @@ onBeforeUnmount(() => {
                 </small>
               </label>
               <details
-                v-if="form.model && caps.supportsImg2img"
+                v-if="form.model && caps.supportsImg2img && !h3Family"
                 class="mobile-native-disclosure"
                 :open="
                   !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
@@ -4802,6 +4816,7 @@ onBeforeUnmount(() => {
                 !resolutionValid ||
                 !basicParametersValid ||
                 !!mobileMediaBudgetError ||
+                !!h3AuthoringError ||
                 preparingGeneration
               "
               data-test="mobile-develop-button"
