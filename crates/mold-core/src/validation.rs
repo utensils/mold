@@ -60,6 +60,7 @@ pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
     "sdxl",
     "qwen-image",
     "qwen-image-edit",
+    "wan",
     "z-image",
 ];
 
@@ -1202,7 +1203,7 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
 }
 
 /// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL,
-/// Qwen-Image (and qwen-image-edit), and Z-Image — `mold-inference`'s
+/// Qwen-Image (and qwen-image-edit), Wan, and Z-Image — `mold-inference`'s
 /// per-family `lora.rs` modules are the engine paths that know how to merge
 /// low-rank adapters into the base weights. Surfacing the gate at validation
 /// produces a clear 400 instead of an opaque inference-layer panic when a
@@ -1211,10 +1212,10 @@ fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
         Some(family) if family_supports_lora(family) => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -4690,6 +4691,44 @@ mod tests {
         assert!(
             validate_generate_request(&req).is_ok(),
             "SDXL + plural LoRAs (multi-LoRA stack) must pass validation"
+        );
+    }
+
+    /// Wan gained LoRA support with the A14B Lightning distills (#747) and
+    /// community `.diff`/`.diff_b` deltas (#781) — `wan/lora.rs` merges pairs
+    /// and deltas on both the safetensors and GGUF weight paths — but this
+    /// gate was never updated, so the server 400'd every explicit wan LoRA
+    /// request while the engine loaded the same files happily.
+    #[test]
+    fn lora_on_wan_accepted() {
+        let mut req = valid_req();
+        req.model = "wan21-t2v-1.3b".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(16);
+        req.frames = Some(33);
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Wan + LoRA must pass validation now that wan/lora.rs is live"
+        );
+
+        req.lora = None;
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".to_string(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".to_string(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Wan + plural LoRAs (multi-LoRA stack) must pass validation"
         );
     }
 
