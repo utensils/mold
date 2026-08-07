@@ -687,8 +687,9 @@ event: complete
 data: {"images":[{"data":[137,80,78,71],"format":"png","width":1024,"height":1024,"index":0}],"generation_time_ms":12345,"model":"flux-dev:q4","seed_used":42}
 ```
 
-`preview` events are live latent previews for FLUX.1, Flux.2, and Z-Image:
-a small PNG at latent resolution (~width/8 × height/8) produced by a linear
+`preview` events are live latent previews for FLUX.1, Flux.2, Z-Image, and Wan (video previews project the clip's middle latent frame):
+a small PNG at latent resolution (~width/8 × height/8 for most families;
+Wan 2.2 TI2V's VAE compresses 16×, so ~width/16) produced by a linear
 latent→RGB projection — no VAE involved, so the cost per step is negligible.
 Emitted at most every ~700 ms plus always on the final step; clients upscale
 and blur it. Disable with `MOLD_STEP_PREVIEW=0` on the server.

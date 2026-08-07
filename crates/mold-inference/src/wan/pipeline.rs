@@ -477,6 +477,17 @@ struct DenoiseInputs<'a> {
     rope: &'a (Tensor, Tensor),
     device: &'a Device,
     progress: &'a crate::progress::ProgressReporter,
+    /// Live denoise previews. `None` when the checkpoint's latent channel
+    /// count has no factor table.
+    previewer: Option<&'a crate::latent_preview::LatentPreviewer>,
+}
+
+/// The preview's clean-latent estimate. Wan is flow matching, so
+/// `x0 = x_t - sigma_t * v` — the same arithmetic as the sampler's own
+/// `to_x0`. Evaluated after the solver step at `sigma[index + 1]`, so the
+/// final preview (terminal sigma 0) is exactly the finished latent.
+fn preview_x0_estimate(latents: &Tensor, velocity: &Tensor, sigma: f64) -> Result<Tensor> {
+    Ok(latents.sub(&velocity.affine(sigma, 0.0)?)?)
 }
 
 /// The sampling loop for all three conditioning modes.
@@ -498,6 +509,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         rope,
         device,
         progress,
+        previewer,
     } = inputs;
 
     let total = schedule.timesteps.len();
@@ -555,6 +567,17 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             total,
             elapsed: step_start.elapsed(),
         });
+        if let Some(previewer) = previewer {
+            if previewer.due(index + 1, total) {
+                // Preview the predicted clean latent, not the still-noisy
+                // working latent — composition is visible from the first
+                // step. CFG runs project the guided velocity.
+                match preview_x0_estimate(&latents, &velocity, schedule.sigmas[index + 1]) {
+                    Ok(x0_est) => previewer.maybe_emit(progress, &x0_est, index + 1, total),
+                    Err(e) => tracing::warn!("skipping denoise preview: {e:#}"),
+                }
+            }
+        }
     }
     Ok(latents)
 }
@@ -1000,6 +1023,9 @@ impl WanEngine {
             )?)?;
 
         progress.stage_start("Denoising");
+        // Live previews project the working latent through the checkpoint
+        // generation's own factor table, selected by latent channel count.
+        let previewer = crate::latent_preview::LatentPreviewer::wan(vae_config.z_dim);
         let latents = run_denoise_loop(DenoiseInputs {
             experts: &mut experts,
             conditioning: &conditioning,
@@ -1013,6 +1039,7 @@ impl WanEngine {
             rope: &rope,
             device: &device,
             progress,
+            previewer: previewer.as_ref(),
         })?;
         progress.checkpoint()?;
         drop(experts);
@@ -1878,6 +1905,108 @@ mod tests {
         assert_eq!(frames[0].dimensions(), (32, 32));
     }
 
+    /// Flow matching: `x0 = x_t - sigma_t * v`, hand-computed on a tiny
+    /// tensor so the preview's clean-latent estimate is pinned to the same
+    /// arithmetic the sampler's own `to_x0` uses.
+    #[test]
+    fn preview_x0_estimate_matches_hand_computation() {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], 2, &device).unwrap();
+        let v = Tensor::from_vec(vec![0.5f32, -1.0], 2, &device).unwrap();
+        let x0 = preview_x0_estimate(&x, &v, 0.6).unwrap();
+        let got = x0.to_vec1::<f32>().unwrap();
+        // 1.0 - 0.6*0.5 = 0.7; 2.0 - 0.6*(-1.0) = 2.6.
+        assert!((got[0] - 0.7).abs() < 1e-6, "got {}", got[0]);
+        assert!((got[1] - 2.6).abs() < 1e-6, "got {}", got[1]);
+    }
+
+    /// The real denoise loop must emit `Preview` events when a previewer is
+    /// attached: the final step is always rendered, at latent resolution.
+    #[test]
+    fn tiny_denoise_loop_emits_previews() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        // z = 16 so the real Wan 2.1 factor table applies.
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 2);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
+        let mut solver = FlowUniPc::new(schedule.clone());
+        let latents = seeded_randn(
+            7,
+            &[1, z, latent_frames, latent_h, latent_w],
+            &device,
+            dtype,
+        )
+        .unwrap();
+
+        let mut progress = crate::progress::ProgressReporter::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        progress.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+        let mut experts = WanExperts::single(transformer);
+        let rope = experts
+            .transformer_for(schedule.timesteps[0], &progress)
+            .unwrap()
+            .rope_freqs_for(
+                &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device).unwrap(),
+            )
+            .unwrap();
+
+        // `force_enabled` keeps the test hermetic against MOLD_STEP_PREVIEW.
+        let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+            .expect("16-channel Wan checkpoints have a preview table")
+            .force_enabled();
+        run_denoise_loop(DenoiseInputs {
+            experts: &mut experts,
+            conditioning: &WanImageConditioning::None,
+            schedule: &schedule,
+            solver: &mut solver,
+            latents,
+            cond_embeds: &context,
+            uncond_embeds: None,
+            guidance: 1.0,
+            patch: config.patch_size.1,
+            rope: &rope,
+            device: &device,
+            progress: &progress,
+            previewer: Some(&previewer),
+        })
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        let previews: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProgressEvent::Preview {
+                    image_png,
+                    step,
+                    total,
+                } => Some((image_png.clone(), *step, *total)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !previews.is_empty(),
+            "the wan denoise loop must emit at least one preview frame"
+        );
+        // The final step is always emitted, at latent resolution.
+        let (png, step, total) = previews.last().unwrap();
+        assert_eq!((*step, *total), (4, 4));
+        assert!(png.starts_with(b"\x89PNG"));
+        let decoded = image::load_from_memory(png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 4));
+    }
+
     /// Build a tiny model pair and drive the *real* denoise loop for one
     /// conditioning mode. Returns the final latents plus the decoded frames, so
     /// tests can assert both the latent invariant and the pixel outcome.
@@ -2020,6 +2149,7 @@ mod tests {
                 rope: &rope,
                 device: &device,
                 progress: &progress,
+                previewer: None,
             })
             .unwrap();
 
