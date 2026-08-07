@@ -634,12 +634,26 @@ pub enum GenerationReference {
         mime_type: String,
         width: u32,
         height: u32,
+        /// Exact decoded source-frame count. Older clients deserialize with
+        /// this absent, but Ref2VA planning fails closed until ingress probes
+        /// it: duration and a rounded FPS cannot determine CFR resampling at
+        /// frame-grid boundaries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_count: Option<u32>,
         duration_ms: u64,
         fps: f64,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         has_audio: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio_duration_ms: Option<u64>,
+        /// Exact decoded soundtrack samples per channel at
+        /// `audio_sample_rate`. Canonical ingress supplies this authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_sample_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_sample_rate: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_channels: Option<u16>,
     },
     Audio {
         media: GenerationReferenceAuthority,
@@ -649,6 +663,11 @@ pub enum GenerationReference {
         duration_ms: u64,
         sample_rate: u32,
         channels: u16,
+        /// Exact decoded samples per channel at `sample_rate`. Older clients
+        /// remain readable, but Ref2VA planning fails closed until ingress
+        /// supplies this authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_count: Option<u64>,
     },
 }
 
@@ -675,6 +694,8 @@ pub struct GenerationReferenceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<f64>,
@@ -683,10 +704,18 @@ pub struct GenerationReferenceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u16>,
-    /// Exact payload-free v1 preprocessing result used for placement and
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_count: Option<u64>,
+    /// Exact payload-free versioned preprocessing result used for placement and
     /// admission. Older metadata remains compatible when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_shape: Option<crate::minimax_h3::GenerationReferencePreparedShape>,
@@ -819,22 +848,31 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: Some(*width),
                 height: Some(*height),
+                frame_count: None,
                 duration_ms: None,
                 fps: None,
                 has_audio: false,
                 audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
                 sample_rate: None,
                 channels: None,
+                sample_count: None,
                 prepared_shape,
             },
             Self::Video {
                 mime_type,
                 width,
                 height,
+                frame_count,
                 duration_ms,
                 fps,
                 has_audio,
                 audio_duration_ms,
+                audio_sample_count,
+                audio_sample_rate,
+                audio_channels,
                 ..
             } => GenerationReferenceMetadata {
                 kind: GenerationReferenceKind::Video,
@@ -844,12 +882,17 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: Some(*width),
                 height: Some(*height),
+                frame_count: *frame_count,
                 duration_ms: Some(*duration_ms),
                 fps: Some(*fps),
                 has_audio: *has_audio,
                 audio_duration_ms: *audio_duration_ms,
+                audio_sample_count: *audio_sample_count,
+                audio_sample_rate: *audio_sample_rate,
+                audio_channels: *audio_channels,
                 sample_rate: None,
                 channels: None,
+                sample_count: None,
                 prepared_shape,
             },
             Self::Audio {
@@ -857,6 +900,7 @@ impl GenerationReference {
                 duration_ms,
                 sample_rate,
                 channels,
+                sample_count,
                 ..
             } => GenerationReferenceMetadata {
                 kind: GenerationReferenceKind::Audio,
@@ -866,12 +910,17 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: None,
                 height: None,
+                frame_count: None,
                 duration_ms: Some(*duration_ms),
                 fps: None,
                 has_audio: false,
                 audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
                 sample_rate: Some(*sample_rate),
                 channels: Some(*channels),
+                sample_count: *sample_count,
                 prepared_shape,
             },
         })
@@ -905,22 +954,31 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: Some(*width),
                 height: Some(*height),
+                frame_count: None,
                 duration_ms: None,
                 fps: None,
                 has_audio: false,
                 audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
                 sample_rate: None,
                 channels: None,
+                sample_count: None,
                 prepared_shape,
             },
             Self::Video {
                 mime_type,
                 width,
                 height,
+                frame_count,
                 duration_ms,
                 fps,
                 has_audio,
                 audio_duration_ms,
+                audio_sample_count,
+                audio_sample_rate,
+                audio_channels,
                 ..
             } => GenerationReferenceMetadata {
                 kind: GenerationReferenceKind::Video,
@@ -930,12 +988,17 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: Some(*width),
                 height: Some(*height),
+                frame_count: *frame_count,
                 duration_ms: Some(*duration_ms),
                 fps: Some(*fps),
                 has_audio: *has_audio,
                 audio_duration_ms: *audio_duration_ms,
+                audio_sample_count: *audio_sample_count,
+                audio_sample_rate: *audio_sample_rate,
+                audio_channels: *audio_channels,
                 sample_rate: None,
                 channels: None,
+                sample_count: None,
                 prepared_shape,
             },
             Self::Audio {
@@ -943,6 +1006,7 @@ impl GenerationReference {
                 duration_ms,
                 sample_rate,
                 channels,
+                sample_count,
                 ..
             } => GenerationReferenceMetadata {
                 kind: GenerationReferenceKind::Audio,
@@ -952,12 +1016,17 @@ impl GenerationReference {
                 mime_type: mime_type.clone(),
                 width: None,
                 height: None,
+                frame_count: None,
                 duration_ms: Some(*duration_ms),
                 fps: None,
                 has_audio: false,
                 audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
                 sample_rate: Some(*sample_rate),
                 channels: Some(*channels),
+                sample_count: *sample_count,
                 prepared_shape,
             },
         }

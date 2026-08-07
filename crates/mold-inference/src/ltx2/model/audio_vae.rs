@@ -270,21 +270,29 @@ pub struct DecodedAudio {
 impl DecodedAudio {
     pub fn from_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
         let decoded = if is_mp4_audio_container(path) {
-            match Self::decode_with_probe(path) {
-                Ok(Some(decoded)) => Some(decoded),
-                Ok(None) => Self::decode_aac_from_mp4(path)?,
-                Err(probe_err) => match Self::decode_aac_from_mp4(path) {
-                    Ok(decoded) => decoded,
-                    Err(fallback_err) => {
-                        return Err(anyhow!(
-                            "failed to decode source audio '{}' via probe ({probe_err:#}) or native MP4 fallback ({fallback_err:#})",
-                            path.display()
-                        ));
-                    }
-                },
-            }
+            return Self::from_mp4_file(path, max_duration_seconds);
         } else {
             Self::decode_with_probe(path)?
+        };
+        Ok(decoded.map(|decoded| decoded.trimmed(max_duration_seconds)))
+    }
+
+    /// Decode an MP4 soundtrack even when a private staging path has no media
+    /// extension. Reference ingress uses this to bind exact decoded sample
+    /// counts before Ref2VA placement can freeze a layout.
+    pub fn from_mp4_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
+        let decoded = match Self::decode_with_probe(path) {
+            Ok(Some(decoded)) => Some(decoded),
+            Ok(None) => Self::decode_aac_from_mp4(path)?,
+            Err(probe_err) => match Self::decode_aac_from_mp4(path) {
+                Ok(decoded) => decoded,
+                Err(fallback_err) => {
+                    return Err(anyhow!(
+                        "failed to decode source audio '{}' via probe ({probe_err:#}) or native MP4 fallback ({fallback_err:#})",
+                        path.display()
+                    ));
+                }
+            },
         };
         Ok(decoded.map(|decoded| decoded.trimmed(max_duration_seconds)))
     }

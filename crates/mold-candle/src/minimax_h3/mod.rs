@@ -88,6 +88,7 @@ pub use model::{
 pub use presentation::{
     build_fl2va_presentation, build_ref2va_presentation, build_text_presentation, H3ModalityTag,
     H3Presentation, H3RawTokenizer, PresentationError, RefPresentation, RefPresentationKind,
+    VideoPresentationBlock,
 };
 pub use processor::{
     create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
