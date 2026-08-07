@@ -59,6 +59,54 @@ unaltered two's-complement bytes in CPU U8 storage and widens each byte through
 signed interpretation when staging a chunk. A numeric U8 cast would corrupt
 negative weights and is never used.
 
+## Pruned DiT scaled FP8
+
+The published pruned FP8 transformer uses E4M3 weights plus two exact rank-0
+F32 sidecars for every one of the 200 quantized block matrices:
+`weight_scale` and calibrated `input_scale`. The source convention stores the
+decode scale, not its reciprocal. The legal-neutral reference operation is:
+
+```text
+qx = fp8_e4m3(clamp(x / input_scale, -448, 448))
+qw = stored fp8_e4m3 weight
+y = (f32(qx) * input_scale) @ (f32(qw) * weight_scale)^T + bias
+```
+
+Mold rejects missing, rank-one, non-F32, zero, negative, or non-finite scale
+sidecars. Its F32 reference multiplication stages bounded output-row chunks;
+it establishes scale/QDQ semantics but does not claim a native FP8 kernel or
+production runtime qualification.
+
+## Qwen3-VL layer-50 INT8 ConvRot
+
+The Comfy repository also publishes a 27,141,342,152-byte layer-50 Qwen3-VL
+INT8 ConvRot object. Its size independently corroborates the source policy:
+exactly seven language projection matrices across each of layers 0-49 are
+INT8, for 350 matrices and 24,379,392,000 signed weight bytes. Their per-output
+F32 scales add 14,336,000 bytes. Embeddings, RMS norms, all vision weights and
+biases, and every other materialized tensor retain BF16, adding 2,747,407,840
+bytes. The total tensor payload is therefore 27,141,135,840 bytes and the
+safetensors header is 206,312 bytes.
+
+Comfy's `int8_tensorwise` registration sets `quantize_input=false`. The Qwen
+path is consequently weight-only: reconstruct each ConvRot weight chunk in the
+activation dtype, then execute an ordinary floating-point linear operation.
+Mold freezes that distinction in a named loader policy rather than inferring it
+from an I8 dtype or filename. Text/vision rotary math and attention score/
+softmax boundaries remain explicitly F32; language norms, embeddings, and the
+complete vision tower are protected from quantization. The policy accepts only
+the Comfy layer-50 namespace, the exact 350-layer metadata set, I8 matrix
+shapes, `[out_features, 1]` F32 scales, and ConvRot group 256.
+
+At the default 256-row portable chunk, the largest reconstruction peak is
+92,013,568 bytes: signed F32 source rows, scaled F32 rows, reconstructed F32
+rows, the concurrently live BF16/F16 conversion, per-row F32 scales, and the
+shared F32 Hadamard matrix. This excludes
+request-shaped activations and outputs and therefore is not presented as a
+complete peak-memory estimate. Mapped object bytes likewise are not claimed as
+resident host RAM, and streamed/device-resident totals stay unset until an
+authorized loader is bound to admission.
+
 ## Qwen3-VL NVFP4-AWQ
 
 Comfy's NVFP4 storage consists of:
@@ -98,6 +146,10 @@ The committed tests use tiny deterministic synthetic tensors only. They prove:
 - regular Hadamard symmetry and orthonormality;
 - ConvRot forward equivalence to explicit dequantization;
 - strict `[out_features, 1]` INT8 scale authority and signed-byte handling;
+- scaled FP8 clamp/cast/decode order, mandatory rank-0 F32 scales, and bounded
+  staging accounting;
+- exact Qwen layer-50 INT8 allow/deny policy, weight-only dequant-before-matmul
+  execution, FP32 compute boundaries, and public-size-derived byte accounting;
 - high-nibble-first E2M1 decoding, tensor/block scale application, and
   multi-tile scale unswizzling against a fixed comfy-kitchen layout oracle;
 - AWQ input scaling occurs before the dequantized linear operation; and

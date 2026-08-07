@@ -10,6 +10,15 @@ pub const H3_FULL_CHECKPOINT_BYTES: u64 = 66_714_780_128;
 pub const H3_BF16_PARAMETER_BYTES: u64 = 51_506_191_840;
 /// Size of Comfy's pruned single-file safetensors object, including its header.
 pub const H3_COMFY_SAFETENSORS_BYTES: u64 = 51_506_295_256;
+/// Tensor payload of Comfy's layer-50 Qwen3-VL INT8 ConvRot checkpoint.
+///
+/// This is derived without reading the published checkpoint: the 350 language
+/// projection matrices use one signed byte per parameter plus one F32 scale per
+/// output row; every other materialized tensor retains its BF16 source dtype.
+pub const H3_COMFY_INT8_CONVROT_PARAMETER_BYTES: u64 = 27_141_135_840;
+/// Public object size of Comfy's layer-50 Qwen3-VL INT8 ConvRot checkpoint,
+/// including its safetensors header.
+pub const H3_COMFY_INT8_CONVROT_SAFETENSORS_BYTES: u64 = 27_141_342_152;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct H3ConditionerConfig {
