@@ -171,6 +171,8 @@ pub struct LatentPreviewer {
     /// video axis, …).
     to_spatial: UnpackFn,
     last_emit: Mutex<Option<Instant>>,
+    /// [`MIN_INTERVAL`] in production; tests shrink it to observe every step.
+    min_interval: Duration,
     enabled: bool,
 }
 
@@ -192,6 +194,7 @@ impl LatentPreviewer {
                     .map_err(Into::into)
             }),
             last_emit: Mutex::new(None),
+            min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
     }
@@ -205,6 +208,7 @@ impl LatentPreviewer {
                 crate::flux2::sampling::unpack(t, height, width).map_err(Into::into)
             }),
             last_emit: Mutex::new(None),
+            min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
     }
@@ -223,6 +227,7 @@ impl LatentPreviewer {
                 }
             }),
             last_emit: Mutex::new(None),
+            min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
     }
@@ -253,6 +258,7 @@ impl LatentPreviewer {
                 }
             }),
             last_emit: Mutex::new(None),
+            min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         })
     }
@@ -264,6 +270,14 @@ impl LatentPreviewer {
         self
     }
 
+    /// Test-only: override the throttle so a fast CPU loop still emits every
+    /// step — the intermediate steps are where preview math can go wrong.
+    #[cfg(test)]
+    pub(crate) fn with_min_interval(mut self, interval: Duration) -> Self {
+        self.min_interval = interval;
+        self
+    }
+
     /// True when the next `maybe_emit` for this step would render — lets
     /// callers skip building the x₀-estimate tensor for throttled steps.
     pub fn due(&self, step: usize, total: usize) -> bool {
@@ -271,7 +285,7 @@ impl LatentPreviewer {
             return false;
         }
         let last = self.last_emit.lock().expect("preview throttle mutex");
-        step >= total || last.is_none_or(|t| t.elapsed() >= MIN_INTERVAL)
+        step >= total || last.is_none_or(|t| t.elapsed() >= self.min_interval)
     }
 
     /// Emit a preview if due. Never fails the generation: conversion or
@@ -361,6 +375,7 @@ mod tests {
             bias: FLUX1_BIAS,
             to_spatial: Box::new(|t| Ok(t.clone())),
             last_emit: Mutex::new(None),
+            min_interval: MIN_INTERVAL,
             enabled: true,
         }
     }

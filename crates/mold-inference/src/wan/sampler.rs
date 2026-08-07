@@ -277,6 +277,18 @@ impl FlowUniPc {
         self.this_order
     }
 
+    /// The x0 prediction the most recent `step` converted and stored:
+    /// `sample - sigma[step_index] * v` from the *pre-step, uncorrected*
+    /// sample (`convert_model_output`, the same value the corrector anchors
+    /// on). This is what live previews must project — once the corrector has
+    /// rewritten the sample the predictor steps from, the naive post-step
+    /// identity `x_next - sigma_next * v` no longer recovers this x0.
+    /// `None` before the first `step`. Always F32; borrows the multistep
+    /// history slot, so reading it costs nothing.
+    pub fn last_x0(&self) -> Option<&Tensor> {
+        self.model_outputs.last().and_then(|slot| slot.as_ref())
+    }
+
     /// `model_outputs[-(back + 1)]`.
     fn model_output(&self, back: usize) -> Result<&Tensor> {
         let len = self.model_outputs.len();
@@ -1060,5 +1072,67 @@ mod tests {
             assert!((g - want).abs() < 1e-6, "got {g}, want {want}");
         }
         assert_eq!(solver.last_order_used(), 1);
+    }
+
+    /// `last_x0` must hand back the x0 the solver itself converted — from the
+    /// *pre-step, uncorrected* sample at `sigma[index]` — and on the corrector
+    /// steps that must NOT equal the naive post-step identity
+    /// `x_next - sigma_next * v` (#791 preview fix). Two steps coincide by
+    /// construction and are excluded from the divergence check: the order-1
+    /// first step (the exponential-integrator update cancels back to exactly
+    /// the linear identity) and the terminal step (`sigma_next = 0` and the
+    /// final order-1 predictor returns m0 itself).
+    #[test]
+    fn last_x0_is_the_pre_step_conversion_not_the_post_step_identity() {
+        let schedule = schedule(4, 8.0);
+        let mut solver = FlowUniPc::new(schedule.clone());
+        assert!(
+            solver.last_x0().is_none(),
+            "no x0 exists before the first step"
+        );
+
+        let mut x = tensor(&[0.8, -0.4, 1.2, 0.3]);
+        for index in 0..schedule.steps() {
+            // A nonlinear velocity field, v = 0.6 x^2 - 0.4 x + 0.2: the
+            // corrector's adjustment scales with how much successive x0
+            // estimates move, so a near-linear field would make the
+            // divergence below vanish into the tolerance.
+            let v = x
+                .sqr()
+                .unwrap()
+                .affine(0.6, 0.2)
+                .unwrap()
+                .sub(&x.affine(0.4, 0.0).unwrap())
+                .unwrap();
+            let x_pre = x.clone();
+            x = solver.step(&v, index, &x).unwrap();
+
+            let sigma = schedule.sigmas[index];
+            let expected = values(&x_pre.sub(&v.affine(sigma, 0.0).unwrap()).unwrap());
+            let got = values(solver.last_x0().expect("step records an x0"));
+            for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+                assert!(
+                    (g - e).abs() < 1e-6,
+                    "step {index} element {i}: got {g}, want {e}"
+                );
+            }
+
+            if index >= 1 && index + 1 < schedule.steps() {
+                let naive = values(
+                    &x.sub(&v.affine(schedule.sigmas[index + 1], 0.0).unwrap())
+                        .unwrap(),
+                );
+                let max_diff = got
+                    .iter()
+                    .zip(&naive)
+                    .map(|(g, n)| (g - n).abs())
+                    .fold(0f32, f32::max);
+                assert!(
+                    max_diff > 1e-4,
+                    "step {index}: the corrected trajectory should break the naive \
+                     identity, max diff {max_diff}"
+                );
+            }
+        }
     }
 }
