@@ -65,6 +65,27 @@ describe("source resolution", () => {
     expect(result.output.height % 32).toBe(0);
   });
 
+  it("snaps sources onto a host-advertised 32 px grid the family fallback would miss", () => {
+    // wan22-ti2v-5b: the family-wide fallback is 16, but the host advertises
+    // dimension_alignment: 32 for this model (its 2.2 VAE's real grid). A
+    // 1280x720 source is %16-but-not-%32 and must land on the /32 grid the
+    // server admits instead of a canvas it rejects.
+    const result = resolveSourceResolution(
+      { width: 1280, height: 720 },
+      {
+        family: "wan",
+        max_pixels: 1_800_000,
+        dimension_alignment: 32,
+      },
+    );
+
+    expect(result.alignment).toBe(32);
+    expect(result.output).toEqual({ width: 1280, height: 704 });
+    expect(result.output.width % 32).toBe(0);
+    expect(result.output.height % 32).toBe(0);
+    expect(result.fitsModel).toBe(true);
+  });
+
   it("uses the video-family alignment before a live model contract arrives", () => {
     const result = resolveSourceResolution(
       { width: 1215, height: 703 },

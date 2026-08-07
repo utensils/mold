@@ -536,6 +536,22 @@ pub fn dimension_alignment_for_family(family: Option<&str>) -> u32 {
     }
 }
 
+/// Model-aware counterpart to [`dimension_alignment_for_family`].
+///
+/// Most families have one grid, but Wan's is per checkpoint:
+/// `wan22-ti2v-5b`'s 2.2 VAE compresses 16x spatially and its DiT patches the
+/// latent 2x2, putting it on a 32 px grid while the 2.1-VAE checkpoints keep
+/// the family's 16 (see [`wan_dimension_alignment`]). `family_hint` mirrors
+/// [`validate_generate_request_with_family`]: pass the catalog-resolved family
+/// for `cv:` / `hf:` ids; manifest models resolve without it.
+pub fn dimension_alignment_for_model(model: &str, family_hint: Option<&str>) -> u32 {
+    let family = resolved_family(model, family_hint);
+    if family == Some("wan") {
+        return wan_dimension_alignment(model);
+    }
+    dimension_alignment_for_family(family)
+}
+
 /// Validate explicit generation dimensions without rewriting them.
 ///
 /// This is the shared admission boundary for one-shot and chain requests.
@@ -567,11 +583,49 @@ pub fn validate_generation_dimensions_composed(
     family: Option<&str>,
     composition: Ltx2SpatialComposition,
 ) -> Result<(), String> {
+    validate_generation_dimensions_with_alignment(
+        width,
+        height,
+        family,
+        composition,
+        dimension_alignment_for_family(family),
+    )
+}
+
+/// Model-aware sibling of [`validate_generation_dimensions_composed`].
+///
+/// Same contract, but the pixel grid comes from
+/// [`dimension_alignment_for_model`], so a per-checkpoint grid — currently
+/// `wan22-ti2v-5b`'s 32 — is enforced at admission instead of after the model
+/// has loaded. Callers that cannot name a model keep the family-only
+/// validator, whose answer is deliberately unchanged.
+pub fn validate_generation_dimensions_for_model(
+    model: &str,
+    width: u32,
+    height: u32,
+    family: Option<&str>,
+    composition: Ltx2SpatialComposition,
+) -> Result<(), String> {
+    validate_generation_dimensions_with_alignment(
+        width,
+        height,
+        family,
+        composition,
+        dimension_alignment_for_model(model, family),
+    )
+}
+
+fn validate_generation_dimensions_with_alignment(
+    width: u32,
+    height: u32,
+    family: Option<&str>,
+    composition: Ltx2SpatialComposition,
+    alignment: u32,
+) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err("width and height must be > 0".to_string());
     }
 
-    let alignment = dimension_alignment_for_family(family);
     if !width.is_multiple_of(alignment) || !height.is_multiple_of(alignment) {
         let family_label = family
             .filter(|value| !value.is_empty())
@@ -878,10 +932,16 @@ pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
 /// shrink a canvas the validator would have accepted, and could land off the
 /// /32 grid it requires — a silent downgrade followed by a rejection.
 pub fn clamp_to_family_pixel_limit(w: u32, h: u32, family: Option<&str>) -> (u32, u32) {
-    let limit = max_pixels_for_family(family);
-    let align = dimension_alignment_for_family(family);
-    let axis_limit = max_axis_pixels_for_family(family);
+    clamp_dims_to(
+        w,
+        h,
+        max_pixels_for_family(family),
+        dimension_alignment_for_family(family),
+        max_axis_pixels_for_family(family),
+    )
+}
 
+fn clamp_dims_to(w: u32, h: u32, limit: u64, align: u32, axis_limit: Option<u32>) -> (u32, u32) {
     let pixels = w as u64 * h as u64;
     let within_axis = axis_limit.is_none_or(|axis| w.max(h) <= axis);
     if pixels <= limit && within_axis {
@@ -920,7 +980,28 @@ pub fn clamp_to_family_pixel_limit(w: u32, h: u32, family: Option<&str>) -> (u32
 ///   scale while keeping the other axis within bounds.
 ///
 /// Output is rounded to 16px alignment and clamped to the megapixel limit.
+///
+/// This is the family-only compatibility path: 16 is the shared generation
+/// grid, but not every checkpoint's. Callers that know the model (or its
+/// advertised `dimension_alignment`) should use
+/// [`fit_to_model_dimensions_aligned`] with
+/// [`dimension_alignment_for_model`]'s answer so a 32-grid checkpoint like
+/// `wan22-ti2v-5b` receives a canvas its VAE can encode.
 pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u32) -> (u32, u32) {
+    fit_to_model_dimensions_aligned(src_w, src_h, model_w, model_h, 16)
+}
+
+/// Alignment-aware counterpart to [`fit_to_model_dimensions`]: identical
+/// aspect-preserving fit, but both axes are floored to the caller-supplied
+/// grid — the resolved model's alignment, not the family-wide 16.
+pub fn fit_to_model_dimensions_aligned(
+    src_w: u32,
+    src_h: u32,
+    model_w: u32,
+    model_h: u32,
+    align: u32,
+) -> (u32, u32) {
+    let align = align.max(1);
     let src_ratio = src_w as f64 / src_h as f64;
     let model_ratio = model_w as f64 / model_h as f64;
 
@@ -932,9 +1013,9 @@ pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u3
         (model_h as f64 * src_ratio, model_h as f64)
     };
 
-    let w = ((w as u32) / 16 * 16).max(16);
-    let h = ((h as u32) / 16 * 16).max(16);
-    clamp_to_megapixel_limit(w, h)
+    let w = ((w as u32) / align * align).max(align);
+    let h = ((h as u32) / align * align).max(align);
+    clamp_dims_to(w, h, MAX_PIXELS, align, None)
 }
 
 /// Resize dimensions toward a target pixel area while preserving aspect ratio.
@@ -1387,7 +1468,13 @@ fn validate_generate_request_after_activation(
     } else {
         Ltx2SpatialComposition::SinglePass
     };
-    validate_generation_dimensions_composed(req.width, req.height, family, composition)?;
+    validate_generation_dimensions_for_model(
+        &req.model,
+        req.width,
+        req.height,
+        family,
+        composition,
+    )?;
     validate_family_video_timing_constraints(req.frames, req.fps, family)?;
     if composition == Ltx2SpatialComposition::TiledTwoStage {
         // The composed ceiling above is the x2 rung's. A request that names a
@@ -2180,6 +2267,25 @@ pub fn wan_recommended_dimensions(model: &str) -> &'static [(u32, u32)] {
         return &[(1280, 704), (704, 1280)];
     }
     recommended_dimensions("wan")
+}
+
+/// Per-checkpoint dimension grid for the Wan family.
+///
+/// `wan22-ti2v-5b`'s 2.2 VAE compresses 16x spatially and its DiT patches the
+/// latent 2x2, so its pixel grid is 32 — the engine enforces exactly this
+/// product after loading (`wan/pipeline.rs`), and admission must agree so an
+/// off-grid canvas never queues a 10 GB load it cannot survive. The 2.1-VAE
+/// checkpoints (1.3B, A14B: 8x stride x 2x2 patch) keep the family's 16.
+/// Mirrors [`wan_recommended_dimensions`]: variant tags and legacy dash names
+/// resolve through the manifest first, and unknown `cv:`/`hf:` installs keep
+/// the family fallback — deriving the grid from a sidecar-described VAE
+/// component is deliberately follow-up work.
+pub fn wan_dimension_alignment(model: &str) -> u32 {
+    let canonical = crate::manifest::resolve_model_name(model);
+    if canonical.starts_with("wan22-ti2v-5b") {
+        return 32;
+    }
+    dimension_alignment_for_family(Some("wan"))
 }
 
 /// Return the list of recommended (width, height) pairs for a model family.
@@ -4348,8 +4454,118 @@ mod tests {
                     validate_generation_dimensions(*w, *h, Some("wan")).is_ok(),
                     "{model}: advertised {w}x{h} must pass the validator"
                 );
+                assert!(
+                    validate_generation_dimensions_for_model(
+                        model,
+                        *w,
+                        *h,
+                        Some("wan"),
+                        Ltx2SpatialComposition::SinglePass,
+                    )
+                    .is_ok(),
+                    "{model}: advertised {w}x{h} must pass its own model-aware validator"
+                );
             }
         }
+    }
+
+    /// The grid is per checkpoint too: `wan22-ti2v-5b`'s 2.2 VAE compresses
+    /// 16x spatially and its DiT patches the latent 2x2, so its pixel grid is
+    /// 32 while the 2.1-VAE checkpoints keep the family's 16.
+    #[test]
+    fn wan_dimension_alignment_is_per_checkpoint() {
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b"), 32);
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b:fp16"), 32);
+        // Variant tags and the legacy dash form must match like
+        // `wan_recommended_dimensions` — a `:q8` install of the same
+        // checkpoint has the same VAE.
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b:q8"), 32);
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b-fp16"), 32);
+        assert_eq!(wan_dimension_alignment("wan21-t2v-1.3b"), 16);
+        assert_eq!(wan_dimension_alignment("wan22-t2v-a14b:q5"), 16);
+        assert_eq!(wan_dimension_alignment("wan22-i2v-a14b:q8"), 16);
+        // Unknown catalog installs keep the family fallback; deriving the
+        // grid from a sidecar-described VAE is follow-up work.
+        assert_eq!(wan_dimension_alignment("cv:someone/some-wan-finetune"), 16);
+    }
+
+    #[test]
+    fn dimension_alignment_for_model_dispatches_wan_checkpoints() {
+        assert_eq!(
+            dimension_alignment_for_model("wan22-ti2v-5b", Some("wan")),
+            32
+        );
+        // Manifest models resolve their family without a hint.
+        assert_eq!(
+            dimension_alignment_for_model("wan22-ti2v-5b:fp16", None),
+            32
+        );
+        assert_eq!(
+            dimension_alignment_for_model("wan21-t2v-1.3b", Some("wan")),
+            16
+        );
+        assert_eq!(
+            dimension_alignment_for_model("cv:someone/some-wan-finetune", Some("wan")),
+            16
+        );
+        // Every other family keeps its family-wide answer.
+        assert_eq!(
+            dimension_alignment_for_model("ltx-2-19b-distilled:fp8", Some("ltx2")),
+            32
+        );
+        assert_eq!(
+            dimension_alignment_for_model("flux-dev:q4", Some("flux")),
+            16
+        );
+    }
+
+    /// 1280x720 is on the family's 16 px grid but off the 5B's 32 px grid.
+    /// Admission must reject it before a 10 GB model load, with the engine's
+    /// own number; the same canvas stays valid for the 2.1-VAE checkpoints.
+    #[test]
+    fn wan22_ti2v_5b_off_grid_dimensions_rejected_at_admission() {
+        let mut req = valid_req();
+        req.model = "wan22-ti2v-5b".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.width = 1280;
+        req.height = 720;
+        let err = validate_generate_request_with_family(&req, Some("wan")).unwrap_err();
+        assert!(err.contains("multiples of 32"), "got: {err}");
+
+        req.width = 704;
+        req.height = 1280;
+        validate_generate_request_with_family(&req, Some("wan"))
+            .expect("the 5B's native portrait bucket is on its 32px grid");
+
+        req.model = "wan21-t2v-1.3b".to_string();
+        req.width = 1280;
+        req.height = 720;
+        validate_generate_request_with_family(&req, Some("wan"))
+            .expect("the 2.1-VAE checkpoints keep the family's 16px grid");
+    }
+
+    #[test]
+    fn validate_generation_dimensions_for_model_uses_the_checkpoint_grid() {
+        let err = validate_generation_dimensions_for_model(
+            "wan22-ti2v-5b",
+            1280,
+            720,
+            Some("wan"),
+            Ltx2SpatialComposition::SinglePass,
+        )
+        .unwrap_err();
+        assert!(err.contains("multiples of 32"), "got: {err}");
+        validate_generation_dimensions_for_model(
+            "wan22-ti2v-5b",
+            1280,
+            704,
+            Some("wan"),
+            Ltx2SpatialComposition::SinglePass,
+        )
+        .expect("1280x704 sits on the 32px grid");
+        // The family-only validator deliberately keeps the compatible 16px
+        // answer for callers that cannot name a model.
+        assert!(validate_generation_dimensions(1280, 720, Some("wan")).is_ok());
     }
 
     #[test]
@@ -4990,6 +5206,22 @@ mod tests {
     fn fit_tiny_source_gets_model_native() {
         // 64x64 source -> 1024x1024 model
         assert_eq!(fit_to_model_dimensions(64, 64, 1024, 1024), (1024, 1024));
+    }
+
+    #[test]
+    fn fit_to_model_dimensions_aligned_rounds_to_the_models_grid() {
+        // 1617x1000 into the 5B's 1280x704 canvas is height-limited:
+        // h=704, w=704*1.617=1138.4 — which floors differently per grid.
+        assert_eq!(
+            fit_to_model_dimensions_aligned(1617, 1000, 1280, 704, 32),
+            (1120, 704)
+        );
+        assert_eq!(
+            fit_to_model_dimensions_aligned(1617, 1000, 1280, 704, 16),
+            (1136, 704)
+        );
+        // The family-only helper stays the /16 compatibility path.
+        assert_eq!(fit_to_model_dimensions(1617, 1000, 1280, 704), (1136, 704));
     }
 
     #[test]

@@ -759,7 +759,8 @@ impl ChainRequest {
         } else {
             crate::validation::Ltx2SpatialComposition::SinglePass
         };
-        crate::validation::validate_generation_dimensions_composed(
+        crate::validation::validate_generation_dimensions_for_model(
+            &self.model,
             self.width,
             self.height,
             family.as_deref(),

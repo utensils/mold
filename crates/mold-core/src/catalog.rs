@@ -45,9 +45,13 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
         .into_iter()
         .map(|(width, height)| RecommendedDimensions { width, height })
         .collect(),
-        dimension_alignment: Some(crate::validation::dimension_alignment_for_family(Some(
-            family,
-        ))),
+        // Per model, like the buckets above: `wan22-ti2v-5b`'s 2.2 VAE needs
+        // a 32px grid the rest of its family does not, and Studio source
+        // fitting floors to exactly this advertised value.
+        dimension_alignment: Some(crate::validation::dimension_alignment_for_model(
+            model,
+            Some(family),
+        )),
     }
 }
 
@@ -421,6 +425,43 @@ mod tests {
         );
         assert_eq!(flux.defaults.dimension_alignment, Some(16));
         assert!(!flux.defaults.recommended_dimensions.is_empty());
+    }
+
+    /// `/api/models` is the single source Studio surfaces read the grid from:
+    /// the 5B must advertise its 2.2 VAE's 32px grid while the 2.1-VAE
+    /// checkpoints keep the family's 16, and every advertised bucket must sit
+    /// on its own model's grid or source fitting floors to a canvas that
+    /// admission rejects.
+    #[test]
+    fn model_catalog_advertises_wan_alignment_per_checkpoint() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let alignment = |name: &str| {
+            catalog
+                .iter()
+                .find(|model| model.name == name)
+                .unwrap_or_else(|| panic!("{name} should be in the catalog"))
+                .defaults
+                .dimension_alignment
+        };
+        assert_eq!(alignment("wan22-ti2v-5b:fp16"), Some(32));
+        assert_eq!(alignment("wan21-t2v-1.3b:bf16"), Some(16));
+        assert_eq!(alignment("wan22-t2v-a14b:q8"), Some(16));
+
+        for model in catalog.iter().filter(|model| model.family == "wan") {
+            let align = model
+                .defaults
+                .dimension_alignment
+                .expect("wan rows always advertise a grid");
+            for size in &model.defaults.recommended_dimensions {
+                assert!(
+                    size.width % align == 0 && size.height % align == 0,
+                    "{}: advertised {}x{} is off its own {align}px grid",
+                    model.name,
+                    size.width,
+                    size.height,
+                );
+            }
+        }
     }
 
     #[test]
