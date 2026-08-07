@@ -6,6 +6,7 @@ import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled } from "@studio/api/devices";
@@ -252,6 +253,13 @@ const queueCapacity = computed(
 const modelsLoaded = computed(() => telemetry.value?.modelsLoaded ?? []);
 const installedModels = computed(() => hostModels.installedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
+const h3Host = computed(() => [
+  {
+    id: hostId.value,
+    label: host.value?.label ?? hostId.value,
+    capabilities: hosts.capabilities[hostId.value],
+  },
+]);
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const mutatingDeviceIds = ref(new Set<string>());
@@ -528,6 +536,8 @@ async function forget() {
         <p v-if="host.status === 'error'" class="mt-2 pl-7 text-caption text-stop">
           Unreachable — reconnect below or check the server.
         </p>
+
+        <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
 
         <!-- Two-column instrument layout (stacks below on narrow widths). -->
         <div class="mt-6 flex flex-col gap-5 lg:flex-row lg:items-start">

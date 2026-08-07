@@ -10,6 +10,7 @@ import type {
   GenerationReferenceMetadata,
 } from "@studio/lib/generationReferences";
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
+import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -92,6 +93,9 @@ export interface ServerCapabilities {
       authorization_url: string;
     }>;
   } | null;
+  /** Host-authored, presentation-only H3 inventory. Current servers omit it;
+   * model_access and runtime_available remain independent hard gates. */
+  minimax_h3?: MiniMaxH3Capability | null;
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected
    * request. */

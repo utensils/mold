@@ -13,6 +13,7 @@ import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import {
   modelDisplayName,
@@ -120,6 +121,13 @@ const address = computed(() => {
 
 const installed = computed(() => models.value.filter((m) => m.downloaded));
 const modelLabel = (name: string) => modelDisplayNameForId(name, models.value);
+const h3Host = computed(() => [
+  {
+    id: hostId.value,
+    label: hostName.value,
+    capabilities: caps.value,
+  },
+]);
 
 let sessionEpoch = 0;
 let queueRequestGeneration = 0;
@@ -251,10 +259,25 @@ async function reloadAll(
   signal?: AbortSignal,
 ) {
   await Promise.all([
+    reloadCapabilities(entry, epoch, signal),
     reloadQueue(entry, epoch, signal),
     reloadModels(entry, epoch, signal),
     reloadDownloads(entry, epoch, signal),
   ]);
+}
+
+async function reloadCapabilities(
+  entry = host.value,
+  epoch = sessionEpoch,
+  signal?: AbortSignal,
+) {
+  if (!entry) return;
+  try {
+    const next = await hostCapabilities(entry, signal);
+    if (isCurrentSession(entry, epoch)) caps.value = next;
+  } catch {
+    if (isCurrentSession(entry, epoch)) caps.value = null;
+  }
 }
 
 function toggleTarget() {
@@ -412,15 +435,6 @@ function startHostSession() {
   if (!entry) return;
   sessionAbort = new AbortController();
   const signal = sessionAbort.signal;
-  void hostCapabilities(entry, signal)
-    .then((nextCaps) => {
-      if (isCurrentSession(entry, epoch) && !signal.aborted) {
-        caps.value = nextCaps;
-      }
-    })
-    .catch(() => {
-      /* default controls-off */
-    });
   void reloadAll(entry, epoch, signal);
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
@@ -539,6 +553,8 @@ onBeforeUnmount(() => {
           Retry
         </button>
       </div>
+
+      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
 
       <div class="md-grid" :data-dimmed="offline ? 'true' : undefined">
         <CardSurface class="md-telemetry">

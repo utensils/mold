@@ -8,6 +8,7 @@ import {
   type QueuePlan,
 } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -108,6 +109,13 @@ const gpus = computed<GpuSnapshot[]>(() => {
 const ram = computed(() => snapshot.value?.system_ram ?? null);
 const cpu = computed(() => snapshot.value?.cpu ?? null);
 const disk = computed(() => status.value?.models_disk ?? null);
+const h3Host = computed(() => [
+  {
+    id: props.host.id,
+    label: props.host.name,
+    capabilities: deviceCapabilities.value,
+  },
+]);
 
 function stopLiveServices(): void {
   queueRequestGeneration += 1;
@@ -586,6 +594,8 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-if="status">
+      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
+
       <section class="mobile-detail-section" aria-labelledby="host-telemetry-title">
         <div class="mobile-section-head">
           <h2 id="host-telemetry-title">Telemetry</h2>

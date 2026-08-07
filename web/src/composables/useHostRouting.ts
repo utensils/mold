@@ -104,6 +104,9 @@ export interface HostRouting {
   /** True once this machine's `/api/models` has actually been read. Anything
    * else must never be described as missing a model — we haven't looked. */
   inventoryKnown: (hostId: string) => boolean;
+  /** Last successful capability snapshot per exact host. Presentation-only
+   * consumers must still fail closed when a host has no current entry. */
+  capabilitiesByHost: Ref<Record<string, ServerCapabilities>>;
   /** Resolve the concrete dispatch route for a model, or null if unreachable. */
   resolve: (model: string | null) => HostRoute | null;
   /** Resolve through each host's read-only authoritative scheduler preview. */
@@ -1027,6 +1030,7 @@ export function useHostRouting(): HostRouting {
     modelsSettled,
     modelOwnerIds: hostsForModel,
     inventoryKnown,
+    capabilitiesByHost,
     resolve,
     resolveFeasible,
     revalidateFeasible,

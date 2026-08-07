@@ -34,6 +34,7 @@ import {
   type CatalogSortOption,
 } from "../lib/catalogFilters";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import {
   planModelInstall,
@@ -51,7 +52,13 @@ import {
   modelDisplayNameForId,
 } from "../lib/models";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
-import type { CatalogEntry, DownloadJob, ModelComponentStatus, ModelEntry } from "../lib/api/types";
+import type {
+  CatalogEntry,
+  DownloadJob,
+  ModelComponentStatus,
+  ModelEntry,
+  ServerCapabilities,
+} from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import {
   useMobileDownloadsStore,
@@ -132,6 +139,7 @@ const error = ref("");
 const announcement = ref("");
 const announcementIsError = ref(false);
 const modelsByHost = ref<Record<string, ModelEntry[]>>({});
+const capabilitiesByHost = ref<Record<string, ServerCapabilities>>({});
 const mobileDownloads = useMobileDownloadsStore();
 
 const detailEntry = ref<MobileCatalogEntry | null>(null);
@@ -167,6 +175,14 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
 });
+
+const h3Hosts = computed(() =>
+  props.hosts.map((host) => ({
+    id: host.id,
+    label: host.name,
+    capabilities: capabilitiesByHost.value[host.id],
+  })),
+);
 
 /** The selected host remains usable while its latest reachability probe is pending. */
 const downloadHosts = computed(() =>
@@ -666,21 +682,32 @@ async function loadFamilies(): Promise<void> {
 async function refreshModels(): Promise<void> {
   const epoch = ++modelsEpoch;
   const next: Record<string, ModelEntry[]> = {};
+  const nextCapabilities: Record<string, ServerCapabilities> = {};
   await Promise.all(
     downloadHosts.value.map(async (host) => {
-      try {
-        const response = await apiFetchTo(mobileHostTarget(host), "/api/models");
-        const result = (await response.json()) as ModelEntry[];
-        if (epoch === modelsEpoch) {
-          next[host.id] = result;
-          recordFamilies(result.map((model) => model.family));
-        }
-      } catch {
-        // One unavailable host must not blank models from the other hosts.
+      const target = mobileHostTarget(host);
+      const [modelResult, capabilityResult] = await Promise.allSettled([
+        apiFetchTo(target, "/api/models").then(
+          (response) => response.json() as Promise<ModelEntry[]>,
+        ),
+        apiFetchTo(target, "/api/capabilities").then(
+          (response) => response.json() as Promise<ServerCapabilities>,
+        ),
+      ]);
+      if (epoch !== modelsEpoch) return;
+      if (modelResult.status === "fulfilled") {
+        next[host.id] = modelResult.value;
+        recordFamilies(modelResult.value.map((model) => model.family));
+      }
+      if (capabilityResult.status === "fulfilled") {
+        nextCapabilities[host.id] = capabilityResult.value;
       }
     }),
   );
-  if (epoch === modelsEpoch) modelsByHost.value = next;
+  if (epoch === modelsEpoch) {
+    modelsByHost.value = next;
+    capabilitiesByHost.value = nextCapabilities;
+  }
 }
 
 function handleDownloadEvent({
@@ -1190,6 +1217,8 @@ onBeforeUnmount(() => {
           </li>
         </ul>
       </section>
+
+      <MinimaxH3InventoryPanel :hosts="h3Hosts" />
 
       <div class="mobile-catalog-search-row">
         <input

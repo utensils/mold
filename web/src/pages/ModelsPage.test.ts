@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 import ModelsPage from "./ModelsPage.vue";
-import type { ModelInfoExtended } from "../types";
+import type { ModelInfoExtended, ServerCapabilities } from "../types";
 import type { RoutableHost } from "../lib/hostRouting";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import { addHost } from "../lib/hostRegistry";
@@ -50,9 +50,11 @@ vi.mock("vue-router", () => ({
 /* Multi-host install targeting; single-host by default so nothing changes. */
 const mockHosts = ref<RoutableHost[]>([]);
 const mockOwners = ref<Record<string, string[]>>({});
+const mockCapabilities = ref<Record<string, ServerCapabilities>>({});
 vi.mock("../composables/useHostRouting", () => ({
   useHostRouting: () => ({
     hosts: mockHosts,
+    capabilitiesByHost: mockCapabilities,
     modelOwnerIds: (name: string) => mockOwners.value[name] ?? [],
     inventoryKnown: () => true,
   }),
@@ -98,6 +100,7 @@ beforeEach(() => {
   routeQuery.value = {};
   mockHosts.value = [host("origin")];
   mockOwners.value = {};
+  mockCapabilities.value = {};
   useModelInstallTargets().cancel();
   mock = {
     tab: ref("installed"),
