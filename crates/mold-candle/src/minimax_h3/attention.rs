@@ -1429,6 +1429,46 @@ mod tests {
         assert!(max <= 1e-6, "dense max difference {max}");
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_keeps_only_the_bounded_synthetic_dense_path() -> candle::Result<()> {
+        let metal = Device::new_metal(0)?;
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::from_candle(&metal),
+            H3AttentionModelContract {
+                heads: 2,
+                head_dim: 8,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .unwrap();
+        let plan = authority
+            .freeze_execution(1, 3, 5)
+            .unwrap()
+            .packed_transformer;
+        let q = Tensor::zeros((1, 5, 2, 8), DType::F32, &metal)?;
+        let output = execute_h3_attention(&plan, &q, &q, &q).unwrap();
+        assert_eq!(output.dims4()?, (1, 5, 2, 8));
+        assert!(output.device().same_device(&metal));
+
+        let product_error = authority.freeze_execution(1, 3, 37_296).unwrap_err();
+        assert_eq!(
+            product_error.code,
+            H3AttentionErrorCode::DenseMathLimitExceeded
+        );
+        assert_eq!(
+            qualify_flash_attention_v2_with_availability(
+                H3AttentionDevice::Metal,
+                H3AttentionModelContract::released_bf16(),
+                true,
+            )
+            .unwrap_err()
+            .code,
+            H3AttentionErrorCode::UnqualifiedArchitecture
+        );
+        Ok(())
+    }
+
     #[cfg(feature = "flash-attn")]
     #[test]
     fn flash_bf16_cpu_reference_cuda_parity() -> candle::Result<()> {

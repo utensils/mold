@@ -22,7 +22,9 @@ flash-attn = ["dep:candle-flash-attn", "cuda"]
 candle = { package = "candle-core", version = "0.11" }
 candle-nn = "0.11"
 candle-transformers = "0.11"
-candle-flash-attn = { version = "0.11", optional = true }
+# The H3 runtime fingerprint qualifies this exact crates.io payload, not
+# an arbitrary semver-compatible 0.11.x implementation.
+candle-flash-attn = { version = "=0.11.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
