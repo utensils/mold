@@ -1045,9 +1045,12 @@ fn pillow_lanczos(x: f64) -> f64 {
 /// H3's pinned preprocessing authority uses `PIL.Image.Resampling.LANCZOS`.
 /// The `image` crate's similarly named Lanczos3 filter uses different edge and
 /// quantization rules, which changes the endpoint tensor before seed-42 VAE
-/// sampling. See Diffusers `before_encoder.py` lines 134-158 at
-/// `9c6a68c32b3b2a64db91800b624d33cec6e25ab8` and Pillow `Resample.c` lines
-/// 65-87, 183-284, 344-363, and 446-463.
+/// sampling. See Diffusers
+/// `src/diffusers/modular_pipelines/minimax_h3/before_encoder.py:134-158` at
+/// `9c6a68c32b3b2a64db91800b624d33cec6e25ab8` and Pillow 12.3.0
+/// (`bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d`)
+/// `src/libImaging/Resample.c:65-87,183-284,344-363,446-463`. The Pillow
+/// attribution and license are preserved in `THIRD_PARTY_NOTICES.md`.
 fn pillow_resample_coefficients(
     input: usize,
     output: usize,
