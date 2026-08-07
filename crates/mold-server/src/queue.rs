@@ -4111,6 +4111,114 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_h3_video_publishes_synchronized_sse_and_gallery_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut request = fake_request(mold_core::minimax_h3::FL2VA_COMFY);
+        request.width = 1344;
+        request.height = 768;
+        request.frames = Some(124);
+        request.fps = Some(24);
+        request.output_format = Some(OutputFormat::Mp4);
+        request.enable_audio = Some(true);
+
+        let video = mold_core::VideoData {
+            data: b"synthetic-h3-mp4-with-synchronized-audio".to_vec(),
+            format: OutputFormat::Mp4,
+            width: 1344,
+            height: 768,
+            frames: 124,
+            fps: 24,
+            pipeline: None,
+            thumbnail: b"synthetic-h3-thumbnail".to_vec(),
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_167),
+            audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+            audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: Some(video.clone()),
+            audio: None,
+            generation_time_ms: 12_345,
+            model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
+            seed_used: 42,
+            gpu: Some(0),
+        };
+        let mut metadata =
+            OutputMetadata::from_generate_request(&request, response.seed_used, None, "test");
+        metadata.apply_video_output(&video);
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let filename = save_video_to_dir(
+            tmp.path(),
+            &video.data,
+            &video.gif_preview,
+            video.format,
+            &request.model,
+            &metadata,
+            Some(response.generation_time_ms as i64),
+            Some(&db),
+            None,
+            &gallery_gate,
+        )
+        .expect("synthetic publication should allocate one gallery filename");
+        assert_eq!(
+            std::fs::read(tmp.path().join(&filename)).unwrap(),
+            video.data
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metadata.model, mold_core::minimax_h3::FL2VA_COMFY);
+        assert_eq!(rows[0].metadata.seed, 42);
+        assert_eq!(rows[0].metadata.frames, Some(124));
+        assert_eq!(rows[0].metadata.fps, Some(24));
+        assert_eq!(rows[0].metadata.enable_audio, Some(true));
+
+        let thumbnail = ImageData {
+            data: video.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: video.width,
+            height: video.height,
+            index: 0,
+        };
+        let message = build_sse_completion_message(
+            &response,
+            &thumbnail,
+            None,
+            Some(&metadata),
+            &SavedOutputNames {
+                output: Some(filename.clone()),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        );
+        let SseMessage::Complete(event) = message else {
+            panic!("saved synthetic H3 video must complete over SSE")
+        };
+        assert_eq!(event.filename.as_deref(), Some(filename.as_str()));
+        assert_eq!(event.model, mold_core::minimax_h3::FL2VA_COMFY);
+        assert_eq!(event.format, OutputFormat::Mp4);
+        assert_eq!(event.video_frames, Some(124));
+        assert_eq!(event.video_fps, Some(24));
+        assert!(event.video_has_audio);
+        assert_eq!(
+            event.video_audio_sample_rate,
+            Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
+        );
+        assert_eq!(
+            event.video_audio_channels,
+            Some(mold_core::minimax_h3::AUDIO_CHANNELS)
+        );
+        assert_eq!(event.metadata.as_ref().map(|value| value.seed), Some(42));
+        assert!(
+            event.image.is_empty(),
+            "metadata-only SSE must not duplicate MP4 bytes"
+        );
+    }
+
+    #[test]
     fn named_video_replay_keeps_one_gallery_file_and_row() {
         let tmp = TempDir::new().unwrap();
         let db = MetadataDb::open_in_memory().unwrap();

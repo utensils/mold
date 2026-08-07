@@ -1348,6 +1348,98 @@ pub(crate) fn plan_h3_admission(
     Ok(plan)
 }
 
+/// Fully synthetic/injected inputs for the ordinary generation admission
+/// bridge. The shipping bridge has no source for these facts: authorization,
+/// a runnable capability, exact landed artifact identities, and qualified
+/// header/runtime evidence must all land before a real source is registered.
+pub(crate) struct H3NormalAdmissionInputs {
+    pub(crate) task: H3FrozenTask,
+    pub(crate) shape: H3PreparedRequestShape,
+    pub(crate) artifacts: H3ArtifactInventory,
+    pub(crate) checkpoint: H3CheckpointMemoryFacts,
+    pub(crate) runtime: H3QualifiedRuntimeFacts,
+    pub(crate) devices: Vec<H3AdmissionDevice>,
+    pub(crate) host: H3HostMemory,
+    pub(crate) policy: H3AdmissionPolicy,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub(crate) enum H3NormalAdmissionError {
+    #[error("{0}")]
+    Activation(String),
+    #[error("MiniMax H3 public runnable capability remains disabled")]
+    RuntimeUnavailable,
+    #[error("{H3_REAL_ADMISSION_SOURCE_DISABLED}")]
+    RealSourceDisabled,
+    #[error(transparent)]
+    Admission(#[from] H3AdmissionError),
+}
+
+pub(crate) const H3_REAL_ADMISSION_SOURCE_DISABLED: &str =
+    "MiniMax H3 real artifact/header admission source is runtime-disabled pending authorization and exact artifact identities";
+
+fn plan_normal_h3_admission_with_gates<G, S>(
+    model: &str,
+    family: &str,
+    activation_gate: G,
+    runtime_available: bool,
+    source: S,
+) -> Result<H3FrozenExecutionPlan, H3NormalAdmissionError>
+where
+    G: FnOnce() -> Result<(), mold_core::ModelActivationError>,
+    S: FnOnce() -> Result<H3NormalAdmissionInputs, H3NormalAdmissionError>,
+{
+    activation_gate().map_err(|error| H3NormalAdmissionError::Activation(error.to_string()))?;
+    if !runtime_available {
+        return Err(H3NormalAdmissionError::RuntimeUnavailable);
+    }
+    let inputs = source()?;
+    if inputs.artifacts.model
+        != minimax_h3::capability_contract_for_model(model)
+            .map(|contract| contract.canonical_model)
+            .unwrap_or_default()
+        || !minimax_h3::is_family(family)
+    {
+        return Err(H3NormalAdmissionError::Admission(
+            H3AdmissionError::InvalidArtifactFacts(
+                "normal H3 admission source differs from the requested model family".to_string(),
+            ),
+        ));
+    }
+    Ok(plan_h3_admission(
+        inputs.task,
+        inputs.shape,
+        &inputs.artifacts,
+        &inputs.checkpoint,
+        Some(&inputs.runtime),
+        &inputs.devices,
+        inputs.host,
+        inputs.policy,
+    )?)
+}
+
+/// Ordinary placement entry point while H3 is disabled.
+///
+/// Ordering is load-bearing: the #831 gate runs first, then the public runtime
+/// registry, and only then may a source gather paths, headers, or runtime
+/// facts. Today the source is an unconditional error, so even a future legal
+/// decision cannot accidentally start artifact work without a separate loader
+/// registration and exact identities.
+pub(crate) fn reject_normal_h3_admission(model: &str, family: &str) -> H3NormalAdmissionError {
+    let result = plan_normal_h3_admission_with_gates(
+        model,
+        family,
+        || mold_core::require_model_activation(model, Some(family)),
+        minimax_h3::runnable_capability_contract_for_model(model).is_some()
+            && mold_inference::production_family_capability_for_family(family).is_some(),
+        || Err(H3NormalAdmissionError::RealSourceDisabled),
+    );
+    match result {
+        Err(error) => error,
+        Ok(_) => H3NormalAdmissionError::RealSourceDisabled,
+    }
+}
+
 /// Bind a fully admitted server plan into the inference factory without
 /// exposing paths or bytes and without activating an H3 loader.
 ///
@@ -1862,6 +1954,74 @@ mod tests {
 
     fn prepared(model: &str, frames: u32) -> (H3FrozenTask, H3PreparedRequestShape) {
         H3PreparedRequestShape::from_prepared_request(&request(model, frames), 128, 0).unwrap()
+    }
+
+    #[test]
+    fn normal_admission_never_reads_facts_before_activation_and_runtime_gates() {
+        let source_calls = std::cell::Cell::new(0_u8);
+        let error = plan_normal_h3_admission_with_gates(
+            minimax_h3::FL2VA_COMFY,
+            minimax_h3::FAMILY,
+            || Err(mold_core::ModelActivationError),
+            true,
+            || {
+                source_calls.set(source_calls.get() + 1);
+                Err(H3NormalAdmissionError::RealSourceDisabled)
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3NormalAdmissionError::Activation(_)));
+        assert_eq!(source_calls.get(), 0);
+
+        let error = plan_normal_h3_admission_with_gates(
+            minimax_h3::FL2VA_COMFY,
+            minimax_h3::FAMILY,
+            || Ok(()),
+            false,
+            || {
+                source_calls.set(source_calls.get() + 1);
+                Err(H3NormalAdmissionError::RealSourceDisabled)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, H3NormalAdmissionError::RuntimeUnavailable);
+        assert_eq!(source_calls.get(), 0);
+    }
+
+    #[test]
+    fn normal_admission_bridge_delegates_to_the_canonical_h3_planner() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let plan = plan_normal_h3_admission_with_gates(
+            minimax_h3::FL2VA_COMFY,
+            minimax_h3::FAMILY,
+            || Ok(()),
+            true,
+            || {
+                Ok(H3NormalAdmissionInputs {
+                    task,
+                    shape,
+                    artifacts: inventory,
+                    checkpoint,
+                    runtime,
+                    devices: vec![cuda(24 * GIB)],
+                    host: H3HostMemory {
+                        total_bytes: 96 * GIB,
+                        available_bytes: 96 * GIB,
+                    },
+                    policy: H3AdmissionPolicy::default(),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.canonical_model, minimax_h3::FL2VA_COMFY);
+        assert_eq!(plan.device_id, "gpu-0");
+        assert_eq!(plan.compute_capability, (8, 9));
+        assert_eq!(plan.execution_fingerprint.len(), 64);
+        plan.validate_execution_fingerprint().unwrap();
     }
 
     #[test]
