@@ -79,4 +79,12 @@ describe("prompt remix contract", () => {
       conditioningFingerprint({ source_image: "b" }),
     );
   });
+
+  it("treats ordered H3 reference reordering as stale conditioning", () => {
+    const first = { kind: "image", provenance: { sha256: "a" } };
+    const second = { kind: "audio", provenance: { sha256: "b" } };
+    expect(conditioningFingerprint({ references: [first, second] })).not.toBe(
+      conditioningFingerprint({ references: [second, first] }),
+    );
+  });
 });

@@ -188,6 +188,8 @@ pub enum ExpandTask {
     KeyframeInterpolation,
     /// Video motion synchronized to authoritative conditioning audio.
     AudioDrivenVideo,
+    /// Semantic audio-video resynthesis from ordered heterogeneous references.
+    ReferenceToAudioVideo,
     /// Audio-only generation from text.
     TextToAudio,
 }
@@ -205,6 +207,14 @@ impl ExpandTask {
     /// Resolve the narrow expansion policy from an admitted generation
     /// request. More authoritative conditioning wins over incidental media.
     pub fn for_generation(family: &str, req: &GenerateRequest) -> Self {
+        if crate::minimax_h3::is_family(family)
+            && req
+                .references
+                .as_ref()
+                .is_some_and(|references| !references.is_empty())
+        {
+            return Self::ReferenceToAudioVideo;
+        }
         Self::for_conditioning(
             family,
             req.pipeline,
@@ -300,6 +310,7 @@ impl std::fmt::Display for ExpandTask {
             Self::Retake => "retake",
             Self::KeyframeInterpolation => "keyframe-interpolation",
             Self::AudioDrivenVideo => "audio-driven-video",
+            Self::ReferenceToAudioVideo => "reference-to-audio-video",
             Self::TextToAudio => "text-to-audio",
         })
     }
@@ -317,11 +328,12 @@ impl std::str::FromStr for ExpandTask {
             "retake" => Ok(Self::Retake),
             "keyframe-interpolation" => Ok(Self::KeyframeInterpolation),
             "audio-driven-video" => Ok(Self::AudioDrivenVideo),
+            "reference-to-audio-video" => Ok(Self::ReferenceToAudioVideo),
             "text-to-audio" => Ok(Self::TextToAudio),
             _ => Err(format!(
                 "unknown expansion task '{value}'. Valid: text-to-image, text-to-video, \
                  image-to-video, video-to-video, retake, keyframe-interpolation, \
-                 audio-driven-video, text-to-audio"
+                 audio-driven-video, reference-to-audio-video, text-to-audio"
             )),
         }
     }
@@ -538,6 +550,265 @@ pub struct UpscaleResponse {
     pub original_height: u32,
 }
 
+/// One media authority for an ordered generation reference.
+///
+/// The tagged enum makes mixed or ambiguous authorities unrepresentable: a
+/// reference carries inline bytes, one request-scoped upload handle, or one
+/// server-local path. Server paths are resolved only against configured media
+/// roots; upload handles are resolved only inside the authenticated request
+/// that owns them. `Descriptor` is a payload-free placement-preview projection
+/// and is rejected by ordinary generation validation.
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "authority", rename_all = "snake_case")]
+pub enum GenerationReferenceAuthority {
+    Inline {
+        #[serde(with = "base64_required")]
+        #[schema(value_type = String, format = Byte)]
+        data: Vec<u8>,
+    },
+    Upload {
+        handle: String,
+    },
+    ServerPath {
+        path: String,
+    },
+    Descriptor,
+}
+
+impl std::fmt::Debug for GenerationReferenceAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inline { data } => formatter
+                .debug_struct("Inline")
+                .field("data", &format_args!("<redacted {} bytes>", data.len()))
+                .finish(),
+            Self::Upload { .. } => formatter
+                .debug_struct("Upload")
+                .field("handle", &"<redacted>")
+                .finish(),
+            Self::ServerPath { .. } => formatter
+                .debug_struct("ServerPath")
+                .field("path", &"<redacted>")
+                .finish(),
+            Self::Descriptor => formatter.write_str("Descriptor"),
+        }
+    }
+}
+
+/// Client provenance that is safe to retain after media resolution.
+///
+/// `name` is a display label, never a client filesystem path. A digest is
+/// optional for inline data because Mold computes it from the received bytes;
+/// upload handles and server paths require one before admission so recovery
+/// and placement can bind the intended content without persisting the secret
+/// handle or unrestricted path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationReferenceProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Ordered heterogeneous reference input for MiniMax H3 Ref2VA.
+///
+/// Variant-specific descriptors are required up front so placement preview
+/// can reason about row counts without decoding or logging media. The server
+/// later content-sniffs and probes the resolved payload and rejects any drift
+/// before freezing admission.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GenerationReference {
+    Image {
+        media: GenerationReferenceAuthority,
+        #[serde(default)]
+        provenance: GenerationReferenceProvenance,
+        mime_type: String,
+        width: u32,
+        height: u32,
+    },
+    Video {
+        media: GenerationReferenceAuthority,
+        #[serde(default)]
+        provenance: GenerationReferenceProvenance,
+        mime_type: String,
+        width: u32,
+        height: u32,
+        duration_ms: u64,
+        fps: f64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        has_audio: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_duration_ms: Option<u64>,
+    },
+    Audio {
+        media: GenerationReferenceAuthority,
+        #[serde(default)]
+        provenance: GenerationReferenceProvenance,
+        mime_type: String,
+        duration_ms: u64,
+        sample_rate: u32,
+        channels: u16,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationReferenceKind {
+    Image,
+    Video,
+    Audio,
+}
+
+/// Redacted, durable projection of one ordered reference. This is the only
+/// form stored in gallery metadata or emitted in completion events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationReferenceMetadata {
+    pub kind: GenerationReferenceKind,
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub sha256: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_audio: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u16>,
+}
+
+impl GenerationReference {
+    pub const fn kind(&self) -> GenerationReferenceKind {
+        match self {
+            Self::Image { .. } => GenerationReferenceKind::Image,
+            Self::Video { .. } => GenerationReferenceKind::Video,
+            Self::Audio { .. } => GenerationReferenceKind::Audio,
+        }
+    }
+
+    pub fn media(&self) -> &GenerationReferenceAuthority {
+        match self {
+            Self::Image { media, .. } | Self::Video { media, .. } | Self::Audio { media, .. } => {
+                media
+            }
+        }
+    }
+
+    pub fn provenance(&self) -> &GenerationReferenceProvenance {
+        match self {
+            Self::Image { provenance, .. }
+            | Self::Video { provenance, .. }
+            | Self::Audio { provenance, .. } => provenance,
+        }
+    }
+
+    pub fn content_sha256(&self) -> Option<String> {
+        match self.media() {
+            GenerationReferenceAuthority::Inline { data } => {
+                use sha2::{Digest, Sha256};
+                Some(format!("{:x}", Sha256::digest(data)))
+            }
+            GenerationReferenceAuthority::Upload { .. }
+            | GenerationReferenceAuthority::ServerPath { .. }
+            | GenerationReferenceAuthority::Descriptor => self
+                .provenance()
+                .sha256
+                .as_deref()
+                .map(str::to_ascii_lowercase),
+        }
+    }
+
+    pub fn redacted_metadata(&self, index: usize) -> Option<GenerationReferenceMetadata> {
+        let sha256 = self.content_sha256()?;
+        let index = u32::try_from(index).ok()?.checked_add(1)?;
+        let name = self
+            .provenance()
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        Some(match self {
+            Self::Image {
+                mime_type,
+                width,
+                height,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Image,
+                index,
+                name,
+                sha256,
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                sample_rate: None,
+                channels: None,
+            },
+            Self::Video {
+                mime_type,
+                width,
+                height,
+                duration_ms,
+                fps,
+                has_audio,
+                audio_duration_ms,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Video,
+                index,
+                name,
+                sha256,
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                duration_ms: Some(*duration_ms),
+                fps: Some(*fps),
+                has_audio: *has_audio,
+                audio_duration_ms: *audio_duration_ms,
+                sample_rate: None,
+                channels: None,
+            },
+            Self::Audio {
+                mime_type,
+                duration_ms,
+                sample_rate,
+                channels,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Audio,
+                index,
+                name,
+                sha256,
+                mime_type: mime_type.clone(),
+                width: None,
+                height: None,
+                duration_ms: Some(*duration_ms),
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                sample_rate: Some(*sample_rate),
+                channels: Some(*channels),
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
@@ -606,6 +877,10 @@ pub struct GenerateRequest {
         with = "base64_vec_opt"
     )]
     pub edit_images: Option<Vec<Vec<u8>>>,
+    /// Ordered heterogeneous MiniMax H3 Ref2VA inputs. Other families retain
+    /// their existing source/edit fields and must reject this additive field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<GenerationReference>>,
     /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise / txt2img).
     #[serde(default = "default_strength")]
     pub strength: f64,
@@ -1280,6 +1555,11 @@ pub struct OutputMetadata {
     /// or private filesystem paths in gallery metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_image_sha256s: Option<Vec<String>>,
+    /// Ordered, redacted H3 reference provenance. Contains only display-safe
+    /// labels, content digests, and probed media facts: never payload bytes,
+    /// upload handles, API keys, or server/client filesystem paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<GenerationReferenceMetadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1408,6 +1688,15 @@ impl OutputMetadata {
                         })
                         .collect()
                 })
+            }),
+            references: req.references.as_ref().and_then(|references| {
+                (!references.is_empty()).then(|| {
+                    references
+                        .iter()
+                        .enumerate()
+                        .map(|(index, reference)| reference.redacted_metadata(index))
+                        .collect::<Option<Vec<_>>>()
+                })?
             }),
             scheduler,
             output_format: req.output_format,
@@ -3446,6 +3735,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3641,6 +3931,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3703,6 +3994,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3762,6 +4054,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3836,6 +4129,7 @@ mod tests {
             source_image: Some(b"fake-png-bytes".to_vec()),
             source_image_name: Some("mold-flux-123-456.png".to_string()),
             edit_images: None,
+            references: None,
             strength: 0.6,
             mask_image: None,
             control_image: None,
@@ -3960,6 +4254,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -4019,6 +4314,7 @@ mod tests {
             source_image: Some(vec![1, 2, 3]),
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.5,
             mask_image: None,
             control_image: None,
@@ -4081,6 +4377,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -4693,6 +4990,7 @@ mod tests {
             source_image: Some(image_bytes.clone()),
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.5,
             mask_image: None,
             control_image: None,
@@ -4758,6 +5056,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: Some(vec![image_a.clone(), image_b.clone()]),
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -4836,6 +5135,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -4899,6 +5199,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: Some(control_bytes.clone()),
@@ -5025,6 +5326,7 @@ mod tests {
             source_image: Some(source_bytes),
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: Some(mask_bytes.clone()),
             control_image: None,

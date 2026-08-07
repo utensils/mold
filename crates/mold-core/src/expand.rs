@@ -128,7 +128,8 @@ pub fn resolve_remix_dimensions(
         | ExpandTask::VideoToVideo
         | ExpandTask::Retake
         | ExpandTask::KeyframeInterpolation
-        | ExpandTask::AudioDrivenVideo => &[RemixDimension::Movement],
+        | ExpandTask::AudioDrivenVideo
+        | ExpandTask::ReferenceToAudioVideo => &[RemixDimension::Movement],
         ExpandTask::TextToAudio => &[RemixDimension::Mood, RemixDimension::Movement],
     };
     let candidates = if requested.is_empty() {

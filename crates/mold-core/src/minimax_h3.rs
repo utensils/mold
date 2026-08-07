@@ -6,7 +6,10 @@
 //! engine work without weakening that gate or claiming that weights can run.
 
 use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest};
-use crate::{GenerateRequest, OutputFormat, MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL};
+use crate::{
+    GenerateRequest, GenerationReference, GenerationReferenceAuthority, OutputFormat,
+    MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL,
+};
 
 pub const FAMILY: &str = "minimax-h3";
 pub const FAMILY_ALIASES: &[&str] = &["minimax-h3", "minimax_h3", "minimaxh3"];
@@ -58,6 +61,21 @@ pub const NATIVE_BATCH_SIZES: &[u32] = &[1];
 pub const CONDITION_POSTERIOR_SEED: u64 = 42;
 pub const AUDIO_SAMPLE_RATE_HZ: u32 = 32_000;
 pub const AUDIO_CHANNELS: u32 = 2;
+pub const MAX_REFERENCE_IMAGES: usize = 9;
+pub const MAX_REFERENCE_VIDEOS: usize = 3;
+pub const MAX_REFERENCE_AUDIOS: usize = 3;
+pub const MAX_REFERENCE_FILES: usize = 12;
+pub const MIN_REFERENCE_DURATION_MS: u64 = 2_000;
+pub const MAX_REFERENCE_DURATION_MS: u64 = 15_000;
+pub const MAX_AGGREGATE_REFERENCE_VIDEO_MS: u64 = 15_000;
+pub const MAX_AGGREGATE_REFERENCE_AUDIO_MS: u64 = 15_000;
+/// Keep decoded inline reference data safely below the server's 64 MiB JSON
+/// body ceiling after base64 expansion and request overhead. Larger media must
+/// use the request-scoped upload or trusted-server-path authority.
+pub const MAX_INLINE_REFERENCE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_REFERENCE_UPLOAD_HANDLE_BYTES: usize = 256;
+pub const MAX_REFERENCE_PATH_BYTES: usize = 4096;
+pub const MAX_REFERENCE_NAME_BYTES: usize = 255;
 
 /// Seed-domain version. Changing stream names/order or seed derivation must
 /// mint a new version rather than silently changing seeded outputs.
@@ -375,6 +393,459 @@ pub struct ContractError {
     pub recommended_dimensions: Option<(u32, u32)>,
 }
 
+/// Structured one-based error for an ordered Ref2VA reference contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct ReferenceContractError {
+    pub code: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<&'static str>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ReferenceContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReferenceContractError {}
+
+fn reference_violation(
+    index: Option<usize>,
+    code: &'static str,
+    field: Option<&'static str>,
+    message: impl Into<String>,
+) -> ReferenceContractError {
+    let reference = index.and_then(|index| u32::try_from(index).ok()?.checked_add(1));
+    let detail = message.into();
+    let message = reference.map_or_else(
+        || detail.clone(),
+        |reference| format!("reference {reference}: {detail}"),
+    );
+    ReferenceContractError {
+        code,
+        reference,
+        field,
+        message,
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_reference_provenance(
+    index: usize,
+    reference: &GenerationReference,
+    placement_preview: bool,
+) -> Result<(), ReferenceContractError> {
+    let provenance = reference.provenance();
+    if let Some(name) = provenance.name.as_deref() {
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > MAX_REFERENCE_NAME_BYTES
+            || name == "."
+            || name == ".."
+            || name.contains(['/', '\\'])
+            || name.chars().any(char::is_control)
+        {
+            return Err(reference_violation(
+                Some(index),
+                "MINIMAX_H3_REFERENCE_NAME",
+                Some("provenance.name"),
+                "provenance name must be a display-only filename, not a path",
+            ));
+        }
+    }
+    if let Some(digest) = provenance.sha256.as_deref() {
+        if !valid_sha256(digest) {
+            return Err(reference_violation(
+                Some(index),
+                "MINIMAX_H3_REFERENCE_DIGEST",
+                Some("provenance.sha256"),
+                "sha256 must contain exactly 64 hexadecimal characters",
+            ));
+        }
+    }
+    match reference.media() {
+        GenerationReferenceAuthority::Descriptor => {
+            if !placement_preview {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY",
+                    Some("media.authority"),
+                    "descriptor authority is valid only for placement preview",
+                ));
+            }
+            if provenance.sha256.is_none() {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_DIGEST_REQUIRED",
+                    Some("provenance.sha256"),
+                    "placement descriptors require a content sha256",
+                ));
+            }
+        }
+        GenerationReferenceAuthority::Inline { data } => {
+            if placement_preview {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PREVIEW_MEDIA",
+                    Some("media.authority"),
+                    "placement preview accepts descriptors only, never raw reference media",
+                ));
+            }
+            if data.is_empty() {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_EMPTY",
+                    Some("media.data"),
+                    "inline media is empty",
+                ));
+            }
+            if let Some(declared) = provenance.sha256.as_deref() {
+                let observed = reference
+                    .content_sha256()
+                    .expect("inline reference always has a digest");
+                if !declared.eq_ignore_ascii_case(&observed) {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_DIGEST_MISMATCH",
+                        Some("provenance.sha256"),
+                        "declared sha256 does not match the inline media bytes",
+                    ));
+                }
+            }
+        }
+        GenerationReferenceAuthority::Upload { handle } => {
+            if placement_preview {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PREVIEW_MEDIA",
+                    Some("media.authority"),
+                    "placement preview accepts descriptors only, never upload handles",
+                ));
+            }
+            if handle.is_empty()
+                || handle.len() > MAX_REFERENCE_UPLOAD_HANDLE_BYTES
+                || !handle.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+                })
+            {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_UPLOAD_HANDLE",
+                    Some("media.handle"),
+                    "upload handle is malformed",
+                ));
+            }
+            if provenance.sha256.is_none() {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_DIGEST_REQUIRED",
+                    Some("provenance.sha256"),
+                    "upload references require a content sha256 before admission",
+                ));
+            }
+        }
+        GenerationReferenceAuthority::ServerPath { path } => {
+            if placement_preview {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PREVIEW_MEDIA",
+                    Some("media.authority"),
+                    "placement preview accepts descriptors only, never server paths",
+                ));
+            }
+            if path.trim().is_empty()
+                || path.len() > MAX_REFERENCE_PATH_BYTES
+                || path.contains('\0')
+            {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PATH",
+                    Some("media.path"),
+                    "server path is empty or malformed",
+                ));
+            }
+            if provenance.sha256.is_none() {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_DIGEST_REQUIRED",
+                    Some("provenance.sha256"),
+                    "server-path references require a content sha256 before admission",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_reference_duration(
+    index: usize,
+    field: &'static str,
+    duration_ms: u64,
+) -> Result<(), ReferenceContractError> {
+    if !(MIN_REFERENCE_DURATION_MS..=MAX_REFERENCE_DURATION_MS).contains(&duration_ms) {
+        return Err(reference_violation(
+            Some(index),
+            "MINIMAX_H3_REFERENCE_DURATION",
+            Some(field),
+            format!(
+                "{field} must be between {MIN_REFERENCE_DURATION_MS} and {MAX_REFERENCE_DURATION_MS} ms"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_duration_sum(
+    current: u64,
+    add: u64,
+    index: usize,
+    field: &'static str,
+) -> Result<u64, ReferenceContractError> {
+    current.checked_add(add).ok_or_else(|| {
+        reference_violation(
+            Some(index),
+            "MINIMAX_H3_REFERENCE_DURATION_OVERFLOW",
+            Some(field),
+            "aggregate duration overflowed",
+        )
+    })
+}
+
+/// Validate the complete, ordered Ref2VA reference list before media decode,
+/// model download, or queue mutation.
+pub fn validate_references(
+    references: &[GenerationReference],
+) -> Result<(), ReferenceContractError> {
+    validate_reference_set(references, false)
+}
+
+/// Validate the payload-free projection accepted by placement preview. Every
+/// entry must retain its content digest and planning descriptors, but any raw
+/// bytes, upload handle, or server-local path fails closed.
+pub fn validate_reference_descriptors(
+    references: &[GenerationReference],
+) -> Result<(), ReferenceContractError> {
+    validate_reference_set(references, true)
+}
+
+fn validate_reference_set(
+    references: &[GenerationReference],
+    placement_preview: bool,
+) -> Result<(), ReferenceContractError> {
+    if references.is_empty() {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_REQUIRED",
+            Some("references"),
+            "Ref2VA requires at least one image or video reference",
+        ));
+    }
+    if references.len() > MAX_REFERENCE_FILES {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_COUNT",
+            Some("references"),
+            format!("Ref2VA accepts at most {MAX_REFERENCE_FILES} total references"),
+        ));
+    }
+
+    let mut images = 0usize;
+    let mut videos = 0usize;
+    let mut audios = 0usize;
+    let mut inline_bytes = 0usize;
+    let mut video_duration_ms = 0u64;
+    let mut audio_duration_ms = 0u64;
+
+    for (index, reference) in references.iter().enumerate() {
+        validate_reference_provenance(index, reference, placement_preview)?;
+        if let GenerationReferenceAuthority::Inline { data } = reference.media() {
+            inline_bytes = inline_bytes.checked_add(data.len()).ok_or_else(|| {
+                reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_INLINE_BYTES",
+                    Some("media.data"),
+                    "aggregate inline media size overflowed",
+                )
+            })?;
+            if inline_bytes > MAX_INLINE_REFERENCE_BYTES {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_INLINE_BYTES",
+                    Some("media.data"),
+                    format!(
+                        "aggregate inline reference media exceeds {} MiB; use an upload handle or trusted server path",
+                        MAX_INLINE_REFERENCE_BYTES / (1024 * 1024)
+                    ),
+                ));
+            }
+        }
+
+        match reference {
+            GenerationReference::Image {
+                mime_type,
+                width,
+                height,
+                ..
+            } => {
+                images += 1;
+                if !mime_type.trim().to_ascii_lowercase().starts_with("image/") {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_MEDIA_TYPE",
+                        Some("mime_type"),
+                        "image reference must declare an image MIME type",
+                    ));
+                }
+                if *width == 0 || *height == 0 {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_DIMENSIONS",
+                        Some("width"),
+                        "image dimensions must be positive",
+                    ));
+                }
+            }
+            GenerationReference::Video {
+                mime_type,
+                width,
+                height,
+                duration_ms,
+                fps,
+                has_audio,
+                audio_duration_ms: soundtrack_duration,
+                ..
+            } => {
+                videos += 1;
+                if !mime_type.trim().to_ascii_lowercase().starts_with("video/") {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_MEDIA_TYPE",
+                        Some("mime_type"),
+                        "video reference must declare a video MIME type",
+                    ));
+                }
+                if *width == 0 || *height == 0 || !fps.is_finite() || *fps <= 0.0 {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_VIDEO_SHAPE",
+                        Some("fps"),
+                        "video dimensions and fps must be positive and finite",
+                    ));
+                }
+                validate_reference_duration(index, "duration_ms", *duration_ms)?;
+                video_duration_ms =
+                    checked_duration_sum(video_duration_ms, *duration_ms, index, "duration_ms")?;
+                match (*has_audio, *soundtrack_duration) {
+                    (true, Some(soundtrack_ms)) => {
+                        validate_reference_duration(index, "audio_duration_ms", soundtrack_ms)?;
+                        audio_duration_ms = checked_duration_sum(
+                            audio_duration_ms,
+                            soundtrack_ms,
+                            index,
+                            "audio_duration_ms",
+                        )?;
+                    }
+                    (true, None) => {
+                        return Err(reference_violation(
+                            Some(index),
+                            "MINIMAX_H3_REFERENCE_SOUNDTRACK_DURATION",
+                            Some("audio_duration_ms"),
+                            "video with audio must declare its soundtrack duration",
+                        ));
+                    }
+                    (false, Some(_)) => {
+                        return Err(reference_violation(
+                            Some(index),
+                            "MINIMAX_H3_REFERENCE_SOUNDTRACK_MISMATCH",
+                            Some("audio_duration_ms"),
+                            "audio_duration_ms is only valid when has_audio is true",
+                        ));
+                    }
+                    (false, None) => {}
+                }
+            }
+            GenerationReference::Audio {
+                mime_type,
+                duration_ms,
+                sample_rate,
+                channels,
+                ..
+            } => {
+                audios += 1;
+                if !mime_type.trim().to_ascii_lowercase().starts_with("audio/") {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_MEDIA_TYPE",
+                        Some("mime_type"),
+                        "audio reference must declare an audio MIME type",
+                    ));
+                }
+                validate_reference_duration(index, "duration_ms", *duration_ms)?;
+                if *sample_rate == 0 || *channels == 0 {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_AUDIO_SHAPE",
+                        Some("sample_rate"),
+                        "audio sample rate and channel count must be positive",
+                    ));
+                }
+                audio_duration_ms =
+                    checked_duration_sum(audio_duration_ms, *duration_ms, index, "duration_ms")?;
+            }
+        }
+    }
+
+    for (observed, maximum, kind) in [
+        (images, MAX_REFERENCE_IMAGES, "image"),
+        (videos, MAX_REFERENCE_VIDEOS, "video"),
+        (audios, MAX_REFERENCE_AUDIOS, "audio"),
+    ] {
+        if observed > maximum {
+            return Err(reference_violation(
+                None,
+                "MINIMAX_H3_REFERENCE_KIND_COUNT",
+                Some("references"),
+                format!("Ref2VA accepts at most {maximum} {kind} references; received {observed}"),
+            ));
+        }
+    }
+    if images + videos == 0 {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_AUDIO_ONLY",
+            Some("references"),
+            "Ref2VA audio references require at least one image or video reference",
+        ));
+    }
+    if video_duration_ms > MAX_AGGREGATE_REFERENCE_VIDEO_MS {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_VIDEO_DURATION_TOTAL",
+            Some("references"),
+            format!(
+                "aggregate reference video duration exceeds {MAX_AGGREGATE_REFERENCE_VIDEO_MS} ms"
+            ),
+        ));
+    }
+    if audio_duration_ms > MAX_AGGREGATE_REFERENCE_AUDIO_MS {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_AUDIO_DURATION_TOTAL",
+            Some("references"),
+            format!(
+                "aggregate reference audio duration exceeds {MAX_AGGREGATE_REFERENCE_AUDIO_MS} ms"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 impl std::fmt::Display for ContractError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -490,16 +961,35 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
             if req
                 .edit_images
                 .as_ref()
-                .is_none_or(|items| items.is_empty())
+                .is_some_and(|items| !items.is_empty())
             {
                 return Err(violation(
-                    "MINIMAX_H3_REFERENCE_REQUIRED",
-                    "Ref2VA requires at least one reference image",
+                    "MINIMAX_H3_ORDERED_REFERENCES_REQUIRED",
+                    "Ref2VA uses the ordered references contract; edit_images is not authoritative",
                 ));
+            }
+            let references = req.references.as_deref().ok_or_else(|| {
+                violation(
+                    "MINIMAX_H3_REFERENCE_REQUIRED",
+                    "Ref2VA requires at least one ordered reference",
+                )
+            })?;
+            if let Err(error) = validate_references(references) {
+                return Err(violation(error.code, error.message));
             }
             Ok(Mode::ReferenceToAudioVideo)
         }
         Task::Fl2va => {
+            if req
+                .references
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                return Err(violation(
+                    "MINIMAX_H3_TASK_MISMATCH",
+                    "FL2VA does not accept Ref2VA ordered references",
+                ));
+            }
             if req
                 .edit_images
                 .as_ref()
@@ -1273,6 +1763,56 @@ mod tests {
     use super::*;
     use crate::manifest::{find_manifest, storage_path};
 
+    fn inline(bytes: &[u8]) -> GenerationReferenceAuthority {
+        GenerationReferenceAuthority::Inline {
+            data: bytes.to_vec(),
+        }
+    }
+
+    fn image_reference(label: &str, byte: u8) -> GenerationReference {
+        GenerationReference::Image {
+            media: inline(&[byte; 8]),
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some(label.to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    fn video_reference(label: &str, byte: u8, duration_ms: u64) -> GenerationReference {
+        GenerationReference::Video {
+            media: inline(&[byte; 12]),
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some(label.to_string()),
+                sha256: None,
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 1920,
+            height: 1080,
+            duration_ms,
+            fps: 29.97,
+            has_audio: true,
+            audio_duration_ms: Some(duration_ms),
+        }
+    }
+
+    fn audio_reference(label: &str, byte: u8, duration_ms: u64) -> GenerationReference {
+        GenerationReference::Audio {
+            media: inline(&[byte; 10]),
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some(label.to_string()),
+                sha256: None,
+            },
+            mime_type: "audio/wav".to_string(),
+            duration_ms,
+            sample_rate: 48_000,
+            channels: 1,
+        }
+    }
+
     fn request() -> GenerateRequest {
         GenerateRequest {
             prompt: "a lighthouse in a storm".into(),
@@ -1291,6 +1831,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 1.0,
             mask_image: None,
             control_image: None,
@@ -1411,7 +1952,7 @@ mod tests {
                 .code,
             "MINIMAX_H3_REFERENCE_REQUIRED"
         );
-        req.edit_images = Some(vec![vec![1]]);
+        req.references = Some(vec![image_reference("anchor.png", 1)]);
         assert_eq!(
             validate_request_contract(&req, Task::Ref2va).unwrap(),
             Mode::ReferenceToAudioVideo
@@ -1422,6 +1963,216 @@ mod tests {
                 .unwrap_err()
                 .code,
             "MINIMAX_H3_SYNCHRONIZED_AUDIO_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn mixed_reference_order_round_trips_and_metadata_stays_redacted() {
+        let references = vec![
+            image_reference("  first.png  ", 11),
+            video_reference("middle.mp4", 22, 4_000),
+            audio_reference("last.wav", 33, 3_000),
+        ];
+        validate_references(&references).unwrap();
+
+        let wire = serde_json::to_value(&references).unwrap();
+        assert_eq!(wire[0]["kind"], "image");
+        assert_eq!(wire[1]["kind"], "video");
+        assert_eq!(wire[2]["kind"], "audio");
+        let parsed: Vec<GenerationReference> = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            parsed
+                .iter()
+                .map(GenerationReference::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::GenerationReferenceKind::Image,
+                crate::GenerationReferenceKind::Video,
+                crate::GenerationReferenceKind::Audio,
+            ]
+        );
+
+        let mut req = request();
+        req.model = REF2VA_COMFY.to_string();
+        req.references = Some(parsed);
+        assert_eq!(
+            crate::ExpandTask::for_generation(FAMILY, &req),
+            crate::ExpandTask::ReferenceToAudioVideo
+        );
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        let references = metadata.references.unwrap();
+        assert_eq!(references.len(), 3);
+        assert_eq!(references[0].index, 1);
+        assert_eq!(references[0].name.as_deref(), Some("first.png"));
+        assert_eq!(references[1].index, 2);
+        assert_eq!(references[1].name.as_deref(), Some("middle.mp4"));
+        assert!(references[1].has_audio);
+        assert_eq!(references[2].index, 3);
+        assert_eq!(references[2].name.as_deref(), Some("last.wav"));
+
+        let metadata_wire = serde_json::to_string(&references).unwrap();
+        assert!(!metadata_wire.contains("media"));
+        assert!(!metadata_wire.contains("authority"));
+        assert!(!metadata_wire.contains("handle"));
+        assert!(!metadata_wire.contains("path"));
+        assert!(!metadata_wire.contains("CwsLCwsL"));
+        assert!(references
+            .iter()
+            .all(|reference| reference.sha256.len() == 64));
+    }
+
+    #[test]
+    fn reference_debug_redacts_bytes_handles_and_paths() {
+        let cases = [
+            image_reference("inline.png", 99),
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Upload {
+                    handle: "secret-upload-handle".to_string(),
+                },
+                provenance: crate::GenerationReferenceProvenance {
+                    name: Some("upload.png".to_string()),
+                    sha256: Some("a".repeat(64)),
+                },
+                mime_type: "image/png".to_string(),
+                width: 1,
+                height: 1,
+            },
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::ServerPath {
+                    path: "/private/reference.png".to_string(),
+                },
+                provenance: crate::GenerationReferenceProvenance {
+                    name: Some("path.png".to_string()),
+                    sha256: Some("b".repeat(64)),
+                },
+                mime_type: "image/png".to_string(),
+                width: 1,
+                height: 1,
+            },
+        ];
+        let debug = format!("{cases:?}");
+        assert!(debug.contains("<redacted"));
+        assert!(!debug.contains("secret-upload-handle"));
+        assert!(!debug.contains("/private/reference.png"));
+        assert!(!debug.contains("99, 99"));
+    }
+
+    #[test]
+    fn reference_limits_cover_kind_counts_durations_and_audio_only_sets() {
+        let mut images = (0..=MAX_REFERENCE_IMAGES)
+            .map(|index| image_reference(&format!("image-{index}.png"), index as u8))
+            .collect::<Vec<_>>();
+        let error = validate_references(&images).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_KIND_COUNT");
+        images.pop();
+        validate_references(&images).unwrap();
+
+        let audio_only = vec![audio_reference("voice.wav", 1, 2_000)];
+        assert_eq!(
+            validate_references(&audio_only).unwrap_err().code,
+            "MINIMAX_H3_REFERENCE_AUDIO_ONLY"
+        );
+
+        let too_short = vec![video_reference("short.mp4", 1, 1_999)];
+        let error = validate_references(&too_short).unwrap_err();
+        assert_eq!(error.reference, Some(1));
+        assert_eq!(error.field, Some("duration_ms"));
+
+        let too_much_video = vec![
+            video_reference("one.mp4", 1, 8_000),
+            video_reference("two.mp4", 2, 8_000),
+        ];
+        assert_eq!(
+            validate_references(&too_much_video).unwrap_err().code,
+            "MINIMAX_H3_REFERENCE_VIDEO_DURATION_TOTAL"
+        );
+
+        let too_much_audio = vec![
+            image_reference("anchor.png", 1),
+            audio_reference("one.wav", 2, 8_000),
+            audio_reference("two.wav", 3, 8_000),
+        ];
+        assert_eq!(
+            validate_references(&too_much_audio).unwrap_err().code,
+            "MINIMAX_H3_REFERENCE_AUDIO_DURATION_TOTAL"
+        );
+    }
+
+    #[test]
+    fn reference_authorities_and_declared_identity_fail_closed() {
+        let bytes = [7u8; 8];
+        let mut bad_digest = image_reference("bad.png", 7);
+        if let GenerationReference::Image { provenance, .. } = &mut bad_digest {
+            provenance.sha256 = Some("0".repeat(64));
+        }
+        assert_eq!(
+            validate_references(&[bad_digest]).unwrap_err().code,
+            "MINIMAX_H3_REFERENCE_DIGEST_MISMATCH"
+        );
+
+        let path_without_digest = GenerationReference::Image {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/srv/mold-media/anchor.png".to_string(),
+            },
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("anchor.png".to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(
+            validate_references(&[path_without_digest])
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_DIGEST_REQUIRED"
+        );
+
+        let mut correct = image_reference("correct.png", 7);
+        if let GenerationReference::Image { provenance, .. } = &mut correct {
+            use sha2::{Digest, Sha256};
+            provenance.sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
+        }
+        validate_references(&[correct]).unwrap();
+
+        let descriptor = GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("preview.png".to_string()),
+                sha256: Some("A".repeat(64)),
+            },
+            mime_type: "image/png".to_string(),
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(
+            validate_references(&[descriptor.clone()]).unwrap_err().code,
+            "MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY"
+        );
+        validate_reference_descriptors(&[descriptor]).unwrap();
+        assert_eq!(
+            validate_reference_descriptors(&[image_reference("raw.png", 1)])
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_PREVIEW_MEDIA"
+        );
+    }
+
+    #[test]
+    fn reference_reordering_changes_serialized_authority() {
+        use sha2::{Digest, Sha256};
+        let first = image_reference("first.png", 1);
+        let second = image_reference("second.png", 2);
+        let digest = |references: &[GenerationReference]| {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(references).unwrap())
+            )
+        };
+        assert_ne!(
+            digest(&[first.clone(), second.clone()]),
+            digest(&[second, first])
         );
     }
 

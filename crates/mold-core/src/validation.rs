@@ -1368,6 +1368,13 @@ fn validate_generate_request_after_activation(
 ) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
 
+    if req.references.is_some() && !family.is_some_and(crate::minimax_h3::is_family) {
+        return Err(
+            "references is only supported by MiniMax H3 Ref2VA; other families retain their existing source/edit fields"
+                .to_string(),
+        );
+    }
+
     if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
         return Err("prompt must not be empty".to_string());
     }
@@ -2949,6 +2956,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3035,7 +3043,16 @@ mod tests {
     #[test]
     fn h3_post_activation_ref2va_accepts_image_references() {
         let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
-        req.edit_images = Some(vec![png_bytes(), jpeg_bytes()]);
+        req.references = Some(vec![crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Inline { data: png_bytes() },
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }]);
 
         assert!(
             validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)

@@ -1,4 +1,8 @@
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type {
+  GenerationReference,
+  GenerationReferenceMetadata,
+} from "@studio/lib/generationReferences";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   Ltx2GuidanceOverrides,
@@ -62,6 +66,8 @@ export interface OutputMetadata {
   source_image_sha256?: string | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
+  /** Redacted ordered H3 reference provenance (newer servers only). */
+  references?: GenerationReferenceMetadata[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
@@ -235,6 +241,8 @@ export interface GenerateRequestWire {
    * subsequent images are references. Mutually exclusive with
    * `source_image`. */
   edit_images?: string[] | null;
+  /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
+  references?: GenerationReference[] | null;
   strength?: number;
   mask_image?: string | null;
   control_image?: string | null;

@@ -708,6 +708,7 @@ fn build_request(
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
+        references: None,
         source_image,
         source_image_name,
         strength,
