@@ -548,7 +548,7 @@ fn is_regenerable_rotary_buffer(name: &str) -> bool {
     )
 }
 
-fn expected_materialized_keys() -> BTreeSet<String> {
+pub(super) fn expected_materialized_keys() -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     keys.insert("model.language_model.embed_tokens.weight".into());
     for layer in 0..H3_SELECTED_LANGUAGE_LAYERS {

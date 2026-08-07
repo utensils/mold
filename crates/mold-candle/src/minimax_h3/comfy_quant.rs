@@ -7,13 +7,18 @@
 //! supplied by the caller and do not discover, open, download, or register H3
 //! artifacts.
 //!
-//! Two representations intentionally remain distinct:
+//! Four representations/execution policies intentionally remain distinct:
 //!
 //! - The pruned DiT stores INT8 weights after a regular, normalized, 256-wide
 //!   ConvRot transform and carries one F32 scale per output row. A portable
 //!   forward rotates the activation in F32, streams output-row chunks, and
 //!   multiplies by the stored row scale without retaining a dense weight.
-//! - The Qwen3-VL conditioner stores high-nibble-first NVFP4 weights with
+//! - The pruned DiT's scaled FP8 matrices retain E4M3 weights plus scalar F32
+//!   weight/input scales. Their reference path preserves the source QDQ order
+//!   and accumulates against bounded, reconstructed F32 weight chunks.
+//! - The Qwen3-VL INT8 ConvRot variant reconstructs bounded weight chunks and
+//!   runs an ordinary floating-point matmul; it does not quantize activations.
+//! - The Qwen3-VL NVFP4 variant stores high-nibble-first weights with
 //!   swizzled FP8-E4M3 block scales, an F32 tensor scale, and an AWQ-style
 //!   `pre_quant_scale`. Comfy deliberately selects full-precision matrix
 //!   multiplication for text encoders, so the portable forward dequantizes
@@ -160,7 +165,160 @@ fn regular_hadamard(device: &Device) -> Result<Tensor> {
     )
 }
 
-/// CPU-backed INT8 ConvRot weight for the Comfy pruned H3 DiT.
+/// CPU-backed per-tensor FP8-E4M3 linear used by Comfy's scaled H3 DiT.
+///
+/// Both scales use the source convention, not its reciprocal:
+///
+/// ```text
+/// q(x) = fp8(clamp(x / input_scale, -448, 448))
+/// y = (f32(q(x)) * input_scale)
+///     @ (f32(weight) * weight_scale)^T + bias
+/// ```
+///
+/// The portable reference path deliberately executes the reconstructed
+/// multiplication in F32. It establishes the exact quantize/dequantize and
+/// scale ordering without claiming a qualified native FP8 kernel. Construction
+/// accepts only caller-supplied tensors and never discovers or reads an H3
+/// artifact.
+#[derive(Clone, Debug)]
+pub struct H3ComfyFp8ScaledLinear {
+    weight: Tensor,
+    weight_scale: f32,
+    input_scale: f32,
+    out_features: usize,
+    in_features: usize,
+}
+
+impl H3ComfyFp8ScaledLinear {
+    pub fn new(weight: Tensor, weight_scale: Tensor, input_scale: Tensor) -> Result<Self> {
+        if !weight.device().is_cpu()
+            || !weight_scale.device().is_cpu()
+            || !input_scale.device().is_cpu()
+        {
+            candle::bail!("MiniMax H3 portable scaled FP8 storage must remain on CPU")
+        }
+        if weight.dtype() != DType::F8E4M3 {
+            candle::bail!(
+                "MiniMax H3 scaled FP8 weight must use F8E4M3 storage, got {:?}",
+                weight.dtype()
+            )
+        }
+        let (out_features, in_features) = weight.dims2()?;
+        if out_features == 0 || in_features == 0 {
+            candle::bail!("MiniMax H3 scaled FP8 weight dimensions must be positive")
+        }
+        let scalar = |value: &Tensor, role: &str| -> Result<f32> {
+            if value.dtype() != DType::F32 || value.rank() != 0 {
+                candle::bail!(
+                    "MiniMax H3 scaled FP8 {role} must use an exact rank-0 F32 source tensor"
+                )
+            }
+            let value = value.to_scalar::<f32>()?;
+            if !value.is_finite() || value <= 0.0 {
+                candle::bail!("MiniMax H3 scaled FP8 {role} must be finite and positive")
+            }
+            Ok(value)
+        };
+        Ok(Self {
+            weight,
+            weight_scale: scalar(&weight_scale, "weight scale")?,
+            input_scale: scalar(&input_scale, "input scale")?,
+            out_features,
+            in_features,
+        })
+    }
+
+    pub const fn in_features(&self) -> usize {
+        self.in_features
+    }
+
+    pub const fn out_features(&self) -> usize {
+        self.out_features
+    }
+
+    pub const fn weight_scale(&self) -> f32 {
+        self.weight_scale
+    }
+
+    pub const fn input_scale(&self) -> f32 {
+        self.input_scale
+    }
+
+    /// Source-encoded weight and its two mandatory F32 scalar sidecars.
+    pub fn encoded_weight_bytes(&self) -> Result<usize> {
+        self.out_features
+            .checked_mul(self.in_features)
+            .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<f32>()))
+            .ok_or_else(|| candle::Error::Msg("MiniMax H3 scaled FP8 byte count overflows".into()))
+    }
+
+    /// Dense F32 device-weight bytes staged for one output-row chunk.
+    pub fn portable_weight_staging_bytes(&self, rows_per_chunk: usize) -> Result<usize> {
+        if rows_per_chunk == 0 {
+            candle::bail!("MiniMax H3 scaled FP8 row chunk must be positive")
+        }
+        rows_per_chunk
+            .min(self.out_features)
+            .checked_mul(self.in_features)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 scaled FP8 staging size overflows".into())
+            })
+    }
+
+    fn quantize_dequantize_input(&self, input: &Tensor) -> Result<Tensor> {
+        let input = input.to_dtype(DType::F32)?;
+        let scale = Tensor::new(self.input_scale, input.device())?;
+        input
+            .broadcast_div(&scale)?
+            .clamp(-448.0f32, 448.0f32)?
+            .to_dtype(DType::F8E4M3)?
+            .to_dtype(DType::F32)?
+            .broadcast_mul(&scale)
+    }
+
+    fn dequantize_rows(&self, start: usize, rows: usize, device: &Device) -> Result<Tensor> {
+        self.weight
+            .narrow(0, start, rows)?
+            .to_dtype(DType::F32)?
+            .affine(self.weight_scale as f64, 0.0)?
+            .to_device(device)
+    }
+
+    /// Execute the source-defined scaled FP8 reference operation with bounded
+    /// output-row weight staging and F32 accumulation.
+    pub fn forward_reference(
+        &self,
+        input: &Tensor,
+        bias: Option<&Tensor>,
+        output_dtype: DType,
+        rows_per_chunk: usize,
+    ) -> Result<Tensor> {
+        if rows_per_chunk == 0 {
+            candle::bail!("MiniMax H3 scaled FP8 row chunk must be positive")
+        }
+        let device = input.device();
+        let (flat, output_shape) = flattened_input(input, self.in_features)?;
+        let quantized_input = self.quantize_dequantize_input(&flat)?;
+        let mut chunks = Vec::new();
+        for start in (0..self.out_features).step_by(rows_per_chunk) {
+            let rows = rows_per_chunk.min(self.out_features - start);
+            let weight = self.dequantize_rows(start, rows, device)?;
+            chunks.push(quantized_input.matmul(&weight.t()?.contiguous()?)?);
+        }
+        finish_linear(
+            chunks,
+            bias,
+            output_dtype,
+            output_shape,
+            self.out_features,
+            device,
+        )
+    }
+}
+
+/// CPU-backed INT8 ConvRot weight for the Comfy pruned H3 DiT or Qwen
+/// conditioner.
 ///
 /// Candle does not expose a signed-I8 tensor dtype, so the checkpoint's exact
 /// two's-complement bytes are retained in a U8 tensor and widened explicitly
@@ -275,6 +433,36 @@ impl H3ComfyInt8ConvRotLinear {
         Tensor::from_vec(values, (rows, self.in_features), device)
     }
 
+    fn dequantize_rows(
+        &self,
+        start: usize,
+        rows: usize,
+        output_dtype: DType,
+        device: &Device,
+        hadamard: &Tensor,
+    ) -> Result<Tensor> {
+        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
+        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 INT8 grouped weight rows overflow".into())
+        })?;
+        let quantized = self.signed_rows(start, rows, device)?;
+        let scales = self
+            .weight_scale
+            .narrow(0, start, rows)?
+            .to_device(device)?
+            .reshape((rows, 1))?;
+        quantized
+            .broadcast_mul(&scales)?
+            // Candle 0.11 materializes the broadcasted RHS for
+            // `broadcast_matmul`. Flatten groups into the row dimension so the
+            // fixed 256x256 Hadamard stays singular and the bounded staging
+            // calculation remains authoritative.
+            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
+            .matmul(hadamard)?
+            .reshape((rows, self.in_features))?
+            .to_dtype(output_dtype)
+    }
+
     /// Reconstruct the dense weight in the original, unrotated basis.
     pub fn dequantize_weight(
         &self,
@@ -287,28 +475,62 @@ impl H3ComfyInt8ConvRotLinear {
             candle::bail!("MiniMax H3 INT8 row chunk must be positive")
         }
         let hadamard = regular_hadamard(device)?;
-        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
         let mut chunks = Vec::new();
         for start in (0..self.out_features).step_by(rows_per_chunk) {
             let rows = rows_per_chunk.min(self.out_features - start);
-            let quantized = self.signed_rows(start, rows, device)?;
-            let scales = self
-                .weight_scale
-                .narrow(0, start, rows)?
-                .to_device(device)?
-                .reshape((rows, 1))?;
-            let rotated = quantized.broadcast_mul(&scales)?.reshape((
-                rows,
-                groups,
-                H3_COMFY_CONVROT_GROUP_SIZE,
-            ))?;
-            chunks.push(
-                rotated
-                    .broadcast_matmul(&hadamard)?
-                    .reshape((rows, self.in_features))?,
-            );
+            chunks.push(self.dequantize_rows(start, rows, output_dtype, device, &hadamard)?);
         }
-        Tensor::cat(&chunks, 0)?.to_dtype(output_dtype)
+        Tensor::cat(&chunks, 0)
+    }
+
+    /// Comfy's Qwen INT8 layout is weight-only: each ConvRot row chunk is
+    /// reconstructed in the input dtype, then a normal floating-point linear
+    /// operation runs without dynamically quantizing the activation. This is
+    /// intentionally distinct from the DiT's optional fused W8A8 execution.
+    pub fn forward_weight_only(
+        &self,
+        input: &Tensor,
+        bias: Option<&Tensor>,
+        output_dtype: DType,
+        rows_per_chunk: usize,
+    ) -> Result<Tensor> {
+        ensure_output_dtype(output_dtype)?;
+        if rows_per_chunk == 0 {
+            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
+        }
+        let compute_dtype = input.dtype();
+        ensure_floating(compute_dtype, "Qwen INT8 weight-only compute")?;
+        let device = input.device();
+        let (flat, mut output_shape) = flattened_input(input, self.in_features)?;
+        let flat = flat.to_dtype(compute_dtype)?;
+        let hadamard = regular_hadamard(device)?;
+        let mut chunks = Vec::new();
+        for start in (0..self.out_features).step_by(rows_per_chunk) {
+            let rows = rows_per_chunk.min(self.out_features - start);
+            let weight = self.dequantize_rows(start, rows, compute_dtype, device, &hadamard)?;
+            chunks.push(flat.matmul(&weight.t()?.contiguous()?)?);
+        }
+        let mut output = Tensor::cat(&chunks, 1)?;
+        if let Some(bias) = bias {
+            ensure_floating(bias.dtype(), "Qwen INT8 weight-only bias")?;
+            if bias.dims() != [self.out_features] {
+                candle::bail!(
+                    "MiniMax H3 Qwen INT8 weight-only bias must have shape [{}], got {:?}",
+                    self.out_features,
+                    bias.dims()
+                )
+            }
+            output = output.broadcast_add(
+                &bias
+                    .to_device(device)?
+                    .to_dtype(compute_dtype)?
+                    .reshape((1, self.out_features))?,
+            )?;
+        }
+        *output_shape
+            .last_mut()
+            .expect("flattened_input established a nonempty shape") = self.out_features;
+        output.to_dtype(output_dtype)?.reshape(&*output_shape)
     }
 
     /// Portable low-memory forward equivalent to multiplying by the exact
@@ -328,11 +550,14 @@ impl H3ComfyInt8ConvRotLinear {
         let (flat, output_shape) = flattened_input(input, self.in_features)?;
         let rows = flat.dim(0)?;
         let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
+        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 INT8 grouped activation rows overflow".into())
+        })?;
         let hadamard = regular_hadamard(device)?;
         let rotated = flat
             .to_dtype(DType::F32)?
-            .reshape((rows, groups, H3_COMFY_CONVROT_GROUP_SIZE))?
-            .broadcast_matmul(&hadamard)?
+            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
+            .matmul(&hadamard)?
             .reshape((rows, self.in_features))?;
         let mut chunks = Vec::new();
         for start in (0..self.out_features).step_by(rows_per_chunk) {
@@ -698,6 +923,97 @@ mod tests {
         swizzled
     }
 
+    #[test]
+    fn scaled_fp8_reference_applies_exact_source_scale_order() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(
+            vec![1.0f32, 2.0, -1.0, 0.5, -2.0, 0.5, 1.0, 4.0],
+            (2, 4),
+            &device,
+        )?
+        .to_dtype(DType::F8E4M3)?;
+        let linear = H3ComfyFp8ScaledLinear::new(
+            weight,
+            Tensor::new(0.25f32, &device)?,
+            Tensor::new(0.5f32, &device)?,
+        )?;
+        let input = Tensor::from_vec(vec![0.5f32, 1.0, -0.5, 0.25], (1, 4), &device)?;
+        let bias = Tensor::from_vec(vec![0.125f32, -0.25], 2, &device)?;
+        let output = linear.forward_reference(&input, Some(&bias), DType::F32, 1)?;
+        assert_eq!(output.to_vec2::<f32>()?, vec![vec![0.90625, -0.25]]);
+        assert_eq!(linear.weight_scale(), 0.25);
+        assert_eq!(linear.input_scale(), 0.5);
+        assert_eq!(linear.encoded_weight_bytes()?, 16);
+        assert_eq!(linear.portable_weight_staging_bytes(1)?, 16);
+        Ok(())
+    }
+
+    #[test]
+    fn scaled_fp8_reference_clamps_before_cast_and_reapplies_input_scale() -> Result<()> {
+        let device = Device::Cpu;
+        let weight =
+            Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device)?.to_dtype(DType::F8E4M3)?;
+        let linear = H3ComfyFp8ScaledLinear::new(
+            weight,
+            Tensor::new(1.0f32, &device)?,
+            Tensor::new(0.5f32, &device)?,
+        )?;
+        let input = Tensor::from_vec(vec![250.0f32, -250.0], (1, 2), &device)?;
+        assert_eq!(
+            linear
+                .forward_reference(&input, None, DType::F32, 1)?
+                .to_vec2::<f32>()?,
+            vec![vec![224.0]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scaled_fp8_rejects_implicit_or_invalid_dtype_and_scale_contracts() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::ones((2, 4), DType::F32, &device)?.to_dtype(DType::F8E4M3)?;
+        let scalar = Tensor::new(0.5f32, &device)?;
+        let rank_one = Tensor::from_vec(vec![0.5f32], 1, &device)?;
+        assert!(
+            H3ComfyFp8ScaledLinear::new(weight.clone(), rank_one, scalar.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("rank-0 F32")
+        );
+        let zero = Tensor::new(0.0f32, &device)?;
+        assert!(
+            H3ComfyFp8ScaledLinear::new(weight.clone(), scalar.clone(), zero)
+                .unwrap_err()
+                .to_string()
+                .contains("finite and positive")
+        );
+        for invalid in [-1.0f32, f32::INFINITY, f32::NAN] {
+            assert!(H3ComfyFp8ScaledLinear::new(
+                weight.clone(),
+                scalar.clone(),
+                Tensor::new(invalid, &device)?,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("finite and positive"));
+        }
+        let half_scale = scalar.to_dtype(DType::F16)?;
+        assert!(H3ComfyFp8ScaledLinear::new(weight, half_scale, scalar)
+            .unwrap_err()
+            .to_string()
+            .contains("rank-0 F32"));
+        let dense = Tensor::ones((2, 4), DType::F32, &device)?;
+        assert!(H3ComfyFp8ScaledLinear::new(
+            dense,
+            Tensor::new(1.0f32, &device)?,
+            Tensor::new(1.0f32, &device)?,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("F8E4M3"));
+        Ok(())
+    }
+
     #[cfg(any(feature = "metal", feature = "cuda"))]
     fn synthetic_int8_forward(device: &Device) -> Result<Tensor> {
         let columns = H3_COMFY_CONVROT_GROUP_SIZE;
@@ -829,6 +1145,43 @@ mod tests {
         assert!(linear
             .forward_dequantized(&input, Some(&bias), DType::F32, 0)
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn qwen_int8_weight_only_forward_dequantizes_before_float_matmul() -> Result<()> {
+        let device = Device::Cpu;
+        let rows = 3;
+        let columns = H3_COMFY_CONVROT_GROUP_SIZE;
+        let quantized = (0..rows * columns)
+            .map(|index| (((index * 17 + 3) % 23) as i8 - 11) as u8)
+            .collect::<Vec<_>>();
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::from_vec(quantized, (rows, columns), &device)?,
+            Tensor::from_vec(vec![0.03125f32, 0.0625, 0.125], (rows, 1), &device)?,
+        )?;
+        let input = Tensor::from_vec(
+            (0..2 * columns)
+                .map(|index| (index as f32 % 19.0 - 9.0) / 16.0)
+                .collect(),
+            (1, 2, columns),
+            &device,
+        )?;
+        let bias = Tensor::from_vec(vec![0.125f32, -0.25, 0.5], rows, &device)?;
+        let actual = linear.forward_weight_only(&input, Some(&bias), DType::F32, 2)?;
+        let dense = linear.dequantize_weight(DType::F32, &device, 1)?;
+        let expected = input
+            .reshape((2, columns))?
+            .matmul(&dense.t()?.contiguous()?)?
+            .broadcast_add(&bias.reshape((1, rows))?)?
+            .reshape((1, 2, rows))?;
+        assert!(max_error(&actual, &expected)? <= 2e-5);
+
+        let mut perturbed = input.flatten_all()?.to_vec1::<f32>()?;
+        perturbed[0] += 1.0 / 65_536.0;
+        let perturbed = Tensor::from_vec(perturbed, (1, 2, columns), &device)?;
+        let changed = linear.forward_weight_only(&perturbed, Some(&bias), DType::F32, 2)?;
+        assert!(max_error(&actual, &changed)? > 0.0);
         Ok(())
     }
 

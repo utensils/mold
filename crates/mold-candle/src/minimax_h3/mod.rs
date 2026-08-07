@@ -14,6 +14,7 @@ mod loader;
 mod model;
 mod presentation;
 mod processor;
+mod qwen_quant;
 mod text;
 mod vision;
 mod visual_condition;
@@ -60,11 +61,12 @@ pub use comfy_dit::{
     H3_COMFY_ORG_SOURCE_REVISION,
 };
 pub use comfy_quant::{
-    H3ComfyInt8ConvRotLinear, H3ComfyNvfp4AwqLinear, H3_COMFY_CONVROT_GROUP_SIZE,
-    H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
+    H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear, H3ComfyNvfp4AwqLinear,
+    H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
+    H3_COMFY_INT8_CONVROT_PARAMETER_BYTES, H3_COMFY_INT8_CONVROT_SAFETENSORS_BYTES,
     H3_COMFY_SAFETENSORS_BYTES, H3_FULL_CHECKPOINT_BYTES, H3_FULL_LANGUAGE_LAYERS,
     H3_SELECTED_LANGUAGE_LAYERS,
 };
@@ -93,6 +95,13 @@ pub use presentation::{
 pub use processor::{
     create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
     GridThw, PackedVisionPatches, QwenMmTokenType, SampledVideo,
+};
+pub use qwen_quant::{
+    expected_h3_qwen_int8_weight_only_schema, validate_h3_qwen_int8_weight_only_schema,
+    H3QwenFp32Boundary, H3QwenInt8CheckpointMetadata, H3QwenInt8LayerMetadata,
+    H3QwenInt8MemoryAccounting, H3QwenInt8PolicyError, H3QwenInt8WeightOnlyPolicy,
+    H3QwenLinearExecution, H3QwenTensorDType, H3QwenTensorSpec,
+    H3_QWEN_INT8_QUANTIZED_LINEAR_COUNT, H3_QWEN_INT8_WEIGHT_ONLY_STABLE_ID,
 };
 pub use visual_condition::{
     ConditionEncodeMode, SignedRgbPixels, Uint8RgbPixels, UnitRgbPixels, H3_IMAGENET_MEAN,
