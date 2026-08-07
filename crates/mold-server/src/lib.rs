@@ -9,6 +9,8 @@ pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 mod gallery_authority;
+#[allow(dead_code)]
+mod h3_admission;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;
