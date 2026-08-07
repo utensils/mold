@@ -1713,6 +1713,8 @@ mod tests {
     #[test]
     fn flux2_size_selection_does_not_assume_device_count() {
         let mut paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/transformer"),
             transformer_shards: Vec::new(),
             vae: PathBuf::from("/tmp/vae"),
@@ -2040,6 +2042,8 @@ mod tests {
             expected.push(path);
         }
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.path().join("transformer.safetensors"),
             transformer_shards: Vec::new(),
             vae: root.path().join("vae.safetensors"),
@@ -2080,6 +2084,8 @@ mod tests {
         )
         .unwrap();
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.path().join("transformer.safetensors"),
             transformer_shards: Vec::new(),
             vae: root.path().join("vae.safetensors"),
@@ -2121,6 +2127,8 @@ mod tests {
         std::fs::write(&tokenizer, b"tokenizer").unwrap();
         std::fs::write(&weights, b"weights").unwrap();
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.path().join("transformer.safetensors"),
             transformer_shards: Vec::new(),
             vae: root.path().join("vae.safetensors"),

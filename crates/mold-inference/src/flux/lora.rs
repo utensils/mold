@@ -238,6 +238,31 @@ const LORA_UP_SUFFIXES: &[&str] = &[
 /// reference — so it's exhaustively unit-tested against the suffix
 /// matrix (Diffusers / Kohya / OneTrainer / PEFT default-adapter /
 /// Mochi edge case) without needing a synthetic safetensors fixture.
+/// Read a LoRA `.alpha` scalar whatever dtype the trainer stored it in.
+///
+/// kohya and diffusers write `F32`, but the Wan 2.2 Lightning LoRAs ship
+/// **`I64`** alphas (value 8 against rank 64, so the intended scale is
+/// `8/64 = 0.125`). The previous `tensor.to_scalar::<f32>()` fails on `I64`
+/// storage inside `cpu_storage_as_slice`, and the surrounding `if let Ok`
+/// swallowed the error — leaving `alpha: None`, which falls back to the
+/// caller's raw scale and applies such a LoRA **8x too strong, silently**.
+///
+/// Also tolerates the shape-`[1]` spelling some trainers emit alongside the
+/// canonical rank-0 scalar.
+pub(crate) fn read_alpha_scalar(tensor: &Tensor) -> Option<f64> {
+    let values = tensor
+        .to_dtype(DType::F64)
+        .ok()?
+        .flatten_all()
+        .ok()?
+        .to_vec1::<f64>()
+        .ok()?;
+    match values.as_slice() {
+        [value] if value.is_finite() => Some(*value),
+        _ => None,
+    }
+}
+
 pub(crate) fn classify_lora_key(key: &str) -> Option<(LoraDirection, &str)> {
     for suffix in LORA_DOWN_SUFFIXES {
         if let Some(stem) = key.strip_suffix(suffix) {
@@ -291,8 +316,8 @@ impl LoraAdapter {
                     }
                 }
             } else if let Some(layer) = name.strip_suffix(".alpha") {
-                if let Ok(val) = tensor.to_scalar::<f32>() {
-                    alpha_values.insert(layer.to_string(), val as f64);
+                if let Some(val) = read_alpha_scalar(tensor) {
+                    alpha_values.insert(layer.to_string(), val);
                 }
             }
         }
@@ -1562,6 +1587,79 @@ mod tests {
         assert_eq!(lora_layer.a.dims(), &[2, 4]);
         assert_eq!(lora_layer.b.dims(), &[6, 2]);
         assert_eq!(lora_layer.alpha, Some(16.0));
+    }
+
+    /// Regression: an `I64` alpha must be read, not silently dropped.
+    ///
+    /// The Wan 2.2 Lightning distills ship `.alpha` as `I64` (value 8 against
+    /// rank 64). `to_scalar::<f32>()` errors on `I64` storage, and the old
+    /// `if let Ok` swallowed it — the layer got `alpha: None`, the scale fell
+    /// back to the caller's raw value, and the adapter applied 8x too strong
+    /// with no diagnostic.
+    #[test]
+    fn load_reads_an_i64_alpha_rather_than_dropping_it() {
+        use safetensors::tensor::TensorView;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("i64_alpha.safetensors");
+        let layer = "lora_unet_double_blocks_0_img_attn_qkv";
+
+        let down_bytes: Vec<u8> = (0..2 * 4).flat_map(|i| (i as f32).to_le_bytes()).collect();
+        let up_bytes: Vec<u8> = (0..6 * 2).flat_map(|i| (i as f32).to_le_bytes()).collect();
+        // The shipped spelling: a rank-0 I64 scalar.
+        let alpha_bytes = 8i64.to_le_bytes().to_vec();
+
+        let entries: Vec<(String, TensorView)> = vec![
+            (
+                format!("{layer}.lora_down.weight"),
+                TensorView::new(safetensors::Dtype::F32, vec![2, 4], &down_bytes).unwrap(),
+            ),
+            (
+                format!("{layer}.lora_up.weight"),
+                TensorView::new(safetensors::Dtype::F32, vec![6, 2], &up_bytes).unwrap(),
+            ),
+            (
+                format!("{layer}.alpha"),
+                TensorView::new(safetensors::Dtype::I64, vec![], &alpha_bytes).unwrap(),
+            ),
+        ];
+        safetensors::serialize_to_file(entries, &None, &path).expect("write safetensors");
+
+        let adapter = LoraAdapter::load(&path).expect("I64-alpha safetensors must load");
+        let lora_layer = adapter.layers.get(layer).expect("layer present");
+        assert_eq!(
+            lora_layer.alpha,
+            Some(8.0),
+            "an I64 alpha must survive the read"
+        );
+        // Rank 2 with alpha 8 means an effective scale of 4x the user's, not 1x.
+        let specs = [LoraSpec {
+            adapter: &adapter,
+            scale: 1.0,
+            path_hash: 0,
+        }];
+        let (patches, _) = build_patches(&specs);
+        let patch = patches.values().next().expect("one patch").first().unwrap();
+        assert!((patch.effective_scale - 4.0).abs() < 1e-9);
+    }
+
+    /// `read_alpha_scalar` must accept every spelling trainers emit and reject
+    /// anything that is not one scalar.
+    #[test]
+    fn alpha_scalar_reads_are_dtype_and_shape_tolerant() {
+        let device = Device::Cpu;
+        for (label, tensor) in [
+            ("f32 rank-0", Tensor::new(16f32, &device).unwrap()),
+            ("f64 rank-0", Tensor::new(16f64, &device).unwrap()),
+            ("i64 rank-0", Tensor::new(16i64, &device).unwrap()),
+            ("u32 rank-0", Tensor::new(16u32, &device).unwrap()),
+            ("f32 shape [1]", Tensor::new(&[16f32], &device).unwrap()),
+            ("i64 shape [1]", Tensor::new(&[16i64], &device).unwrap()),
+        ] {
+            assert_eq!(read_alpha_scalar(&tensor), Some(16.0), "{label}");
+        }
+        // Not a scalar: refuse rather than silently taking the first element.
+        let vector = Tensor::new(&[1f32, 2.0], &device).unwrap();
+        assert_eq!(read_alpha_scalar(&vector), None);
     }
 
     #[test]

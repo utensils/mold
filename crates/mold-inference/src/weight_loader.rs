@@ -47,7 +47,7 @@ fn total_file_bytes(paths: &[impl AsRef<Path>]) -> u64 {
         .sum()
 }
 
-fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, Value>> {
+pub(crate) fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, Value>> {
     let mut file = File::open(path)?;
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)?;

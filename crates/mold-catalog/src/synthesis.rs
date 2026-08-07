@@ -227,8 +227,13 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         // Mixed bundling — combined official checkpoints and transformer-only
         // fine-tunes both exist.
         Family::Ltx2 => false,
-        // Always-separate VAE.
-        Family::Flux2 | Family::ZImage | Family::LtxVideo => false,
+        // Always-separate VAE. Wan belongs here for a stronger reason than
+        // convention: the whole ecosystem ships the DiT alone — Comfy-Org's
+        // repacks, QuantStack's GGUF experts, and every Civitai fine-tune put
+        // the VAE in its own file, and the GGUF experts could not bundle one
+        // even in principle. So there is nothing to probe for and the resolver
+        // routes straight to the VAE companion.
+        Family::Flux2 | Family::ZImage | Family::LtxVideo | Family::Wan => false,
         Family::QwenImage | Family::Wuerstchen => false,
     }
 }

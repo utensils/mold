@@ -899,6 +899,88 @@ fn family_from_hf_id_substring() {
     );
 }
 
+/// Every spelling of Wan that the ecosystem actually ships must land on the
+/// family, and — the part that needs care — nothing else may.
+///
+/// `wan` is three letters that occur inside ordinary words. The `flux` arm can
+/// afford an owner-prefix match (`/flux`) because "flux" rarely prefixes an
+/// unrelated model name; `/wan` would swallow `wanderlust`, `wan-derby`, and
+/// anything from an org whose name starts with those letters, then hand the
+/// row a frame count and route it to a video pipeline it cannot run.
+#[test]
+fn family_from_hf_recognizes_every_wan_spelling_without_swallowing_words() {
+    for id in [
+        "Wan-AI/Wan2.1-T2V-1.3B",
+        "Wan-AI/Wan2.2-T2V-A14B",
+        "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+        "QuantStack/Wan2.2-I2V-A14B-GGUF",
+        "city96/Wan2.1-T2V-14B-gguf",
+        "Kijai/WanVideo_comfy",
+        "lightx2v/Wan2.2-Distill-Loras",
+        "someone/wan-2.2-finetune",
+    ] {
+        let (got, _role) =
+            family_from_hf(id, &[], None).unwrap_or_else(|| panic!("expected a family for {id}"));
+        assert_eq!(got, Family::Wan, "id {id}");
+    }
+
+    // The collision cases. None of these is a Wan model.
+    for id in [
+        "someone/wanderlust-xl",
+        "someone/wandering-diffusion",
+        "taiwan-labs/some-sdxl-merge",
+        "wanda/pruning-research",
+    ] {
+        assert!(
+            family_from_hf(id, &[], None)
+                != Some((Family::Wan, mold_catalog::entry::FamilyRole::Finetune))
+                && family_from_hf(id, &[], None)
+                    != Some((Family::Wan, mold_catalog::entry::FamilyRole::Foundation)),
+            "{id} must not be classified as Wan"
+        );
+    }
+
+    // An explicit `wan` tag is a claim, not a coincidence, so it is honoured
+    // even when the id says nothing.
+    let (got, _) = family_from_hf("some-org/mystery-video-model", &["wan".to_string()], None)
+        .expect("tag fallback");
+    assert_eq!(got, Family::Wan);
+}
+
+/// TI2V-5B is the one Wan checkpoint whose VAE and timing differ from the
+/// rest of the family, and HF — where `sub_family` is otherwise always `None`
+/// — is where it is published. Without this inference a 5B row is handed the
+/// 16-channel 2.1 VAE, which its 48-channel DiT rejects at load, after the
+/// download has already run.
+#[test]
+fn wan_sub_family_is_inferred_for_the_one_variant_that_needs_it() {
+    use mold_catalog::live::wan_sub_family_from_id;
+
+    for id in [
+        "Wan-AI/Wan2.2-TI2V-5B",
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged-ti2v_5b",
+        "someone/wan2.2-TI2V-5B-gguf",
+    ] {
+        assert_eq!(
+            wan_sub_family_from_id(id).as_deref(),
+            Some("wan22-ti2v-5b"),
+            "id {id}"
+        );
+    }
+
+    // Everything else keeps `None` and takes the family default, which is
+    // already correct for it — guessing further would add risk for no gain.
+    for id in [
+        "Wan-AI/Wan2.1-T2V-1.3B",
+        "Wan-AI/Wan2.2-T2V-A14B",
+        "QuantStack/Wan2.2-I2V-A14B-GGUF",
+        "black-forest-labs/FLUX.1-dev",
+    ] {
+        assert_eq!(wan_sub_family_from_id(id), None, "id {id}");
+    }
+}
+
 #[test]
 fn family_from_hf_marks_seed_repos_as_foundation() {
     use mold_catalog::entry::FamilyRole;

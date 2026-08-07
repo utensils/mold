@@ -15,6 +15,7 @@ pub enum Family {
     ZImage,
     LtxVideo,
     Ltx2,
+    Wan,
     QwenImage,
     Wuerstchen,
 }
@@ -27,6 +28,7 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::ZImage,
     Family::LtxVideo,
     Family::Ltx2,
+    Family::Wan,
     Family::QwenImage,
     Family::Wuerstchen,
 ];
@@ -48,8 +50,32 @@ impl Family {
             Family::ZImage => "z-image",
             Family::LtxVideo => "ltx-video",
             Family::Ltx2 => "ltx2",
+            Family::Wan => "wan",
             Family::QwenImage => "qwen-image",
             Family::Wuerstchen => "wuerstchen",
+        }
+    }
+
+    /// Whether this family generates video rather than images.
+    ///
+    /// The modality decision is made at four separate points — HF repo
+    /// normalization, Civitai version normalization, the companion row
+    /// builder, and the HF search-hit path — and every one of them was a
+    /// `match` with an `_ => Modality::Image` catch-all. That shape means a
+    /// newly added video family compiles cleanly while being classified as an
+    /// image model at any site the author missed: the catalog row then renders
+    /// with no duration controls and its requests are built with no frame
+    /// count. One predicate is what keeps the four in step.
+    pub fn is_video(&self) -> bool {
+        match self {
+            Family::LtxVideo | Family::Ltx2 | Family::Wan => true,
+            Family::Flux
+            | Family::Flux2
+            | Family::Sd15
+            | Family::Sdxl
+            | Family::ZImage
+            | Family::QwenImage
+            | Family::Wuerstchen => false,
         }
     }
 
@@ -63,6 +89,7 @@ impl Family {
             "z-image" => Family::ZImage,
             "ltx-video" => Family::LtxVideo,
             "ltx2" => Family::Ltx2,
+            "wan" => Family::Wan,
             "qwen-image" => Family::QwenImage,
             "wuerstchen" => Family::Wuerstchen,
             other => return Err(UnknownFamily(other.to_string())),

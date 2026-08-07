@@ -76,5 +76,13 @@ export function maxFramesForFamilyAtFps(
     return ltx2MaxFramesOnGridAtFps(fps);
   }
   if (normalized === "ltx-video") return MAX_FRAMES_GLOBAL;
+  // Wan's ceiling is a frame count, not a duration, so it does not move with
+  // fps — the mirror of `"wan" => Some(MAX_FRAMES_GLOBAL)` in
+  // `max_frames_for_family_at_fps`. Its temporal RoPE indexes *latent* frames
+  // against a 1024-entry table, which 257 pixel frames comes nowhere near, so
+  // memory is the binding constraint and the flat global guard is the real
+  // limit. 257 also sits on Wan's `4k+1` grid, so the advertised maximum is
+  // itself submittable.
+  if (normalized === "wan") return MAX_FRAMES_GLOBAL;
   return null;
 }

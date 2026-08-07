@@ -52,6 +52,14 @@ pub fn map_base_model(
         "LTXV2" => (Ltx2, Finetune, Some("v2".into())),
         "LTXV 2.3" => (Ltx2, Finetune, Some("v2.3".into())),
 
+        // Wan. Only the checkpoints this build can install *and* run as a
+        // complete model are mapped; the rest stay in `CIVITAI_DROPS` below
+        // with the reason. The sub family carries the variant because one
+        // `Family::Wan` spans very different runtime shapes.
+        "Wan Video 1.3B t2v" => (Wan, Finetune, Some("wan21-t2v-1.3b".into())),
+        "Wan Video 14B t2v" => (Wan, Finetune, Some("wan21-t2v-14b".into())),
+        "Wan Video 2.2 TI2V-5B" => (Wan, Finetune, Some("wan22-ti2v-5b".into())),
+
         // Qwen
         "Qwen" | "Qwen 2" => (QwenImage, Finetune, None),
 
@@ -78,13 +86,27 @@ pub const CIVITAI_DROPS: &[&str] = &[
     "Mochi",
     "PixArt a",
     "PixArt E",
-    "Wan Video 1.3B t2v",
-    "Wan Video 14B t2v",
+    // Wan 2.1 image-to-video conditions through a CLIP-vision cross-attention
+    // branch (`k_img`/`v_img`) that mold's DiT does not implement, and the
+    // engine refuses those checkpoints by name. Mapping them would offer a
+    // multi-gigabyte download that cannot generate.
     "Wan Video 14B i2v 480p",
     "Wan Video 14B i2v 720p",
-    "Wan Video 2.2 TI2V-5B",
-    "Wan Video 2.2 I2V-A14B",
+    // A14B is a *pair*: two complete transformers the sampler alternates
+    // between at a fixed timestep. Civitai publishes the high- and low-noise
+    // experts as separate model versions, `from_civitai_version` selects one
+    // file, and catalog resolution populates only `ModelConfig.transformer` —
+    // nothing sets `low_noise_transformer`. An installed A14B row would
+    // therefore denoise the whole schedule with whichever expert was pulled.
+    // The I2V half at least fails loudly (`reject_unwired_channel_concat_
+    // checkpoint` refuses a 36-channel checkpoint with no partner), but the
+    // T2V half is shape-indistinguishable from a single-expert 2.1 14B and
+    // would render silently wrong after ~11 GB. These stay dropped until the
+    // catalog can pair both versions; the manifest tiers `wan22-t2v-a14b:q5`
+    // / `:q8` ship the pair and are the supported route today.
     "Wan Video 2.2 T2V-A14B",
+    "Wan Video 2.2 I2V-A14B",
+    // Wan 2.5 and 2.7 are later architectures with no mold engine at all.
     "Wan Video 2.5 T2V",
     "Wan Video 2.5 I2V",
     "Wan Image 2.7",
@@ -165,7 +187,7 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
         // don't inherit checkpoint runnability rules.
         Lora => matches!(
             family,
-            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | QwenImage
+            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | Wan | QwenImage
         ),
         Vae | TextEncoder | Tokenizer | Clip => true,
         ControlNet => matches!(family, Sd15 | Sdxl),

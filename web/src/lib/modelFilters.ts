@@ -56,6 +56,7 @@ const FAMILY_ORDER = [
   "ltx-video",
   "ltx2",
   "ltx-2",
+  "wan",
 ];
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -74,6 +75,7 @@ const FAMILY_LABELS: Record<string, string> = {
   "ltx-video": "LTX Video",
   ltx2: "LTX-2",
   "ltx-2": "LTX-2",
+  wan: "Wan Video",
 };
 
 const VARIANT_RANKS: Record<string, number> = {

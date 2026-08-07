@@ -133,6 +133,9 @@ pub struct ModelConfig {
     pub transformer: Option<String>,
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
     pub transformer_shards: Option<Vec<String>>,
+    /// Low-noise expert of a two-expert checkpoint pair (Wan 2.2 A14B); the
+    /// high-noise expert is `transformer`.
+    pub low_noise_transformer: Option<String>,
     pub vae: Option<String>,
     /// LTX latent upsampler / spatial upscaler weights.
     pub spatial_upscaler: Option<String>,
@@ -140,6 +143,8 @@ pub struct ModelConfig {
     pub temporal_upscaler: Option<String>,
     /// Optional distilled LoRA bundled with a model manifest.
     pub distilled_lora: Option<String>,
+    /// Distilled LoRA for `low_noise_transformer`.
+    pub low_noise_distilled_lora: Option<String>,
     pub t5_encoder: Option<String>,
     pub clip_encoder: Option<String>,
     pub t5_tokenizer: Option<String>,
@@ -294,10 +299,21 @@ pub struct ModelPaths {
     pub transformer: PathBuf,
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
     pub transformer_shards: Vec<PathBuf>,
+    /// The low-noise expert of a two-expert checkpoint pair (Wan 2.2 A14B).
+    ///
+    /// `Some` is the two-expert predicate. The high-noise expert lives in
+    /// `transformer` because it runs first — the sampler starts at high sigma —
+    /// so every consumer that only understands one transformer keeps working
+    /// against the one that opens the generation.
+    pub low_noise_transformer: Option<PathBuf>,
     pub vae: PathBuf,
     pub spatial_upscaler: Option<PathBuf>,
     pub temporal_upscaler: Option<PathBuf>,
     pub distilled_lora: Option<PathBuf>,
+    /// The distilled adapter for `low_noise_transformer`. Each expert of an
+    /// A14B pair is distilled separately; swapping them is not a degradation,
+    /// it is the wrong model.
+    pub low_noise_distilled_lora: Option<PathBuf>,
     pub t5_encoder: Option<PathBuf>,
     pub clip_encoder: Option<PathBuf>,
     pub t5_tokenizer: Option<PathBuf>,
@@ -366,10 +382,12 @@ impl ModelPaths {
                 .as_ref()
                 .map(|paths| paths.iter().map(PathBuf::from).collect())
                 .unwrap_or_default(),
+            low_noise_transformer: path(model_cfg.low_noise_transformer.as_deref()),
             vae,
             spatial_upscaler: path(model_cfg.spatial_upscaler.as_deref()),
             temporal_upscaler: path(model_cfg.temporal_upscaler.as_deref()),
             distilled_lora: path(model_cfg.distilled_lora.as_deref()),
+            low_noise_distilled_lora: path(model_cfg.low_noise_distilled_lora.as_deref()),
             t5_encoder: path(model_cfg.t5_encoder.as_deref()),
             clip_encoder: path(model_cfg.clip_encoder.as_deref()),
             t5_tokenizer: path(model_cfg.t5_tokenizer.as_deref()),
@@ -395,6 +413,10 @@ impl ModelPaths {
             .and_then(|m| m.transformer_shards.as_ref())
             .map(|shards| shards.iter().map(PathBuf::from).collect())
             .unwrap_or_default();
+        let low_noise_transformer = Self::resolve_path(
+            model_cfg.and_then(|m| m.low_noise_transformer.as_deref()),
+            "MOLD_LOW_NOISE_TRANSFORMER_PATH",
+        );
         let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")?;
         let spatial_upscaler = Self::resolve_path(
             model_cfg.and_then(|m| m.spatial_upscaler.as_deref()),
@@ -407,6 +429,10 @@ impl ModelPaths {
         let distilled_lora = Self::resolve_path(
             model_cfg.and_then(|m| m.distilled_lora.as_deref()),
             "MOLD_DISTILLED_LORA_PATH",
+        );
+        let low_noise_distilled_lora = Self::resolve_path(
+            model_cfg.and_then(|m| m.low_noise_distilled_lora.as_deref()),
+            "MOLD_LOW_NOISE_DISTILLED_LORA_PATH",
         );
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
@@ -448,10 +474,12 @@ impl ModelPaths {
         Some(Self {
             transformer,
             transformer_shards,
+            low_noise_transformer,
             vae,
             spatial_upscaler,
             temporal_upscaler,
             distilled_lora,
+            low_noise_distilled_lora,
             t5_encoder,
             clip_encoder,
             t5_tokenizer,
@@ -1682,8 +1710,16 @@ fn resolved_manifest_paths_exist(
             .temporal_upscaler
             .as_ref()
             .is_some_and(|path| path.exists()),
+        ModelComponent::LowNoiseTransformer => paths
+            .low_noise_transformer
+            .as_ref()
+            .is_some_and(|path| path.exists()),
         ModelComponent::DistilledLora => paths
             .distilled_lora
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::LowNoiseDistilledLora => paths
+            .low_noise_distilled_lora
             .as_ref()
             .is_some_and(|path| path.exists()),
         ModelComponent::T5Encoder => paths.t5_encoder.as_ref().is_some_and(|path| path.exists()),

@@ -33,10 +33,12 @@ fn resolve_file_path(
     let mcfg = model_config?;
     match component {
         ModelComponent::Transformer => mcfg.transformer.clone(),
+        ModelComponent::LowNoiseTransformer => mcfg.low_noise_transformer.clone(),
         ModelComponent::Vae => mcfg.vae.clone(),
         ModelComponent::SpatialUpscaler => mcfg.spatial_upscaler.clone(),
         ModelComponent::TemporalUpscaler => mcfg.temporal_upscaler.clone(),
         ModelComponent::DistilledLora => mcfg.distilled_lora.clone(),
+        ModelComponent::LowNoiseDistilledLora => mcfg.low_noise_distilled_lora.clone(),
         ModelComponent::T5Encoder => mcfg.t5_encoder.clone(),
         ModelComponent::ClipEncoder => mcfg.clip_encoder.clone(),
         ModelComponent::T5Tokenizer => mcfg.t5_tokenizer.clone(),
@@ -60,10 +62,12 @@ fn resolve_verify_path(
     if let Some(paths) = resolved {
         let path = match component {
             ModelComponent::Transformer => Some(&paths.transformer),
+            ModelComponent::LowNoiseTransformer => paths.low_noise_transformer.as_ref(),
             ModelComponent::Vae => Some(&paths.vae),
             ModelComponent::SpatialUpscaler => paths.spatial_upscaler.as_ref(),
             ModelComponent::TemporalUpscaler => paths.temporal_upscaler.as_ref(),
             ModelComponent::DistilledLora => paths.distilled_lora.as_ref(),
+            ModelComponent::LowNoiseDistilledLora => paths.low_noise_distilled_lora.as_ref(),
             ModelComponent::T5Encoder => paths.t5_encoder.as_ref(),
             ModelComponent::ClipEncoder => paths.clip_encoder.as_ref(),
             ModelComponent::T5Tokenizer => paths.t5_tokenizer.as_ref(),
@@ -89,10 +93,12 @@ fn component_label(component: &ModelComponent) -> &'static str {
     match component {
         ModelComponent::Transformer => "Transformer",
         ModelComponent::TransformerShard => "Transformer Shard",
+        ModelComponent::LowNoiseTransformer => "Low-Noise Transformer",
         ModelComponent::Vae => "VAE",
         ModelComponent::SpatialUpscaler => "Spatial Upscaler",
         ModelComponent::TemporalUpscaler => "Temporal Upscaler",
         ModelComponent::DistilledLora => "Distilled LoRA",
+        ModelComponent::LowNoiseDistilledLora => "Low-Noise Distilled LoRA",
         ModelComponent::T5Encoder => "T5 Encoder",
         ModelComponent::ClipEncoder => "CLIP-L Encoder",
         ModelComponent::T5Tokenizer => "T5 Tokenizer",

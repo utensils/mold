@@ -276,6 +276,8 @@ mod tests {
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/ltx2.safetensors"),
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/unused"),

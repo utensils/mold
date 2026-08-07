@@ -19,9 +19,11 @@
 //! run in the model dtype.
 
 use candle_core::{bail, DType, Device, Result, Tensor, D};
-use candle_nn::{ops, Linear, Module, VarBuilder};
-use std::path::Path;
+use candle_nn::{ops, Module, VarBuilder};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::wan::model::fp8;
 use crate::wan::model::rope::{apply_rope, WanRope, WAN_ROPE_THETA};
 
 /// Positions Wan precomputes rotation tables for (`model.py:478-485`).
@@ -33,6 +35,199 @@ const TEST_WEIGHT_INIT: candle_nn::Init = candle_nn::Init::Randn {
     mean: 0.0,
     stdev: 0.02,
 };
+
+/// A biased linear projection, however it is stored.
+///
+/// `candle_nn::Linear` and `mold_candle::quantized_nn::Linear` both implement
+/// `Module`, so the forward path is identical and only construction differs.
+/// Holding the trait object rather than an enum keeps every call site in this
+/// file unchanged between the plain and quantized builds.
+pub(crate) type WanLinear = Arc<dyn Module + Send + Sync>;
+
+/// Where a Wan transformer reads its weights.
+///
+/// GGUF is not merely a different container: a Q5_K A14B expert is ~10 GB
+/// against ~28 GB at BF16, and that only holds if the quantized blocks stay
+/// quantized in memory and dequantize per matmul. So the quantized arm builds
+/// `QMatMul`-backed linears rather than dequantizing at load. fp8-scaled
+/// safetensors work the same way at 1 byte per parameter — see
+/// [`crate::wan::model::fp8`].
+///
+/// Non-linear tensors — norm gains, `modulation`, `patch_embedding` — are
+/// dequantized eagerly. In the shipped QuantStack files they are already F16 or
+/// F32 (only the 400 projection weights are quantized), so this costs nothing.
+pub(crate) enum WanWeights<'a> {
+    Plain(VarBuilder<'a>),
+    /// GGUF. `loras` is empty unless an adapter is active, in which case each
+    /// patched projection gains a parallel low-rank branch — see
+    /// [`crate::wan::lora::WanQuantizedLoraLinear`] for why a merge is not an
+    /// option on a quantized weight.
+    Quantized {
+        vb: mold_candle::quantized::VarBuilder,
+        loras: Arc<crate::wan::lora::WanLoraRegistry>,
+    },
+    /// fp8-scaled safetensors. The builder is backed by
+    /// [`crate::weight_loader::NativeFp8Backend`], so tensors arrive at their
+    /// on-disk dtype and the per-module dequantization happens in the linear.
+    Fp8 {
+        vb: VarBuilder<'a>,
+        marker: fp8::ScaledFp8Marker,
+    },
+}
+
+impl<'a> WanWeights<'a> {
+    pub fn plain(vb: VarBuilder<'a>) -> Self {
+        Self::Plain(vb)
+    }
+
+    pub fn quantized(vb: mold_candle::quantized::VarBuilder) -> Self {
+        Self::quantized_with_loras(vb, Arc::new(Default::default()))
+    }
+
+    pub fn quantized_with_loras(
+        vb: mold_candle::quantized::VarBuilder,
+        loras: Arc<crate::wan::lora::WanLoraRegistry>,
+    ) -> Self {
+        Self::Quantized { vb, loras }
+    }
+
+    pub fn fp8(vb: VarBuilder<'a>, marker: fp8::ScaledFp8Marker) -> Self {
+        Self::Fp8 { vb, marker }
+    }
+
+    fn pp(&self, segment: impl std::fmt::Display) -> Self {
+        match self {
+            Self::Plain(vb) => Self::Plain(vb.pp(segment.to_string())),
+            Self::Quantized { vb, loras } => Self::Quantized {
+                vb: vb.pp(segment.to_string()),
+                loras: loras.clone(),
+            },
+            Self::Fp8 { vb, marker } => Self::Fp8 {
+                vb: vb.pp(segment.to_string()),
+                marker: *marker,
+            },
+        }
+    }
+
+    fn device(&self) -> Device {
+        match self {
+            Self::Plain(vb) => vb.device().clone(),
+            Self::Quantized { vb, .. } => vb.device().clone(),
+            Self::Fp8 { vb, .. } => vb.device().clone(),
+        }
+    }
+
+    /// Model dtype. The fp8 arm keeps the caller's dtype: that is the dtype
+    /// its weights dequantize *into*, so it is the activation dtype for the
+    /// whole model.
+    ///
+    /// The quantized arm runs BF16 activations on GPU: candle's `QMatMul`
+    /// dequantizes into F32 *inside* each linear, but carrying F32 between
+    /// ops was measured to OOM a 24 GB card — ~3.4 GB of activations at a
+    /// mere 4.7k tokens, extrapolating past the card at the 20k+ tokens a
+    /// 49-frame 480p render needs. Each quantized linear casts its own IO at
+    /// the boundary (see `CastBoundary`), so the F32 stays transient and
+    /// per-linear. CPU keeps F32 because candle's CPU backend has no BF16
+    /// matmul — the same constraint that moved the CPU-parked encoder to F32.
+    fn dtype(&self) -> DType {
+        match self {
+            Self::Plain(vb) => vb.dtype(),
+            Self::Quantized { vb, .. } => {
+                if vb.device().is_cpu() {
+                    DType::F32
+                } else {
+                    DType::BF16
+                }
+            }
+            Self::Fp8 { vb, .. } => vb.dtype(),
+        }
+    }
+
+    /// The fp8 marker this source was built from, for the load-time report.
+    fn quantization(&self) -> Option<fp8::ScaledFp8Marker> {
+        match self {
+            Self::Fp8 { marker, .. } => Some(*marker),
+            _ => None,
+        }
+    }
+
+    fn linear(&self, in_dim: usize, out_dim: usize) -> Result<WanLinear> {
+        match self {
+            Self::Plain(vb) => Ok(Arc::new(candle_nn::linear(in_dim, out_dim, vb.clone())?)),
+            Self::Quantized { vb, loras } => {
+                let inner = crate::wan::lora::attach_quantized_branches(
+                    loras,
+                    &vb.key("weight"),
+                    mold_candle::quantized_nn::linear(in_dim, out_dim, vb.clone())?,
+                    vb.device(),
+                )?;
+                Ok(CastBoundary::wrap(inner, self.dtype()))
+            }
+            Self::Fp8 { vb, .. } => fp8::load_linear(vb, in_dim, out_dim, self.dtype()),
+        }
+    }
+
+    /// Fetch a non-linear tensor, dequantizing when the source is GGUF.
+    fn tensor<S: Into<candle_core::Shape>>(
+        &self,
+        shape: S,
+        name: &str,
+        init: candle_nn::Init,
+    ) -> Result<Tensor> {
+        let shape = shape.into();
+        match self {
+            // The fp8 backend shape-checks and hands back the on-disk dtype;
+            // every consumer of a non-linear tensor casts to F32 anyway, so
+            // keeping the file's own F32 is both cheaper and more faithful
+            // than a round trip through the compute dtype.
+            Self::Plain(vb) | Self::Fp8 { vb, .. } => vb.get_with_hints(shape, name, init),
+            Self::Quantized { vb, loras } => {
+                let tensor = vb.get_no_shape(name)?.dequantize(&self.device())?;
+                if tensor.shape() != &shape {
+                    bail!(
+                        "Wan DiT: GGUF tensor `{name}` is {:?} but the config wants {shape:?}",
+                        tensor.shape()
+                    );
+                }
+                // A non-linear tensor is already dequantized, so an adapter
+                // targeting one merges here exactly as it would on the plain
+                // path. The shipped distills touch none of these, but a
+                // checkpoint-specific adapter that did must not be applied on
+                // one weight source and silently skipped on the other.
+                loras.merge_into(&vb.key(name), tensor)
+            }
+        }
+    }
+}
+
+/// IO-dtype boundary around a quantized linear: the surrounding graph runs in
+/// the model dtype (BF16 on GPU), while `QMatMul` and the Lightning adapter
+/// branch compute in F32 internally. Casting at this boundary keeps every F32
+/// tensor transient and scoped to one linear call — carrying F32 *between*
+/// ops is what blew past 24 GB at 20k+ tokens (measured: ~3.4 GB of
+/// activations at 4.7k tokens on the 9-frame probe). A no-op when the model
+/// dtype is already F32 (CPU).
+struct CastBoundary {
+    inner: WanLinear,
+    io: DType,
+}
+
+impl CastBoundary {
+    fn wrap(inner: WanLinear, io: DType) -> WanLinear {
+        if io == DType::F32 {
+            return inner;
+        }
+        Arc::new(Self { inner, io })
+    }
+}
+
+impl Module for CastBoundary {
+    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+        self.inner
+            .forward(&xs.to_dtype(DType::F32)?)?
+            .to_dtype(self.io)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WanTransformerConfig {
@@ -268,9 +463,9 @@ struct WanRmsNorm {
 }
 
 impl WanRmsNorm {
-    fn load(vb: VarBuilder, dim: usize, eps: f64) -> Result<Self> {
+    fn load(vb: &WanWeights<'_>, dim: usize, eps: f64) -> Result<Self> {
         Ok(Self {
-            weight: vb.get_with_hints(dim, "weight", candle_nn::Init::Const(1.0))?,
+            weight: vb.tensor(dim, "weight", candle_nn::Init::Const(1.0))?,
             eps,
         })
     }
@@ -302,9 +497,9 @@ impl WanLayerNorm {
         Self { affine: None, eps }
     }
 
-    fn affine(vb: VarBuilder, dim: usize, eps: f64) -> Result<Self> {
-        let weight = vb.get_with_hints(dim, "weight", candle_nn::Init::Const(1.0))?;
-        let bias = vb.get_with_hints(dim, "bias", candle_nn::Init::Const(0.0))?;
+    fn affine(vb: &WanWeights<'_>, dim: usize, eps: f64) -> Result<Self> {
+        let weight = vb.tensor(dim, "weight", candle_nn::Init::Const(1.0))?;
+        let bias = vb.tensor(dim, "bias", candle_nn::Init::Const(0.0))?;
         Ok(Self {
             affine: Some((weight, bias)),
             eps,
@@ -329,12 +524,12 @@ impl WanLayerNorm {
 /// Self- or cross-attention. Both carry biased q/k/v/o projections and RMS
 /// norms on q and k applied to the **full inner dimension before the head
 /// split** (`qk_norm = "rms_norm_across_heads"`, `model.py:127-128`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WanAttention {
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    o: Linear,
+    q: WanLinear,
+    k: WanLinear,
+    v: WanLinear,
+    o: WanLinear,
     norm_q: WanRmsNorm,
     norm_k: WanRmsNorm,
     heads: usize,
@@ -342,14 +537,14 @@ struct WanAttention {
 }
 
 impl WanAttention {
-    fn load(vb: VarBuilder, dim: usize, heads: usize, eps: f64) -> Result<Self> {
+    fn load(vb: &WanWeights<'_>, dim: usize, heads: usize, eps: f64) -> Result<Self> {
         Ok(Self {
-            q: candle_nn::linear(dim, dim, vb.pp("q"))?,
-            k: candle_nn::linear(dim, dim, vb.pp("k"))?,
-            v: candle_nn::linear(dim, dim, vb.pp("v"))?,
-            o: candle_nn::linear(dim, dim, vb.pp("o"))?,
-            norm_q: WanRmsNorm::load(vb.pp("norm_q"), dim, eps)?,
-            norm_k: WanRmsNorm::load(vb.pp("norm_k"), dim, eps)?,
+            q: vb.pp("q").linear(dim, dim)?,
+            k: vb.pp("k").linear(dim, dim)?,
+            v: vb.pp("v").linear(dim, dim)?,
+            o: vb.pp("o").linear(dim, dim)?,
+            norm_q: WanRmsNorm::load(&vb.pp("norm_q"), dim, eps)?,
+            norm_k: WanRmsNorm::load(&vb.pp("norm_k"), dim, eps)?,
             heads,
             head_dim: dim / heads,
         })
@@ -396,17 +591,17 @@ impl WanAttention {
 }
 
 /// `Linear -> GELU(tanh) -> Linear` (`model.py:271-273`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WanFeedForward {
-    up: Linear,
-    down: Linear,
+    up: WanLinear,
+    down: WanLinear,
 }
 
 impl WanFeedForward {
-    fn load(vb: VarBuilder, dim: usize, ffn_dim: usize) -> Result<Self> {
+    fn load(vb: &WanWeights<'_>, dim: usize, ffn_dim: usize) -> Result<Self> {
         Ok(Self {
-            up: candle_nn::linear(dim, ffn_dim, vb.pp("0"))?,
-            down: candle_nn::linear(ffn_dim, dim, vb.pp("2"))?,
+            up: vb.pp("0").linear(dim, ffn_dim)?,
+            down: vb.pp("2").linear(ffn_dim, dim)?,
         })
     }
 
@@ -432,7 +627,7 @@ fn chunk_at(table: &Tensor, index: usize) -> Result<Tensor> {
     table.narrow(2, index, 1)?.squeeze(2)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WanBlock {
     norm1: WanLayerNorm,
     self_attn: WanAttention,
@@ -447,16 +642,21 @@ struct WanBlock {
 }
 
 impl WanBlock {
-    fn load(vb: VarBuilder, config: &WanTransformerConfig) -> Result<Self> {
+    fn load(vb: &WanWeights<'_>, config: &WanTransformerConfig) -> Result<Self> {
         let dim = config.dim;
         Ok(Self {
             norm1: WanLayerNorm::plain(config.eps),
-            self_attn: WanAttention::load(vb.pp("self_attn"), dim, config.num_heads, config.eps)?,
-            norm3: WanLayerNorm::affine(vb.pp("norm3"), dim, config.eps)?,
-            cross_attn: WanAttention::load(vb.pp("cross_attn"), dim, config.num_heads, config.eps)?,
+            self_attn: WanAttention::load(&vb.pp("self_attn"), dim, config.num_heads, config.eps)?,
+            norm3: WanLayerNorm::affine(&vb.pp("norm3"), dim, config.eps)?,
+            cross_attn: WanAttention::load(
+                &vb.pp("cross_attn"),
+                dim,
+                config.num_heads,
+                config.eps,
+            )?,
             norm2: WanLayerNorm::plain(config.eps),
-            ffn: WanFeedForward::load(vb.pp("ffn"), dim, config.ffn_dim)?,
-            modulation: vb.get_with_hints((1, 6, dim), "modulation", TEST_WEIGHT_INIT)?,
+            ffn: WanFeedForward::load(&vb.pp("ffn"), dim, config.ffn_dim)?,
+            modulation: vb.tensor((1, 6, dim), "modulation", TEST_WEIGHT_INIT)?,
         })
     }
 
@@ -547,7 +747,7 @@ fn sinusoidal_embedding(values: &[f64], dim: usize, device: &Device) -> Result<T
     Tensor::from_vec(out, (values.len(), dim), device)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct WanTransformer {
     config: WanTransformerConfig,
     /// The checkpoint's 5-D Conv3d weight flattened to `[in*patch, dim]`.
@@ -557,18 +757,21 @@ pub(crate) struct WanTransformer {
     /// `patch_embedding(x.float()).to(dtype)`.
     patch_weight: Tensor,
     patch_bias: Tensor,
-    time_embedding_in: Linear,
-    time_embedding_out: Linear,
-    time_projection: Linear,
-    text_embedding_in: Linear,
-    text_embedding_out: Linear,
+    time_embedding_in: WanLinear,
+    time_embedding_out: WanLinear,
+    time_projection: WanLinear,
+    text_embedding_in: WanLinear,
+    text_embedding_out: WanLinear,
     blocks: Vec<WanBlock>,
     head_norm: WanLayerNorm,
     /// `[1, 2, dim]`.
     head_modulation: Tensor,
-    head: Linear,
+    head: WanLinear,
     rope: WanRope,
     dtype: DType,
+    /// Set when the weights came from an fp8-scaled checkpoint, so the engine
+    /// can report which precision path a run is actually on.
+    quantization: Option<fp8::ScaledFp8Marker>,
 }
 
 impl WanTransformer {
@@ -580,14 +783,122 @@ impl WanTransformer {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        // dtype and device travel on the VarBuilder from here on.
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
-        let vb = if vb.contains_tensor("patch_embedding.weight") {
-            vb
+        Self::from_safetensors_with_loras(paths, config, device, dtype, &Default::default())
+    }
+
+    /// Load with a LoRA stack merged into the weights as they are read.
+    ///
+    /// The merge happens inside a `SimpleBackend` rather than after
+    /// construction, so no code in this module changes and the merged weight is
+    /// the only copy that ever exists — there is no separate base tensor to
+    /// keep resident. That is the same shape as FLUX's `LoraBackend`.
+    pub fn from_safetensors_with_loras(
+        paths: &[std::path::PathBuf],
+        config: WanTransformerConfig,
+        device: &Device,
+        dtype: DType,
+        loras: &crate::wan::lora::WanLoraRegistry,
+    ) -> Result<Self> {
+        // Header-only, and first: an e5m2 checkpoint has to be refused before
+        // anything memory-maps a dtype candle cannot represent.
+        let scaled_fp8 = fp8::probe_scaled_fp8(paths)?;
+        if let Some(checkpoint) = &scaled_fp8 {
+            let first = paths.first().map(PathBuf::as_path).unwrap_or(Path::new(""));
+            checkpoint.ensure_supported(first)?;
+            if !loras.is_empty() {
+                bail!(
+                    "{} is fp8-scaled, and mold merges LoRAs into bf16 and GGUF checkpoints \
+                     only — an fp8 merge would dequantize every targeted weight, add the \
+                     delta, and re-round it to three mantissa bits. Use the bf16 or GGUF \
+                     tier for adapters, or a checkpoint that ships the distill already \
+                     merged.",
+                    first.display()
+                );
+            }
+        }
+
+        // The shipped Comfy-Org repacks prefix every DiT key; bare exports and
+        // the GGUF layout do not. Probe once and reuse for both paths.
+        let probe = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+        let prefix = if probe.contains_tensor("patch_embedding.weight") {
+            String::new()
         } else {
-            vb.pp("model.diffusion_model")
+            "model.diffusion_model.".to_string()
         };
+        drop(probe);
+
+        if let Some(checkpoint) = scaled_fp8 {
+            // Native dtypes all the way in: the weights stay fp8 and the
+            // linears dequantize per call.
+            let mmap = unsafe { candle_core::safetensors::MmapedSafetensors::multi(paths) }?;
+            let backend = crate::weight_loader::NativeFp8Backend::from_mmap(mmap);
+            let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
+            let vb = if prefix.is_empty() {
+                vb
+            } else {
+                vb.pp("model.diffusion_model")
+            };
+            return Self::from_weights(&WanWeights::fp8(vb, checkpoint.marker), config);
+        }
+
+        if loras.is_empty() {
+            let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+            let vb = if prefix.is_empty() {
+                vb
+            } else {
+                vb.pp("model.diffusion_model")
+            };
+            return Self::from_var_builder(vb, config);
+        }
+
+        let backend =
+            unsafe { crate::wan::lora::WanLoraBackend::new(paths, prefix, loras.clone())? };
+        backend
+            .ensure_lora_targets_present(
+                paths.first().map(PathBuf::as_path).unwrap_or(Path::new("")),
+            )
+            .map_err(|err| candle_core::Error::Msg(format!("{err:#}")))?;
+        let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Self::from_var_builder(vb, config)
+    }
+
+    /// Load from a GGUF checkpoint (the QuantStack A14B layout).
+    ///
+    /// Quantized blocks stay quantized: a Q5_K expert is ~10 GB against ~28 GB
+    /// dequantized, and two of them have to be resident-or-parked for the A14B
+    /// tier. `QMatMul` dequantizes per matmul instead.
+    ///
+    /// GGUF keys are **bare** (`blocks.0.self_attn.q.weight`) — the
+    /// `model.diffusion_model.` prefix the Comfy-Org safetensors repacks carry
+    /// is absent, so no prefix handling applies here.
+    pub fn from_gguf(path: &Path, config: WanTransformerConfig, device: &Device) -> Result<Self> {
+        Self::from_gguf_with_loras(path, config, device, &Default::default())
+    }
+
+    /// Load a GGUF checkpoint with a LoRA stack applied.
+    ///
+    /// The adapters do not merge into the weights the way they do on the two
+    /// safetensors paths — a quantized weight cannot take a delta without being
+    /// requantized, which costs minutes per expert and rounds most of a distill
+    /// away. Each patched projection gets a parallel low-rank branch instead;
+    /// [`crate::wan::lora::WanQuantizedLoraLinear`] carries the measurements.
+    pub fn from_gguf_with_loras(
+        path: &Path,
+        config: WanTransformerConfig,
+        device: &Device,
+        loras: &crate::wan::lora::WanLoraRegistry,
+    ) -> Result<Self> {
+        let vb = mold_candle::quantized::VarBuilder::from_gguf(path, device)?;
+        if loras.is_empty() {
+            return Self::from_weights(&WanWeights::quantized(vb), config);
+        }
+        loras
+            .ensure_targets_present(|name| vb.contains_key(name), path)
+            .map_err(|err| candle_core::Error::Msg(format!("{err:#}")))?;
+        Self::from_weights(
+            &WanWeights::quantized_with_loras(vb, Arc::new(loras.clone())),
+            config,
+        )
     }
 
     /// Convenience for a single-file checkpoint.
@@ -601,61 +912,74 @@ impl WanTransformer {
     }
 
     pub fn from_var_builder(vb: VarBuilder, config: WanTransformerConfig) -> Result<Self> {
+        Self::from_weights(&WanWeights::plain(vb), config)
+    }
+
+    /// Build from either weight source.
+    pub fn from_weights(vb: &WanWeights<'_>, config: WanTransformerConfig) -> Result<Self> {
         config.validate()?;
         let dtype = vb.dtype();
         let dim = config.dim;
         let (pt, ph, pw) = config.patch_size;
 
-        // Always F32, independent of the model dtype.
-        let vb_patch = vb.pp("patch_embedding").to_dtype(DType::F32);
+        // Always F32, independent of the model dtype. In the GGUF layout this
+        // is the file's only F32 tensor, stored 5-D — the quantizers made the
+        // same call.
+        let vb_patch = vb.pp("patch_embedding");
         let patch_weight = vb_patch
-            .get_with_hints((dim, config.in_dim, pt, ph, pw), "weight", TEST_WEIGHT_INIT)?
+            .tensor((dim, config.in_dim, pt, ph, pw), "weight", TEST_WEIGHT_INIT)?
+            .to_dtype(DType::F32)?
             .reshape((dim, config.in_dim * config.patch_elems()))?
             .t()?
             .contiguous()?;
-        let patch_bias = vb_patch.get_with_hints(dim, "bias", candle_nn::Init::Const(0.0))?;
+        let patch_bias = vb_patch
+            .tensor(dim, "bias", candle_nn::Init::Const(0.0))?
+            .to_dtype(DType::F32)?;
 
         let mut blocks = Vec::with_capacity(config.num_layers);
         for i in 0..config.num_layers {
-            blocks.push(WanBlock::load(vb.pp(format!("blocks.{i}")), &config)?);
+            blocks.push(WanBlock::load(&vb.pp(format!("blocks.{i}")), &config)?);
         }
 
-        let head_modulation =
-            vb.pp("head")
-                .get_with_hints((1, 2, dim), "modulation", TEST_WEIGHT_INIT)?;
+        let head_modulation = vb
+            .pp("head")
+            .tensor((1, 2, dim), "modulation", TEST_WEIGHT_INIT)?;
 
         Ok(Self {
-            time_embedding_in: candle_nn::linear(
-                config.freq_dim,
-                dim,
-                vb.pp("time_embedding").pp("0"),
-            )?,
-            time_embedding_out: candle_nn::linear(dim, dim, vb.pp("time_embedding").pp("2"))?,
-            time_projection: candle_nn::linear(dim, 6 * dim, vb.pp("time_projection").pp("1"))?,
-            text_embedding_in: candle_nn::linear(
-                config.text_dim,
-                dim,
-                vb.pp("text_embedding").pp("0"),
-            )?,
-            text_embedding_out: candle_nn::linear(dim, dim, vb.pp("text_embedding").pp("2"))?,
+            time_embedding_in: vb
+                .pp("time_embedding")
+                .pp("0")
+                .linear(config.freq_dim, dim)?,
+            time_embedding_out: vb.pp("time_embedding").pp("2").linear(dim, dim)?,
+            time_projection: vb.pp("time_projection").pp("1").linear(dim, 6 * dim)?,
+            text_embedding_in: vb
+                .pp("text_embedding")
+                .pp("0")
+                .linear(config.text_dim, dim)?,
+            text_embedding_out: vb.pp("text_embedding").pp("2").linear(dim, dim)?,
             blocks,
             head_norm: WanLayerNorm::plain(config.eps),
             head_modulation,
-            head: candle_nn::linear(
-                dim,
-                config.out_dim * config.patch_elems(),
-                vb.pp("head").pp("head"),
-            )?,
+            head: vb
+                .pp("head")
+                .pp("head")
+                .linear(dim, config.out_dim * config.patch_elems())?,
             rope: WanRope::new(config.head_dim(), config.rope_max_seq_len, WAN_ROPE_THETA)?,
             patch_weight,
             patch_bias,
             config,
             dtype,
+            quantization: vb.quantization(),
         })
     }
 
     pub fn config(&self) -> &WanTransformerConfig {
         &self.config
+    }
+
+    /// The fp8 marker the loaded checkpoint declared, if any.
+    pub fn quantization(&self) -> Option<fp8::ScaledFp8Marker> {
+        self.quantization
     }
 
     /// Fold `[b, c, f, h, w]` into `[b, tokens, dim]` in `(f, h, w)` order.
@@ -2030,6 +2354,506 @@ mod tests {
             data["head.modulation"].as_tensor().dims(),
             &[1, 2, TINY_DIM]
         );
+    }
+
+    /// candle's GGUF reader already converts ggml's fastest-varying-first dims
+    /// into torch order (`gguf_file.rs`'s `dimensions.reverse()`), so a loader
+    /// must NOT reverse them again. Pin that, because the whole quantized path
+    /// silently transposes if it ever changes.
+    #[test]
+    fn candle_presents_gguf_dims_in_torch_order() {
+        use candle_core::quantized::{gguf_file, QTensor};
+
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dims.gguf");
+
+        // A [3, 5] torch weight: out_features 3, in_features 5.
+        let weight = Tensor::arange(0f32, 15f32, &device)
+            .unwrap()
+            .reshape((3, 5))
+            .unwrap();
+        let q = QTensor::quantize(&weight, candle_core::quantized::GgmlDType::F32).unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        let arch = gguf_file::Value::String("wan".to_string());
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &[("w", &q)]).unwrap();
+        drop(file);
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let content = gguf_file::Content::read(&mut file).unwrap();
+        assert_eq!(
+            content.tensor_infos["w"].shape.dims(),
+            &[3, 5],
+            "candle must hand back torch order, not ggml's reversed [5, 3]"
+        );
+        let back = content.tensor(&mut file, "w", &device).unwrap();
+        assert_eq!(back.shape().dims(), &[3, 5]);
+    }
+
+    /// Full GGUF round trip, 5-D patch embedding included.
+    ///
+    /// Every Wan GGUF carries one 5-D tensor — `patch_embedding.weight`,
+    /// `[dim, in_dim, pt, ph, pw]` — which candle refused until the compat
+    /// branch raised `GGUF_MAX_TENSOR_DIMS` to 5 (`3a49a729`). This writes a
+    /// complete tiny model, reads it back through `from_gguf`, and requires the
+    /// forward to match the safetensors path that produced the weights.
+    ///
+    /// Quantizing at F32 is lossless, so any divergence is a naming, dim-order,
+    /// or dispatch bug rather than quantization error.
+    #[test]
+    fn gguf_round_trip_reproduces_the_safetensors_forward() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        use candle_nn::{VarBuilder as NnVarBuilder, VarMap};
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny_wan.gguf");
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        let plain = WanTransformer::from_var_builder(
+            NnVarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        // Every tensor the model asked for, under its bare GGUF name — the
+        // shipped files carry no `model.diffusion_model.` prefix.
+        let quantized: Vec<(String, QTensor)> = {
+            let data = varmap.data().lock().unwrap();
+            data.iter()
+                .map(|(name, var)| {
+                    (
+                        name.clone(),
+                        QTensor::quantize(var.as_tensor(), GgmlDType::F32).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert!(
+            quantized
+                .iter()
+                .any(|(name, q)| name == "patch_embedding.weight" && q.shape().rank() == 5),
+            "the fixture must exercise the 5-D patch embedding"
+        );
+
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let arch = gguf_file::Value::String("wan".to_string());
+        let mut file = std::fs::File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
+        drop(file);
+
+        let from_gguf = WanTransformer::from_gguf(&path, config.clone(), &device).unwrap();
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+
+        let want = plain.forward(&x, &timestep, &context).unwrap();
+        let got = from_gguf.forward(&x, &timestep, &context).unwrap();
+        assert_eq!(want.dims(), got.dims());
+
+        let want_v: Vec<f32> = want.flatten_all().unwrap().to_vec1().unwrap();
+        let got_v: Vec<f32> = got.flatten_all().unwrap().to_vec1().unwrap();
+        let err = want_v
+            .iter()
+            .zip(&got_v)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            err < 1e-4,
+            "GGUF forward diverged from safetensors by {err:e}"
+        );
+
+        // Per-token timesteps travel the same path.
+        let per_token = Tensor::from_vec(vec![500f32; 4], (1, 4), &device).unwrap();
+        let want = plain.forward(&x, &per_token, &context).unwrap();
+        let got = from_gguf.forward(&x, &per_token, &context).unwrap();
+        let err = want
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .zip(got.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-4, "per-token GGUF forward diverged by {err:e}");
+    }
+
+    /// The quantized source serves every tensor class the real files contain,
+    /// and refuses a shape the config did not ask for.
+    #[test]
+    fn gguf_quantized_source_serves_every_tensor_class() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        use candle_nn::{VarBuilder as NnVarBuilder, VarMap};
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("classes.gguf");
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            NnVarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        let quantized: Vec<(String, QTensor)> = {
+            let data = varmap.data().lock().unwrap();
+            data.iter()
+                .map(|(name, var)| {
+                    (
+                        name.clone(),
+                        QTensor::quantize(var.as_tensor(), GgmlDType::F32).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let arch = gguf_file::Value::String("wan".to_string());
+        let mut file = std::fs::File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[("general.architecture", &arch)], &refs).unwrap();
+        drop(file);
+
+        let vb = mold_candle::quantized::VarBuilder::from_gguf(&path, &device).unwrap();
+        let source = WanWeights::quantized(vb);
+        let dim = config.dim;
+
+        // 2-D linear through QMatMul.
+        let linear = source.pp("blocks.0.self_attn.q").linear(dim, dim).unwrap();
+        let probe = Tensor::randn(0f32, 1f32, (1, 4, dim), &device).unwrap();
+        assert_eq!(linear.forward(&probe).unwrap().dims(), &[1, 4, dim]);
+
+        // 1-D norm gain, 3-D modulation, 5-D patch embedding.
+        assert_eq!(
+            source
+                .pp("blocks.0.self_attn.norm_q")
+                .tensor(dim, "weight", candle_nn::Init::Const(1.0))
+                .unwrap()
+                .dims(),
+            &[dim]
+        );
+        assert_eq!(
+            source
+                .pp("blocks.0")
+                .tensor((1, 6, dim), "modulation", TEST_WEIGHT_INIT)
+                .unwrap()
+                .dims(),
+            &[1, 6, dim],
+            "3-D modulation must come back in torch order"
+        );
+        let (pt, ph, pw) = config.patch_size;
+        assert_eq!(
+            source
+                .pp("patch_embedding")
+                .tensor((dim, config.in_dim, pt, ph, pw), "weight", TEST_WEIGHT_INIT)
+                .unwrap()
+                .dims(),
+            &[dim, config.in_dim, pt, ph, pw],
+            "5-D patch embedding must come back in torch order"
+        );
+
+        // A shape the config does not expect is refused, not silently reshaped.
+        assert!(source
+            .pp("blocks.0")
+            .tensor((1, 2, dim), "modulation", TEST_WEIGHT_INIT)
+            .is_err());
+    }
+
+    /// A GGUF missing a tensor the config demands must fail at load, naming the
+    /// key — not produce a partly-initialised model.
+    #[test]
+    fn gguf_load_reports_a_missing_tensor() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incomplete.gguf");
+        let q = QTensor::quantize(
+            &Tensor::zeros((16, 16), DType::F32, &device).unwrap(),
+            GgmlDType::F32,
+        )
+        .unwrap();
+        let mut file = std::fs::File::create(&path).unwrap();
+        let arch = gguf_file::Value::String("wan".to_string());
+        gguf_file::write(
+            &mut file,
+            &[("general.architecture", &arch)],
+            &[("blocks.0.self_attn.q.weight", &q)],
+        )
+        .unwrap();
+        drop(file);
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let error = match WanTransformer::from_gguf(&path, config, &device) {
+            Ok(_) => panic!("an incomplete GGUF must not load"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("cannot find tensor"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The `e4m3` maximum finite magnitude. Upstream picks the per-tensor scale
+    /// so the largest weight lands on it (`comfy/float.py`'s stochastic
+    /// rounding operates on `weight / scale_weight`).
+    const FP8_E4M3_MAX: f32 = 448.0;
+
+    /// True for the tensors the shipped fp8 files actually quantize: the ten
+    /// block projections. `norm_q`/`norm_k`/`norm3` gains and every bias stay
+    /// unquantized, as do the five top-level projections.
+    fn is_quantized_projection(name: &str) -> bool {
+        name.starts_with("blocks.") && name.ends_with(".weight") && !name.contains("norm")
+    }
+
+    /// Write a tiny fp8-scaled checkpoint plus the F32 checkpoint that holds
+    /// exactly the weights it dequantizes to, and return both paths.
+    ///
+    /// The reference is the *same-dequantized* baseline, not the pre-quantized
+    /// one: an fp8 forward cannot reproduce the original F32 weights, so
+    /// comparing against them would only measure e4m3's 3-bit mantissa. What
+    /// has to hold is that the loader reproduces `weight * scale_weight`.
+    fn write_fp8_pair(
+        dir: &Path,
+        varmap: &VarMap,
+        marker_elements: usize,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let device = Device::Cpu;
+        let mut quantized: HashMap<String, Tensor> = HashMap::new();
+        let mut reference: HashMap<String, Tensor> = HashMap::new();
+        let mut quantized_count = 0usize;
+
+        for (name, var) in varmap.data().lock().unwrap().iter() {
+            let tensor = var.as_tensor().clone();
+            if !is_quantized_projection(name) {
+                quantized.insert(name.clone(), tensor.clone());
+                reference.insert(name.clone(), tensor);
+                continue;
+            }
+            let peak = tensor
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            let scale = peak / FP8_E4M3_MAX;
+            let fp8 = tensor
+                .affine(1.0 / f64::from(scale), 0.0)
+                .unwrap()
+                .to_dtype(DType::F8E4M3)
+                .unwrap();
+            reference.insert(
+                name.clone(),
+                fp8.to_dtype(DType::F32)
+                    .unwrap()
+                    .affine(f64::from(scale), 0.0)
+                    .unwrap(),
+            );
+            quantized.insert(name.clone(), fp8);
+            quantized.insert(
+                format!("{}.scale_weight", name.trim_end_matches(".weight")),
+                Tensor::from_vec(vec![scale], 1, &device).unwrap(),
+            );
+            quantized_count += 1;
+        }
+        assert_eq!(
+            quantized_count, 20,
+            "the fixture must quantize the ten projections of both blocks"
+        );
+
+        quantized.insert(
+            "scaled_fp8".to_string(),
+            Tensor::zeros(marker_elements, DType::F8E4M3, &device).unwrap(),
+        );
+
+        let fp8_path = dir.join("scaled_fp8.safetensors");
+        let reference_path = dir.join("dequantized.safetensors");
+        candle_core::safetensors::save(&quantized, &fp8_path).unwrap();
+        candle_core::safetensors::save(&reference, &reference_path).unwrap();
+        (fp8_path, reference_path)
+    }
+
+    /// Full fp8-scaled round trip: a checkpoint whose block projections are
+    /// e4m3 with per-tensor scales must forward identically to one holding the
+    /// dequantized weights outright.
+    ///
+    /// This also exercises the mixed layout the shipped experts have — the
+    /// head, both embedding MLPs, and the time projection stay F32 in the same
+    /// file, so a loader that assumed "fp8 file ⇒ every weight is fp8" fails
+    /// here.
+    #[test]
+    fn fp8_scaled_forward_matches_the_dequantized_weights() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        // 2 elements: the mode both Kijai A14B experts declare.
+        let (fp8_path, reference_path) = write_fp8_pair(dir.path(), &varmap, 2);
+
+        let quantized =
+            WanTransformer::from_safetensors(&[fp8_path], config.clone(), &device, dtype).unwrap();
+        let reference =
+            WanTransformer::from_safetensors(&[reference_path], config.clone(), &device, dtype)
+                .unwrap();
+
+        assert_eq!(
+            quantized.quantization().map(|marker| marker.to_string()),
+            Some("e4m3, full-precision matmul".to_string()),
+            "the marker has to survive the load — it is the only record of which \
+             matmul path the checkpoint was calibrated for"
+        );
+        assert!(
+            reference.quantization().is_none(),
+            "a checkpoint with no marker is not fp8-scaled"
+        );
+
+        let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
+        let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
+        let context = Tensor::randn(0f32, 1f32, (1, 4, config.text_dim), &device).unwrap();
+
+        let want = reference.forward(&x, &timestep, &context).unwrap();
+        let got = quantized.forward(&x, &timestep, &context).unwrap();
+        assert_eq!(want.dims(), got.dims());
+
+        let err = max_abs_diff_f32(&values(&got), &values(&want));
+        assert!(
+            err < 1e-5,
+            "fp8 forward diverged from its own dequantized weights by {err:e} — that is a \
+             loader bug, not quantization error"
+        );
+
+        // The fixture is only meaningful if fp8 actually perturbed the weights;
+        // otherwise the comparison above would pass on a no-op quantizer.
+        let untouched = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config,
+        )
+        .unwrap();
+        let original = untouched.forward(&x, &timestep, &context).unwrap();
+        assert!(
+            max_abs_diff_f32(&values(&got), &values(&original)) > 0.0,
+            "e4m3 rounding must move the output; a fixture it cannot perturb proves nothing"
+        );
+    }
+
+    /// The marker's element count decides the matmul path, and a `[0]` marker —
+    /// what `umt5_xxl_fp8_e4m3fn_scaled` ships — must not be read as "absent".
+    #[test]
+    fn an_empty_marker_still_marks_the_checkpoint_as_fp8_scaled() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let (fp8_path, _) = write_fp8_pair(dir.path(), &varmap, 0);
+        let loaded = WanTransformer::from_safetensors(&[fp8_path], config, &device, dtype).unwrap();
+        assert_eq!(
+            loaded.quantization().map(|marker| marker.to_string()),
+            Some("e4m3, native fp8 matmul".to_string())
+        );
+    }
+
+    /// An adapter over an fp8 checkpoint must be refused, not dropped. Merging
+    /// would mean re-rounding every patched weight to three mantissa bits.
+    #[test]
+    fn an_fp8_checkpoint_refuses_a_lora_stack() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let dir = tempfile::tempdir().unwrap();
+        let config = WanTransformerConfig {
+            ffn_dim: 32,
+            text_dim: 32,
+            freq_dim: 16,
+            ..WanTransformerConfig::tiny(16, 2, 2)
+        };
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        let (fp8_path, _) = write_fp8_pair(dir.path(), &varmap, 2);
+
+        let adapter = dir.path().join("adapter.safetensors");
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        tensors.insert(
+            "diffusion_model.blocks.0.self_attn.q.lora_down.weight".to_string(),
+            Tensor::zeros((2, config.dim), dtype, &device).unwrap(),
+        );
+        tensors.insert(
+            "diffusion_model.blocks.0.self_attn.q.lora_up.weight".to_string(),
+            Tensor::zeros((config.dim, 2), dtype, &device).unwrap(),
+        );
+        candle_core::safetensors::save(&tensors, &adapter).unwrap();
+        let registry = crate::wan::lora::WanLoraRegistry::load(&[mold_core::LoraWeight {
+            path: adapter.to_string_lossy().to_string(),
+            scale: 1.0,
+        }])
+        .unwrap();
+        assert!(!registry.is_empty());
+
+        let error = match WanTransformer::from_safetensors_with_loras(
+            &[fp8_path],
+            config,
+            &device,
+            dtype,
+            &registry,
+        ) {
+            Ok(_) => panic!("an fp8 checkpoint must not silently drop an adapter"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("fp8-scaled"), "{error}");
+        assert!(error.contains("GGUF"), "{error}");
     }
 
     #[test]

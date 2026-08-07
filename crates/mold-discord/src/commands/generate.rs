@@ -162,7 +162,7 @@ impl PipelineChoice {
 /// `None` for anything that isn't a recognized video-producing family.
 pub fn video_family(family: &str) -> Option<&str> {
     match family {
-        "ltx-video" | "ltx2" => Some(family),
+        "ltx-video" | "ltx2" | "wan" => Some(family),
         _ => None,
     }
 }
@@ -1474,8 +1474,41 @@ mod tests {
     fn video_family_classification() {
         assert_eq!(video_family("ltx-video"), Some("ltx-video"));
         assert_eq!(video_family("ltx2"), Some("ltx2"));
+        assert_eq!(video_family("wan"), Some("wan"));
         assert!(video_family("flux").is_none());
         assert!(video_family("sdxl").is_none());
+    }
+
+    /// This one predicate gates everything Discord does with a video model —
+    /// the MP4 output format, the frame/fps defaults, the GIF preview, and
+    /// whether `/generate duration:` is accepted at all. Without the wan arm
+    /// the bot renders wan as a still image and rejects duration outright.
+    #[test]
+    fn wan_duration_resolves_onto_its_own_four_frame_grid() {
+        // No model defaults: the resolver falls back to the shared Rust
+        // helpers, which is the path a bot with a stale model cache takes.
+        let (frames, fps) =
+            resolve_video_timing(Some("wan"), None, None, Some(16), Some(3.0)).unwrap();
+        let frames = frames.expect("wan is a video family");
+        assert_eq!(fps, Some(16));
+        // 3s x 16fps = 48 -> the nearest 4k+1 value. An 8k+1 grid would have
+        // produced 49 here, which the server rejects for wan.
+        assert_eq!(frames, 49);
+        assert_eq!((frames - 1) % 4, 0);
+
+        // Wan's ceiling is a flat frame count, not a seconds budget, so the
+        // duration it permits is derived from 257 frames and therefore moves
+        // with fps: ~16.1s at 16 fps, half that at 32. The refusal quotes the
+        // derived figure rather than silently trimming the request.
+        let error =
+            resolve_video_timing(Some("wan"), None, None, Some(16), Some(600.0)).unwrap_err();
+        assert!(error.contains("16.1 seconds"), "{error}");
+        let error =
+            resolve_video_timing(Some("wan"), None, None, Some(32), Some(600.0)).unwrap_err();
+        assert!(error.contains("8.0 seconds"), "{error}");
+
+        // An image family still refuses duration entirely.
+        assert!(resolve_video_timing(Some("flux"), None, None, None, Some(3.0)).is_err());
     }
 
     #[test]

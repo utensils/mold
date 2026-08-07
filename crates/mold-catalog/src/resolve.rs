@@ -158,7 +158,8 @@ pub fn resolve_intent_to_model_config(
             // SDXL / SD1.5 always bundle the VAE.
             Some(true)
         } else {
-            // Flux.2 / Z-Image / LTX-Video always need a separate VAE companion.
+            // Flux.2 / Z-Image / LTX-Video / Wan always need a separate VAE
+            // companion.
             Some(false)
         };
     if probe_says_bundled == Some(true) {
@@ -257,6 +258,13 @@ pub fn copy_companion_into_model_config(
         "ltx-video-vae" | "ltx2-vae" | "ltx2.3-vae" | "flux2-vae" => {
             cfg.vae = to_str(&paths.transformer);
         }
+        // Both Wan VAE companions declare their single file as a Transformer
+        // component, the same shape the LTX VAE companions use, so the path
+        // arrives in `paths.transformer`. Which of the two got pushed is
+        // decided in `companions_for`; by here it is already the right one.
+        "wan21-vae" | "wan22-vae" => {
+            cfg.vae = to_str(&paths.transformer);
+        }
         "t5-v1_1-xxl" => {
             cfg.t5_encoder = to_str(&paths.transformer);
             cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_str);
@@ -296,6 +304,20 @@ pub fn copy_companion_into_model_config(
                 }
             }
             cfg.text_encoder_files = Some(files);
+        }
+        // UMT5-XXL. `WanEngine` reads `text_encoder_files` first and falls
+        // back to `t5_encoder`, and reads `text_tokenizer` before
+        // `t5_tokenizer`; populating the generic pair is what the engine
+        // actually looks for, and keeps the T5 slots free for families that
+        // genuinely use T5.
+        "wan-umt5" => {
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
         }
         "qwen-image-runtime" => {
             cfg.vae = to_str(&paths.vae);
@@ -380,6 +402,12 @@ pub fn installed_intent_from_sidecar(
 /// from the registry. Pinning resolution to the same `&'static str` lets
 /// error messages carry it without an allocation and guarantees the match in
 /// [`copy_companion_into_model_config`] never sees a typo.
+/// Hand-maintained mirror of [`crate::companions::COMPANIONS`], needed
+/// because the resolver wants a `&'static str` it can hand to
+/// `ModelPaths::resolve`. `resolve_intent_to_model_config` `expect`s on
+/// this, so a registry entry missing here is a panic at install time, not
+/// a degraded result — `every_registered_companion_has_a_static_name`
+/// keeps the two in step.
 fn known_companion_static(name: &str) -> Option<&'static str> {
     Some(match name {
         "clip-l" => "clip-l",
@@ -396,6 +424,9 @@ fn known_companion_static(name: &str) -> Option<&'static str> {
         "ltx2.3-vae" => "ltx2.3-vae",
         "ltx2.3-text-projection" => "ltx2.3-text-projection",
         "ltx2-te" => "ltx2-te",
+        "wan-umt5" => "wan-umt5",
+        "wan21-vae" => "wan21-vae",
+        "wan22-vae" => "wan22-vae",
         "qwen-image-runtime" => "qwen-image-runtime",
         "wuerstchen-runtime" => "wuerstchen-runtime",
         "t5-v1_1-xxl" => "t5-v1_1-xxl",
@@ -476,6 +507,23 @@ mod tests {
         require_primary_present: false,
     };
 
+    /// `resolve_intent_to_model_config` calls `.expect("companion name in
+    /// registry")` on this lookup, so a companion that `companions_for` can
+    /// push but this table does not know is not a missing feature — it is a
+    /// panic on the install path. Nothing enforced that the two agreed until
+    /// this test; adding the Wan companions is what surfaced the gap.
+    #[test]
+    fn every_registered_companion_has_a_static_name() {
+        for companion in crate::companions::COMPANIONS {
+            assert!(
+                known_companion_static(companion.canonical_name).is_some(),
+                "`{}` is in COMPANIONS but missing from known_companion_static — \
+                 resolving an entry that needs it would panic",
+                companion.canonical_name
+            );
+        }
+    }
+
     /// Pin MOLD_HOME to a path with no real `.hf-cache/` so
     /// `ModelPaths::resolve` can't discover an unrelated installed companion
     /// from the dev machine and inject it into the synthesized config.
@@ -525,6 +573,8 @@ mod tests {
 
     fn empty_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::new(),
             transformer_shards: Vec::new(),
             vae: PathBuf::new(),

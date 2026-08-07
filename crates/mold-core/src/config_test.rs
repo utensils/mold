@@ -1435,6 +1435,8 @@ is_schnell = false
         // to_model_config should only set path fields, not defaults or metadata
         let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/transformer.gguf"),
             transformer_shards: Vec::new(),
             vae: PathBuf::from("/tmp/vae.safetensors"),

@@ -4,10 +4,10 @@
  * Shared family policy lives in `@studio/lib/generationCapabilities`. Two
  * desktop additions:
  *   - `supportsImg2img` — whether the SourceImageWell should render at all.
- *     True for every non-video image family AND for LTX-2, whose engine
- *     stages `source_image` as frame-0 conditioning (image-to-video, with
- *     `strength`). Plain `ltx-video` stays false — that engine has no
- *     img2vid path and would silently ignore the image.
+ *     True for every non-video image family AND for the video families whose
+ *     engine reads a still source image, which the shared kit names via
+ *     `isImageConditionedVideoFamily`. Plain `ltx-video` stays false — that
+ *     engine has no img2vid path and would silently ignore the image.
  *   - `pruneRequestForFamily` — strips request fields the target family does
  *     not support, applied on model change so a leftover value never ships.
  *
@@ -19,6 +19,7 @@ import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
   isFlux2DevModel,
+  isImageConditionedVideoFamily,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
   type BaseGenerationCapabilities,
@@ -49,10 +50,12 @@ export function generationCapabilitiesForFamily(
   const supportsAdvancedVideo = isAdvancedVideoFamily(family);
   return {
     ...shared,
-    // LTX-2 accepts a still source_image as frame-0 conditioning (img2video);
-    // ltx-video's engine has no img2vid path, so only the advanced-video
-    // families get the well among video families.
-    supportsImg2img: !shared.supportsVideo || supportsAdvancedVideo,
+    // Image conditioning is its own capability, not a consequence of having
+    // the advanced-video panel. Deriving it from `supportsAdvancedVideo` was
+    // correct only while LTX-2 was the sole image-conditioned video family:
+    // Wan is video, is not advanced-video, and reads a source image — and
+    // `wan22-i2v-a14b` cannot generate without one.
+    supportsImg2img: !shared.supportsVideo || isImageConditionedVideoFamily(family),
     supportsMask: shared.supportsMask && !shared.supportsVideo,
     supportsAdvancedVideo,
   };

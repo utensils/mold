@@ -214,6 +214,8 @@ impl Flux2Engine {
         }
 
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: transformer_path,
             transformer_shards: Vec::new(),
             vae: vae_path,
@@ -2060,6 +2062,8 @@ mod tests {
         t5_encoder: Option<PathBuf>,
     ) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: dir.join(transformer_name),
             transformer_shards: vec![],
             vae: dir.join("vae.safetensors"),
@@ -2360,6 +2364,8 @@ mod tests {
         let mut engine = Flux2Engine::new(
             "flux2-klein:bf16".to_string(),
             ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
                 transformer,
                 transformer_shards: vec![],
                 vae,
@@ -2505,6 +2511,8 @@ mod tests {
         let engine = Flux2Engine::new(
             "flux2-klein:q8".to_string(),
             ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
                 transformer,
                 transformer_shards: vec![],
                 vae,
@@ -2544,6 +2552,8 @@ mod tests {
         let engine = Flux2Engine::new(
             "flux2-klein:bf16".to_string(),
             ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
                 transformer,
                 transformer_shards: vec![],
                 vae,

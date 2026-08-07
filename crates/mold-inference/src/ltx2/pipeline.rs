@@ -1672,6 +1672,8 @@ mod tests {
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/ltx2.safetensors"),
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/unused"),
@@ -1698,6 +1700,8 @@ mod tests {
 
     fn dummy_paths_in(root: &Path, gemma_root: &Path) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.join("ltx2.safetensors"),
             transformer_shards: vec![],
             vae: root.join("unused"),
@@ -2126,6 +2130,8 @@ mod tests {
 
         fn paths_for(transformer: &std::path::Path) -> ModelPaths {
             ModelPaths {
+                low_noise_transformer: None,
+                low_noise_distilled_lora: None,
                 transformer: transformer.to_path_buf(),
                 transformer_shards: vec![],
                 vae: PathBuf::new(),

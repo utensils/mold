@@ -2571,6 +2571,8 @@ impl Coordinator {
                         },
                         components,
                         engine_paths: mold_core::ModelPaths {
+                            low_noise_transformer: None,
+                            low_noise_distilled_lora: None,
                             transformer: std::path::PathBuf::from(&pending.job.request.model),
                             transformer_shards: vec![],
                             vae: std::path::PathBuf::from(&pending.job.request.model),
@@ -2589,6 +2591,8 @@ impl Coordinator {
                         },
                         engine_config: engine_config.clone(),
                         admission_paths: mold_core::ModelPaths {
+                            low_noise_transformer: None,
+                            low_noise_distilled_lora: None,
                             transformer: std::path::PathBuf::from(&pending.job.request.model),
                             transformer_shards: vec![],
                             vae: std::path::PathBuf::from(&pending.job.request.model),

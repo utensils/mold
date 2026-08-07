@@ -669,9 +669,10 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         family,
         family_role: FamilyRole::Foundation,
         sub_family: None,
-        modality: match family {
-            Family::LtxVideo | Family::Ltx2 => Modality::Video,
-            _ => Modality::Image,
+        modality: if family.is_video() {
+            Modality::Video
+        } else {
+            Modality::Image
         },
         kind,
         file_format: FileFormat::Safetensors,
@@ -1120,9 +1121,10 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let modality = match family {
-        Family::LtxVideo | Family::Ltx2 => Modality::Video,
-        _ => Modality::Image,
+    let modality = if family.is_video() {
+        Modality::Video
+    } else {
+        Modality::Image
     };
     // Heuristic kind: "lora" tag wins, otherwise checkpoint.
     let kind = if hit
@@ -1144,7 +1146,7 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
         author: hit.author,
         family,
         family_role,
-        sub_family: None,
+        sub_family: wan_sub_family_from_id(&hit.id),
         modality,
         kind,
         file_format: FileFormat::Safetensors,
@@ -1181,6 +1183,56 @@ fn parse_iso(s: Option<&str>) -> Option<i64> {
             .ok()
             .map(|dt| dt.unix_timestamp())
     })
+}
+
+/// Whether a repo id names the Wan video family.
+///
+/// Wan needs its own predicate where the other families get an inline
+/// `contains`, and for the opposite reason to the LTX pair. LTX splits into
+/// two mold families, so `ltx-2` has to be tested before `ltx-video` or the
+/// specific one is shadowed by the general one. Wan's 2.1 and 2.2 releases are
+/// **one** mold family, so no ordering between them matters — what matters is
+/// that `wan` is a three-letter substring that occurs inside ordinary words
+/// (`wandering`, `taiwan`, `wanderlust`). A bare `contains("wan")`, or even the
+/// `/wan` owner-prefix form the `flux` arm uses, would classify unrelated image
+/// checkpoints as video models and hand them a frame count and a video
+/// pipeline. Every pattern here therefore anchors `wan` against a following
+/// version digit or the word `video`.
+///
+/// The spellings are the ones the ecosystem actually ships:
+/// `Wan-AI/Wan2.1-T2V-1.3B`, `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`,
+/// `QuantStack/Wan2.2-I2V-A14B-GGUF`, `Kijai/WanVideo_comfy`.
+fn looks_like_wan(id_lower: &str) -> bool {
+    const ANCHORED: &[&str] = &[
+        "wan2",      // Wan2.1, Wan2.2, wan22
+        "wan-2",     // Wan-2.2
+        "wan_2",     // Wan_2.1_ComfyUI_repackaged
+        "wan.2",     // Wan.2.2
+        "wanvideo",  // Kijai's repack line
+        "wan-video", //
+        "wan_video", //
+        "wan-ai/",   // the upstream org, for repos it names differently
+    ];
+    ANCHORED.iter().any(|needle| id_lower.contains(needle))
+}
+
+/// Wan's sub-family, inferred from a repo id.
+///
+/// The HF normalizers pass `sub_family: None` on the grounds that single-file
+/// HF entries are rare and Civitai is the load-bearing path. That reasoning
+/// does not hold for Wan: HF is where Wan lives — `Wan-AI/*` upstream, the
+/// `Comfy-Org` repacks, and QuantStack's GGUF experts are all HF repos.
+///
+/// Only one distinction changes behaviour, and it changes it hard. TI2V-5B is
+/// the sole Wan checkpoint that pairs with the 48-channel 2.2 VAE and runs at
+/// 121 frames / 24 fps; everything else takes the 16-channel 2.1 VAE at 81/16.
+/// Left as `None`, a 5B row would be handed the 2.1 VAE, whose latent width its
+/// DiT rejects at load — after the download. Every other variant's defaults are
+/// already the fallback, so nothing else is worth guessing at.
+pub fn wan_sub_family_from_id(repo_id: &str) -> Option<String> {
+    let id = repo_id.to_ascii_lowercase();
+    (id.contains("ti2v-5b") || id.contains("ti2v_5b") || id.contains("ti2v5b"))
+        .then(|| "wan22-ti2v-5b".to_string())
 }
 
 /// Best-effort family inference from HF metadata. Returns `None` for
@@ -1220,6 +1272,8 @@ pub fn family_from_hf(
         Family::Ltx2
     } else if id_lower.contains("ltx-video") {
         Family::LtxVideo
+    } else if looks_like_wan(&id_lower) {
+        Family::Wan
     } else if id_lower.contains("z-image") || id_lower.contains("zimage") {
         Family::ZImage
     } else if id_lower.contains("qwen-image") || id_lower.contains("qwen_image") {
@@ -1243,6 +1297,9 @@ pub fn family_from_hf(
                 "flux.2" | "flux2" => Some(Family::Flux2),
                 "stable-diffusion-xl" | "sdxl" => Some(Family::Sdxl),
                 "stable-diffusion" => Some(Family::Sd15),
+                // Safe as an exact tag where it is unsafe as a substring:
+                // a repo that tags itself `wan` is claiming the family.
+                "wan" => Some(Family::Wan),
                 _ => continue,
             };
             break;

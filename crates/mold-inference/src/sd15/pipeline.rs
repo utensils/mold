@@ -169,6 +169,8 @@ impl SD15Engine {
         // `single_file_path` field — future `load()` consults it before
         // falling through to the diffusers `build_*` helpers.
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single_file_path.clone(),
             transformer_shards: Vec::new(),
             vae: single_file_path.clone(),
@@ -1857,6 +1859,8 @@ mod tests {
             .unwrap();
 
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: weights_path.clone(),
             transformer_shards: Vec::new(),
             vae: weights_path.clone(),
@@ -1908,6 +1912,8 @@ mod tests {
             .unwrap();
 
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: dir.path().join("unet.safetensors"),
             transformer_shards: Vec::new(),
             vae: vae_path.clone(),

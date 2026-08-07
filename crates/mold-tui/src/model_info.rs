@@ -186,6 +186,28 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: true,
             default_scheduler: None,
         },
+        // Wan differs from both LTX entries on three axes, and the catch-all
+        // below gets every one of them wrong: it is the only video family that
+        // *wants* a negative prompt (its checkpoints ship a tuned default and
+        // CFG is live above guidance 1.0), it conditions on a single source
+        // image, and it has no audio branch at all.
+        "wan" => ModelCapabilities {
+            supports_negative_prompt: true,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: true,
+            // Wan's image conditioning is a first-frame anchor, not a
+            // strength-weighted blend, so a strength slider would imply a
+            // control the engine does not read.
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: true,
+            supports_video: true,
+            supports_audio: false,
+            supports_video_upscale: false,
+            default_scheduler: None,
+        },
         _ => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
@@ -220,7 +242,28 @@ pub fn capabilities_for_model(
     if advertised_audio_support == Some(false) {
         caps.supports_audio = false;
     }
+    if family == "wan" {
+        caps.supports_source_image = wan_model_takes_source_image(model);
+    }
     caps
+}
+
+/// Whether a Wan checkpoint reads a source image, from its name.
+///
+/// The family as a whole conditions on images, but individual checkpoints do
+/// not: `WanEngine::build_image_conditioning` refuses one outright on a
+/// text-to-video checkpoint ("this Wan checkpoint is text-to-video only"), and
+/// *requires* one on a 36-channel image-to-video checkpoint. Advertising the
+/// field family-wide offered an image on `wan21-t2v-1.3b` and
+/// `wan22-t2v-a14b` that the engine then rejected at generate time.
+///
+/// `i2v` is the discriminator and it subsumes `ti2v`, so one test covers both
+/// the 36-channel I2V checkpoints and TI2V-5B's latent-inpaint path. A name
+/// matching neither is treated as text-to-video: the overwhelming majority of
+/// community Wan fine-tunes are T2V, and withholding a control is recoverable
+/// where offering a rejected one is not.
+fn wan_model_takes_source_image(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("i2v")
 }
 
 /// Resolve the family string for a given model name using the config and manifest.
@@ -275,6 +318,7 @@ mod tests {
             "sdxl",
             "qwen-image",
             "qwen-image-edit",
+            "wan",
             "z-image",
         ] {
             assert!(
@@ -284,6 +328,72 @@ mod tests {
         }
         assert!(!capabilities_for_family("wuerstchen").supports_lora);
         assert!(!capabilities_for_family("ltx-video").supports_lora);
+    }
+
+    /// Wan is the TUI's only video family that keeps the negative prompt and
+    /// takes a source image, and the only one with no audio at all. Without
+    /// its own entry it fell to the catch-all, which hides Frames/FPS — so a
+    /// wan model in the Create form offered no way to set a clip length.
+    #[test]
+    fn wan_shows_video_rows_without_ltx_only_controls() {
+        let caps = capabilities_for_family("wan");
+        assert!(caps.supports_video, "Frames/FPS rows are gated on this");
+        assert!(caps.supports_lora);
+        assert!(caps.supports_source_image);
+        // The negative prompt is live: Wan ships a tuned default and CFG runs
+        // whenever guidance exceeds 1.0.
+        assert!(caps.supports_negative_prompt);
+
+        // LTX-only rows must stay hidden. Audio in particular is not a
+        // degraded control for wan — its checkpoints carry no audio VAE or
+        // vocoder, and the server rejects the request before denoising.
+        assert!(!caps.supports_audio);
+        assert!(!caps.supports_video_upscale);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_controlnet);
+        assert!(!caps.supports_mask);
+        // First-frame anchoring, not a strength-weighted blend.
+        assert!(!caps.supports_strength);
+
+        // The per-model refinement must not resurrect audio for wan the way
+        // an advertised `supports_audio` can for LTX-2.
+        assert!(
+            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None).supports_audio
+        );
+    }
+
+    /// The family conditions on images; individual checkpoints do not. A
+    /// text-to-video checkpoint offered the source-image field would have it
+    /// rejected by `build_image_conditioning` at generate time, after the
+    /// user picked a file.
+    #[test]
+    fn wan_source_image_follows_the_selected_checkpoint() {
+        for model in [
+            "wan22-i2v-a14b:q5",
+            "wan22-i2v-a14b:q8",
+            // TI2V-5B conditions by pinning latent frame 0; `i2v` subsumes it.
+            "wan22-ti2v-5b:fp16",
+        ] {
+            assert!(
+                capabilities_for_model("wan", model, None, None).supports_source_image,
+                "{model} takes a source image"
+            );
+        }
+
+        for model in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-t2v-a14b:q5",
+            // An unrecognized name defaults to text-to-video.
+            "cv:12345",
+        ] {
+            assert!(
+                !capabilities_for_model("wan", model, None, None).supports_source_image,
+                "{model} is text-to-video; the engine rejects an image"
+            );
+        }
+
+        // Other families are untouched by the wan-specific narrowing.
+        assert!(capabilities_for_model("sdxl", "sdxl:fp16", None, None).supports_source_image);
     }
 
     #[test]

@@ -30,6 +30,11 @@ const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
 pub enum ComponentRole {
     Transformer,
     TransformerShard(usize),
+    /// The low-noise expert of a two-expert pair (Wan 2.2 A14B). It is a
+    /// separate artifact rather than a shard: the plan has to fingerprint and
+    /// pre-validate it in its own right, because it is not read until the
+    /// schedule crosses the expert boundary — long after admission.
+    LowNoiseTransformer,
     Vae,
     T5,
     T5Tokenizer,
@@ -46,6 +51,10 @@ pub enum ComponentRole {
     TemporalUpscaler,
     Decoder,
     DistilledLora,
+    /// The distill belonging to [`ComponentRole::LowNoiseTransformer`]. Each
+    /// expert of a pair is distilled separately, so the two adapters are
+    /// distinct artifacts, not one applied twice.
+    LowNoiseDistilledLora,
 }
 
 impl ComponentRole {
@@ -1486,6 +1495,14 @@ fn concrete_artifacts_for_family(
     for (index, shard) in paths.transformer_shards.iter().enumerate() {
         artifacts.insert(ComponentRole::TransformerShard(index), shard.clone());
     }
+    // A two-expert pair reads its second half only after the schedule crosses
+    // the expert boundary. Without its own role the plan would freeze one
+    // expert and validate one expert, and a file replaced or deleted between
+    // admission and the swap would change the render — or fail it — with the
+    // plan still reporting valid.
+    if let Some(path) = &paths.low_noise_transformer {
+        artifacts.insert(ComponentRole::LowNoiseTransformer, path.clone());
+    }
     artifacts.insert(ComponentRole::Vae, paths.vae.clone());
     if let Some(path) = engine_config
         .selected_t5_path
@@ -1560,6 +1577,9 @@ fn concrete_artifacts_for_family(
     }
     if let Some(path) = &paths.distilled_lora {
         artifacts.insert(ComponentRole::DistilledLora, path.clone());
+    }
+    if let Some(path) = &paths.low_noise_distilled_lora {
+        artifacts.insert(ComponentRole::LowNoiseDistilledLora, path.clone());
     }
     for (index, lora) in effective_loras.iter().enumerate() {
         artifacts.insert(ComponentRole::Lora(index), lora.path.clone());
@@ -1650,9 +1670,9 @@ fn effective_constraints(
     let mut components = BTreeMap::new();
     for role in artifacts.keys() {
         let requested = match role {
-            ComponentRole::Transformer | ComponentRole::TransformerShard(_) => {
-                advanced.map(|value| &value.transformer)
-            }
+            ComponentRole::Transformer
+            | ComponentRole::TransformerShard(_)
+            | ComponentRole::LowNoiseTransformer => advanced.map(|value| &value.transformer),
             ComponentRole::Vae => advanced.map(|value| &value.vae),
             ComponentRole::T5 => advanced
                 .and_then(|value| value.t5.as_ref())
@@ -1702,7 +1722,9 @@ fn validate_cpu_constraints(
             role if role.is_host_only() => true,
             role if role.is_text_encoder() => capabilities.supports_text_encoder_cpu,
             ComponentRole::Vae => capabilities.supports_vae_cpu,
-            ComponentRole::Transformer | ComponentRole::TransformerShard(_) => {
+            ComponentRole::Transformer
+            | ComponentRole::TransformerShard(_)
+            | ComponentRole::LowNoiseTransformer => {
                 matches!(family, "flux2" | "flux.2" | "flux2-klein")
             }
             _ => false,
@@ -1861,7 +1883,9 @@ fn build_plan(
         .filter(|(role, _)| {
             matches!(
                 role,
-                ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                ComponentRole::Transformer
+                    | ComponentRole::TransformerShard(_)
+                    | ComponentRole::LowNoiseTransformer
             )
         })
         .all(|(_, cpu)| *cpu);
@@ -1955,7 +1979,9 @@ fn build_plan(
             let strategy = if memory.block_offload
                 && matches!(
                     role,
-                    ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                    ComponentRole::Transformer
+                        | ComponentRole::TransformerShard(_)
+                        | ComponentRole::LowNoiseTransformer
                 ) {
                 host_paths.insert(path.clone());
                 ComponentLoadStrategy::StreamedBlocks
@@ -2208,6 +2234,9 @@ fn gpu_resident_paths(
 
     if on_cpu(&ComponentRole::Transformer) {
         gpu.transformer = PathBuf::new();
+    }
+    if on_cpu(&ComponentRole::LowNoiseTransformer) {
+        gpu.low_noise_transformer = None;
     }
     if !gpu.transformer_shards.is_empty() {
         gpu.transformer_shards = gpu
@@ -3558,6 +3587,8 @@ mod tests {
         text_encoder_files: Vec<PathBuf>,
     ) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/models/transformer.safetensors"),
             transformer_shards,
             vae: PathBuf::from("/models/vae.safetensors"),
@@ -4252,6 +4283,8 @@ mod tests {
             std::fs::write(root.path().join(name), b"x").unwrap();
         }
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: root.path().join("transformer.safetensors"),
             transformer_shards: Vec::new(),
             vae: root.path().join("vae.safetensors"),
@@ -4299,6 +4332,78 @@ mod tests {
             role,
             ComponentRole::T5 | ComponentRole::ClipL | ComponentRole::ClipG
         )));
+    }
+
+    /// Both halves of a two-expert pair must be in the plan's artifact set.
+    ///
+    /// The low-noise expert is not opened until the schedule crosses the expert
+    /// boundary — long after admission — so if it is absent here the plan
+    /// freezes and pre-validates one expert while the generation reads two. A
+    /// file swapped or deleted in between then changes the render, or fails it,
+    /// with the plan still reporting valid. Same for its distill: the two
+    /// adapters are separately trained, so one standing in for both is the
+    /// wrong model rather than a degraded one.
+    #[test]
+    fn a_two_expert_pair_registers_both_experts_and_both_distills() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name);
+        let paths = ModelPaths {
+            low_noise_transformer: Some(at("low-noise.gguf")),
+            low_noise_distilled_lora: Some(at("low-noise-distill.safetensors")),
+            transformer: at("high-noise.gguf"),
+            transformer_shards: Vec::new(),
+            vae: at("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: Some(at("high-noise-distill.safetensors")),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![at("umt5.safetensors")],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let frozen = mold_inference::FrozenEngineConfig::resolve("unused", &Config::default());
+        let artifacts = concrete_artifacts_for_family(&paths, "wan", &[], &frozen);
+
+        assert_eq!(
+            artifacts.get(&ComponentRole::Transformer),
+            Some(&at("high-noise.gguf"))
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::LowNoiseTransformer),
+            Some(&at("low-noise.gguf")),
+            "the low-noise expert must be its own frozen artifact"
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::DistilledLora),
+            Some(&at("high-noise-distill.safetensors"))
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::LowNoiseDistilledLora),
+            Some(&at("low-noise-distill.safetensors")),
+            "each expert's distill is a distinct artifact"
+        );
+
+        // The roles are distinct keys, so the two experts cannot collapse into
+        // one fingerprint entry.
+        assert_ne!(
+            artifacts.get(&ComponentRole::Transformer),
+            artifacts.get(&ComponentRole::LowNoiseTransformer)
+        );
+
+        // A single-expert checkpoint gains neither role.
+        let single = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            ..paths
+        };
+        let artifacts = concrete_artifacts_for_family(&single, "wan", &[], &frozen);
+        assert!(!artifacts.contains_key(&ComponentRole::LowNoiseTransformer));
+        assert!(!artifacts.contains_key(&ComponentRole::LowNoiseDistilledLora));
     }
 
     #[test]

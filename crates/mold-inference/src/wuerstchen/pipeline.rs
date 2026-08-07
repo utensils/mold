@@ -1617,6 +1617,8 @@ mod tests {
         decoder_clip_tokenizer: Option<PathBuf>,
     ) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: vec![],
             vae,

@@ -2400,7 +2400,16 @@ pub(crate) fn oom_user_message_with_advice(
 }
 
 fn is_video_family(family_slug: &str) -> bool {
-    matches!(family_slug, "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3")
+    // The caller also accepts any request that carries an explicit `frames`,
+    // which covers every Studio submission. The family arm is what catches the
+    // rest: `mold run wan22-t2v-a14b:q5 "…"` sends no frame count at all and
+    // relies on the model default, so without wan here a CLI OOM is answered
+    // with image advice — lower the resolution, keep --batch 1 — and never
+    // mentions the frame count that actually drives the peak.
+    matches!(
+        family_slug,
+        "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3" | "wan"
+    )
 }
 
 fn upscale_generated_image_on_worker(
@@ -8931,6 +8940,39 @@ mod tests {
         assert!(
             msg.contains("768x512"),
             "video OOM message should mention the requested resolution; got: {msg}"
+        );
+    }
+
+    /// A wan OOM must get frame guidance even when the request carries no
+    /// explicit frame count.
+    ///
+    /// The video branch fires on `is_video_family(slug) || request.frames`, so
+    /// every Studio submission was already covered by the second disjunct.
+    /// `mold run wan22-t2v-a14b:q5 "…"` sends no frames at all and relies on
+    /// the model default, so with wan missing from the predicate the CLI's OOM
+    /// was answered with image advice — lower the resolution, keep --batch 1 —
+    /// and never mentioned the frame count that actually drives the peak.
+    #[test]
+    fn runtime_oom_message_for_wan_without_explicit_frames_keeps_frame_guidance() {
+        let req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a paper boat","model":"wan22-t2v-a14b:q5","width":832,"height":480,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        assert!(req.frames.is_none(), "the fixture must omit frames");
+
+        let msg = oom_user_message_for_request("wan22-t2v-a14b:q5", Some("wan"), Some(&req));
+
+        assert!(
+            msg.contains("--frames"),
+            "wan OOM must suggest reducing frames; got: {msg}"
+        );
+        assert!(
+            !msg.contains("--batch"),
+            "wan renders one clip at a time; --batch is not a lever, got: {msg}"
+        );
+        assert!(
+            msg.contains("832x480"),
+            "the requested shape belongs in the message; got: {msg}"
         );
     }
 

@@ -83,6 +83,11 @@ function selectedFamily(s: GenerateFormState): string {
   if (s.model.startsWith("qwen-image")) return "qwen-image";
   if (s.model.startsWith("ltx-video")) return "ltx-video";
   if (s.model.startsWith("ltx2") || s.model.startsWith("ltx-2")) return "ltx2";
+  // Every Wan manifest name is versioned — `wan21-…`, `wan22-…` — so the
+  // prefix is unambiguous here in a way a bare `wan` substring would not be.
+  // This is only the fallback for a stored form whose `modelFamily` predates
+  // the field; the server-supplied family above wins whenever it is present.
+  if (s.model.startsWith("wan2") || s.model.startsWith("wan-")) return "wan";
   return "";
 }
 

@@ -233,6 +233,43 @@ pub static COMPANIONS: &[Companion] = &[
         // tokenizer files round to ~38 MB combined and don't move the needle.
         size_bytes: 24_374_793_024,
     },
+    // Wan's UMT5-XXL encoder and tokenizer. Every Wan checkpoint in the wild
+    // — Comfy-Org repack, QuantStack GGUF, Civitai fine-tune — is
+    // transformer-only; the encoder is shipped once and shared. Repo, files,
+    // and sizes match the `wan-umt5` manifest companion exactly so a user who
+    // already pulled a manifest Wan model gets cv:/hf: installs from cache.
+    Companion {
+        canonical_name: "wan-umt5",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Wan],
+        source: Source::Hf,
+        repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        files: &["split_files/text_encoders/umt5_xxl_fp16.safetensors"],
+        size_bytes: 11_366_399_385,
+    },
+    // The two Wan VAEs are different architectures, not versions of one: 2.1
+    // is 16-channel at 8x8 spatial, 2.2 is 48-channel at 16x16. The DiT's
+    // input channel count is validated against the VAE's latent width at load,
+    // so pairing the wrong one fails rather than degrades — but it fails after
+    // a multi-gigabyte download, which is why the two are separate companions.
+    Companion {
+        canonical_name: "wan21-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::Wan],
+        source: Source::Hf,
+        repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        files: &["split_files/vae/wan_2.1_vae.safetensors"],
+        size_bytes: 253_815_318,
+    },
+    Companion {
+        canonical_name: "wan22-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::Wan],
+        source: Source::Hf,
+        repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+        files: &["split_files/vae/wan2.2_vae.safetensors"],
+        size_bytes: 1_409_400_960,
+    },
     // Shared Qwen-Image runtime assets. Civitai Qwen single-file
     // checkpoints are transformer-only exports; the VAE, Qwen2.5-VL text
     // encoder shards, and tokenizer come from the base HF release.
@@ -354,6 +391,21 @@ pub fn companions_for(
                     push(&mut out, "ltx2.3-vae");
                     push(&mut out, "ltx2.3-text-projection");
                 }
+            }
+        }
+        Family::Wan => {
+            push(&mut out, "wan-umt5");
+            // Which VAE is not a version question, and the naming actively
+            // misleads: **Wan 2.2's A14B pair uses the 2.1 VAE**, the same
+            // 16-channel file the 1.3B uses. Only TI2V-5B carries the
+            // 48-channel 2.2 VAE. Keying off the `wan22-` prefix would hand
+            // A14B a VAE whose latent width its DiT rejects.
+            match sub_family {
+                Some("wan22-ti2v-5b") => push(&mut out, "wan22-vae"),
+                // Everything else — 2.1 at either size, both A14B experts,
+                // and unknown community fine-tunes, which are overwhelmingly
+                // 14B-class — takes the 2.1 VAE.
+                _ => push(&mut out, "wan21-vae"),
             }
         }
         Family::QwenImage => {
