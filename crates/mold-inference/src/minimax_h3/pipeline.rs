@@ -6,6 +6,8 @@
 //! noise, sampler, cancellation, and output lifecycle before the compliance,
 //! attention, and admission gates permit a runnable family.
 
+pub(crate) mod ref2va;
+
 use std::io::Cursor;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -223,9 +225,19 @@ pub(crate) struct H3PreparedFl2VaRequest {
 pub(crate) enum H3PipelinePhase {
     Validate,
     EndpointPreprocess,
+    ReferenceDecode,
+    ReferenceDecodeChunk,
+    ReferencePreprocess,
+    ReferencePreprocessChunk,
+    QwenEncode,
+    QwenEncodeChunk,
     PromptEncode,
     VisualConditionEncode,
     VisualConditionEncodeChunk,
+    ReferenceVisualEncode,
+    ReferenceVisualEncodeChunk,
+    ReferenceAudioEncode,
+    ReferenceAudioEncodeChunk,
     NoiseAllocation,
     Denoise,
     TransformerBlock,
@@ -415,10 +427,33 @@ pub(crate) struct H3PipelineProvenance {
     pub requested_grid_points: usize,
     pub transformer_evaluations: usize,
     pub endpoint_anchors: Vec<H3EndpointAnchor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<H3ReferenceProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_fingerprint: Option<String>,
     pub noise_domain_version: &'static str,
     pub noise_draws: Vec<H3NoiseDrawMetadata>,
     pub device_id: String,
     pub execution_fingerprint: String,
+}
+
+/// Payload-free Ref2VA provenance. It intentionally cannot represent media
+/// bytes, upload handles, or local filesystem paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct H3ReferenceProvenance {
+    pub index: u32,
+    pub kind: mold_core::GenerationReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_samples_per_channel: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_samples_per_channel: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -801,6 +836,8 @@ pub(crate) fn execute_staged(
             requested_grid_points: counts.requested_grid_points,
             transformer_evaluations: counts.transformer_evaluations,
             endpoint_anchors: anchors,
+            references: Vec::new(),
+            reference_fingerprint: None,
             noise_domain_version: NOISE_DOMAIN_VERSION,
             noise_draws: {
                 posterior_draws.extend(request_noise.draws);
@@ -863,11 +900,15 @@ pub(crate) struct H3VideoEncodeSink {
 
 impl H3VideoEncodeSink {
     fn new(geometry: &H3Fl2VaGeometry) -> Result<Self> {
-        let width = u32::try_from(geometry.width).context("H3 width does not fit u32")?;
-        let height = u32::try_from(geometry.height).context("H3 height does not fit u32")?;
+        Self::new_dimensions(geometry.width, geometry.height, geometry.frames)
+    }
+
+    fn new_dimensions(width: usize, height: usize, expected_frames: usize) -> Result<Self> {
+        let width = u32::try_from(width).context("H3 width does not fit u32")?;
+        let height = u32::try_from(height).context("H3 height does not fit u32")?;
         Ok(H3VideoEncodeSink {
             encoder: Some(Mp4StreamEncoder::new(width, height, FIXED_FPS)?),
-            expected_frames: geometry.frames,
+            expected_frames,
             width,
             height,
             pushed: 0,

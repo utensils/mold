@@ -32,6 +32,30 @@ pub struct ProbeMetadata {
     pub audio_channels: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedAudioProbe {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples_per_channel: u64,
+}
+
+/// Decode a staged MP4 soundtrack and report the exact PCM authority used by
+/// Ref2VA preprocessing. Container duration alone is deliberately not enough:
+/// codec delay and packet boundaries can change the decoded sample count.
+pub fn probe_decoded_mp4_audio_file(path: &Path) -> Result<Option<DecodedAudioProbe>> {
+    let Some(decoded) = super::model::DecodedAudio::from_mp4_file(path, None)? else {
+        return Ok(None);
+    };
+    Ok(Some(DecodedAudioProbe {
+        sample_rate: u32::try_from(decoded.sample_rate)
+            .context("decoded reference audio sample rate exceeded u32")?,
+        channels: u16::try_from(decoded.channel_count())
+            .context("decoded reference audio channel count exceeded u16")?,
+        samples_per_channel: u64::try_from(decoded.sample_count())
+            .context("decoded reference audio sample count exceeded u64")?,
+    }))
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct VideoTrackInfo {

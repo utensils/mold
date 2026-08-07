@@ -1733,10 +1733,14 @@ mod tests {
                 mime_type: "video/mp4".to_string(),
                 width: 1280,
                 height: 720,
+                frame_count: Some(120),
                 duration_ms: 4_000,
                 fps: 30.0,
                 has_audio: true,
                 audio_duration_ms: Some(4_000),
+                audio_sample_count: Some(128_000),
+                audio_sample_rate: Some(32_000),
+                audio_channels: Some(2),
             },
             GenerationReference::Audio {
                 media: GenerationReferenceAuthority::ServerPath {
@@ -1750,6 +1754,7 @@ mod tests {
                 duration_ms: 4_000,
                 sample_rate: 32_000,
                 channels: 2,
+                sample_count: Some(128_000),
             },
         ]);
         let (task, shape) =

@@ -76,7 +76,9 @@ pub const MAX_INLINE_REFERENCE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_REFERENCE_UPLOAD_HANDLE_BYTES: usize = 256;
 pub const MAX_REFERENCE_PATH_BYTES: usize = 4096;
 pub const MAX_REFERENCE_NAME_BYTES: usize = 255;
-pub const REFERENCE_PREPROCESS_VERSION: u32 = 1;
+/// Version 2 corrects official always-upscale image/video geometry and binds
+/// video row counts to the exact decoded frame count plus target truncation.
+pub const REFERENCE_PREPROCESS_VERSION: u32 = 2;
 pub const MAX_REFERENCE_DIMENSION: u32 = 65_535;
 pub const MAX_REFERENCE_IMAGE_PIXELS: u64 = 100_000_000;
 pub const MAX_REFERENCE_FPS: f64 = 240.0;
@@ -85,7 +87,7 @@ pub const MAX_REFERENCE_CHANNELS: u16 = 32;
 
 /// Payload-free, checked preprocessing authority used by placement, admission,
 /// and durable output metadata. The counts describe the exact packed rows that
-/// the fixed v1 preprocessing policy will produce; callers must recompute this
+/// the versioned preprocessing policy will produce; callers must recompute this
 /// from content-sniffed facts before admission rather than trusting the wire.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct GenerationReferencePreparedShape {
@@ -94,6 +96,8 @@ pub struct GenerationReferencePreparedShape {
     pub normalized_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_video_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -653,7 +657,8 @@ fn aligned_dimension(value: f64) -> Result<u32, ReferenceContractError> {
             "reference preprocessing produced an invalid dimension",
         ));
     }
-    let aligned = (value / f64::from(DIMENSION_ALIGNMENT)).round() * f64::from(DIMENSION_ALIGNMENT);
+    let aligned =
+        (value / f64::from(DIMENSION_ALIGNMENT)).round_ties_even() * f64::from(DIMENSION_ALIGNMENT);
     Ok((aligned as u32).max(DIMENSION_ALIGNMENT))
 }
 
@@ -663,7 +668,11 @@ fn reference_image_dimensions(
 ) -> Result<(u32, u32), ReferenceContractError> {
     const SHORT_EDGE: f64 = 2048.0;
     let short = f64::from(width.min(height));
-    let scale = (SHORT_EDGE / short).min(1.0);
+    // The released Ref2VA checkpoint always puts image references on their
+    // own 2048-short-edge canvas, including upscaling.  The down-only 2048
+    // shortcut belongs to Comfy's deployment path and must not leak into the
+    // official placement authority.
+    let scale = SHORT_EDGE / short;
     Ok((
         aligned_dimension(f64::from(width) * scale)?,
         aligned_dimension(f64::from(height) * scale)?,
@@ -692,60 +701,138 @@ fn reference_video_dimensions(
         nominal_width *= scale;
         nominal_height *= scale;
     }
-    let mut normalized = (
+    let normalized = (
         aligned_dimension(nominal_width)?,
         aligned_dimension(nominal_height)?,
     );
-    if u64::from(width) * u64::from(height) < u64::from(normalized.0) * u64::from(normalized.1) {
-        normalized = (
-            aligned_dimension(f64::from(width))?,
-            aligned_dimension(f64::from(height))?,
-        );
-    }
     Ok(normalized)
 }
 
-fn snapped_reference_video_frames(duration_ms: u64) -> Result<u32, ReferenceContractError> {
-    let frames = duration_ms
-        .checked_mul(u64::from(FIXED_FPS))
+fn normalized_reference_video_frames(
+    frame_count: u32,
+    fps: f64,
+    target_frames: u32,
+) -> Result<(u32, u32), ReferenceContractError> {
+    if frame_count == 0 || !fps.is_finite() || fps <= 0.0 || target_frames == 0 {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_EXACT_VIDEO_SHAPE",
+            Some("frame_count"),
+            "reference video requires a positive decoded frame count, fps, and target frame count",
+        ));
+    }
+    // Diffusers reproduces ffmpeg's CFR filter by assigning source frame i to
+    // floor(i * target/source + 0.5) and holding it until the next slot. The
+    // resulting count telescopes to the terminal slot below; duration_ms and
+    // a rounded rate cannot recover it at boundaries.
+    let resampled = (f64::from(frame_count) * f64::from(FIXED_FPS) / fps + 0.5).floor();
+    if !resampled.is_finite() || resampled <= 0.0 || resampled > f64::from(u32::MAX) {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
+            Some("frame_count"),
+            "reference CFR frame count exceeds the supported range",
+        ));
+    }
+    let normalized = (resampled as u32).min(target_frames);
+    // The Qwen conditioner reads the normalized sequence before the visual
+    // VAE's 17n+5 snap-down.
+    let mut vae_frames = normalized;
+    if vae_frames < FRAME_OFFSET {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
+            Some("frame_count"),
+            "reference video is too short for the visual VAE",
+        ));
+    }
+    vae_frames = ((vae_frames - FRAME_OFFSET) / FRAME_STEP)
+        .max(1)
+        .checked_mul(FRAME_STEP)
+        .and_then(|frames| frames.checked_add(FRAME_OFFSET))
         .ok_or_else(|| {
             reference_violation(
                 None,
                 "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
-                Some("duration_ms"),
-                "reference frame count overflowed",
+                Some("frame_count"),
+                "reference VAE frame count overflowed",
             )
-        })?
-        / 1_000;
-    let mut frames = u32::try_from(frames.max(5)).map_err(|_| {
-        reference_violation(
+        })?;
+    if vae_frames > normalized {
+        return Err(reference_violation(
             None,
             "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
-            Some("duration_ms"),
-            "reference frame count exceeds the supported range",
-        )
-    })?;
-    while frames > 5 && frames % FRAME_STEP != FRAME_OFFSET {
-        frames -= 1;
+            Some("frame_count"),
+            "reference video is too short for one 17n+5 VAE chunk",
+        ));
     }
-    Ok(frames)
+    Ok((normalized, vae_frames))
 }
 
-fn audio_shape(duration_ms: u64) -> Result<(u64, u64), ReferenceContractError> {
-    let samples = duration_ms
+fn exact_reference_frame_count(
+    index: usize,
+    frame_count: Option<u32>,
+) -> Result<u32, ReferenceContractError> {
+    frame_count.filter(|frames| *frames > 0).ok_or_else(|| {
+        reference_violation(
+            Some(index),
+            "MINIMAX_H3_REFERENCE_EXACT_VIDEO_SHAPE",
+            Some("frame_count"),
+            "video references require the exact decoded frame_count before placement or generation",
+        )
+    })
+}
+
+fn audio_shape(
+    index: usize,
+    sample_count: Option<u64>,
+    sample_rate: u32,
+    target_frames: u32,
+) -> Result<(u64, u64), ReferenceContractError> {
+    let source_samples = sample_count.filter(|samples| *samples > 0).ok_or_else(|| {
+        reference_violation(
+            Some(index),
+            "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE",
+            Some("sample_count"),
+            "audio references require the exact decoded samples per channel before placement or generation",
+        )
+    })?;
+    if sample_rate == 0 {
+        return Err(reference_violation(
+            Some(index),
+            "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE",
+            Some("sample_rate"),
+            "audio references require a positive decoded sample rate",
+        ));
+    }
+    // Diffusers truncates in the decoded waveform's native sample domain
+    // before its single torchaudio resample onto 32 kHz.
+    let target_native_samples = u64::from(target_frames)
+        .checked_mul(u64::from(sample_rate))
+        .ok_or_else(|| {
+            reference_violation(
+                Some(index),
+                "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
+                Some("sample_count"),
+                "target-native audio sample count overflowed",
+            )
+        })?
+        / u64::from(FIXED_FPS);
+    let truncated_native = source_samples.min(target_native_samples);
+    let resampled_samples = truncated_native
         .checked_mul(u64::from(AUDIO_SAMPLE_RATE_HZ))
         .ok_or_else(|| {
             reference_violation(
-                None,
+                Some(index),
                 "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
-                Some("duration_ms"),
-                "reference audio sample count overflowed",
+                Some("sample_count"),
+                "reference audio resample count overflowed",
             )
         })?
-        .div_ceil(1_000);
-    let latent_frames = samples.div_ceil(800);
+        .div_ceil(u64::from(sample_rate));
+    let latent_frames = resampled_samples.div_ceil(800);
     Ok((
-        samples,
+        resampled_samples,
         latent_frames.saturating_mul(u64::from(AUDIO_CHANNELS)),
     ))
 }
@@ -753,6 +840,7 @@ fn audio_shape(duration_ms: u64) -> Result<(u64, u64), ReferenceContractError> {
 fn reference_prepared_shape_at(
     index: usize,
     reference: &GenerationReference,
+    target_frames: u32,
 ) -> Result<GenerationReferencePreparedShape, ReferenceContractError> {
     let result = match reference {
         GenerationReference::Image { width, height, .. } => {
@@ -773,6 +861,7 @@ fn reference_prepared_shape_at(
                 version: REFERENCE_PREPROCESS_VERSION,
                 normalized_width: Some(width),
                 normalized_height: Some(height),
+                normalized_video_frames: None,
                 video_frames: None,
                 qwen_video_frames: None,
                 audio_samples_per_channel: None,
@@ -783,13 +872,17 @@ fn reference_prepared_shape_at(
         GenerationReference::Video {
             width,
             height,
-            duration_ms,
+            frame_count,
+            fps,
             has_audio,
-            audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
             ..
         } => {
             let (width, height) = reference_video_dimensions(*width, *height)?;
-            let frames = snapped_reference_video_frames(*duration_ms)?;
+            let source_frames = exact_reference_frame_count(index, *frame_count)?;
+            let (normalized_frames, frames) =
+                normalized_reference_video_frames(source_frames, *fps, target_frames)?;
             let latent_t = if frames <= 5 {
                 2
             } else {
@@ -807,7 +900,12 @@ fn reference_prepared_shape_at(
                     )
                 })?;
             let (audio_samples_per_channel, audio_rows) = if *has_audio {
-                let (samples, rows) = audio_shape(audio_duration_ms.unwrap_or(*duration_ms))?;
+                let (samples, rows) = audio_shape(
+                    index,
+                    *audio_sample_count,
+                    audio_sample_rate.unwrap_or_default(),
+                    target_frames,
+                )?;
                 (Some(samples), rows)
             } else {
                 (None, 0)
@@ -816,19 +914,26 @@ fn reference_prepared_shape_at(
                 version: REFERENCE_PREPROCESS_VERSION,
                 normalized_width: Some(width),
                 normalized_height: Some(height),
+                normalized_video_frames: Some(normalized_frames),
                 video_frames: Some(frames),
-                qwen_video_frames: Some(frames.div_ceil(FIXED_FPS / 2)),
+                qwen_video_frames: Some(normalized_frames.div_ceil(FIXED_FPS / 2)),
                 audio_samples_per_channel,
                 visual_rows,
                 audio_rows,
             }
         }
-        GenerationReference::Audio { duration_ms, .. } => {
-            let (samples, audio_rows) = audio_shape(*duration_ms)?;
+        GenerationReference::Audio {
+            sample_rate,
+            sample_count,
+            ..
+        } => {
+            let (samples, audio_rows) =
+                audio_shape(index, *sample_count, *sample_rate, target_frames)?;
             GenerationReferencePreparedShape {
                 version: REFERENCE_PREPROCESS_VERSION,
                 normalized_width: None,
                 normalized_height: None,
+                normalized_video_frames: None,
                 video_frames: None,
                 qwen_video_frames: None,
                 audio_samples_per_channel: Some(samples),
@@ -843,7 +948,25 @@ fn reference_prepared_shape_at(
 pub fn reference_prepared_shape(
     reference: &GenerationReference,
 ) -> Result<GenerationReferencePreparedShape, ReferenceContractError> {
-    reference_prepared_shape_at(0, reference)
+    reference_prepared_shape_at(0, reference, MAX_FRAMES)
+}
+
+/// Exact preprocessing shape for one concrete generated duration. Reference
+/// video and soundtrack media are truncated to this target before their VAE
+/// row counts become admission authority.
+pub fn reference_prepared_shape_for_target(
+    reference: &GenerationReference,
+    target_frames: u32,
+) -> Result<GenerationReferencePreparedShape, ReferenceContractError> {
+    if !valid_frame_count(target_frames) {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_TARGET_FRAMES",
+            Some("frames"),
+            format!("target frames must use the MiniMax H3 {FRAME_STEP}n+{FRAME_OFFSET} grid"),
+        ));
+    }
+    reference_prepared_shape_at(0, reference, target_frames)
 }
 
 pub fn reference_prepared_shapes(
@@ -852,7 +975,26 @@ pub fn reference_prepared_shapes(
     references
         .iter()
         .enumerate()
-        .map(|(index, reference)| reference_prepared_shape_at(index, reference))
+        .map(|(index, reference)| reference_prepared_shape_at(index, reference, MAX_FRAMES))
+        .collect()
+}
+
+pub fn reference_prepared_shapes_for_target(
+    references: &[GenerationReference],
+    target_frames: u32,
+) -> Result<Vec<GenerationReferencePreparedShape>, ReferenceContractError> {
+    if !valid_frame_count(target_frames) {
+        return Err(reference_violation(
+            None,
+            "MINIMAX_H3_REFERENCE_TARGET_FRAMES",
+            Some("frames"),
+            format!("target frames must use the MiniMax H3 {FRAME_STEP}n+{FRAME_OFFSET} grid"),
+        ));
+    }
+    references
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| reference_prepared_shape_at(index, reference, target_frames))
         .collect()
 }
 
@@ -965,6 +1107,9 @@ fn validate_reference_set(
                 fps,
                 has_audio,
                 audio_duration_ms: soundtrack_duration,
+                audio_sample_count,
+                audio_sample_rate,
+                audio_channels,
                 ..
             } => {
                 videos += 1;
@@ -1025,12 +1170,42 @@ fn validate_reference_set(
                     }
                     (false, None) => {}
                 }
+                match (
+                    *has_audio,
+                    *audio_sample_count,
+                    *audio_sample_rate,
+                    *audio_channels,
+                ) {
+                    (true, Some(samples), Some(rate), Some(channels))
+                        if samples > 0
+                            && rate > 0
+                            && rate <= MAX_REFERENCE_SAMPLE_RATE
+                            && (channels == 1 || channels == AUDIO_CHANNELS as u16) => {}
+                    (true, ..) => {
+                        return Err(reference_violation(
+                            Some(index),
+                            "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE",
+                            Some("audio_sample_count"),
+                            "video soundtracks require exact positive decoded sample_count, sample_rate, and mono/stereo channels",
+                        ));
+                    }
+                    (false, None, None, None) => {}
+                    (false, ..) => {
+                        return Err(reference_violation(
+                            Some(index),
+                            "MINIMAX_H3_REFERENCE_SOUNDTRACK_MISMATCH",
+                            Some("audio_sample_count"),
+                            "soundtrack sample fields are only valid when has_audio is true",
+                        ));
+                    }
+                }
             }
             GenerationReference::Audio {
                 mime_type,
                 duration_ms,
                 sample_rate,
                 channels,
+                sample_count,
                 ..
             } => {
                 audios += 1;
@@ -1046,22 +1221,30 @@ fn validate_reference_set(
                 if *sample_rate == 0
                     || *sample_rate > MAX_REFERENCE_SAMPLE_RATE
                     || *channels == 0
-                    || *channels > MAX_REFERENCE_CHANNELS
+                    || *channels > AUDIO_CHANNELS as u16
                 {
                     return Err(reference_violation(
                         Some(index),
                         "MINIMAX_H3_REFERENCE_AUDIO_SHAPE",
                         Some("sample_rate"),
                         format!(
-                            "audio sample rate must be in 1..={MAX_REFERENCE_SAMPLE_RATE} and channels in 1..={MAX_REFERENCE_CHANNELS}"
+                            "audio sample rate must be in 1..={MAX_REFERENCE_SAMPLE_RATE} and channels must be mono or stereo"
                         ),
+                    ));
+                }
+                if sample_count.is_none_or(|samples| samples == 0) {
+                    return Err(reference_violation(
+                        Some(index),
+                        "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE",
+                        Some("sample_count"),
+                        "audio references require the exact decoded samples per channel",
                     ));
                 }
                 audio_duration_ms =
                     checked_duration_sum(audio_duration_ms, *duration_ms, index, "duration_ms")?;
             }
         }
-        let _ = reference_prepared_shape_at(index, reference)?;
+        let _ = reference_prepared_shape_at(index, reference, MAX_FRAMES)?;
     }
 
     for (observed, maximum, kind) in [
@@ -2092,6 +2275,7 @@ mod tests {
     }
 
     fn video_reference(label: &str, byte: u8, duration_ms: u64) -> GenerationReference {
+        let fps = 29.97;
         GenerationReference::Video {
             media: inline(&[byte; 12]),
             provenance: crate::GenerationReferenceProvenance {
@@ -2101,10 +2285,14 @@ mod tests {
             mime_type: "video/mp4".to_string(),
             width: 1920,
             height: 1080,
+            frame_count: Some((duration_ms as f64 * fps / 1_000.0).round() as u32),
             duration_ms,
-            fps: 29.97,
+            fps,
             has_audio: true,
             audio_duration_ms: Some(duration_ms),
+            audio_sample_count: Some(duration_ms.saturating_mul(48)),
+            audio_sample_rate: Some(48_000),
+            audio_channels: Some(2),
         }
     }
 
@@ -2119,6 +2307,7 @@ mod tests {
             duration_ms,
             sample_rate: 48_000,
             channels: 1,
+            sample_count: Some(duration_ms.saturating_mul(48)),
         }
     }
 
@@ -2409,14 +2598,14 @@ mod tests {
     }
 
     #[test]
-    fn prepared_reference_shapes_match_the_fixed_comfy_policy() {
+    fn prepared_reference_shapes_match_the_official_ref2va_policy() {
         let image = reference_prepared_shape(&image_reference("anchor.png", 1)).unwrap();
         assert_eq!(image.version, REFERENCE_PREPROCESS_VERSION);
         assert_eq!(
             (image.normalized_width, image.normalized_height),
-            (Some(1920), Some(1088))
+            (Some(3648), Some(2048))
         );
-        assert_eq!(image.visual_rows, 60 * 34);
+        assert_eq!(image.visual_rows, 114 * 64);
         assert_eq!(image.audio_rows, 0);
 
         let video = reference_prepared_shape(&video_reference("clip.mp4", 2, 4_000)).unwrap();
@@ -2424,6 +2613,7 @@ mod tests {
             (video.normalized_width, video.normalized_height),
             (Some(1344), Some(768))
         );
+        assert_eq!(video.normalized_video_frames, Some(96));
         assert_eq!(video.video_frames, Some(90));
         assert_eq!(video.qwen_video_frames, Some(8));
         assert_eq!(video.audio_samples_per_channel, Some(128_000));
@@ -2434,6 +2624,110 @@ mod tests {
         assert_eq!(audio.audio_samples_per_channel, Some(96_000));
         assert_eq!(audio.audio_rows, 240);
         assert_eq!(audio.visual_rows, 0);
+    }
+
+    #[test]
+    fn video_prepared_shape_uses_exact_cfr_frames_and_target_truncation() {
+        let mut video = video_reference("long.mp4", 2, 15_000);
+        if let GenerationReference::Video {
+            frame_count, fps, ..
+        } = &mut video
+        {
+            *frame_count = Some(450);
+            *fps = 30.0;
+        }
+        let short = reference_prepared_shape_for_target(&video, MIN_FRAMES).unwrap();
+        assert_eq!(short.normalized_video_frames, Some(MIN_FRAMES));
+        assert_eq!(short.video_frames, Some(MIN_FRAMES));
+        assert_eq!(short.qwen_video_frames, Some(11));
+        assert_eq!(short.audio_samples_per_channel, Some(165_334));
+        assert_eq!(short.audio_rows, 414);
+
+        let long = reference_prepared_shape_for_target(&video, MAX_FRAMES).unwrap();
+        assert_eq!(long.normalized_video_frames, Some(360));
+        assert_eq!(long.video_frames, Some(345));
+        assert_eq!(long.qwen_video_frames, Some(30));
+    }
+
+    #[test]
+    fn legacy_video_without_exact_frame_count_deserializes_then_fails_closed() {
+        let reference: GenerationReference = serde_json::from_value(serde_json::json!({
+            "kind": "video",
+            "media": { "authority": "inline", "data": "AQID" },
+            "mime_type": "video/mp4",
+            "width": 640,
+            "height": 480,
+            "duration_ms": 2000,
+            "fps": 24.0
+        }))
+        .unwrap();
+        let error = reference_prepared_shape_for_target(&reference, MIN_FRAMES).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_VIDEO_SHAPE");
+        assert_eq!(error.field, Some("frame_count"));
+    }
+
+    #[test]
+    fn legacy_audio_without_exact_sample_count_deserializes_then_fails_closed() {
+        let audio: GenerationReference = serde_json::from_value(serde_json::json!({
+            "kind": "audio",
+            "media": { "authority": "inline", "data": "AQID" },
+            "mime_type": "audio/wav",
+            "duration_ms": 2000,
+            "sample_rate": 48000,
+            "channels": 2
+        }))
+        .unwrap();
+        let error = reference_prepared_shape_for_target(&audio, MIN_FRAMES).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE");
+        assert_eq!(error.field, Some("sample_count"));
+
+        let mut video = video_reference("soundtrack.mp4", 4, 2_000);
+        if let GenerationReference::Video {
+            audio_sample_count, ..
+        } = &mut video
+        {
+            *audio_sample_count = None;
+        }
+        let error = reference_prepared_shape_for_target(&video, MIN_FRAMES).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_EXACT_AUDIO_SHAPE");
+        assert_eq!(error.field, Some("sample_count"));
+    }
+
+    #[test]
+    fn official_reference_geometry_upscales_small_images_and_videos() {
+        let image = GenerationReference::Image {
+            media: inline(&[1; 8]),
+            provenance: crate::GenerationReferenceProvenance::default(),
+            mime_type: "image/png".to_string(),
+            width: 80,
+            height: 48,
+        };
+        let image = reference_prepared_shape(&image).unwrap();
+        assert_eq!(
+            (image.normalized_width, image.normalized_height),
+            (Some(3424), Some(2048))
+        );
+
+        let video = GenerationReference::Video {
+            media: inline(&[2; 12]),
+            provenance: crate::GenerationReferenceProvenance::default(),
+            mime_type: "video/mp4".to_string(),
+            width: 320,
+            height: 240,
+            frame_count: Some(48),
+            duration_ms: 2_000,
+            fps: 24.0,
+            has_audio: false,
+            audio_duration_ms: None,
+            audio_sample_count: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        let video = reference_prepared_shape(&video).unwrap();
+        assert_eq!(
+            (video.normalized_width, video.normalized_height),
+            (Some(1024), Some(768))
+        );
     }
 
     #[test]

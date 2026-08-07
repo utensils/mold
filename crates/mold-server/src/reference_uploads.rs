@@ -956,10 +956,14 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             mime_type,
             width,
             height,
+            frame_count,
             duration_ms,
             fps,
             has_audio,
             audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
+            audio_channels,
             ..
         } => GenerationReference::Video {
             media: GenerationReferenceAuthority::Descriptor,
@@ -967,10 +971,14 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             mime_type: mime_type.clone(),
             width: *width,
             height: *height,
+            frame_count: *frame_count,
             duration_ms: *duration_ms,
             fps: *fps,
             has_audio: *has_audio,
             audio_duration_ms: *audio_duration_ms,
+            audio_sample_count: *audio_sample_count,
+            audio_sample_rate: *audio_sample_rate,
+            audio_channels: *audio_channels,
         },
         GenerationReference::Audio {
             provenance,
@@ -978,6 +986,7 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             duration_ms,
             sample_rate,
             channels,
+            sample_count,
             ..
         } => GenerationReference::Audio {
             media: GenerationReferenceAuthority::Descriptor,
@@ -986,6 +995,7 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             duration_ms: *duration_ms,
             sample_rate: *sample_rate,
             channels: *channels,
+            sample_count: *sample_count,
         },
     }
 }
@@ -1009,10 +1019,14 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
             mime_type: metadata.mime_type.clone(),
             width: metadata.width.unwrap_or_default(),
             height: metadata.height.unwrap_or_default(),
+            frame_count: metadata.frame_count,
             duration_ms: metadata.duration_ms.unwrap_or_default(),
             fps: metadata.fps.unwrap_or_default(),
             has_audio: metadata.has_audio,
             audio_duration_ms: metadata.audio_duration_ms,
+            audio_sample_count: metadata.audio_sample_count,
+            audio_sample_rate: metadata.audio_sample_rate,
+            audio_channels: metadata.audio_channels,
         },
         mold_core::GenerationReferenceKind::Audio => GenerationReference::Audio {
             media: GenerationReferenceAuthority::Descriptor,
@@ -1021,6 +1035,7 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
             duration_ms: metadata.duration_ms.unwrap_or_default(),
             sample_rate: metadata.sample_rate.unwrap_or_default(),
             channels: metadata.channels.unwrap_or_default(),
+            sample_count: metadata.sample_count,
         },
     }
 }
@@ -1182,10 +1197,14 @@ fn probe_reference(
             mime_type,
             width,
             height,
+            frame_count,
             duration_ms,
             fps,
             has_audio,
             audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
+            audio_channels,
             ..
         } => {
             require_equal(reference, "mime_type", mime_type.as_str(), "video/mp4")?;
@@ -1197,6 +1216,13 @@ fn probe_reference(
                 .map_err(|error| unsupported_media(reference, error))?;
             require_equal(reference, "width", *width, probe.width)?;
             require_equal(reference, "height", *height, probe.height)?;
+            let observed_frame_count = probe
+                .frames
+                .filter(|frames| *frames > 0)
+                .ok_or_else(|| unsupported_media(reference, "video frame count is unavailable"))?;
+            if let Some(declared) = *frame_count {
+                require_equal(reference, "frame_count", declared, observed_frame_count)?;
+            }
             if (*fps - f64::from(probe.fps)).abs() > 0.51 {
                 return Err(drift_error(reference, "fps", *fps, probe.fps));
             }
@@ -1213,7 +1239,26 @@ fn probe_reference(
                 ));
             }
             require_equal(reference, "has_audio", *has_audio, probe.has_audio)?;
-            let observed_audio_duration = probe.has_audio.then_some(observed_duration);
+            let observed_audio = if probe.has_audio {
+                Some(
+                    mold_inference::ltx2::media::probe_decoded_mp4_audio_file(path)
+                        .map_err(|error| unsupported_media(reference, error))?
+                        .ok_or_else(|| {
+                            unsupported_media(
+                                reference,
+                                "MP4 declares audio but decoded no soundtrack samples",
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+            let observed_audio_duration = observed_audio.map(|audio| {
+                audio
+                    .samples_per_channel
+                    .saturating_mul(1_000)
+                    .div_ceil(u64::from(audio.sample_rate))
+            });
             if let (Some(declared), Some(observed)) = (*audio_duration_ms, observed_audio_duration)
             {
                 if declared.abs_diff(observed) > tolerance {
@@ -1225,16 +1270,36 @@ fn probe_reference(
                     ));
                 }
             }
+            if let Some(audio) = observed_audio {
+                if let Some(declared) = *audio_sample_count {
+                    require_equal(
+                        reference,
+                        "audio_sample_count",
+                        declared,
+                        audio.samples_per_channel,
+                    )?;
+                }
+                if let Some(declared) = *audio_sample_rate {
+                    require_equal(reference, "audio_sample_rate", declared, audio.sample_rate)?;
+                }
+                if let Some(declared) = *audio_channels {
+                    require_equal(reference, "audio_channels", declared, audio.channels)?;
+                }
+            }
             GenerationReference::Video {
                 media: GenerationReferenceAuthority::Descriptor,
                 provenance,
                 mime_type: "video/mp4".to_string(),
                 width: probe.width,
                 height: probe.height,
+                frame_count: Some(observed_frame_count),
                 duration_ms: observed_duration,
                 fps: f64::from(probe.fps),
                 has_audio: probe.has_audio,
                 audio_duration_ms: observed_audio_duration,
+                audio_sample_count: observed_audio.map(|audio| audio.samples_per_channel),
+                audio_sample_rate: observed_audio.map(|audio| audio.sample_rate),
+                audio_channels: observed_audio.map(|audio| audio.channels),
             }
         }
         GenerationReference::Audio {
@@ -1242,6 +1307,7 @@ fn probe_reference(
             duration_ms,
             sample_rate,
             channels,
+            sample_count,
             ..
         } => {
             if !matches!(
@@ -1260,6 +1326,9 @@ fn probe_reference(
             let wav = probe_wav(file).map_err(|error| unsupported_media(reference, error))?;
             require_equal(reference, "sample_rate", *sample_rate, wav.sample_rate)?;
             require_equal(reference, "channels", *channels, wav.channels)?;
+            if let Some(declared) = *sample_count {
+                require_equal(reference, "sample_count", declared, wav.sample_count)?;
+            }
             if duration_ms.abs_diff(wav.duration_ms) > 2 {
                 return Err(drift_error(
                     reference,
@@ -1275,6 +1344,7 @@ fn probe_reference(
                 duration_ms: wav.duration_ms,
                 sample_rate: wav.sample_rate,
                 channels: wav.channels,
+                sample_count: Some(wav.sample_count),
             }
         }
     };
@@ -1289,6 +1359,7 @@ struct WavProbe {
     duration_ms: u64,
     sample_rate: u32,
     channels: u16,
+    sample_count: u64,
 }
 
 fn probe_wav(file: std::fs::File) -> anyhow::Result<WavProbe> {
@@ -1403,6 +1474,7 @@ fn probe_wav(file: std::fs::File) -> anyhow::Result<WavProbe> {
         duration_ms,
         sample_rate,
         channels,
+        sample_count: data_bytes / block_align,
     })
 }
 
