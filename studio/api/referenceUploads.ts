@@ -856,6 +856,12 @@ export async function prepareReferenceUploads<
       entry.descriptor = canonical.descriptor;
       canonicalScopeSha256 = canonical.requestScopeSha256;
     }
+    if (session.expiresAtMs <= (options.now ?? Date.now)()) {
+      protocolError(
+        "REFERENCE_UPLOAD_SESSION_INVALID",
+        "The reference-upload session expired before its canonical request could be returned.",
+      );
+    }
   } catch (error) {
     try {
       await cancel();

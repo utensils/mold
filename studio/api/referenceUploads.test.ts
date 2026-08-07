@@ -533,6 +533,63 @@ describe("MiniMax H3 reference upload leases", () => {
     expect(methods).toEqual(["POST", "PUT", "DELETE"]);
   });
 
+  it("cancels instead of returning a lease when the session expires during its final upload", async () => {
+    const request = await requestFixture();
+    const methods: string[] = [];
+    let descriptors: GenerationReference[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (
+          _input: RequestInfo | URL,
+          init?: RequestInit,
+        ): Promise<Response> => {
+          const method = init?.method ?? "GET";
+          methods.push(method);
+          if (method === "POST") {
+            const payload = JSON.parse(String(init?.body)) as {
+              request: ReferenceUploadRequest;
+            };
+            descriptors = payload.request.references ?? [];
+            return Response.json({
+              instance_id: INSTANCE_ID,
+              expires_at_ms: 20_000,
+              request_scope_sha256: SCOPE_DIGEST,
+              session_handle: "expired-session",
+              uploads: [
+                { reference: 1, handle: "expired-image" },
+                { reference: 2, handle: "expired-audio" },
+              ],
+            });
+          }
+          if (method === "PUT") {
+            const handle = new Headers(init?.headers).get(
+              CAPABILITIES.upload_handle_header,
+            );
+            const index = handle === "expired-image" ? 1 : 2;
+            return Response.json(
+              uploadComplete(descriptors[index - 1]!, index, index === 2),
+            );
+          }
+          return new Response(null, { status: 204 });
+        },
+      ),
+    );
+    const now = vi.fn().mockReturnValueOnce(10_000).mockReturnValue(20_000);
+
+    await expect(
+      prepareReferenceUploads({
+        target: TARGET,
+        expectedInstanceId: INSTANCE_ID,
+        capabilities: CAPABILITIES,
+        request,
+        now,
+      }),
+    ).rejects.toMatchObject({ code: "REFERENCE_UPLOAD_SESSION_INVALID" });
+    expect(methods).toEqual(["POST", "PUT", "PUT", "DELETE"]);
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects duplicate one-based slots and cleans up the untrusted session", async () => {
     const request = await requestFixture();
     const calls: RequestInit[] = [];
