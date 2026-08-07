@@ -358,6 +358,49 @@ afterEach(() => {
 });
 
 describe("MobileApp sequence generation", () => {
+  it("removes capability-restricted models from the picker before submission", async () => {
+    const restrictedModel: ModelEntry = {
+      ...model,
+      name: "AutoencoderKLMiniMaxH3",
+      family: "minimax-h3",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model, restrictedModel]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          gallery: { can_delete: true },
+          model_access: {
+            restrictions: [
+              {
+                code: "minimax_h3_authorization_required",
+                family: "minimax-h3",
+                message: "MiniMax H3 is not activated.",
+                license_url: "https://example.test/license",
+                authorization_url: "https://example.test/authorize",
+              },
+            ],
+          },
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const values = fieldControl("Model")
+      .findAll("option")
+      .map((option) => option.attributes("value"));
+    expect(values).toContain(model.name);
+    expect(values).not.toContain(restrictedModel.name);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+  });
+
   it("shows active work started by another client with host attribution", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status") return Promise.resolve(status);

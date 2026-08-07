@@ -42,6 +42,7 @@ pub enum ExactUpscalePlacement {
 pub struct ResolvedUpscaleExecutionPlan {
     pub model_name: String,
     pub weights: ResolvedUpscaleArtifact,
+    pub artifact_root: Option<PathBuf>,
     pub placement: ExactUpscalePlacement,
     pub predicted_vram_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
@@ -50,6 +51,11 @@ pub struct ResolvedUpscaleExecutionPlan {
 
 impl ResolvedUpscaleExecutionPlan {
     pub fn validate(&self) -> Result<()> {
+        require_upscale_model_activation(
+            &self.model_name,
+            &self.weights.path,
+            self.artifact_root.as_deref(),
+        )?;
         let current = freeze_upscale_artifact(&self.weights.path)
             .map_err(|error| anyhow::anyhow!("upscaler artifact changed: {error}"))?;
         if current != self.weights {
@@ -60,6 +66,7 @@ impl ResolvedUpscaleExecutionPlan {
         let execution_fingerprint = upscale_execution_fingerprint(
             &self.model_name,
             &self.weights,
+            self.artifact_root.as_deref(),
             self.placement,
             predicted_vram_peak_bytes,
             predicted_host_increment_bytes,
@@ -72,6 +79,16 @@ impl ResolvedUpscaleExecutionPlan {
         }
         Ok(())
     }
+}
+
+fn require_upscale_model_activation(
+    model_name: &str,
+    weights_path: &Path,
+    artifact_root: Option<&Path>,
+) -> Result<()> {
+    mold_core::require_model_activation(model_name, None)?;
+    mold_core::require_model_artifact_activation(weights_path, artifact_root, None)?;
+    Ok(())
 }
 
 fn upscale_artifact_identity(path: &Path, size_bytes: u64) -> Result<String> {
@@ -154,6 +171,7 @@ fn upscale_plan_memory_floors(
 fn upscale_execution_fingerprint(
     model_name: &str,
     weights: &ResolvedUpscaleArtifact,
+    artifact_root: Option<&Path>,
     placement: ExactUpscalePlacement,
     predicted_vram_peak_bytes: u64,
     predicted_host_increment_bytes: u64,
@@ -164,6 +182,10 @@ fn upscale_execution_fingerprint(
     hash.update(weights.path.as_os_str().as_encoded_bytes());
     hash.update(weights.size_bytes.to_le_bytes());
     hash.update(weights.identity_fingerprint.as_bytes());
+    if let Some(root) = artifact_root {
+        hash.update(b"artifact-root\0");
+        hash.update(root.as_os_str().as_encoded_bytes());
+    }
     match placement {
         ExactUpscalePlacement::Cpu => hash.update(b"cpu"),
         ExactUpscalePlacement::Device { backend, ordinal } => {
@@ -182,18 +204,26 @@ fn upscale_execution_fingerprint(
 pub fn resolve_upscale_execution_plan(
     model_name: impl Into<String>,
     weights_path: &Path,
+    artifact_root: Option<&Path>,
     placement: ExactUpscalePlacement,
 ) -> Result<ResolvedUpscaleExecutionPlan> {
     let model_name = model_name.into();
+    require_upscale_model_activation(&model_name, weights_path, artifact_root)?;
     let weights = freeze_upscale_artifact(weights_path)?;
+    let artifact_root = artifact_root
+        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
     Ok(resolve_upscale_execution_plan_from_artifact(
-        model_name, weights, placement,
+        model_name,
+        weights,
+        artifact_root,
+        placement,
     ))
 }
 
 pub fn resolve_upscale_execution_plan_from_artifact(
     model_name: impl Into<String>,
     weights: ResolvedUpscaleArtifact,
+    artifact_root: Option<PathBuf>,
     placement: ExactUpscalePlacement,
 ) -> ResolvedUpscaleExecutionPlan {
     let model_name = model_name.into();
@@ -202,6 +232,7 @@ pub fn resolve_upscale_execution_plan_from_artifact(
     let execution_fingerprint = upscale_execution_fingerprint(
         &model_name,
         &weights,
+        artifact_root.as_deref(),
         placement,
         predicted_vram_peak_bytes,
         predicted_host_increment_bytes,
@@ -209,6 +240,7 @@ pub fn resolve_upscale_execution_plan_from_artifact(
     ResolvedUpscaleExecutionPlan {
         model_name,
         weights,
+        artifact_root,
         placement,
         predicted_vram_peak_bytes,
         predicted_host_increment_bytes,
@@ -658,9 +690,11 @@ impl UpscaleEngine for UpscalerEngine {
 pub fn create_upscale_engine(
     model_name: String,
     weights_path: PathBuf,
+    artifact_root: Option<&Path>,
     load_strategy: LoadStrategy,
     gpu_ordinal: usize,
 ) -> Result<Box<dyn UpscaleEngine>> {
+    require_upscale_model_activation(&model_name, &weights_path, artifact_root)?;
     if !weights_path.exists() {
         bail!("upscaler weights not found: {}", weights_path.display());
     }
@@ -690,6 +724,73 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+
+    #[test]
+    fn upscale_engine_rejects_restricted_model_before_reading_weights() {
+        let missing = PathBuf::from("/definitely/missing/upscaler.safetensors");
+        let error = create_upscale_engine(
+            "MiniMaxH3Scheduler".into(),
+            missing,
+            None,
+            LoadStrategy::Eager,
+            0,
+        )
+        .err()
+        .expect("restricted model must fail before filesystem access");
+        assert!(
+            error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn upscale_execution_plan_rejects_restricted_weight_path_before_metadata() {
+        let missing = PathBuf::from("/definitely/missing/MiniMax-H3/upscaler.safetensors");
+        let error = resolve_upscale_execution_plan(
+            "ordinary-upscaler",
+            &missing,
+            None,
+            ExactUpscalePlacement::Cpu,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn upscale_policy_ignores_h3_named_root_but_rejects_nested_h3_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_root = temp.path().join("mold-uat/minimax-h3/models");
+        let ordinary = artifact_root.join("real-esrgan/upscaler.safetensors");
+        std::fs::create_dir_all(ordinary.parent().unwrap()).unwrap();
+        std::fs::write(&ordinary, vec![0_u8; 64]).unwrap();
+
+        resolve_upscale_execution_plan(
+            "ordinary-upscaler",
+            &ordinary,
+            Some(&artifact_root),
+            ExactUpscalePlacement::Cpu,
+        )
+        .expect("the storage root name must not taint an ordinary upscaler");
+
+        let nested_h3 = artifact_root.join("MiniMax-H3/upscaler.safetensors");
+        let error = resolve_upscale_execution_plan(
+            "ordinary-upscaler",
+            &nested_h3,
+            Some(&artifact_root),
+            ExactUpscalePlacement::Cpu,
+        )
+        .expect_err("a nested H3 artifact must remain gated");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
 
     struct CancellationContractEngine {
         set: Arc<AtomicBool>,
@@ -775,12 +876,14 @@ mod tests {
         let cpu = resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             ExactUpscalePlacement::Cpu,
         )
         .unwrap();
         let gpu = resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             ExactUpscalePlacement::Device {
                 backend: mold_core::GpuBackend::Cuda,
                 ordinal: 7,
@@ -807,6 +910,7 @@ mod tests {
         let plan = resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             ExactUpscalePlacement::Device {
                 backend: mold_core::GpuBackend::Cuda,
                 ordinal: 3,
@@ -836,12 +940,14 @@ mod tests {
         let cpu = resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             ExactUpscalePlacement::Cpu,
         )
         .unwrap();
         let gpu = resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             ExactUpscalePlacement::Device {
                 backend: mold_core::GpuBackend::Cuda,
                 ordinal: 5,

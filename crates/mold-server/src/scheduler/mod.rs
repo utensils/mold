@@ -1490,8 +1490,25 @@ impl Coordinator {
             OwnerWork::PromptExpansion(_) => {
                 Err("local prompt expansion is unavailable in this build".to_string())
             }
-            OwnerWork::StandaloneUpscale(job) => {
-                upscale_candidates(&self.state, &job.model, &job.weights_path)
+            OwnerWork::StandaloneUpscale(_) => {
+                #[cfg(feature = "expand")]
+                let base = supplied.iter().find_map(|plan| match plan {
+                    UtilityExecutionPlan::Upscale(plan) => Some(plan),
+                    UtilityExecutionPlan::PromptExpansion(_) => None,
+                });
+                #[cfg(not(feature = "expand"))]
+                let base = supplied.first().map(|plan| match plan {
+                    UtilityExecutionPlan::Upscale(plan) => plan,
+                });
+                let base = base.ok_or_else(|| {
+                    "standalone upscaling lacked a frozen artifact candidate".to_string()
+                })?;
+                Ok(upscale_utility_candidates(
+                    &base.model_name,
+                    &base.weights,
+                    base.artifact_root.as_deref(),
+                    placements,
+                ))
             }
             OwnerWork::PostUpscale(_) => {
                 #[cfg(feature = "expand")]
@@ -1509,6 +1526,7 @@ impl Coordinator {
                 Ok(upscale_utility_candidates(
                     &base.model_name,
                     &base.weights,
+                    base.artifact_root.as_deref(),
                     placements,
                 ))
             }
@@ -5811,6 +5829,7 @@ fn snake_debug(value: impl std::fmt::Debug) -> String {
 pub(crate) fn upscale_utility_candidates(
     model_name: &str,
     weights: &mold_inference::upscaler::ResolvedUpscaleArtifact,
+    artifact_root: Option<&std::path::Path>,
     placements: impl IntoIterator<Item = UtilityPlacement>,
 ) -> Vec<UtilityExecutionPlan> {
     placements
@@ -5820,6 +5839,7 @@ pub(crate) fn upscale_utility_candidates(
                 mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
                     model_name,
                     weights.clone(),
+                    artifact_root.map(std::path::Path::to_path_buf),
                     match placement {
                         UtilityPlacement::Cpu => {
                             mold_inference::upscaler::ExactUpscalePlacement::Cpu
@@ -5879,10 +5899,12 @@ pub(crate) fn upscale_candidates(
     state: &AppState,
     model_name: &str,
     weights_path: &std::path::Path,
+    artifact_root: Option<&std::path::Path>,
 ) -> Result<Vec<UtilityExecutionPlan>, String> {
     let base = mold_inference::upscaler::resolve_upscale_execution_plan(
         model_name,
         weights_path,
+        artifact_root,
         mold_inference::upscaler::ExactUpscalePlacement::Cpu,
     )
     .map_err(|error| error.to_string())?;
@@ -5899,6 +5921,7 @@ pub(crate) fn upscale_candidates(
     Ok(upscale_utility_candidates(
         &base.model_name,
         &base.weights,
+        base.artifact_root.as_deref(),
         placements,
     ))
 }
@@ -10135,6 +10158,7 @@ mod tests {
         let frozen_upscale_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &upscale_weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .unwrap();
@@ -10273,6 +10297,7 @@ mod tests {
         let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Device {
                 backend: mold_core::GpuBackend::Cuda,
                 ordinal: 0,
@@ -12106,8 +12131,10 @@ mod tests {
 
         for count in [1, 2, 8, 64] {
             let state = utility_state_with_workers(count);
-            let first = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
-            let second = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+            let first =
+                upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
+            let second =
+                upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
 
             assert_eq!(first, second, "candidate order drifted at {count} GPUs");
             assert_eq!(first.len(), count + 1);
@@ -12139,7 +12166,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let weights = root.path().join("upscaler.safetensors");
         std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
-        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let work = OwnerWork::StandaloneUpscale(Box::new(crate::gpu_pool::StandaloneUpscaleJob {
             id: "preview-equality".to_string(),
@@ -12239,7 +12266,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let weights = root.path().join("upscaler.safetensors");
         std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
-        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
         let plan = plans
             .iter()
             .find(|plan| {
@@ -12466,7 +12493,8 @@ mod tests {
             let state = utility_state_with_backend(gpu_backend);
             let worker = state.gpu_pool.worker_by_ordinal(0).unwrap();
             let device_id = worker_device_id(&worker);
-            let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+            let plans =
+                upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
             let coordinator = Coordinator::with_preparer_and_memory(
                 state,
                 Arc::new(ImmediatePreparer),

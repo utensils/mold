@@ -481,6 +481,7 @@ impl ExecutionSemanticConfig {
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
+            artifact_root: _,
             is_schnell,
             is_turbo,
             scheduler,
@@ -5454,6 +5455,7 @@ mod tests {
         )]);
         let engine_config = mold_inference::FrozenEngineConfig {
             family: "flux2".into(),
+            artifact_root: PathBuf::from("/models"),
             is_schnell: Some(false),
             is_turbo: None,
             scheduler: None,

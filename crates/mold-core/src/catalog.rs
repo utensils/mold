@@ -68,8 +68,16 @@ pub fn build_model_catalog(
     engine_is_loaded: bool,
 ) -> Vec<ModelInfoExtended> {
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
+    let artifact_root = config.resolved_models_dir();
 
-    for manifest in visible_manifests() {
+    for manifest in visible_manifests().filter(|manifest| {
+        crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_ok()
+            && manifest.files.iter().all(|file| {
+                crate::require_model_activation(&file.hf_repo, Some(&manifest.family)).is_ok()
+                    && crate::require_model_activation(&file.hf_filename, Some(&manifest.family))
+                        .is_ok()
+            })
+    }) {
         let resolution = resolution_defaults(&manifest.name, &manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
@@ -153,7 +161,18 @@ pub fn build_model_catalog(
     let mut config_only: Vec<_> = config
         .models
         .iter()
-        .filter(|(name, _)| crate::manifest::find_manifest(name).is_none())
+        .filter(|(name, model_cfg)| {
+            crate::manifest::find_manifest(name).is_none()
+                && crate::require_model_activation(name, model_cfg.family.as_deref()).is_ok()
+                && model_cfg.all_file_paths().iter().all(|path| {
+                    crate::require_model_artifact_activation(
+                        std::path::Path::new(path),
+                        Some(&artifact_root),
+                        model_cfg.family.as_deref(),
+                    )
+                    .is_ok()
+                })
+        })
         .collect();
     config_only.sort_by_key(|(name, _)| *name);
 
@@ -490,6 +509,52 @@ mod tests {
         assert!(entry.downloaded);
         assert_eq!(entry.family, "custom");
         assert_eq!(entry.defaults.default_steps, 12);
+    }
+
+    #[test]
+    fn build_model_catalog_hides_compliance_gated_config_only_models() {
+        let mut models = HashMap::new();
+        models.insert(
+            "private-checkpoint".to_string(),
+            ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        models.insert(
+            "ordinary-custom-model".to_string(),
+            ModelConfig {
+                family: Some("custom".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        models.insert(
+            "disguised-checkpoint".to_string(),
+            ModelConfig {
+                family: Some("custom".to_string()),
+                transformer: Some("/models/MiniMax-H3/transformer.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+
+        let catalog = build_model_catalog(
+            &Config {
+                models,
+                ..Config::default()
+            },
+            None,
+            false,
+        );
+
+        assert!(!catalog
+            .iter()
+            .any(|model| model.name == "private-checkpoint"));
+        assert!(!catalog
+            .iter()
+            .any(|model| model.name == "disguised-checkpoint"));
+        assert!(catalog
+            .iter()
+            .any(|model| model.name == "ordinary-custom-model"));
     }
 
     #[test]

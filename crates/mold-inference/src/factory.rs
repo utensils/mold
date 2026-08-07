@@ -24,6 +24,10 @@ use crate::zimage::ZImageEngine;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenEngineConfig {
     pub family: String,
+    /// Trusted root for concrete model artifacts. The activation policy strips
+    /// this storage prefix before classifying path identity, so a Mold home
+    /// named after a gated UAT target does not taint unrelated models.
+    pub artifact_root: PathBuf,
     pub is_schnell: Option<bool>,
     pub is_turbo: Option<bool>,
     pub scheduler: Option<Scheduler>,
@@ -53,6 +57,7 @@ impl FrozenEngineConfig {
         let runtime_environment = crate::runtime_env::snapshot();
         Self {
             family: resolve_family(model_name, config),
+            artifact_root: config.resolved_models_dir(),
             is_schnell: model_cfg.is_schnell,
             is_turbo: model_cfg.is_turbo,
             scheduler: model_cfg.scheduler,
@@ -351,6 +356,14 @@ pub fn create_engine_with_frozen_config(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
+    mold_core::require_model_activation(&model_name, Some(&frozen.family))?;
+    for path in paths.all_file_paths() {
+        mold_core::require_model_artifact_activation(
+            path,
+            Some(&frozen.artifact_root),
+            Some(&frozen.family),
+        )?;
+    }
     let current_attention = crate::attention::AttentionBackend::resolve();
     let current_chunk = crate::attention::resolved_chunk_policy();
     let current_vae_tiling = crate::vae_tiling::resolve_mode();
@@ -714,6 +727,100 @@ mod tests {
         assert!(error
             .to_string()
             .contains("process-frozen attention/chunk/VAE authority"));
+    }
+
+    #[test]
+    fn frozen_factory_rejects_compliance_gated_family_before_runtime_or_device_work() {
+        let mut frozen = FrozenEngineConfig::resolve("private-checkpoint", &Config::default());
+        frozen.family = "minimax-h3".to_string();
+
+        let error = create_engine_with_frozen_config(
+            "private-checkpoint".into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("compliance-gated family must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn frozen_factory_rejects_restricted_artifact_path_before_runtime_or_device_work() {
+        let frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
+        let mut paths = dummy_paths();
+        paths.transformer = PathBuf::from("/models/MiniMax-H3/transformer.safetensors");
+
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            paths,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("restricted artifact path must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn frozen_factory_ignores_h3_named_root_but_rejects_nested_h3_artifact() {
+        let artifact_root = PathBuf::from("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+        let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
+        frozen.artifact_root = artifact_root.clone();
+        frozen.attention_backend = match crate::attention::AttentionBackend::resolve() {
+            crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
+            crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
+        };
+        let mut ordinary = dummy_paths();
+        ordinary.transformer = artifact_root.join("flux-dev/transformer.safetensors");
+        ordinary.vae = artifact_root.join("flux-vae/ae.safetensors");
+
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            ordinary,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("the deliberate runtime mismatch should follow activation");
+        assert!(
+            error
+                .to_string()
+                .contains("process-frozen attention/chunk/VAE authority"),
+            "the storage root name must not taint ordinary artifacts: {error:#}"
+        );
+
+        let mut nested_h3 = dummy_paths();
+        nested_h3.transformer = artifact_root.join("MiniMax-H3/transformer.safetensors");
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            nested_h3,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("a nested H3 artifact must fail closed before runtime checks");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[test]

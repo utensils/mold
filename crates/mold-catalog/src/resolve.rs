@@ -366,6 +366,7 @@ pub fn installed_intent_from_sidecar(
     let (sidecar_dir, sidecar) = crate::sidecar::walk_sidecars(models_dir)
         .into_iter()
         .find(|(_, sidecar)| sidecar.id == model_name)?;
+    crate::sidecar::require_sidecar_artifact_activation(models_dir, &sidecar_dir, &sidecar).ok()?;
     if sidecar.kind != "checkpoint" {
         return None;
     }

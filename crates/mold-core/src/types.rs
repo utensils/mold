@@ -5893,6 +5893,10 @@ pub struct DispatchCapabilities {
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
+    /// Explicit model-family restrictions enforced by this server. Absent on
+    /// older servers, where clients must still trust server-side rejection.
+    #[serde(default)]
+    pub model_access: crate::ModelAccessCapabilities,
     /// Absent on older servers. Missing means LAN browsing is unavailable.
     #[serde(default)]
     pub discovery: DiscoveryCapabilities,
@@ -5997,6 +6001,7 @@ mod device_types_tests {
         assert!(caps.dispatch.active_mode.is_none());
         assert!(!caps.dispatch.v2_authoritative);
         assert!(!caps.dispatch.observes_v2_decisions);
+        assert!(caps.model_access.restrictions.is_empty());
     }
 }
 

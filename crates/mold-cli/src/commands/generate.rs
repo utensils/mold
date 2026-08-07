@@ -87,6 +87,24 @@ fn resolve_family(model: &str, config: &Config) -> Option<String> {
         .or_else(|| manifest::find_manifest(model).map(|m| m.family.clone()))
 }
 
+fn require_local_request_model_activation(req: &GenerateRequest, config: &Config) -> Result<()> {
+    let family = resolve_family(&req.model, config);
+    let models_root = config.resolved_models_dir();
+    mold_core::require_generate_request_model_activation(
+        req,
+        Some(&models_root),
+        family.as_deref(),
+    )?;
+    crate::catalog_bridge::require_known_model_activation(config, &req.model)?;
+    for identity in [req.control_model.as_deref(), req.upscale_model.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::catalog_bridge::require_known_model_activation(config, identity)?;
+    }
+    Ok(())
+}
+
 /// Validate a request on the forced-local path.
 ///
 /// Feeds the config/manifest-resolved family through as a hint so `cv:` / `hf:`
@@ -95,6 +113,7 @@ fn resolve_family(model: &str, config: &Config) -> Option<String> {
 /// mirrors what the HTTP server does with its catalog family hint.
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> {
+    require_local_request_model_activation(req, config)?;
     mold_core::validate_generate_request_with_family(
         req,
         resolve_family(&req.model, config).as_deref(),
@@ -672,6 +691,7 @@ pub async fn run(
         placement,
     };
     if local {
+        require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
     }
@@ -1033,6 +1053,7 @@ async fn materialize_local_builtin_control(
     request: &mut GenerateRequest,
     config: &Config,
 ) -> Result<()> {
+    require_local_request_model_activation(request, config)?;
     let Some(control) = request.ic_lora_control.as_deref() else {
         return Ok(());
     };
@@ -1100,6 +1121,7 @@ async fn materialize_local_builtin_camera_controls(
     request: &mut GenerateRequest,
     config: &Config,
 ) -> Result<()> {
+    require_local_request_model_activation(request, config)?;
     let aliases: Vec<String> = request
         .loras
         .iter()
@@ -1410,6 +1432,8 @@ async fn prepare_local_request(
 
     let model_name = req.model.clone();
     let mut req = req.clone();
+
+    require_local_request_model_activation(&req, config)?;
 
     let (paths, effective_config, pulled) = resolve_or_pull_model(&model_name, config).await?;
     if pulled {
@@ -3267,6 +3291,45 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("prompt"));
+    }
+
+    #[test]
+    fn forced_local_policy_gates_nested_models_and_artifacts_before_pull() {
+        let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
+        let mut config = Config {
+            models_dir: root.to_string(),
+            ..Config::default()
+        };
+        config.models.insert(
+            "private-control".to_string(),
+            ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a red apple",
+            "model": "flux-dev:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+
+        request.control_model = Some("private-control".to_string());
+        assert!(require_local_request_model_activation(&request, &config).is_err());
+
+        request.control_model = None;
+        request.lora = Some(LoraWeight {
+            path: format!("{root}/custom/MiniMax-H3/adapter.safetensors"),
+            scale: 1.0,
+        });
+        assert!(require_local_request_model_activation(&request, &config).is_err());
+
+        request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
+        assert!(require_local_request_model_activation(&request, &config).is_ok());
     }
 
     /// Metadata must survive a zero-length prompt on every embedded surface.

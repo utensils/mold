@@ -437,6 +437,43 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("hal9000-7680")).toBeNull();
   });
 
+  it("refuses an advertised restricted request before placement", async () => {
+    const hosts = useHostsStore();
+    const restrictedModel = "hf:MiniMaxAI/MiniMaxH3";
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      model_access: {
+        restrictions: [
+          {
+            code: "minimax_h3_authorization_required",
+            family: "minimax-h3",
+            message: "MiniMax H3 is not activated.",
+            license_url: "https://example.test/license",
+            authorization_url: "https://example.test/authorize",
+          },
+        ],
+      },
+    };
+    useHostModelsStore().byHost.local = {
+      entries: [{ ...installedModel(restrictedModel), family: "minimax-h3" }],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    const request = { ...placementRequest, model: restrictedModel };
+
+    expect(hosts.resolveRoute("local", restrictedModel)).toBeNull();
+    await expect(hosts.resolveFeasible("local", request)).resolves.toEqual({
+      kind: "infeasible",
+      perHost: [
+        expect.objectContaining({
+          hostId: "local",
+          reason: "MiniMax H3 is not activated.",
+        }),
+      ],
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("stops placement when the live generation selection changes", async () => {
     const prefs = useAppPrefsStore();
     prefs.settings = settings({

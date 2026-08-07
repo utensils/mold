@@ -26,6 +26,7 @@ import { remixPrompt } from "../lib/api/remix";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import {
   conditioningFingerprint,
@@ -93,6 +94,7 @@ import type {
   PromptTransformProvenance,
   RemixDimension,
   RemixSourceKind,
+  ServerCapabilities,
   ServerStatus,
 } from "../lib/api/types";
 import {
@@ -396,6 +398,7 @@ const chainLimits = ref<ChainLimits | null>(null);
 const sequenceRoute = shallowRef<{ hostId: string; target: ApiTarget } | null>(null);
 let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
+const serverCapabilities = reactive<Record<string, ServerCapabilities | null | undefined>>({});
 const form = reactive<GenerateForm>(newGenerateForm());
 const seedValid = ref(true);
 const parameterValid = ref(true);
@@ -1700,9 +1703,7 @@ async function refreshModels(): Promise<boolean> {
     const [status, entries, capabilities] = await Promise.all([
       apiJsonTo<ServerStatus>(target, "/api/status"),
       apiJsonTo<ModelEntry[]>(target, "/api/models"),
-      apiJsonTo<{ expand?: ExpandCapabilities | null }>(target, "/api/capabilities").catch(
-        () => null,
-      ),
+      apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(() => null),
     ]);
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     knownHostReachability.add(hostId);
@@ -1712,10 +1713,11 @@ async function refreshModels(): Promise<boolean> {
     host.instanceId = status.instance_id ?? host.instanceId;
     captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
+    serverCapabilities[hostId] = capabilities;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
     // the main Model select uses `generationModels` so those tools can never
     // become the active generation model.
-    models.value = entries;
+    models.value = filterRestrictedModels(entries, capabilities);
     modelsHostId.value = hostId;
     const selectedEntry = generationModels.value.find((model) => model.name === form.model);
     if (selectedEntry) {
@@ -1842,6 +1844,16 @@ watch(
 
 async function submitMobileSequence(): Promise<void> {
   const host = selectedHost.value;
+  const restriction = host
+    ? modelAccessRestrictionFor(serverCapabilities[host.id], {
+        model: form.model,
+        family: form.family,
+      })
+    : null;
+  if (restriction) {
+    sequenceError.value = restriction.message;
+    return;
+  }
   const entry = selectedGenerationModel.value;
   if (!host || !entry || sequenceStarting.value) return;
   const target = { ...mobileHostTarget(host) };
@@ -3172,6 +3184,17 @@ async function generate(): Promise<void> {
       : selectedHost.value;
   const route = preparedSubmission?.route ?? quickSubmission?.route ?? selectedRoute.value;
   const target = route?.target ?? null;
+  const restriction = route
+    ? modelAccessRestrictionFor(serverCapabilities[route.hostId], {
+        model: form.model,
+        family: form.family,
+      })
+    : null;
+  if (restriction) {
+    setGenerationStatus(restriction.message, true);
+    generationAnnouncement.value = `${restriction.message} Nothing was queued.`;
+    return;
+  }
   if (
     !host ||
     !route ||

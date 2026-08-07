@@ -1,0 +1,277 @@
+use std::fmt;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+/// Stable machine-readable reason returned while MiniMax H3 authorization is absent.
+pub const MINIMAX_H3_AUTHORIZATION_REQUIRED: &str = "MINIMAX_H3_AUTHORIZATION_REQUIRED";
+
+/// Repository record that owns the authorization decision.
+pub const MINIMAX_H3_AUTHORIZATION_ISSUE_URL: &str = "https://github.com/utensils/mold/issues/831";
+
+/// License revision reviewed when this policy was introduced.
+pub const MINIMAX_H3_LICENSE_URL: &str = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/\
+bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelActivation {
+    Available,
+    ComplianceGated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelActivationError;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelAccessCapabilities {
+    #[serde(default)]
+    pub restrictions: Vec<ModelAccessRestriction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelAccessRestriction {
+    pub code: String,
+    pub family: String,
+    pub message: String,
+    pub license_url: String,
+    pub authorization_url: String,
+}
+
+impl fmt::Display for ModelActivationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "MiniMax H3 support is compliance-gated and is not activated in this build \
+             ({MINIMAX_H3_AUTHORIZATION_REQUIRED}). See {MINIMAX_H3_AUTHORIZATION_ISSUE_URL}"
+        )
+    }
+}
+
+impl std::error::Error for ModelActivationError {}
+
+impl ModelActivationError {
+    pub fn restriction(self) -> ModelAccessRestriction {
+        minimax_h3_restriction()
+    }
+}
+
+pub fn model_access_capabilities() -> ModelAccessCapabilities {
+    ModelAccessCapabilities {
+        restrictions: vec![minimax_h3_restriction()],
+    }
+}
+
+fn minimax_h3_restriction() -> ModelAccessRestriction {
+    ModelAccessRestriction {
+        code: MINIMAX_H3_AUTHORIZATION_REQUIRED.to_string(),
+        family: "minimax-h3".to_string(),
+        message: ModelActivationError.to_string(),
+        license_url: MINIMAX_H3_LICENSE_URL.to_string(),
+        authorization_url: MINIMAX_H3_AUTHORIZATION_ISSUE_URL.to_string(),
+    }
+}
+
+/// Return the activation state for a model identity and its resolved family.
+///
+/// The family is required when the public identifier is opaque (for example a
+/// `cv:` catalog ID). Callers that have resolved catalog metadata must pass it.
+pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
+    if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
+        ModelActivation::ComplianceGated
+    } else {
+        ModelActivation::Available
+    }
+}
+
+pub fn require_model_activation(
+    identifier: &str,
+    family: Option<&str>,
+) -> Result<(), ModelActivationError> {
+    match model_activation(identifier, family) {
+        ModelActivation::Available => Ok(()),
+        ModelActivation::ComplianceGated => Err(ModelActivationError),
+    }
+}
+
+/// Return the activation state for one concrete model artifact path.
+///
+/// `artifact_root` is a caller-owned trust boundary such as
+/// [`crate::Config::resolved_models_dir`]. Its own path components describe
+/// storage placement, not model identity, so only the artifact-relative suffix
+/// is inspected when `path` is contained by that root. Paths outside the root
+/// remain fail-closed and are inspected in full.
+///
+/// This distinction matters when an operator deliberately names `MOLD_HOME`
+/// after a UAT target (for example `/.../minimax-h3`): an ordinary FLUX file
+/// below that root is not H3, while a nested `MiniMax-H3/...` artifact still is.
+pub fn model_artifact_activation(
+    path: &Path,
+    artifact_root: Option<&Path>,
+    family: Option<&str>,
+) -> ModelActivation {
+    let identity_path = artifact_root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+    if is_minimax_h3_identity(&identity_path.to_string_lossy())
+        || family.is_some_and(is_minimax_h3_identity)
+    {
+        ModelActivation::ComplianceGated
+    } else {
+        ModelActivation::Available
+    }
+}
+
+pub fn require_model_artifact_activation(
+    path: &Path,
+    artifact_root: Option<&Path>,
+    family: Option<&str>,
+) -> Result<(), ModelActivationError> {
+    match model_artifact_activation(path, artifact_root, family) {
+        ModelActivation::Available => Ok(()),
+        ModelActivation::ComplianceGated => Err(ModelActivationError),
+    }
+}
+
+fn is_minimax_h3_identity(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().chars().fold(
+        String::with_capacity(value.len()),
+        |mut out, ch| {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+            } else if !out.ends_with('-') {
+                out.push('-');
+            }
+            out
+        },
+    );
+    let needle = "minimax-h3";
+    let separated_alias = normalized.match_indices(needle).any(|(start, _)| {
+        let before = normalized[..start].chars().next_back();
+        let after = normalized[start + needle.len()..].chars().next();
+        before.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+            && after.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+    });
+    separated_alias || normalized.split('-').any(is_minimax_h3_compact_alias)
+}
+
+fn is_minimax_h3_compact_alias(token: &str) -> bool {
+    fn has_class_suffix(value: &str, prefix: &str) -> bool {
+        value.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_none_or(|ch| ch.is_ascii_alphabetic())
+        })
+    }
+
+    has_class_suffix(token, "minimaxh3") || has_class_suffix(token, "autoencoderklminimaxh3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimax_h3_aliases_and_task_variants_are_compliance_gated() {
+        for identifier in [
+            "minimax-h3",
+            "MiniMax H3",
+            "MiniMax-H3-FL2VA",
+            "minimax_h3_ref2va:bf16",
+            "MiniMaxH3",
+            "MiniMaxH3Scheduler",
+            "MiniMaxH3Transformer3DModel",
+            "AutoencoderKLMiniMaxH3",
+            "hf:MiniMaxAI/MiniMax-H3",
+            "hf:MiniMaxAI/MiniMaxH3",
+            "hf:Comfy-Org/MiniMax-H3",
+            "https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main",
+        ] {
+            assert_eq!(
+                model_activation(identifier, None),
+                ModelActivation::ComplianceGated,
+                "{identifier}"
+            );
+        }
+
+        assert_eq!(
+            model_activation("cv:42", Some("MiniMax-H3")),
+            ModelActivation::ComplianceGated
+        );
+    }
+
+    #[test]
+    fn unrelated_models_and_h3_lookalikes_remain_available() {
+        for identifier in [
+            "flux-dev:q8",
+            "my-h3-model",
+            "h3",
+            "minimax-h30",
+            "minimaxh30",
+            "notminimax-h3",
+            "notminimaxh3",
+        ] {
+            assert_eq!(
+                model_activation(identifier, None),
+                ModelActivation::Available,
+                "{identifier}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_policy_ignores_h3_named_storage_root_but_not_nested_identity() {
+        let artifact_root = Path::new("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+        let flux = artifact_root.join("flux-dev/transformer/model.safetensors");
+        let h3 = artifact_root.join("custom/MiniMax-H3/transformer/model.safetensors");
+
+        assert_eq!(
+            model_artifact_activation(&flux, Some(artifact_root), Some("flux")),
+            ModelActivation::Available
+        );
+        assert_eq!(
+            model_artifact_activation(&h3, Some(artifact_root), Some("custom")),
+            ModelActivation::ComplianceGated
+        );
+    }
+
+    #[test]
+    fn artifact_policy_inspects_full_paths_outside_its_trusted_root() {
+        let artifact_root = Path::new("/srv/mold/models");
+        let external = Path::new("/Volumes/MiniMax-H3/weights.safetensors");
+
+        assert_eq!(
+            model_artifact_activation(external, Some(artifact_root), None),
+            ModelActivation::ComplianceGated
+        );
+    }
+
+    #[test]
+    fn rejection_is_stable_and_does_not_echo_the_supplied_identifier() {
+        let secretish_identifier = "hf:MiniMaxAI/MiniMax-H3?token=do-not-echo";
+        let error = require_model_activation(secretish_identifier, None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(message.contains(MINIMAX_H3_AUTHORIZATION_ISSUE_URL));
+        assert!(!message.contains(secretish_identifier));
+    }
+
+    #[test]
+    fn capabilities_advertise_the_same_fail_closed_authority() {
+        let capabilities = model_access_capabilities();
+        assert_eq!(capabilities.restrictions.len(), 1);
+        let restriction = &capabilities.restrictions[0];
+        assert_eq!(restriction.code, MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(restriction.family, "minimax-h3");
+        assert_eq!(restriction.message, ModelActivationError.to_string());
+        assert_eq!(restriction.license_url, MINIMAX_H3_LICENSE_URL);
+        assert_eq!(
+            restriction.authorization_url,
+            MINIMAX_H3_AUTHORIZATION_ISSUE_URL
+        );
+
+        let round_trip: ModelAccessCapabilities =
+            serde_json::from_str(&serde_json::to_string(&capabilities).unwrap()).unwrap();
+        assert_eq!(round_trip, capabilities);
+    }
+}

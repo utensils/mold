@@ -78,6 +78,16 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
+  /** Server-enforced model families that are not activated in this build. */
+  model_access?: {
+    restrictions: Array<{
+      code: string;
+      family: string;
+      message: string;
+      license_url: string;
+      authorization_url: string;
+    }>;
+  } | null;
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected
    * request. */

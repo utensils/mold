@@ -2368,6 +2368,7 @@ impl App {
                 let mut engine = mold_inference::create_upscale_engine(
                     model_name_local.clone(),
                     weights_path,
+                    Some(&config.resolved_models_dir()),
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;

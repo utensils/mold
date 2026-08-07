@@ -9,6 +9,8 @@ allowed-tools: Bash, Read, Glob, Grep
 
 Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2, and Wuerstchen diffusion models running on local GPU hardware.
 
+MiniMax H3 is intentionally unavailable until issue #831 records reviewed written authorization. `mold-core::model_policy` is the single fail-closed authority, exposed to clients through `/api/capabilities.model_access`; raw `hf:` identities and metadata-resolved `cv:` identities must both pass it, and no environment variable, client flag, or local weight can activate H3. Re-review `docs/architecture/minimax-h3-authorization.md` before any release that touches H3.
+
 The native apps' public privacy policy is sourced at `website/privacy.md`,
 published at `https://utensils.io/mold/privacy`, and linked from the desktop and
 iPhone Settings → About surfaces. Keep the page and app links aligned when data

@@ -179,6 +179,8 @@ Sequence mode on web, desktop, and iPhone filters the picker to chain-capable in
 
 **Gallery delete is always enabled.** `DELETE /api/gallery/image/:filename` is a destructive endpoint — pair with `MOLD_API_KEY` when the server is exposed beyond localhost. `GET /api/capabilities` still returns `{ gallery: { can_delete: true } }` so older clients keep a stable shape.
 
+**MiniMax H3 remains compliance-gated.** Until issue #831 records reviewed written authorization, `mold-core::model_policy` is the single fail-closed authority and `/api/capabilities.model_access` is its client-facing projection. Do not add an H3 manifest, URL, catalog row, engine arm, fixture generated from the weights, or activation override. Catalog identities must be checked both before a raw `hf:` request and after opaque `cv:` metadata resolution; weight presence never implies authorization. Re-review the pinned license through `docs/architecture/minimax-h3-authorization.md` before every release that touches H3.
+
 ## Workflow
 
 - **TDD.** Every bug fix and feature: failing test first, then code. Prefer unit tests on exported contracts (key→action maps, focus transitions, serialization round-trips, layout invariants) over E2E. Layout constants need a test that asserts the inner area fits the rendered row count — otherwise they drift.

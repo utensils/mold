@@ -43,20 +43,23 @@ pub fn looks_like_catalog_id(input: &str) -> bool {
 /// Bases honor `CIVITAI_BASE` / `HF_BASE` env for test overrides; tokens come
 /// from `CIVITAI_TOKEN` / `HF_TOKEN`.
 pub async fn lookup_catalog_entry_live(id: &str) -> Result<CatalogEntry> {
+    mold_core::require_model_activation(id, None)?;
     let civitai_base =
         std::env::var("CIVITAI_BASE").unwrap_or_else(|_| "https://civitai.com".to_string());
     let hf_base = std::env::var("HF_BASE").unwrap_or_else(|_| "https://huggingface.co".to_string());
     let civitai_token = std::env::var("CIVITAI_TOKEN").ok();
     let hf_token = std::env::var("HF_TOKEN").ok();
 
-    Ok(mold_catalog::live::fetch_entry_by_id(
+    let entry = mold_catalog::live::fetch_entry_by_id(
         id,
         &civitai_base,
         &hf_base,
         civitai_token.as_deref(),
         hf_token.as_deref(),
     )
-    .await?)
+    .await?;
+    mold_catalog::entry::require_catalog_entry_activation(&entry)?;
+    Ok(entry)
 }
 
 /// Resolve a pure catalog intent into a `ModelConfig` using the CLI's policy:
@@ -88,6 +91,7 @@ pub fn synthesize_model_config(
     models_dir: &Path,
     config: &Config,
 ) -> Result<ModelConfig> {
+    mold_catalog::entry::require_catalog_entry_activation(entry)?;
     let intent = mold_catalog::synthesis::synthesize_intent(entry, models_dir)?;
     resolve_intent(entry.id.as_str(), &intent, config)
 }
@@ -117,13 +121,97 @@ pub async fn ensure_catalog_model(config: &mut Config, id: &str) -> Result<bool>
     Ok(true)
 }
 
+/// Resolve and enforce model activation before a cloud command performs any
+/// provider operation. Catalog IDs are resolved through the same sidecar/live
+/// bridge as local generation so an opaque `cv:` or `hf:` identifier cannot
+/// hide restricted metadata. Configured families and paths are checked both
+/// before and after catalog synthesis; the first pass keeps an already-known
+/// restricted config from triggering even a catalog lookup.
+pub async fn require_cloud_model_activation(config: &mut Config, id: &str) -> Result<()> {
+    mold_core::require_model_activation(id, None)?;
+
+    let canonical = mold_core::manifest::resolve_model_name(id);
+    mold_core::require_model_activation(&canonical, None)?;
+    require_configured_model_activation(config, id)?;
+    if canonical != id {
+        require_configured_model_activation(config, &canonical)?;
+    }
+    require_manifest_model_activation(&canonical)?;
+
+    if looks_like_catalog_id(id) {
+        ensure_catalog_model(config, id).await?;
+        require_configured_model_activation(config, id)?;
+    }
+
+    Ok(())
+}
+
+fn require_manifest_model_activation(id: &str) -> Result<()> {
+    let Some(manifest) = mold_core::manifest::find_manifest(id) else {
+        return Ok(());
+    };
+    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
+    for file in &manifest.files {
+        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
+        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+    }
+    Ok(())
+}
+
+fn require_configured_model_activation(config: &Config, id: &str) -> Result<()> {
+    let Some(model) = config.lookup_model_config(id) else {
+        return Ok(());
+    };
+    let family = model.family.as_deref();
+    mold_core::require_model_activation(id, family)?;
+    let models_root = config.resolved_models_dir();
+    for path in model.all_file_paths() {
+        mold_core::require_model_artifact_activation(Path::new(&path), Some(&models_root), family)?;
+    }
+    Ok(())
+}
+
+/// Fail-closed local authority for a model identity without performing a live
+/// catalog lookup or downloading anything.
+pub(crate) fn require_known_model_activation(config: &Config, id: &str) -> Result<()> {
+    mold_core::require_model_activation(id, None)?;
+    let canonical = mold_core::manifest::resolve_model_name(id);
+    mold_core::require_model_activation(&canonical, None)?;
+    require_configured_model_activation(config, id)?;
+    if canonical != id {
+        require_configured_model_activation(config, &canonical)?;
+    }
+    require_manifest_model_activation(&canonical)?;
+
+    let models_root = config.resolved_models_dir();
+    mold_catalog::sidecar::require_installed_sidecar_activation(&models_root, id)?;
+    let family = config
+        .lookup_model_config(id)
+        .and_then(|model| model.family)
+        .or_else(|| {
+            mold_core::manifest::find_manifest(&canonical).map(|manifest| manifest.family.clone())
+        });
+    if let Some(paths) = mold_core::ModelPaths::resolve(id, config) {
+        for path in paths.all_file_paths() {
+            mold_core::require_model_artifact_activation(
+                path,
+                Some(&models_root),
+                family.as_deref(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn install_catalog_model_from_installed_sidecar(config: &mut Config, id: &str) -> Result<bool> {
     if !looks_like_catalog_id(id) {
         return Ok(false);
     }
+    mold_catalog::sidecar::require_installed_sidecar_activation(&config.resolved_models_dir(), id)?;
     let Some(synth) = synthesize_model_config_from_installed_sidecar(config, id)? else {
         return Ok(false);
     };
+    mold_core::require_model_activation(id, synth.family.as_deref())?;
     config.models.insert(id.to_string(), synth);
     Ok(true)
 }
@@ -160,6 +248,19 @@ mod tests {
         assert!(!looks_like_catalog_id(""));
     }
 
+    #[test]
+    fn resolved_catalog_entry_cannot_hide_h3_behind_an_opaque_id() {
+        let mut entry = juggernaut_entry();
+        entry.id = CatalogId::from("cv:42");
+        entry.source_id = "42".into();
+        entry.name = "MiniMax H3 FL2VA".into();
+
+        let error = mold_catalog::entry::require_catalog_entry_activation(&entry).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
     /// `Config` builder that is fully explicit (no `..Config::default()`)
     /// so it doesn't read `MOLD_HOME` mid-construction and race with other
     /// env-mutating tests.
@@ -187,6 +288,57 @@ mod tests {
             queue_size: None,
             models: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn cloud_activation_rejects_configured_family_and_path_without_catalog_io() {
+        let mut family_config = explicit_config("/tmp/mold-cloud-policy-family");
+        family_config.models.insert(
+            "renamed-model".into(),
+            ModelConfig {
+                family: Some("minimax-h3".into()),
+                transformer: Some("/models/renamed/weights.safetensors".into()),
+                ..Default::default()
+            },
+        );
+        let error = require_cloud_model_activation(&mut family_config, "renamed-model")
+            .await
+            .expect_err("configured H3 family must be rejected");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+        let mut path_config = explicit_config("/tmp/mold-cloud-policy-path");
+        path_config.models.insert(
+            "renamed-model".into(),
+            ModelConfig {
+                family: Some("custom".into()),
+                transformer: Some("/models/MiniMax-H3/weights.safetensors".into()),
+                ..Default::default()
+            },
+        );
+        let error = require_cloud_model_activation(&mut path_config, "renamed-model")
+            .await
+            .expect_err("configured H3 path must be rejected");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn cloud_activation_keeps_h3_lookalikes_available() {
+        let mut config = explicit_config("/tmp/mold-cloud-policy-lookalike");
+        config.models.insert(
+            "renamed-model".into(),
+            ModelConfig {
+                family: Some("custom".into()),
+                transformer: Some("/models/minimax-h30/weights.safetensors".into()),
+                ..Default::default()
+            },
+        );
+        require_cloud_model_activation(&mut config, "renamed-model")
+            .await
+            .expect("H3 lookalike must remain available");
     }
 
     use mold_catalog::entry::{

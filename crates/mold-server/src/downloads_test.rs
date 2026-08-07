@@ -28,6 +28,30 @@ async fn enqueue_unknown_model_errors() {
     assert!(err.is_err(), "expected unknown-model error");
 }
 
+#[tokio::test]
+async fn h3_raw_manifest_enqueue_rejects_without_queueing_or_events() {
+    let queue = DownloadQueue::new_for_test();
+    let mut events = queue.subscribe();
+
+    let error = queue
+        .enqueue("hf:MiniMaxAI/MiniMax-H3".to_string())
+        .await
+        .expect_err("H3 must be rejected before manifest lookup or queue mutation");
+
+    assert!(matches!(
+        error,
+        crate::downloads::EnqueueError::ModelActivation(_)
+    ));
+    let listing = queue.listing().await;
+    assert!(listing.active_jobs.is_empty());
+    assert!(listing.queued.is_empty());
+    assert!(listing.history.is_empty());
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
 use crate::downloads::{spawn_driver, PullDriver, RecipePayload, RecipePullDriver};
 use mold_core::types::{DownloadEvent, JobStatus};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -898,6 +922,131 @@ fn synthetic_recipe(catalog_id: &str) -> RecipePayload {
             size_bytes: Some(123),
         }],
         auth: mold_core::download::RecipeAuth::None,
+    }
+}
+
+fn synthetic_manifest(name: &str, family: &str, repo: &str) -> mold_core::manifest::ModelManifest {
+    use mold_core::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest};
+
+    ModelManifest {
+        name: name.to_string(),
+        family: family.to_string(),
+        description: "queue policy fixture".to_string(),
+        files: vec![ModelFile {
+            hf_repo: repo.to_string(),
+            hf_filename: "weights.safetensors".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 1,
+            gated: false,
+            sha256: None,
+        }],
+        defaults: ManifestDefaults {
+            steps: 1,
+            guidance: 1.0,
+            width: 32,
+            height: 32,
+            is_schnell: false,
+            scheduler: None,
+            negative_prompt: None,
+            frames: None,
+            fps: None,
+        },
+        hidden: true,
+    }
+}
+
+#[tokio::test]
+async fn h3_resolved_manifest_name_family_and_repo_reject_before_queue_mutation() {
+    let cases = [
+        ("MiniMax-H3-FL2VA", "custom", "example/weights"),
+        ("opaque-model", "minimax-h3", "example/weights"),
+        ("opaque-model", "custom", "Comfy-Org/MiniMax-H3"),
+    ];
+
+    for (name, family, repo) in cases {
+        let queue = DownloadQueue::new_for_test();
+        let mut events = queue.subscribe();
+        let manifest = synthetic_manifest(name, family, repo);
+
+        let error = queue
+            .enqueue_resolved_manifest("opaque-model:q8".to_string(), &manifest, None)
+            .await
+            .expect_err("resolved H3 metadata must be compliance-gated");
+
+        assert!(matches!(
+            error,
+            crate::downloads::EnqueueError::ModelActivation(_)
+        ));
+        let listing = queue.listing().await;
+        assert!(listing.active_jobs.is_empty(), "{name}/{family}/{repo}");
+        assert!(listing.queued.is_empty(), "{name}/{family}/{repo}");
+        assert!(listing.history.is_empty(), "{name}/{family}/{repo}");
+        assert!(
+            queue.recipe_payloads.lock().unwrap().is_empty(),
+            "{name}/{family}/{repo}"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn h3_recipe_id_url_and_dest_reject_before_queue_mutation() {
+    let cases = [
+        (
+            "hf:MiniMaxAI/MiniMax-H3",
+            "https://example.invalid/weights.safetensors",
+            "weights.safetensors",
+        ),
+        (
+            "cv:opaque",
+            "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/weights.safetensors",
+            "weights.safetensors",
+        ),
+        (
+            "cv:opaque",
+            "https://example.invalid/weights.safetensors",
+            "MiniMax-H3/weights.safetensors",
+        ),
+    ];
+
+    for (catalog_id, url, dest) in cases {
+        let queue = DownloadQueue::new_for_test();
+        let mut events = queue.subscribe();
+        let payload = RecipePayload {
+            catalog_id: catalog_id.to_string(),
+            files: vec![OwnedRecipeFile {
+                url: url.to_string(),
+                dest: dest.to_string(),
+                sha256: None,
+                size_bytes: Some(1),
+            }],
+            auth: mold_core::download::RecipeAuth::None,
+        };
+
+        let error = queue
+            .enqueue_recipe(payload)
+            .await
+            .expect_err("H3 recipe metadata must be compliance-gated");
+
+        assert!(matches!(
+            error,
+            crate::downloads::EnqueueError::ModelActivation(_)
+        ));
+        let listing = queue.listing().await;
+        assert!(listing.active_jobs.is_empty(), "{catalog_id}/{url}/{dest}");
+        assert!(listing.queued.is_empty(), "{catalog_id}/{url}/{dest}");
+        assert!(listing.history.is_empty(), "{catalog_id}/{url}/{dest}");
+        assert!(
+            queue.recipe_payloads.lock().unwrap().is_empty(),
+            "{catalog_id}/{url}/{dest}"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 }
 

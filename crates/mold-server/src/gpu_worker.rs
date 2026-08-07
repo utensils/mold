@@ -3043,6 +3043,7 @@ fn process_job_with_sink(
                                 mold_inference::upscaler::resolve_upscale_execution_plan(
                                     resolved.clone(),
                                     std::path::Path::new(path),
+                                    Some(&config.resolved_models_dir()),
                                     mold_inference::upscaler::ExactUpscalePlacement::Cpu,
                                 )
                                 .map_err(|error| error.to_string())
@@ -3086,6 +3087,7 @@ fn process_job_with_sink(
                             mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
                                 frozen_upscale_plan.model_name.clone(),
                                 frozen_upscale_plan.weights.clone(),
+                                frozen_upscale_plan.artifact_root.clone(),
                                 mold_inference::upscaler::ExactUpscalePlacement::Device {
                                     backend: worker.gpu.backend,
                                     ordinal: worker.gpu.ordinal,
@@ -5498,6 +5500,7 @@ mod tests {
         let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .unwrap();
@@ -6566,6 +6569,7 @@ mod tests {
                             mold_inference::upscaler::resolve_upscale_execution_plan(
                                 "missing-upscaler",
                                 &upscale_weights,
+                                None,
                                 mold_inference::upscaler::ExactUpscalePlacement::Device {
                                     backend: worker.gpu.backend,
                                     ordinal: worker.gpu.ordinal,
@@ -8517,6 +8521,7 @@ mod tests {
         let err = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &missing_weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .expect_err("planning must surface missing weights before admission");

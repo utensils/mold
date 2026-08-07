@@ -26,6 +26,7 @@ import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -530,7 +531,10 @@ const chainReject = computed(() => {
   );
 });
 const installedModels = computed(() =>
-  mergeInstalledModels(models.installed, hostModels.unionInstalled),
+  mergeInstalledModels(
+    filterRestrictedModels(models.installed, hosts.capabilities.local),
+    hostModels.unionInstalled,
+  ),
 );
 const modelLabels = computed(
   () =>

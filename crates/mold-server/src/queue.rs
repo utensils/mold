@@ -756,15 +756,19 @@ async fn upscale_generated_image_on_single_worker(
             .map_err(|e| format!("failed to pull upscaler model: {}", e.error))?;
     }
 
-    let weights_path = {
+    let (weights_path, artifact_root) = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .map(std::path::PathBuf::from)
-    }
-    .ok_or_else(|| format!("upscaler model '{model_name}' not configured after pull"))?;
+        (
+            config
+                .models
+                .get(&model_name)
+                .and_then(|c| c.transformer.as_ref())
+                .map(std::path::PathBuf::from),
+            config.resolved_models_dir(),
+        )
+    };
+    let weights_path = weights_path
+        .ok_or_else(|| format!("upscaler model '{model_name}' not configured after pull"))?;
 
     let upscale_req = mold_core::UpscaleRequest {
         model: model_name.clone(),
@@ -788,6 +792,7 @@ async fn upscale_generated_image_on_single_worker(
                 let new_engine = mold_inference::create_upscale_engine(
                     model_name.clone(),
                     weights_path,
+                    Some(&artifact_root),
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
@@ -2125,8 +2130,12 @@ fn freeze_legacy_post_upscale_candidates(
                 ordinal: worker.gpu.ordinal,
             }),
     );
-    work.utility_plans =
-        crate::scheduler::upscale_utility_candidates(&base.model_name, &base.weights, placements);
+    work.utility_plans = crate::scheduler::upscale_utility_candidates(
+        &base.model_name,
+        &base.weights,
+        base.artifact_root.as_deref(),
+        placements,
+    );
     Ok(())
 }
 
@@ -3541,6 +3550,7 @@ mod tests {
         let cpu_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .unwrap();
@@ -3609,6 +3619,7 @@ mod tests {
                 mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
                     cpu_plan.model_name.clone(),
                     cpu_plan.weights.clone(),
+                    cpu_plan.artifact_root.clone(),
                     mold_inference::upscaler::ExactUpscalePlacement::Device {
                         backend: origin.gpu.backend,
                         ordinal: origin.gpu.ordinal,
