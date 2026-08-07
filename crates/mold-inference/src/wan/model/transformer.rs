@@ -59,9 +59,11 @@ pub(crate) type WanLinear = Arc<dyn Module + Send + Sync>;
 pub(crate) enum WanWeights<'a> {
     Plain(VarBuilder<'a>),
     /// GGUF. `loras` is empty unless an adapter is active, in which case each
-    /// patched projection gains a parallel low-rank branch — see
+    /// patched projection gains a parallel branch (low-rank for A/B pairs,
+    /// dense for `.diff` full-weight deltas) — see
     /// [`crate::wan::lora::WanQuantizedLoraLinear`] for why a merge is not an
-    /// option on a quantized weight.
+    /// option on a quantized weight. `.diff_b` bias deltas and norm `.diff`s
+    /// merge directly: those tensors are stored unquantized.
     Quantized {
         vb: mold_candle::quantized::VarBuilder,
         loras: Arc<crate::wan::lora::WanLoraRegistry>,
@@ -155,12 +157,7 @@ impl<'a> WanWeights<'a> {
         match self {
             Self::Plain(vb) => Ok(Arc::new(candle_nn::linear(in_dim, out_dim, vb.clone())?)),
             Self::Quantized { vb, loras } => {
-                let inner = crate::wan::lora::attach_quantized_branches(
-                    loras,
-                    &vb.key("weight"),
-                    mold_candle::quantized_nn::linear(in_dim, out_dim, vb.clone())?,
-                    vb.device(),
-                )?;
+                let inner = crate::wan::lora::quantized_linear(loras, vb, in_dim, out_dim)?;
                 Ok(CastBoundary::wrap(inner, self.dtype()))
             }
             Self::Fp8 { vb, .. } => fp8::load_linear(vb, in_dim, out_dim, self.dtype()),
@@ -877,11 +874,14 @@ impl WanTransformer {
 
     /// Load a GGUF checkpoint with a LoRA stack applied.
     ///
-    /// The adapters do not merge into the weights the way they do on the two
-    /// safetensors paths — a quantized weight cannot take a delta without being
-    /// requantized, which costs minutes per expert and rounds most of a distill
-    /// away. Each patched projection gets a parallel low-rank branch instead;
+    /// The adapters do not merge into the quantized weights the way they do on
+    /// the safetensors path — a quantized weight cannot take a delta without
+    /// being requantized, which costs minutes per expert and rounds most of a
+    /// distill away. Each patched projection gets a parallel branch instead
+    /// (low-rank for A/B pairs, dense for `.diff` full-weight deltas);
     /// [`crate::wan::lora::WanQuantizedLoraLinear`] carries the measurements.
+    /// `.diff_b` bias deltas and norm-tensor `.diff`s merge directly, because
+    /// GGUF stores those unquantized.
     pub fn from_gguf_with_loras(
         path: &Path,
         config: WanTransformerConfig,

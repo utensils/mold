@@ -87,10 +87,20 @@ its published timesteps exactly. Override the flow shift with
 A14B ships as GGUF. Quantized weights stay quantized in memory and dequantize
 inside the matmul, which is what keeps a 14B expert at ~10.8 GB rather than
 ~28 GB. A LoRA cannot be merged into a weight in that state without
-requantizing it, so on GGUF mold applies adapters as a parallel low-rank
-branch instead — the same arithmetic, applied at full precision, with no load
-cost. On bf16 and fp8-scaled safetensors the adapter is merged as the weights
-are read.
+requantizing it, so on GGUF mold applies adapters as a parallel branch
+instead — low-rank for A/B pairs, dense for full-weight `.diff` deltas — the
+same arithmetic, applied at full precision, with no load cost. On bf16
+safetensors the adapter is merged as the weights are read; fp8-scaled
+checkpoints refuse adapter stacks rather than re-round their weights.
+
+Community adapters that carry `.diff` (full weight delta) and `.diff_b`
+(bias delta) tensors alongside or instead of their low-rank pairs — Kijai's
+Wan 2.1 lightx2v extractions, lightx2v's distill pairs, musubi-tuner-trained
+Civitai LoRAs — load fully: `W' = W + strength·diff`, `b' = b +
+strength·diff_b`, matching ComfyUI. The kohya alpha never rescales a
+full-weight delta (a delta has no rank), and a delta naming a tensor the
+checkpoint does not have still refuses the whole adapter rather than
+applying the part that matches.
 
 `*_fp8_e4m3fn_scaled` safetensors also load: the weights stay 1 byte per
 parameter and dequantize per call against their per-module scale. The `e5m2`
