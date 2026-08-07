@@ -1248,7 +1248,7 @@ fn flash_attention_eligible(query: &Tensor) -> bool {
             .is_ok_and(|dim| dim > 0 && dim.is_multiple_of(8) && dim <= 512)
 }
 
-#[cfg(feature = "h3-flash-attn-rc")]
+#[cfg(feature = "flash-attn")]
 fn try_flash_attention(
     query: &Tensor,
     key: &Tensor,
@@ -1262,7 +1262,7 @@ fn try_flash_attention(
     Ok(Some(output.transpose(1, 2)?.contiguous()?))
 }
 
-#[cfg(feature = "h3-flash-attn-rc")]
+#[cfg(feature = "flash-attn")]
 fn to_flash_layout(tensor: &Tensor) -> Result<Tensor> {
     let tensor = tensor.transpose(1, 2)?;
     if tensor.stride().last() == Some(&1) {
@@ -1272,7 +1272,7 @@ fn to_flash_layout(tensor: &Tensor) -> Result<Tensor> {
     }
 }
 
-#[cfg(not(feature = "h3-flash-attn-rc"))]
+#[cfg(not(feature = "flash-attn"))]
 fn try_flash_attention(
     _query: &Tensor,
     _key: &Tensor,

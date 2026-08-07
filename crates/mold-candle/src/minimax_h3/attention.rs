@@ -30,10 +30,35 @@ pub const H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);
 pub const H3_ATTENTION_RC_SCHEMA: &str = "mold.minimax-h3.attention-rc.v1";
 pub const H3_ATTENTION_RC_FEATURE: &str = "h3-flash-attn-rc";
 pub const H3_ATTENTION_RC_CLAIM_MARKER: &str = "mold.minimax-h3.attention-rc.kernel-compiled.v1";
+pub const H3_ATTENTION_RELEASE_PROVENANCE_PREFIX: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:";
+
+#[cfg(all(not(feature = "h3-flash-attn-rc"), not(feature = "flash-attn")))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted";
+#[cfg(all(feature = "h3-flash-attn-rc", not(feature = "flash-attn")))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted";
+#[cfg(all(not(feature = "h3-flash-attn-rc"), feature = "flash-attn"))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled";
+#[cfg(all(feature = "h3-flash-attn-rc", feature = "flash-attn"))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled";
 
 const H3_RELEASE_HEADS: usize = 56;
 const H3_RELEASE_HEAD_DIM: usize = 128;
 const PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// Positive, compile-time provenance for release artifact inspection.
+///
+/// Exactly one marker is compiled from the same Cargo feature gates that make
+/// the H3 DiT and global FlashAttention code reachable. Published binaries
+/// deliberately retain this value and their verifier requires the omitted /
+/// omitted state; absence of evidence therefore fails closed.
+pub const fn h3_attention_release_provenance_marker() -> &'static str {
+    H3_ATTENTION_RELEASE_PROVENANCE_MARKER
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionDType {
@@ -791,6 +816,7 @@ impl H3AttentionRuntimeAuthority {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionRequirement {
     NonEmptySelfAttention,
+    NativeBatchOne,
     Bf16OrBoundedSyntheticF32,
     ReleasedBf16HeadGeometry,
     ExactModelContract,
@@ -996,6 +1022,13 @@ fn validate_flash_launch_shape(
     if backend != H3AttentionBackend::FlashAttentionV2 {
         return Ok(());
     }
+    if batch_size != 1 {
+        return Err(failure(
+            H3AttentionErrorCode::InvalidShape,
+            "MiniMax H3 release-candidate FlashAttention is qualified only for native batch 1",
+            vec![H3AttentionRequirement::NativeBatchOne],
+        ));
+    }
     let batch_stride = checked_product("FlashAttention batch stride", &[rows, heads, head_dim])?;
     let total_rows = checked_product("FlashAttention total rows", &[batch_size, rows])?;
     if batch_stride > u32::MAX as u64 || total_rows > u32::MAX as u64 {
@@ -1122,12 +1155,6 @@ fn workspace_for(
 
 fn parse_compute_capability(raw: &str) -> Option<(u16, u16)> {
     let raw = raw.trim();
-    if let Some((major, minor)) = raw.split_once('.') {
-        if major.is_empty() || minor.len() != 1 || minor.contains('.') {
-            return None;
-        }
-        return Some((major.parse().ok()?, minor.parse().ok()?));
-    }
     if raw.len() < 2 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
@@ -1437,7 +1464,7 @@ mod tests {
             H3AttentionErrorCode::KernelNotCompiled
         );
 
-        for raw_target in [None, Some("86"), Some("90"), Some("invalid")] {
+        for raw_target in [None, Some("8.9"), Some("86"), Some("90"), Some("invalid")] {
             let build = H3AttentionReleaseCandidateBuild::from_build_inputs(true, raw_target);
             assert_eq!(
                 build.qualify(sm89).unwrap_err().code,
@@ -1445,7 +1472,7 @@ mod tests {
             );
         }
 
-        let exact = H3AttentionReleaseCandidateBuild::from_build_inputs(true, Some("8.9"));
+        let exact = H3AttentionReleaseCandidateBuild::from_build_inputs(true, Some("89"));
         assert_eq!(exact.compiled_compute_capability, Some((8, 9)));
         assert_eq!(
             exact.claim_marker.as_deref(),
@@ -1621,6 +1648,39 @@ mod tests {
             short.packed_transformer.identity_sha256(),
             long.packed_transformer.identity_sha256()
         );
+    }
+
+    #[test]
+    fn flash_release_candidate_rejects_non_native_batch() {
+        let authority = exact_flash_candidate();
+        for batch_size in [2, 8] {
+            let error = authority
+                .freeze_execution(batch_size, 256, 37_296)
+                .unwrap_err();
+            assert_eq!(error.code, H3AttentionErrorCode::InvalidShape);
+            assert!(error
+                .requirements
+                .contains(&H3AttentionRequirement::NativeBatchOne));
+        }
+
+        let mut forged = authority
+            .freeze_execution(1, 8, 8)
+            .unwrap()
+            .packed_transformer;
+        forged.batch_size = 2;
+        forged.identity_sha256 = plan_identity(&forged);
+        let error = forged.validate_identity().unwrap_err();
+        assert_eq!(error.code, H3AttentionErrorCode::InvalidShape);
+        assert!(error
+            .requirements
+            .contains(&H3AttentionRequirement::NativeBatchOne));
+
+        let dense = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract::released_bf16(),
+        )
+        .unwrap();
+        assert!(dense.freeze_execution(2, 8, 8).is_ok());
     }
 
     #[test]

@@ -34,6 +34,7 @@ on:
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
+      - "crates/mold-candle/**"
       - "crates/mold-inference/**"
       - "crates/mold-scheduler/**"
       - "crates/mold-server/**"
@@ -48,6 +49,7 @@ on:
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
       - "scripts/prepare-desktop-linuxdeploy.sh"
+      - "scripts/verify-h3-release-exclusion.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -86,6 +88,7 @@ on:
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
+      - "crates/mold-candle/**"
       - "crates/mold-inference/**"
       - "crates/mold-scheduler/**"
       - "crates/mold-server/**"
@@ -100,6 +103,7 @@ on:
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
       - "scripts/prepare-desktop-linuxdeploy.sh"
+      - "scripts/verify-h3-release-exclusion.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -190,12 +194,14 @@ jobs:
               - 'crates/mold-core/**'
               - 'crates/mold-catalog/**'
               - 'crates/mold-db/**'
+              - 'crates/mold-candle/**'
               - 'crates/mold-inference/**'
               - 'crates/mold-scheduler/**'
               - 'crates/mold-server/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'flake.nix'
+              - 'scripts/verify-h3-release-exclusion.sh'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/desktop-distribution.yml'
             updater:
@@ -359,6 +365,10 @@ jobs:
           appimage=$(realpath "$appimage")
           (cd "$extract_dir" && "$appimage" --appimage-extract >/dev/null)
           root="$extract_dir/squashfs-root"
+
+          desktop_binary=$(find "$root" -type f -name mold-desktop -perm -u+x -print -quit)
+          test -n "$desktop_binary"
+          ../scripts/verify-h3-release-exclusion.sh "$desktop_binary"
 
           if find "$root" -name 'libcuda.so*' -print -quit | grep -q .; then
             echo "unexpected bundled NVIDIA driver" >&2

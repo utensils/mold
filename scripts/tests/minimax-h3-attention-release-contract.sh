@@ -20,8 +20,21 @@ require_text crates/mold-candle/Cargo.toml \
   'h3-flash-attn-rc = ["dep:candle-flash-attn", "cuda"]' \
   "mold-candle does not expose the isolated H3 kernel feature"
 require_text crates/mold-candle/Cargo.toml \
-  'flash-attn = ["h3-flash-attn-rc"]' \
-  "the existing global developer feature does not share the reviewed H3 primitive"
+  'flash-attn = ["dep:candle-flash-attn", "cuda"]' \
+  "the existing global developer feature is not independent from H3 qualification"
+if grep -Eq '^flash-attn[[:space:]]*=.*h3-flash-attn-rc' crates/mold-candle/Cargo.toml; then
+  fail "the global FlashAttention feature aliases the isolated H3 release candidate"
+fi
+if grep -Fq 'feature = "h3-flash-attn-rc"' \
+  crates/mold-candle/src/minimax_h3/visual_vae.rs; then
+  fail "H3 qualification changes Visual VAE attention dispatch"
+fi
+require_text crates/mold-candle/src/minimax_h3/visual_vae.rs \
+  '#[cfg(feature = "flash-attn")]' \
+  "Visual VAE no longer keys FlashAttention off the global developer feature"
+require_text crates/mold-candle/src/minimax_h3/dit.rs \
+  '#[cfg(feature = "h3-flash-attn-rc")]' \
+  "the isolated H3 feature does not guard the DiT release-candidate dispatch"
 require_text crates/mold-inference/Cargo.toml \
   'h3-attention-rc = ["cuda", "mold-candle/h3-flash-attn-rc"]' \
   "mold-inference does not expose the synthetic-only H3 qualification path"
@@ -33,12 +46,18 @@ if grep -Eq '^h3-(flash-)?attention-rc[[:space:]]*=' crates/mold-cli/Cargo.toml;
   fail "mold-ai must not forward the H3 release-candidate feature into a runnable binary"
 fi
 
-release_commands="$({
-  grep -E 'cargo build --release .*--features' .github/workflows/release.yml Dockerfile
+release_feature_sources="$({
+  grep -E -- '--features|releaseFeatures[[:space:]]*=|buildFeatures[[:space:]]*=' \
+    .github/workflows/release.yml \
+    .github/workflows/desktop.yml \
+    Dockerfile \
+    flake.nix \
+    packaging/aur/mold-ai/PKGBUILD \
+    packaging/aur/mold-ai-git/PKGBUILD
   sed -n '/^[[:space:]]*releaseFeatures =/,/^[[:space:]]*completionFeatures =/p' flake.nix
 } || true)"
 if grep -Eq '(^|[,[:space:]])(h3-attention-rc|h3-flash-attn-rc|flash-attn)([,[:space:]]|$)' \
-  <<< "$release_commands"; then
+  <<< "$release_feature_sources"; then
   fail "a published release feature set compiles an H3/FlashAttention candidate"
 fi
 
@@ -52,10 +71,23 @@ flash_filter="$(sed -n '/^            flash:/,/^            website:/p' .github/
 for path in \
   crates/mold-candle/Cargo.toml \
   crates/mold-candle/src/minimax_h3/attention.rs \
+  crates/mold-candle/src/minimax_h3/mod.rs \
+  crates/mold-candle/src/minimax_h3/dit.rs \
+  crates/mold-candle/src/minimax_h3/visual_vae.rs \
+  crates/mold-inference/src/lib.rs \
   crates/mold-inference/Cargo.toml \
   crates/mold-inference/src/bin/h3_attention_qualification.rs; do
   grep -Fq "'$path'" <<< "$flash_filter" \
     || fail "FlashAttention CI classifier omits $path"
+done
+
+release_filter="$(sed -n '/^            release:/,/^[[:space:]]*release:/p' .github/workflows/ci.yml)"
+for path in \
+  crates/mold-candle/src/minimax_h3/mod.rs \
+  crates/mold-candle/src/minimax_h3/dit.rs \
+  crates/mold-candle/src/minimax_h3/visual_vae.rs; do
+  grep -Fq "'$path'" <<< "$release_filter" \
+    || fail "release CI classifier omits $path"
 done
 
 require_text scripts/verify-cuda-release-binary.sh \
@@ -64,14 +96,52 @@ require_text scripts/verify-cuda-release-binary.sh \
 require_text Dockerfile \
   'RUN scripts/verify-h3-release-exclusion.sh /build/target/release/mold' \
   "the published container does not enforce the H3 candidate exclusion"
+for target in 86 89 100 120; do
+  require_text .github/workflows/release.yml \
+    "scripts/verify-cuda-release-binary.sh target/release/mold $target" \
+    "the native sm$target publication route bypasses H3 exclusion verification"
+done
+require_text flake.nix \
+  '${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$out/bin/mold"' \
+  "Nix CUDA CLI outputs bypass H3 exclusion verification"
+require_text flake.nix \
+  '${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$desktop_bin"' \
+  "Nix CUDA desktop outputs bypass H3 exclusion verification"
+require_text .github/workflows/desktop.yml \
+  '../scripts/verify-h3-release-exclusion.sh "$desktop_binary"' \
+  "the Linux CUDA AppImage route bypasses H3 exclusion verification"
+for pkgbuild in packaging/aur/mold-ai/PKGBUILD packaging/aur/mold-ai-git/PKGBUILD; do
+  require_text "$pkgbuild" \
+    './scripts/verify-h3-release-exclusion.sh "target/release/${_binname}"' \
+    "$pkgbuild bypasses H3 exclusion verification"
+done
+
+omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
+claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
+compiled_markers=(
+  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
+  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
+  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
+)
 
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
-printf 'ordinary-published-mold\n' > "$scratch_dir/ordinary"
+printf '%s\n' "$omitted_marker" > "$scratch_dir/ordinary"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary" >/dev/null
-printf 'mold.minimax-h3.attention-rc.kernel-compiled.v1\n' > "$scratch_dir/claimed"
+printf 'ordinary-published-mold\n' > "$scratch_dir/missing-provenance"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/missing-provenance" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted missing compile-time provenance"
+fi
+printf '%s\n%s\n' "$omitted_marker" "$claim_marker" > "$scratch_dir/claimed"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/claimed" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted an H3 release-candidate claim marker"
 fi
+for index in "${!compiled_markers[@]}"; do
+  printf '%s\n%s\n' "$omitted_marker" "${compiled_markers[$index]}" \
+    > "$scratch_dir/compiled-$index"
+  if scripts/verify-h3-release-exclusion.sh "$scratch_dir/compiled-$index" >/dev/null 2>&1; then
+    fail "release exclusion verifier accepted compiled FlashAttention provenance"
+  fi
+done
 
 echo "PASS: MiniMax H3 attention release-candidate contract"

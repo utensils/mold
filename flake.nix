@@ -537,13 +537,24 @@
               ];
               doCheck = false;
 
-              postInstall = lib.optionalString isDarwin ''
-                if [ -d "$out/Applications/Mold.app" ]; then
-                  mkdir -p $out/bin
-                  makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
-                    $out/bin/mold-desktop
-                fi
-              '';
+              postInstall =
+                if isLinux then
+                  ''
+                    desktop_bin="$(find "$out" -type f -name mold-desktop -print -quit)"
+                    if [ -z "$desktop_bin" ]; then
+                      echo "installed Mold desktop executable is missing" >&2
+                      exit 1
+                    fi
+                    ${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$desktop_bin"
+                  ''
+                else
+                  ''
+                    if [ -d "$out/Applications/Mold.app" ]; then
+                      mkdir -p $out/bin
+                      makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
+                        $out/bin/mold-desktop
+                    fi
+                  '';
 
               # A signed/notarized bundle must not load /nix/store dylibs
               # (dyld Team-ID rejection); libiconv links in via stdenv — point
@@ -601,6 +612,8 @@
                 postInstall =
                   if isLinux then
                     ''
+                      ${pkgs.bash}/bin/bash ${./scripts/verify-h3-release-exclusion.sh} "$out/bin/mold"
+
                       # Build a CUDA-free helper for completion generation, then
                       # patch its RUNPATH before execing it. The installed binary
                       # is CUDA-linked and cannot run in the sandbox because the
