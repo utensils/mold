@@ -2,7 +2,8 @@
 //!
 //! The schema is derived from ComfyUI `a464ac33588ae182f81a090d910cfbf21e255b73`:
 //! `comfy/ldm/minimax/model.py`, `comfy/model_detection.py`,
-//! `comfy/quant_ops.py`, `comfy/ops.py`, and `comfy/utils.py`. Public artifact
+//! `comfy/quant_ops.py`, `comfy/ops.py`, and `comfy/utils.py`, plus its exact
+//! comfy-kitchen 0.2.26 dependency for ConvRot scale semantics. Public artifact
 //! sizes and content digests are pinned to the Comfy-Org repository revision
 //! below. No model tensor data is needed by this inspector.
 //!
@@ -33,12 +34,21 @@ use super::dit::{
 
 pub const H3_COMFYUI_SOURCE_REVISION: &str = "a464ac33588ae182f81a090d910cfbf21e255b73";
 pub const H3_COMFY_ORG_SOURCE_REVISION: &str = "eb8a16107c595128b3a578f82d2ce2f75920c355";
+pub const H3_COMFY_KITCHEN_REPOSITORY: &str = "Comfy-Org/comfy-kitchen";
+pub const H3_COMFY_KITCHEN_VERSION: &str = "0.2.26";
+pub const H3_COMFY_KITCHEN_SOURCE_REVISION: &str = "255a43879fe57bbcbecfdb273b46d772b00c5a90";
 
 const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TENSORS: usize = 4_096;
 const MAX_TENSOR_KEY_BYTES: usize = 4_096;
 const MAX_TENSOR_RANK: usize = 8;
 const CONVROT_GROUP_SIZE: usize = 256;
+const QUANTIZED_BLOCK_WEIGHT_SUFFIXES: &[&str] = &[
+    "attn.qkv_proj.weight",
+    "attn.out_proj.weight",
+    "mlp.fc1.weight",
+    "mlp.fc2.weight",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3ComfyPrunedFormat {
@@ -186,6 +196,7 @@ pub struct H3ComfyFrozenStrategyMetadata {
 pub enum H3ComfyRuntimeRequirement {
     ComplianceApprovedHeaderIdentity,
     VerifiedFullContentSha256,
+    PrunedAdaLnNumericalQualification,
     RuntimeFactoryActivation,
     H3ScaledFp8KernelOrQualifiedDequantization,
     H3Int8ConvRotKernelOrQualifiedDequantization,
@@ -232,6 +243,7 @@ impl H3ComfyCheckpointCandidate {
         let mut requirements = vec![
             H3ComfyRuntimeRequirement::ComplianceApprovedHeaderIdentity,
             H3ComfyRuntimeRequirement::VerifiedFullContentSha256,
+            H3ComfyRuntimeRequirement::PrunedAdaLnNumericalQualification,
             H3ComfyRuntimeRequirement::RuntimeFactoryActivation,
         ];
         match self.strategy.format {
@@ -239,16 +251,12 @@ impl H3ComfyCheckpointCandidate {
             H3ComfyPrunedFormat::Fp8Scaled => {
                 requirements
                     .push(H3ComfyRuntimeRequirement::H3ScaledFp8KernelOrQualifiedDequantization);
-                if backend != H3ComfyRuntimeBackend::Cuda {
-                    requirements.push(H3ComfyRuntimeRequirement::QuantizedBackendQualification);
-                }
+                requirements.push(H3ComfyRuntimeRequirement::QuantizedBackendQualification);
             }
             H3ComfyPrunedFormat::Int8ConvRot => {
                 requirements
                     .push(H3ComfyRuntimeRequirement::H3Int8ConvRotKernelOrQualifiedDequantization);
-                if backend != H3ComfyRuntimeBackend::Cuda {
-                    requirements.push(H3ComfyRuntimeRequirement::QuantizedBackendQualification);
-                }
+                requirements.push(H3ComfyRuntimeRequirement::QuantizedBackendQualification);
             }
         }
         Err(H3ComfyRuntimeRejection {
@@ -393,7 +401,8 @@ fn read_safetensors_header(path: &Path) -> InspectionResult<ParsedHeader> {
             "H3 Comfy safetensors header must be a JSON object",
         )
     })?;
-    if object.len() > MAX_TENSORS + 1 {
+    let tensor_count = object.len() - usize::from(object.contains_key("__metadata__"));
+    if tensor_count > MAX_TENSORS {
         return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidHeader,
             "H3 Comfy safetensors tensor count exceeds the header bound",
@@ -601,9 +610,10 @@ impl PrunedTransformerConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuantizationMetadata {
+    #[serde(default)]
     format_version: String,
     layers: BTreeMap<String, QuantizedLayerMetadata>,
 }
@@ -769,10 +779,12 @@ fn detect_format(
     let Some(quantization) = quantization else {
         return Ok(H3ComfyPrunedFormat::Bf16);
     };
-    if quantization.format_version != "1.0" || quantization.layers.is_empty() {
+    if (!quantization.format_version.is_empty() && quantization.format_version != "1.0")
+        || quantization.layers.is_empty()
+    {
         return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidMetadata,
-            "H3 Comfy quantization metadata must use non-empty format_version 1.0",
+            "H3 Comfy quantization metadata must have layers and use format_version 1.0 when versioned",
         ));
     }
     let formats = quantization
@@ -790,6 +802,34 @@ fn detect_format(
     }
 }
 
+fn published_quantized_layers(
+    config: &H3TransformerConfig,
+    base: &BTreeMap<String, super::dit::H3TensorSpec>,
+) -> InspectionResult<BTreeSet<String>> {
+    (0..config.num_layers)
+        .flat_map(|index| {
+            QUANTIZED_BLOCK_WEIGHT_SUFFIXES
+                .iter()
+                .map(move |suffix| format!("blocks.{index}.{suffix}"))
+        })
+        .map(|weight| {
+            let spec = base.get(&weight).ok_or_else(|| {
+                failure(
+                    H3ComfyCheckpointErrorCode::ConfigMismatch,
+                    format!("H3 Comfy quantization policy references missing weight {weight:?}"),
+                )
+            })?;
+            if spec.dtype != DType::BF16 || spec.shape.len() != 2 {
+                return Err(failure(
+                    H3ComfyCheckpointErrorCode::ConfigMismatch,
+                    format!("H3 Comfy quantization policy requires BF16 matrix {weight:?}"),
+                ));
+            }
+            Ok(weight.trim_end_matches(".weight").to_owned())
+        })
+        .collect()
+}
+
 fn expected_schema(
     config: &H3TransformerConfig,
     mode: H3AdaLnMode,
@@ -803,13 +843,13 @@ fn expected_schema(
                 error.to_string(),
             )
         })?;
-    let quantizable = base
-        .iter()
-        .filter(|(name, spec)| {
-            spec.dtype == DType::BF16 && spec.shape.len() == 2 && name.ends_with(".weight")
-        })
-        .map(|(name, _)| name.trim_end_matches(".weight").to_owned())
-        .collect::<BTreeSet<_>>();
+    // The published H3 conversions quantize exactly the four large matrix
+    // weights in each of the 50 denoising blocks. Input projections, the text
+    // token refiner, all norms/biases, the FP32 patch/output islands, and the
+    // FP32 curve AdaLN projections remain protected. Deriving this set from
+    // "every BF16 matrix" would silently admit nine layers that the published
+    // artifacts intentionally retain in BF16.
+    let quantizable = published_quantized_layers(config, &base)?;
     let quantized_layers = if format == H3ComfyPrunedFormat::Bf16 {
         if quantization.is_some() {
             return Err(failure(
@@ -836,7 +876,7 @@ fn expected_schema(
             match format {
                 H3ComfyPrunedFormat::Fp8Scaled => {
                     if layer.format != "float8_e4m3fn"
-                        || layer.full_precision_matrix_mult != Some(false)
+                        || layer.full_precision_matrix_mult == Some(true)
                         || layer.convrot.is_some()
                         || layer.convrot_groupsize.is_some()
                     {
@@ -871,6 +911,7 @@ fn expected_schema(
     for (name, spec) in base {
         let layer = name.strip_suffix(".weight");
         let quantized = layer.is_some_and(|layer| quantized_layers.contains(layer));
+        let quantized_output_features = quantized.then(|| spec.shape[0]);
         let dtype = if quantized {
             match format {
                 H3ComfyPrunedFormat::Fp8Scaled => "F8_E4M3",
@@ -895,7 +936,15 @@ fn expected_schema(
                 format!("{layer}.weight_scale", layer = layer.unwrap()),
                 ExpectedTensor {
                     dtype: "F32",
-                    shape: vec![],
+                    shape: match format {
+                        H3ComfyPrunedFormat::Fp8Scaled => vec![],
+                        // comfy-kitchen's ConvRot path requires per-output-row
+                        // quantization and preserves the reduced axis.
+                        H3ComfyPrunedFormat::Int8ConvRot => {
+                            vec![quantized_output_features.unwrap(), 1]
+                        }
+                        H3ComfyPrunedFormat::Bf16 => unreachable!(),
+                    },
                 },
             );
             if format == H3ComfyPrunedFormat::Fp8Scaled {
@@ -916,7 +965,11 @@ fn expected_schema(
         digest.update((layer.len() as u64).to_le_bytes());
         digest.update(layer.as_bytes());
         if let Some(metadata) = quantization.and_then(|metadata| metadata.layers.get(layer)) {
-            let encoded = serde_json::to_vec(metadata).map_err(|error| {
+            let mut canonical = metadata.clone();
+            if canonical.full_precision_matrix_mult == Some(false) {
+                canonical.full_precision_matrix_mult = None;
+            }
+            let encoded = serde_json::to_vec(&canonical).map_err(|error| {
                 failure(
                     H3ComfyCheckpointErrorCode::InvalidMetadata,
                     error.to_string(),
@@ -1178,16 +1231,13 @@ mod tests {
     ) -> String {
         let base = expected_h3_weight_specs(config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
             .unwrap();
-        let layers = base
-            .iter()
-            .filter(|(name, spec)| {
-                spec.dtype == DType::BF16 && spec.shape.len() == 2 && name.ends_with(".weight")
-            })
-            .map(|(name, _)| {
+        let layers = published_quantized_layers(config, &base)
+            .unwrap()
+            .into_iter()
+            .map(|name| {
                 let metadata = match format {
                     H3ComfyPrunedFormat::Fp8Scaled => serde_json::json!({
-                        "format": "float8_e4m3fn",
-                        "full_precision_matrix_mult": false
+                        "format": "float8_e4m3fn"
                     }),
                     H3ComfyPrunedFormat::Int8ConvRot => serde_json::json!({
                         "format": "int8_tensorwise",
@@ -1196,10 +1246,10 @@ mod tests {
                     }),
                     H3ComfyPrunedFormat::Bf16 => unreachable!(),
                 };
-                (name.trim_end_matches(".weight").to_owned(), metadata)
+                (name, metadata)
             })
             .collect::<Map<_, _>>();
-        serde_json::json!({"format_version": "1.0", "layers": layers}).to_string()
+        serde_json::json!({"layers": layers}).to_string()
     }
 
     fn fixture_header(
@@ -1330,8 +1380,41 @@ mod tests {
             Some(&fp8_metadata),
         )
         .unwrap();
-        assert_eq!(fp8_policy.quantized_layers.len(), 209);
-        assert_eq!(fp8.len(), 950);
+        assert_eq!(fp8_policy.quantized_layers.len(), 200);
+        assert_eq!(fp8.len(), 932);
+        let mut explicit_false_fp8 = fp8_metadata.clone();
+        for layer in explicit_false_fp8.layers.values_mut() {
+            layer.full_precision_matrix_mult = Some(false);
+        }
+        let (_, explicit_false_policy) = expected_schema(
+            &config,
+            mode,
+            H3ComfyPrunedFormat::Fp8Scaled,
+            Some(&explicit_false_fp8),
+        )
+        .unwrap();
+        assert_eq!(
+            fp8_policy.policy_sha256,
+            explicit_false_policy.policy_sha256
+        );
+        let mut invalid_full_precision_fp8 = fp8_metadata.clone();
+        invalid_full_precision_fp8
+            .layers
+            .values_mut()
+            .next()
+            .unwrap()
+            .full_precision_matrix_mult = Some(true);
+        assert_eq!(
+            expected_schema(
+                &config,
+                mode,
+                H3ComfyPrunedFormat::Fp8Scaled,
+                Some(&invalid_full_precision_fp8),
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
 
         let int8_raw = quant_metadata(&config, mode, H3ComfyPrunedFormat::Int8ConvRot);
         let int8_metadata: QuantizationMetadata = serde_json::from_str(&int8_raw).unwrap();
@@ -1342,8 +1425,66 @@ mod tests {
             Some(&int8_metadata),
         )
         .unwrap();
-        assert_eq!(int8_policy.quantized_layers.len(), 209);
-        assert_eq!(int8.len(), 741);
+        assert_eq!(int8_policy.quantized_layers.len(), 200);
+        assert_eq!(int8_policy.protected_weight_tensors.len(), 274);
+        assert_eq!(int8.len(), 732);
+        assert_eq!(
+            int8["blocks.0.attn.qkv_proj.weight_scale"].shape,
+            vec![21_504, 1]
+        );
+        assert_eq!(int8["blocks.0.mlp.fc2.weight_scale"].shape, vec![5_376, 1]);
+        for protected in [
+            "condition_proj.weight",
+            "token_refiner.blocks.0.attn.qkv_proj.weight",
+            "blocks.0.adaln_proj.linear.weight",
+        ] {
+            assert_eq!(int8[protected].dtype, bf16[protected].dtype);
+            assert!(int8_policy
+                .protected_weight_tensors
+                .contains(&protected.to_owned()));
+        }
+        assert!(int8_policy.quantized_layers.iter().all(|layer| {
+            layer
+                .strip_prefix("blocks.")
+                .and_then(|rest| rest.split_once('.'))
+                .is_some_and(|(index, suffix)| {
+                    index.parse::<usize>().is_ok_and(|index| index < 50)
+                        && QUANTIZED_BLOCK_WEIGHT_SUFFIXES
+                            .iter()
+                            .any(|expected| suffix == expected.trim_end_matches(".weight"))
+                })
+        }));
+
+        let encoded_bytes = |schema: &BTreeMap<String, ExpectedTensor>| {
+            schema
+                .values()
+                .map(|tensor| {
+                    tensor
+                        .shape
+                        .iter()
+                        .map(|dimension| *dimension as u64)
+                        .product::<u64>()
+                        * dtype_size(tensor.dtype).unwrap()
+                })
+                .sum::<u64>()
+        };
+        let bf16_bytes = encoded_bytes(&bf16);
+        let fp8_bytes = encoded_bytes(&fp8);
+        let int8_bytes = encoded_bytes(&int8);
+        assert_eq!(bf16_bytes - fp8_bytes, 19_267_582_400);
+        assert_eq!(bf16_bytes - int8_bytes, 19_255_398_400);
+        assert_eq!(
+            (bf16_bytes - fp8_bytes)
+                - (H3ComfyPublishedArtifact::Fl2VaPrunedBf16.file_bytes()
+                    - H3ComfyPublishedArtifact::Fl2VaPrunedFp8Scaled.file_bytes()),
+            63_832
+        );
+        assert_eq!(
+            (bf16_bytes - int8_bytes)
+                - (H3ComfyPublishedArtifact::Fl2VaPrunedBf16.file_bytes()
+                    - H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot.file_bytes()),
+            53_840
+        );
     }
 
     #[test]
@@ -1404,9 +1545,12 @@ mod tests {
         assert!(cuda
             .requirements
             .contains(&H3ComfyRuntimeRequirement::H3Int8ConvRotKernelOrQualifiedDequantization));
-        assert!(!cuda
+        assert!(cuda
             .requirements
             .contains(&H3ComfyRuntimeRequirement::QuantizedBackendQualification));
+        assert!(cuda
+            .requirements
+            .contains(&H3ComfyRuntimeRequirement::PrunedAdaLnNumericalQualification));
         let metal = candidate
             .require_supported_runtime(H3ComfyRuntimeBackend::Metal)
             .unwrap_err();
@@ -1465,6 +1609,22 @@ mod tests {
         );
         assert_eq!(
             inspect_fixture(&header, &data, H3ComfyPrunedFormat::Int8ConvRot)
+                .unwrap_err()
+                .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
+
+        let (mut header, data) = fixture_header(&config, mode, H3ComfyPrunedFormat::Fp8Scaled);
+        let metadata = header["__metadata__"].as_object_mut().unwrap();
+        let mut quant: Value =
+            serde_json::from_str(metadata["_quantization_metadata"].as_str().unwrap()).unwrap();
+        quant["format_version"] = Value::String("2.0".into());
+        metadata.insert(
+            "_quantization_metadata".into(),
+            Value::String(quant.to_string()),
+        );
+        assert_eq!(
+            inspect_fixture(&header, &data, H3ComfyPrunedFormat::Fp8Scaled)
                 .unwrap_err()
                 .code,
             H3ComfyCheckpointErrorCode::InvalidMetadata
@@ -1586,6 +1746,23 @@ mod tests {
     fn duplicate_json_keys_are_rejected_recursively() {
         assert!(parse_strict_json(br#"{"a":1,"a":2}"#, "duplicate root").is_err());
         assert!(parse_strict_json(br#"{"a":{"b":1,"b":2}}"#, "duplicate nested").is_err());
+    }
+
+    #[test]
+    fn tensor_count_bound_applies_without_metadata() {
+        let mut header = Map::new();
+        for index in 0..=MAX_TENSORS {
+            header.insert(
+                format!("empty.{index}"),
+                serde_json::json!({"dtype":"U8","shape":[0],"data_offsets":[0,0]}),
+            );
+        }
+        let path = write_fixture(&Value::Object(header), &[], "tensor-bound");
+        assert_eq!(
+            read_safetensors_header(&path).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::InvalidHeader
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

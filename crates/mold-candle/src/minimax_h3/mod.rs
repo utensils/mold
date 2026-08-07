@@ -45,6 +45,7 @@ pub use comfy_dit::{
     H3ComfyFrozenStrategyMetadata, H3ComfyMemoryAccounting, H3ComfyPrunedFormat,
     H3ComfyPublishedArtifact, H3ComfyQuantizationPolicy, H3ComfyRuntimeBackend,
     H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
+    H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,
     H3_COMFY_ORG_SOURCE_REVISION,
 };
 pub use config::{
