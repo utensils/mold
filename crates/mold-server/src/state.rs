@@ -63,6 +63,10 @@ pub struct GenerationJob {
     /// construct `GenerationJob` directly may leave it empty.
     pub id: String,
     pub request: mold_core::GenerateRequest,
+    /// Private, payload-bearing reference authority. The public request is
+    /// descriptor-only by the time this exists; this owner keeps safe-open
+    /// staging alive without exposing paths to queue metadata or recovery.
+    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: SseCompletionPayload,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -277,6 +281,9 @@ pub struct AppState {
     /// Must never be held across an .await point.
     pub active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
+    /// Authenticated, quota-bounded private staging for H3 reference media.
+    /// Its root derives from the shared `Config::mold_dir()` authority.
+    pub reference_uploads: crate::reference_uploads::ReferenceUploadStore,
     /// Hard output kill switch used by isolated server test fixtures.
     ///
     /// This is intentionally separate from `Config`: environment overrides
@@ -561,6 +568,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -629,6 +637,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -707,6 +716,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -752,6 +762,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -797,6 +808,7 @@ impl AppState {
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -848,6 +860,7 @@ mod tests {
         GenerationJob {
             id: id.to_string(),
             request,
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

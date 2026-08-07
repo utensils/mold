@@ -5149,6 +5149,7 @@ fn gpu_job_from_generation(
         id: job.id,
         model: job.request.model.clone(),
         request: job.request,
+        resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -5177,6 +5178,7 @@ fn generation_and_prepared_from_gpu_job(
         GenerationJob {
             id: job.id,
             request: job.request,
+            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -6229,6 +6231,7 @@ mod tests {
             GenerationJob {
                 id: id.to_string(),
                 request,
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,

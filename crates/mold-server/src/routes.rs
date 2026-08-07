@@ -41,6 +41,10 @@ fn submit_error_to_api(e: SubmitError) -> ApiError {
 pub struct ApiError {
     pub error: String,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     #[serde(skip)]
     status: StatusCode,
 }
@@ -55,75 +59,71 @@ impl ApiError {
     }
 
     pub fn validation(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, "VALIDATION_ERROR", StatusCode::UNPROCESSABLE_ENTITY)
+    }
+
+    pub fn reference(error: mold_core::minimax_h3::ReferenceContractError) -> Self {
         Self {
-            error: msg.into(),
-            code: "VALIDATION_ERROR".to_string(),
+            error: error.message,
+            code: error.code.to_string(),
+            reference: error.reference,
+            field: error.field.map(str::to_string),
             status: StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
-    pub fn not_found(msg: impl Into<String>) -> Self {
+    pub(crate) fn structured(
+        msg: impl Into<String>,
+        code: impl Into<String>,
+        status: StatusCode,
+        reference: Option<u32>,
+        field: Option<String>,
+    ) -> Self {
         Self {
             error: msg.into(),
-            code: "MODEL_NOT_FOUND".to_string(),
-            status: StatusCode::NOT_FOUND,
+            code: code.into(),
+            reference,
+            field,
+            status,
         }
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, "MODEL_NOT_FOUND", StatusCode::NOT_FOUND)
     }
 
     pub fn unknown_model(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "UNKNOWN_MODEL".to_string(),
-            status: StatusCode::BAD_REQUEST,
-        }
+        Self::with_code(msg, "UNKNOWN_MODEL", StatusCode::BAD_REQUEST)
     }
 
     pub fn inference(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "INFERENCE_ERROR".to_string(),
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-        }
+        Self::with_code(msg, "INFERENCE_ERROR", StatusCode::INTERNAL_SERVER_ERROR)
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "INTERNAL_ERROR".to_string(),
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-        }
+        Self::with_code(msg, "INTERNAL_ERROR", StatusCode::INTERNAL_SERVER_ERROR)
     }
 
     pub fn internal_with_status(msg: impl Into<String>, status: StatusCode) -> Self {
-        Self {
-            error: msg.into(),
-            code: "INTERNAL_ERROR".to_string(),
-            status,
-        }
+        Self::with_code(msg, "INTERNAL_ERROR", status)
     }
 
     pub fn with_code(msg: impl Into<String>, code: impl Into<String>, status: StatusCode) -> Self {
         Self {
             error: msg.into(),
             code: code.into(),
+            reference: None,
+            field: None,
             status,
         }
     }
 
     pub fn queue_job_not_found(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "QUEUE_JOB_NOT_FOUND".to_string(),
-            status: StatusCode::NOT_FOUND,
-        }
+        Self::with_code(msg, "QUEUE_JOB_NOT_FOUND", StatusCode::NOT_FOUND)
     }
 
     pub fn queue_job_running(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "QUEUE_JOB_RUNNING".to_string(),
-            status: StatusCode::CONFLICT,
-        }
+        Self::with_code(msg, "QUEUE_JOB_RUNNING", StatusCode::CONFLICT)
     }
 
     /// Job cancelled while queued. 499 is the de-facto "client closed
@@ -131,51 +131,39 @@ impl ApiError {
     /// the server did any work" so clients can distinguish cancellation
     /// from real inference failures.
     pub fn cancelled(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "CANCELLED".to_string(),
-            status: StatusCode::from_u16(499).expect("499 is a valid status code"),
-        }
+        Self::with_code(
+            msg,
+            "CANCELLED",
+            StatusCode::from_u16(499).expect("499 is a valid status code"),
+        )
     }
 
     pub fn insufficient_memory(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "INSUFFICIENT_MEMORY".to_string(),
-            status: StatusCode::SERVICE_UNAVAILABLE,
-        }
+        Self::with_code(msg, "INSUFFICIENT_MEMORY", StatusCode::SERVICE_UNAVAILABLE)
     }
 
     pub fn forbidden(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "FORBIDDEN".to_string(),
-            status: StatusCode::FORBIDDEN,
-        }
+        Self::with_code(msg, "FORBIDDEN", StatusCode::FORBIDDEN)
     }
 
     pub fn queue_full(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "QUEUE_FULL".to_string(),
-            status: StatusCode::SERVICE_UNAVAILABLE,
-        }
+        Self::with_code(msg, "QUEUE_FULL", StatusCode::SERVICE_UNAVAILABLE)
     }
 
     pub fn generation_unavailable(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "GENERATION_UNAVAILABLE".to_string(),
-            status: StatusCode::SERVICE_UNAVAILABLE,
-        }
+        Self::with_code(
+            msg,
+            "GENERATION_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
     }
 
     pub fn no_schedulable_device(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: "NO_SCHEDULABLE_DEVICE".to_string(),
-            status: StatusCode::SERVICE_UNAVAILABLE,
-        }
+        Self::with_code(
+            msg,
+            "NO_SCHEDULABLE_DEVICE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
     }
 }
 
@@ -202,6 +190,9 @@ use crate::queue::clean_error_message;
         generate,
         generate_stream,
         generate_placement_preview,
+        crate::reference_uploads::create_reference_upload_session,
+        crate::reference_uploads::upload_reference,
+        crate::reference_uploads::cancel_reference_upload_session,
         expand_prompt,
         remix_prompt,
         list_models,
@@ -270,6 +261,11 @@ use crate::queue::clean_error_message;
         mold_core::GenerationPlacementPreview,
         mold_core::GenerationPlacementCandidate,
         mold_core::ChainStagePlacementCandidate,
+        mold_core::ReferenceUploadSessionRequest,
+        mold_core::ReferenceUploadSessionResponse,
+        mold_core::ReferenceUploadSlot,
+        mold_core::ReferenceUploadCompleteResponse,
+        mold_core::minimax_h3::GenerationReferencePreparedShape,
         crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
@@ -380,6 +376,23 @@ pub fn create_router(state: AppState) -> Router {
             post(generate_placement_preview),
         )
         .route("/api/generate/stream", post(generate_stream))
+        .route(
+            "/api/generate/reference-upload-sessions",
+            post(crate::reference_uploads::create_reference_upload_session)
+                .delete(crate::reference_uploads::cancel_reference_upload_session)
+                .layer(DefaultBodyLimit::max(
+                    crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSION_REQUEST_BYTES,
+                )),
+        )
+        .route(
+            "/api/generate/reference-upload",
+            put(crate::reference_uploads::upload_reference).layer(DefaultBodyLimit::max(
+                usize::try_from(
+                    crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES.saturating_add(1),
+                )
+                .unwrap_or(usize::MAX),
+            )),
+        )
         .route(
             "/api/generate/chain",
             post(crate::routes_chain::generate_chain),
@@ -729,7 +742,7 @@ async fn require_server_model_activation(
     Ok(family)
 }
 
-async fn require_server_generation_request_activation(
+pub(crate) async fn require_server_generation_request_activation(
     state: &AppState,
     request: &mold_core::GenerateRequest,
     family: Option<&str>,
@@ -750,7 +763,16 @@ async fn require_server_generation_request_activation(
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-) -> Result<(Option<std::path::PathBuf>, RequestWarnings, Option<usize>), ApiError> {
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+) -> Result<
+    (
+        Option<std::path::PathBuf>,
+        RequestWarnings,
+        Option<usize>,
+        Option<crate::reference_uploads::ResolvedReferenceSet>,
+    ),
+    ApiError,
+> {
     // `hdr_exr_dir` names an output directory on the machine doing inference.
     // An HTTP client must never choose that server-local path: unlike media
     // inputs there is no useful remote artifact to return and no safe root to
@@ -764,6 +786,40 @@ async fn prepare_generation(
     }
     let family = require_server_model_activation(state, &request.model).await?;
     require_server_generation_request_activation(state, request, family.as_deref()).await?;
+    if request.references.is_some() && request.batch_size > 1 {
+        return Err(ApiError::with_code(
+            "MiniMax H3 reference requests do not support durable server batches yet",
+            "MINIMAX_H3_REFERENCE_BATCH_UNSUPPORTED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    if let Some(references) = request.references.as_deref() {
+        // Validate the complete ordered contract before catalog/model install
+        // or any other admission mutation. Content probing follows authority
+        // resolution, still before the request can enter the queue.
+        mold_core::minimax_h3::validate_references(references).map_err(ApiError::reference)?;
+    }
+    let reference_identity = if request.references.is_some() {
+        Some(
+            authenticated
+                .ok_or_else(|| {
+                    ApiError::with_code(
+                        "API key authentication is required for reference media",
+                        "UNAUTHORIZED",
+                        StatusCode::UNAUTHORIZED,
+                    )
+                })?
+                .identity
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let reference_scope_sha256 = request
+        .references
+        .as_ref()
+        .map(|_| state.reference_uploads.scope_sha256(request))
+        .transpose()?;
     if request.expand == Some(true) && !request.prompt.trim().is_empty() {
         let settings = state
             .config
@@ -831,6 +887,24 @@ async fn prepare_generation(
         return Err(ApiError::validation(e));
     }
 
+    let resolved_references = if request.references.is_some() {
+        let identity = reference_identity
+            .as_deref()
+            .expect("reference authentication was checked before admission mutation");
+        let media_roots = state.config.read().await.resolved_media_roots();
+        state
+            .reference_uploads
+            .resolve_request(
+                identity,
+                request,
+                &media_roots,
+                reference_scope_sha256.as_deref(),
+            )
+            .await?
+    } else {
+        None
+    };
+
     resolve_server_local_media_paths(state, request).await?;
     if let Some((adapter, path)) = planned_control {
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
@@ -862,7 +936,7 @@ async fn prepare_generation(
     };
 
     warnings.dimension = dim_warning;
-    Ok((output_dir, warnings, preferred_gpu))
+    Ok((output_dir, warnings, preferred_gpu, resolved_references))
 }
 
 pub(crate) async fn plan_builtin_ltx2_camera_controls(
@@ -1516,6 +1590,7 @@ fn validate_live_server_batch_admission(
 // requests use the authoritative scheduler and return one atomic JSON parent.
 async fn generate(
     State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     validate_live_server_batch_admission(&req)?;
@@ -1526,7 +1601,12 @@ async fn generate(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, warnings, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, warnings, preferred_gpu, resolved_references) = prepare_generation(
+        &state,
+        &mut req,
+        authenticated.as_ref().map(|Extension(auth)| auth),
+    )
+    .await?;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     if req.batch_size > 1 {
@@ -1601,6 +1681,7 @@ async fn generate(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        resolved_references,
         completion_payload: SseCompletionPayload::Full,
         progress_tx: None,
         result_tx,
@@ -2521,6 +2602,7 @@ pub(crate) fn requested_sse_completion_payload(
 )]
 async fn generate_stream(
     State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
@@ -2533,7 +2615,12 @@ async fn generate_stream(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, warnings, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, warnings, preferred_gpu, resolved_references) = prepare_generation(
+        &state,
+        &mut req,
+        authenticated.as_ref().map(|Extension(auth)| auth),
+    )
+    .await?;
     if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
         return Err(ApiError::validation(
             "metadata-only SSE completions require server gallery output to be enabled",
@@ -2651,6 +2738,7 @@ async fn generate_stream(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        resolved_references,
         completion_payload,
         progress_tx: Some(tx.clone()),
         result_tx,
@@ -4480,6 +4568,19 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             server_batch,
             server_batch_max_outputs: server_batch
                 .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),
+        },
+        reference_uploads: mold_core::ReferenceUploadCapabilities {
+            available: true,
+            protocol_version: 1,
+            requires_api_key: true,
+            session_path: "/api/generate/reference-upload-sessions".to_string(),
+            upload_path: "/api/generate/reference-upload".to_string(),
+            session_handle_header: crate::reference_uploads::SESSION_HANDLE_HEADER.to_string(),
+            upload_handle_header: crate::reference_uploads::UPLOAD_HANDLE_HEADER.to_string(),
+            max_file_bytes: crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES,
+            max_session_bytes: crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSION_BYTES,
+            session_ttl_ms: crate::reference_uploads::REFERENCE_UPLOAD_SESSION_TTL.as_millis()
+                as u64,
         },
         devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),

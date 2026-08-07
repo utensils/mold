@@ -104,6 +104,20 @@ export interface ServerCapabilities {
   discovery?: { can_browse: boolean } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Stable-URL, header-secret reference ingress. Model access is advertised
+   * separately and may still keep H3 legally unavailable. */
+  reference_uploads?: {
+    available: boolean;
+    protocol_version: number;
+    requires_api_key: boolean;
+    session_path: string;
+    upload_path: string;
+    session_handle_header: string;
+    upload_handle_header: string;
+    max_file_bytes: number;
+    max_session_bytes: number;
+    session_ttl_ms: number;
+  } | null;
   /** Live lifecycle and restart-only recovery support. */
   devices?: {
     available?: boolean;

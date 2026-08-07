@@ -990,6 +990,16 @@ mod tests {
                 audio_duration_ms: Some(4_000),
                 sample_rate: None,
                 channels: None,
+                prepared_shape: Some(mold_core::minimax_h3::GenerationReferencePreparedShape {
+                    version: mold_core::minimax_h3::REFERENCE_PREPROCESS_VERSION,
+                    normalized_width: Some(1344),
+                    normalized_height: Some(768),
+                    video_frames: Some(90),
+                    qwen_video_frames: Some(8),
+                    audio_samples_per_channel: Some(128_000),
+                    visual_rows: 27_216,
+                    audio_rows: 320,
+                }),
             },
             mold_core::GenerationReferenceMetadata {
                 kind: mold_core::GenerationReferenceKind::Audio,
@@ -1005,6 +1015,16 @@ mod tests {
                 audio_duration_ms: None,
                 sample_rate: Some(32_000),
                 channels: Some(2),
+                prepared_shape: Some(mold_core::minimax_h3::GenerationReferencePreparedShape {
+                    version: mold_core::minimax_h3::REFERENCE_PREPROCESS_VERSION,
+                    normalized_width: None,
+                    normalized_height: None,
+                    video_frames: None,
+                    qwen_video_frames: None,
+                    audio_samples_per_channel: Some(96_000),
+                    visual_rows: 0,
+                    audio_rows: 240,
+                }),
             },
         ]);
 
@@ -1036,12 +1056,26 @@ mod tests {
             mold_core::GenerationReferenceKind::Video
         );
         assert!(references[0].has_audio);
+        assert_eq!(
+            references[0]
+                .prepared_shape
+                .as_ref()
+                .map(|shape| shape.visual_rows),
+            Some(27_216)
+        );
         assert_eq!(references[1].index, 2);
         assert_eq!(
             references[1].kind,
             mold_core::GenerationReferenceKind::Audio
         );
         assert_eq!(references[1].sha256, "b".repeat(64));
+        assert_eq!(
+            references[1]
+                .prepared_shape
+                .as_ref()
+                .map(|shape| shape.audio_rows),
+            Some(240)
+        );
     }
 
     #[test]

@@ -794,6 +794,13 @@ pub(crate) fn validate_and_normalize_chain_family(
         (!family.is_empty()).then_some(family.as_str()),
     )
     .map_err(ApiError::model_activation)?;
+    if mold_core::minimax_h3::is_family(&family) {
+        return Err(ApiError::with_code(
+            "MiniMax H3 chains remain disabled until reference media have durable recovery authority",
+            "MINIMAX_H3_CHAIN_RECOVERY_UNSUPPORTED",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
     validate_chain_build_features(req)?;
     // A clip is one generation, so the composed ceiling applies here exactly
     // as it does to a single shot. `resolved_model.spatial_upscaler` is the

@@ -5,6 +5,7 @@ import {
   previewRequestForSiblingFanout,
   redactChainForPlacement,
   redactGenerationForPlacement,
+  requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "./generationPlacement";
 
@@ -31,6 +32,16 @@ function planned(
 }
 
 describe("generation placement preview", () => {
+  test("requires authority whenever the references field is present", () => {
+    expect(requiresAuthoritativePlacement({ model: "ordinary" })).toBe(false);
+    expect(
+      requiresAuthoritativePlacement({ model: "h3", references: null }),
+    ).toBe(true);
+    expect(
+      requiresAuthoritativePlacement({ model: "h3", references: [] }),
+    ).toBe(true);
+  });
+
   test("previews sibling fanout as copies of a one-image request without mutating input", () => {
     const request = { model: "preview", batch_size: 4, prompt: "reviewed" };
     expect(previewRequestForSiblingFanout(request, 4)).toEqual({

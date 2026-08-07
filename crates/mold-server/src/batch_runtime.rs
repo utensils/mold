@@ -852,6 +852,7 @@ async fn submit_child(
     let job = GenerationJob {
         id: id.clone(),
         request,
+        resolved_references: None,
         completion_payload: SseCompletionPayload::Full,
         progress_tx: None,
         result_tx,

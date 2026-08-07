@@ -527,6 +527,79 @@ describe("useHostRouting", () => {
     },
   );
 
+  it.each([404, 405])(
+    "fails closed for reference requests when placement HTTP %s is unsupported",
+    async (statusCode) => {
+      statuses.set(ORIGIN_HOST_ID, status());
+      models.set(ORIGIN_HOST_ID, [
+        model("minimax-h3-ref2va:comfy-pruned-int8"),
+      ]);
+      placementCall.mockRejectedValue(
+        new ApiError("not supported", statusCode),
+      );
+      const routing = useHostRouting();
+      await routing.refresh();
+
+      await expect(
+        routing.resolveFeasible({
+          prompt: "reference print",
+          model: "minimax-h3-ref2va:comfy-pruned-int8",
+          width: 1344,
+          height: 768,
+          steps: 8,
+          guidance: 0,
+          seed: null,
+          batch_size: 1,
+          references: [],
+        }),
+      ).resolves.toMatchObject({
+        kind: "unreachable",
+        perHost: [
+          expect.objectContaining({
+            error:
+              "does not provide the authoritative placement preview required for reference media",
+          }),
+        ],
+      });
+    },
+  );
+
+  it("fails closed for an explicit unsupported reference preview", async () => {
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [model("minimax-h3-ref2va:comfy-pruned-int8")]);
+    placementCall.mockResolvedValue(
+      placement(0, {
+        authoritative: false,
+        outcome: "unsupported",
+        candidate: null,
+      }),
+    );
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "reference print",
+        model: "minimax-h3-ref2va:comfy-pruned-int8",
+        width: 1344,
+        height: 768,
+        steps: 8,
+        guidance: 0,
+        seed: null,
+        batch_size: 1,
+        references: [],
+      }),
+    ).resolves.toMatchObject({
+      kind: "unreachable",
+      perHost: [
+        expect.objectContaining({
+          error:
+            "does not provide the authoritative placement preview required for reference media",
+        }),
+      ],
+    });
+  });
+
   it("revalidates only the frozen host when another host becomes faster", async () => {
     setGenerateTargetId(AUTO_TARGET_ID);
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });

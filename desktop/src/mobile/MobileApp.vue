@@ -56,6 +56,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
 import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
@@ -3324,6 +3325,9 @@ async function generate(): Promise<void> {
     releasePreparedSubmission();
     return;
   }
+  const requireAuthoritativePlacement = requiresAuthoritativePlacement(
+    request as unknown as Record<string, unknown>,
+  );
   let placement: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
   try {
@@ -3346,15 +3350,31 @@ async function generate(): Promise<void> {
             batchSize,
           );
   } catch (error) {
-    if (error instanceof ApiError && (error.status === 404 || error.status === 405))
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      if (requireAuthoritativePlacement) {
+        setGenerationStatus(
+          `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+          true,
+        );
+        releasePreparedSubmission();
+        return;
+      }
       legacyUnsupported = true;
-    else {
+    } else {
       setGenerationStatus(describeTransportError(error, route.label), true);
       releasePreparedSubmission();
       return;
     }
   }
   const classification: string = classifyPlacementPreview(placement);
+  if (requireAuthoritativePlacement && classification === "unsupported") {
+    setGenerationStatus(
+      `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+      true,
+    );
+    releasePreparedSubmission();
+    return;
+  }
   if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
     setGenerationStatus(mobilePlacementFailure(placement, route.label, "print"), true);
     releasePreparedSubmission();

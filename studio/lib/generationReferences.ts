@@ -57,6 +57,19 @@ export interface GenerationReferenceMetadata {
   audio_duration_ms?: number | null;
   sample_rate?: number | null;
   channels?: number | null;
+  prepared_shape?: GenerationReferencePreparedShape | null;
+}
+
+/** Exact checked output of the versioned reference preprocessing policy. */
+export interface GenerationReferencePreparedShape {
+  version: number;
+  normalized_width?: number | null;
+  normalized_height?: number | null;
+  video_frames?: number | null;
+  qwen_video_frames?: number | null;
+  audio_samples_per_channel?: number | null;
+  visual_rows: number;
+  audio_rows: number;
 }
 
 /** Keep planning descriptors and digests while removing every media authority
