@@ -3140,6 +3140,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "serde",
+ "serde_json",
  "tracing",
 ]
 

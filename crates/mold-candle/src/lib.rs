@@ -5,6 +5,7 @@
 //! universal tensor/backend semantics belong upstream.
 
 pub mod ltx_video;
+pub mod minimax_h3;
 pub mod quantized;
 pub mod quantized_nn;
 pub mod stable_diffusion;
