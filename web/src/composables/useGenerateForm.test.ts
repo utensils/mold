@@ -728,6 +728,41 @@ describe("useGenerateForm", () => {
     expect(wire.gif_preview).toBeUndefined();
   });
 
+  it("keeps video fields for a wan model whose stored family is empty", () => {
+    // `selectedFamily` falls back to the model name only when `modelFamily` is
+    // absent — a restored draft that predates the field. Without the wan arm
+    // the family resolves to "", `supportsVideo` is false, and `toRequest`
+    // prunes exactly the fields that make it a video request: the same request
+    // is then submitted as a still.
+    const form = useGenerateForm();
+    for (const model of [
+      "wan22-t2v-a14b:q5",
+      "wan22-i2v-a14b:q8",
+      "wan21-t2v-1.3b:bf16",
+      "wan22-ti2v-5b:fp16",
+    ]) {
+      Object.assign(form.state.value, {
+        model,
+        modelFamily: "",
+        frames: 81,
+        fps: 16,
+        gifPreview: true,
+      });
+      const wire = form.toRequest();
+      expect(wire.frames, model).toBe(81);
+      expect(wire.fps, model).toBe(16);
+    }
+
+    // A server-supplied family still wins over the name heuristic.
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "sdxl",
+      frames: 81,
+      fps: 16,
+    });
+    expect(form.toRequest().frames).toBeUndefined();
+  });
+
   it("serializes backend-supported advanced generation knobs", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {

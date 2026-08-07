@@ -4926,6 +4926,40 @@ mod tests {
         );
     }
 
+    /// A wan OOM must get video advice, not the image-family default.
+    ///
+    /// Wan reached the generic arm because it matched only `LtxVideo`, so the
+    /// message recommended `--batch` (wan renders one clip at a time whatever
+    /// the value) and `--offload` (a FLUX flag with no wan code path), while
+    /// never mentioning `--frames` — the one lever that actually moves wan's
+    /// peak, since activation cost scales with tokens and tokens scale with
+    /// frames.
+    #[test]
+    fn preflight_rejection_message_for_wan_suggests_frames_not_offload() {
+        let hint = ActivationHint {
+            width: 832,
+            height: 480,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::WanVideo,
+        };
+        let suggestion = rejection_suggestion(Some(hint));
+        assert!(suggestion.contains("--frames"), "got: {suggestion}");
+        assert!(!suggestion.contains("--offload"), "got: {suggestion}");
+        assert!(!suggestion.contains("--batch"), "got: {suggestion}");
+        // Wan ships :q5/:q8 tiers, so the quantized-variant hint applies.
+        assert!(suggestion.contains("quantized"), "got: {suggestion}");
+
+        // The two full-weight video families share one message.
+        assert_eq!(
+            suggestion,
+            rejection_suggestion(Some(ActivationHint {
+                family: ActivationFamily::LtxVideo,
+                ..hint
+            })),
+        );
+    }
+
     #[test]
     fn preflight_rejection_message_for_image_suggests_resolution_not_frames() {
         let hint = ActivationHint {
