@@ -309,7 +309,7 @@ impl WanLoraRegistry {
         let mut deltas = 0usize;
         for (stem, diff) in weight_deltas {
             self.patches
-                .entry(format!("{stem}.weight"))
+                .entry(weight_delta_key(&stem))
                 .or_default()
                 .push(WanLoraPatch::Delta {
                     diff,
@@ -337,6 +337,25 @@ impl WanLoraRegistry {
             );
         }
         Ok(())
+    }
+}
+
+/// The checkpoint key a `.diff` for `stem` lands on.
+///
+/// Almost every Wan tensor lives under `{stem}.weight`, but the AdaLN
+/// modulation tables are BARE parameters — the checkpoint keys are
+/// `blocks.N.modulation` and `head.modulation`, with no `.weight` suffix
+/// (they load through `WanWeights::tensor`, not a linear). Kijai's Wan 2.1
+/// lightx2v extractions ship `.diff` deltas for exactly those stems, so
+/// appending `.weight` would invent a tensor no checkpoint has and
+/// `ensure_targets_present` would fail-closed a valid adapter. `.diff_b`
+/// keeps its unconditional `.bias` mapping: a bare parameter has no bias to
+/// delta.
+fn weight_delta_key(stem: &str) -> String {
+    if stem.ends_with(".modulation") {
+        stem.to_string()
+    } else {
+        format!("{stem}.weight")
     }
 }
 
@@ -929,6 +948,83 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("blocks.0.self_attn.norm_q.bias"), "{error}");
+    }
+
+    /// Wan's AdaLN modulation tables are BARE parameters — the checkpoint
+    /// keys are `blocks.N.modulation` and `head.modulation`, with no
+    /// `.weight` suffix — and Kijai's Wan 2.1 lightx2v extractions ship
+    /// `.diff` deltas for exactly those stems. Routing them to
+    /// `{stem}.weight` invents a tensor no checkpoint has, and the
+    /// fail-closed target check then rejects the whole (valid) adapter.
+    #[test]
+    fn a_modulation_diff_targets_the_bare_checkpoint_key() {
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modulation.safetensors");
+        let block_diff = synth(11, 6 * 4);
+        let head_diff = synth(13, 2 * 4);
+        write_tensors(
+            &path,
+            &[
+                (
+                    "diffusion_model.blocks.0.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 6, 4],
+                    f32_bytes(&block_diff),
+                ),
+                (
+                    "diffusion_model.head.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 2, 4],
+                    f32_bytes(&head_diff),
+                ),
+            ],
+        );
+        let registry = WanLoraRegistry::load(&[lora(&path, 0.5)]).unwrap();
+        assert_eq!(registry.tensor_count(), 2);
+
+        // The patches must land on the bare keys the checkpoint actually has.
+        registry
+            .ensure_targets_present(
+                |name| name == "blocks.0.modulation" || name == "head.modulation",
+                std::path::Path::new("checkpoint.safetensors"),
+            )
+            .expect("modulation deltas must target the bare checkpoint keys");
+
+        // And apply there: W + strength * diff, hand-computed.
+        let base = Tensor::ones((1, 6, 4), DType::F32, &device).unwrap();
+        let merged = registry.apply("blocks.0.modulation", base).unwrap();
+        let got: Vec<f32> = merged.flatten_all().unwrap().to_vec1().unwrap();
+        let want: Vec<f32> = block_diff.iter().map(|d| 1.0 + 0.5 * d).collect();
+        assert_eq!(got, want);
+
+        let head_base = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let head_merged = registry.apply("head.modulation", head_base).unwrap();
+        let head_got: Vec<f32> = head_merged.flatten_all().unwrap().to_vec1().unwrap();
+        let head_want: Vec<f32> = head_diff.iter().map(|d| 0.5 * d).collect();
+        assert_eq!(head_got, head_want);
+
+        // The bare-key routing must not weaken fail-closed: a genuinely bogus
+        // stem still refuses the adapter.
+        let bogus = dir.path().join("bogus.safetensors");
+        write_tensors(
+            &bogus,
+            &[(
+                "diffusion_model.blocks.7.modulation.diff",
+                SafeDtype::F32,
+                vec![1, 6, 4],
+                f32_bytes(&block_diff),
+            )],
+        );
+        let bogus_registry = WanLoraRegistry::load(&[lora(&bogus, 0.5)]).unwrap();
+        let error = bogus_registry
+            .ensure_targets_present(
+                |name| name == "blocks.0.modulation" || name == "head.modulation",
+                std::path::Path::new("checkpoint.safetensors"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("blocks.7.modulation"), "{error}");
     }
 
     /// A half-written adapter must be refused, not partially applied.
@@ -1610,10 +1706,20 @@ mod tests {
                     vec![dim],
                     f32_bytes(&synth(6, dim)),
                 ),
+                // Modulation delta — the checkpoint key is BARE
+                // (`blocks.0.modulation`, no `.weight`), stored unquantized
+                // in GGUF and merged through the same `tensor()` hook as the
+                // norms on both weight sources.
+                (
+                    "diffusion_model.blocks.0.modulation.diff",
+                    SafeDtype::F32,
+                    vec![1, 6, dim],
+                    f32_bytes(&synth(7, 6 * dim)),
+                ),
             ],
         );
         let registry = WanLoraRegistry::load(&[lora(&adapter, 0.5)]).unwrap();
-        assert_eq!(registry.tensor_count(), 4);
+        assert_eq!(registry.tensor_count(), 5);
 
         let x = Tensor::randn(0f32, 1f32, (1, config.in_dim, 1, 4, 4), &device).unwrap();
         let timestep = Tensor::from_vec(vec![500f32], 1, &device).unwrap();
