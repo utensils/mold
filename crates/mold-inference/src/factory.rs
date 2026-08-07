@@ -72,6 +72,9 @@ pub struct FrozenEngineConfig {
     pub selected_qwen3_paths: Vec<PathBuf>,
     pub selected_qwen2_path: Option<PathBuf>,
     pub selected_gemma_paths: Vec<PathBuf>,
+    /// Exact contract-only MiniMax H3 admission/factory authority. This is
+    /// `None` for every runnable family and cannot activate H3 by itself.
+    pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
     pub runtime_environment: crate::runtime_env::FrozenRuntimeEnvironment,
     pub attention_backend: crate::attention::AttentionBackend,
     pub attention_chunk: crate::attention::AttentionChunkPolicy,
@@ -114,6 +117,7 @@ impl FrozenEngineConfig {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            h3_factory_authority: None,
             runtime_environment,
             attention_backend: crate::attention::AttentionBackend::resolve(),
             attention_chunk: crate::attention::resolved_chunk_policy(),
@@ -384,7 +388,55 @@ pub fn create_engine_with_frozen_config(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
+    create_engine_with_frozen_config_and_h3_factory(
+        model_name,
+        paths,
+        frozen,
+        load_strategy,
+        gpu_ordinal,
+        offload,
+        shared_pool,
+        |_| {
+            bail!(
+                "MiniMax H3 typed factory authority is present but no runnable loader is registered"
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_engine_with_frozen_config_and_h3_factory<F>(
+    model_name: String,
+    paths: ModelPaths,
+    frozen: &FrozenEngineConfig,
+    load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
+    offload: bool,
+    shared_pool: Option<Arc<Mutex<SharedPool>>>,
+    h3_factory: F,
+) -> Result<Box<dyn InferenceEngine>>
+where
+    F: FnOnce(&crate::FrozenH3FactoryAuthority) -> Result<Box<dyn InferenceEngine>>,
+{
+    // The compliance gate is intentionally the first operation. No path,
+    // runtime, device, authority, or future loader inspection may precede it.
     mold_core::require_model_activation(&model_name, Some(&frozen.family))?;
+    if mold_core::minimax_h3::is_family(&frozen.family) {
+        let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("MiniMax H3 factory dispatch requires an exact frozen server authority")
+        })?;
+        // The static runtime/registry gate deliberately precedes even path
+        // classification and local-existence checks. Legal authorization alone
+        // can therefore never make a contract-only build touch H3 artifacts.
+        authority.validate_for_dispatch(
+            &model_name,
+            &frozen.family,
+            gpu_ordinal,
+            offload,
+            frozen.attention_backend,
+            frozen.attention_chunk,
+        )?;
+    }
     for path in paths.all_file_paths() {
         mold_core::require_model_artifact_activation(
             path,
@@ -659,9 +711,22 @@ pub fn create_engine_with_frozen_config(
             gpu_ordinal,
             shared_pool,
         ))),
-        family if mold_core::minimax_h3::is_family(family) => bail!(
-            "MiniMax H3 has a static contract but no runnable inference engine in this build"
-        ),
+        family if mold_core::minimax_h3::is_family(family) => {
+            let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MiniMax H3 factory dispatch requires an exact frozen server authority"
+                )
+            })?;
+            authority.validate_for_dispatch(
+                &model_name,
+                family,
+                gpu_ordinal,
+                offload,
+                frozen.attention_backend,
+                frozen.attention_chunk,
+            )?;
+            h3_factory(authority)
+        }
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
@@ -684,6 +749,58 @@ pub fn create_engine_with_frozen_config(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn sha(byte: char) -> String {
+        std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn h3_factory_authority(frozen: &FrozenEngineConfig) -> crate::FrozenH3FactoryAuthority {
+        crate::FrozenH3FactoryAuthority::new_contract_only(crate::H3FactoryAuthorityInput {
+            model: mold_core::minimax_h3::FL2VA_COMFY.into(),
+            device_id: "gpu-0".into(),
+            device_ordinal: 0,
+            compute_capability: (8, 9),
+            execution_fingerprint: sha('a'),
+            conditioner_placement: crate::H3FactoryConditionerPlacement::HostCpuThenDrop,
+            qwen_parameter_bytes: 2048,
+            qwen_activation_workspace_bytes: 1024,
+            resident_block_count: 8,
+            prefetch_depth: 1,
+            attention_backend: frozen.attention_backend,
+            attention_chunk: frozen.attention_chunk,
+            attention_kernel_identity: "synthetic-lossless-packed-attention-v1".into(),
+            attention_qualification_sha256: sha('b'),
+            attention_full_noncausal: true,
+            attention_lossless: true,
+            attention_head_count: 56,
+            attention_head_dim: 128,
+            block_offload: true,
+            quantization: crate::H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                transformer_policy_sha256: sha('c'),
+                qwen_policy_sha256: sha('d'),
+                pruned_adaln_table_sha256: sha('e'),
+            },
+            components: [
+                crate::H3FactoryComponentRole::Conditioner,
+                crate::H3FactoryComponentRole::Transformer,
+                crate::H3FactoryComponentRole::VisualVae,
+                crate::H3FactoryComponentRole::AudioVae,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                crate::H3FactoryComponentAuthority::new(
+                    role,
+                    sha(char::from(b'1' + index as u8)),
+                    sha(char::from(b'5' + index as u8)),
+                )
+                .unwrap()
+            })
+            .collect(),
+        })
+        .unwrap()
+    }
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
@@ -780,6 +897,37 @@ mod tests {
         assert!(error
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn frozen_factory_never_calls_h3_loader_before_the_legal_gate() {
+        let mut frozen =
+            FrozenEngineConfig::resolve(mold_core::minimax_h3::FL2VA_COMFY, &Config::default());
+        frozen.family = mold_core::minimax_h3::FAMILY.to_string();
+        frozen.h3_factory_authority = Some(h3_factory_authority(&frozen));
+        let called = Arc::new(AtomicBool::new(false));
+        let loader_called = Arc::clone(&called);
+
+        let error = create_engine_with_frozen_config_and_h3_factory(
+            mold_core::minimax_h3::FL2VA_COMFY.into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+            move |_| {
+                loader_called.store(true, Ordering::SeqCst);
+                unreachable!("the MiniMax H3 legal gate must precede the loader")
+            },
+        )
+        .err()
+        .expect("compliance-gated H3 must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[test]

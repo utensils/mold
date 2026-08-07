@@ -297,6 +297,10 @@ impl FrozenH3Fl2VaCandlePlan {
         &self.device_id
     }
 
+    pub(crate) const fn backend(&self) -> H3CandleBackendDevice {
+        self.backend
+    }
+
     pub(crate) fn execution_fingerprint(&self) -> &str {
         &self.execution_fingerprint
     }
@@ -349,7 +353,7 @@ impl FrozenH3Fl2VaCandlePlan {
         self.runtime.validate()
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         self.validate_fields()?;
         require_sha256(&self.identity_sha256, "H3 backend plan")?;
         if self.identity_sha256 != backend_plan_identity(self) {
@@ -1115,6 +1119,14 @@ mod tests {
                 (|plan: &mut FrozenH3Fl2VaCandlePlan| plan.device_id = "gpu-1".into())
                     as fn(&mut FrozenH3Fl2VaCandlePlan),
                 "streaming and backend admission authorities disagree",
+            ),
+            (
+                |plan: &mut FrozenH3Fl2VaCandlePlan| {
+                    plan.backend = H3CandleBackendDevice::Cuda {
+                        compute_capability: (9, 0),
+                    }
+                },
+                "plan identity changed after admission",
             ),
             (
                 |plan: &mut FrozenH3Fl2VaCandlePlan| {
