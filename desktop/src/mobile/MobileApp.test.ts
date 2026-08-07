@@ -3152,6 +3152,14 @@ describe("MobileApp generation queue", () => {
     expect(preview.attributes("style")).toContain("blur(11px)");
     // The develop grain layers over the preview and thins with progress.
     expect(wrapper.find("develop-canvas-stub").exists()).toBe(true);
+    // iPhone already keeps the changing status outside and below the noisy
+    // preview, matching the desktop/web placement invariant.
+    const summary = wrapper.get("[data-test='mobile-generation-summary']");
+    expect(summary.text()).toBe("Developing 2 / 8");
+    expect(bed.find("[data-test='mobile-generation-summary']").exists()).toBe(false);
+    expect(
+      bed.element.compareDocumentPosition(summary.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
 
     openStreams[0]?.options.onEvent(
       "complete",

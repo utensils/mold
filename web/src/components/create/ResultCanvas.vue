@@ -3,8 +3,8 @@
  * Result canvas (Mold Studio Create) — the develop bed. Four states:
  *  - empty: brand headline + what-to-do guidance.
  *  - generating: the develop bed — live latent preview under the thinning
- *    Develop grain (desktop parity), with a progress ring + stage line until
- *    the first preview arrives.
+ *    Develop grain (desktop parity), with a progress ring until the first
+ *    preview arrives and an always-visible stage line below the bed.
  *  - result: the finished print with a mono provenance caption.
  *  - variations: batch>1 expansion review — editable prompts with per-row Use,
  *    plus Discard / Queue N.
@@ -160,7 +160,11 @@ watch(
       class="canvas__generating"
       data-test="canvas-generating"
     >
-      <div class="canvas__bed ms-shimmer" :style="bedStyle">
+      <div
+        class="canvas__bed ms-shimmer"
+        data-test="canvas-bed"
+        :style="bedStyle"
+      >
         <!-- Live latent preview: a tiny PNG upscaled by CSS; the blur tightens
              as denoising progresses so the print develops on the canvas. -->
         <img
@@ -180,13 +184,13 @@ watch(
           class="canvas__develop"
           :style="{ opacity: grainOpacity }"
         />
-        <!-- Ring + stage overlay the grain only until the first latent
-             preview arrives; then the forming print takes over. -->
+        <!-- The ring overlays the grain only until the first latent preview
+             arrives; the stage line remains legible below the bed. -->
         <div v-if="!previewSrc" class="canvas__ring">
           <ProgressRing :value="progress" :size="104" show-label />
         </div>
       </div>
-      <div v-if="!previewSrc" class="canvas__stage" data-test="canvas-stage">
+      <div class="canvas__stage" data-test="canvas-stage">
         {{ stage }}
       </div>
     </div>

@@ -79,9 +79,18 @@ describe("ResultCanvas", () => {
     expect(wrapper.findComponent(DevelopCanvas).attributes("style")).toContain(
       "opacity: 0.55",
     );
-    // The forming print replaces the ring + stage overlay.
+    // The forming print replaces the ring, while the status stays legible
+    // below the noisy preview instead of disappearing or overlaying it.
     expect(wrapper.findComponent(ProgressRing).exists()).toBe(false);
-    expect(wrapper.find("[data-test='canvas-stage']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='canvas-stage']").text()).toBe(
+      "Developing 4 / 8",
+    );
+    expect(
+      wrapper
+        .get("[data-test='canvas-bed']")
+        .find("[data-test='canvas-stage']")
+        .exists(),
+    ).toBe(false);
     expect(wrapper.find("[data-test='canvas-generating']").exists()).toBe(true);
   });
 
