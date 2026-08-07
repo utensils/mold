@@ -5,6 +5,7 @@
 //! frozen placement and issued component lease.
 
 pub(crate) mod offload;
+pub(crate) mod pipeline;
 pub(crate) mod sampler;
 
 use anyhow::{anyhow, Result};
