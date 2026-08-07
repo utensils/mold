@@ -14,7 +14,10 @@ runtime backend.
 - ComfyUI pins `comfy-kitchen==0.2.26` in `requirements.txt`.
 - comfy-kitchen tag `v0.2.26`, commit
   `255a43879fe57bbcbecfdb273b46d772b00c5a90`.
-- Both implementation repositories publish their source under Apache-2.0.
+- ComfyUI publishes its repository under GPL-3.0. comfy-kitchen publishes its
+  repository under Apache-2.0; the portable quantization math below is validated
+  against that Apache-2.0 implementation, while the ComfyUI source is used to
+  verify H3's format selection, metadata wiring, and execution ordering.
 
 The relevant ComfyUI authorities are `comfy/quant_ops.py`, `comfy/ops.py`,
 `comfy/sd1_clip.py`, and `comfy/text_encoders/minimax.py`. The relevant

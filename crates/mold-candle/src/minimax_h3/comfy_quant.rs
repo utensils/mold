@@ -1,6 +1,6 @@
 //! Source-pinned, artifact-free Comfy quantization primitives for MiniMax H3.
 //!
-//! The execution contracts in this module are derived from ComfyUI
+//! The execution contracts in this module are validated against ComfyUI
 //! `a464ac33588ae182f81a090d910cfbf21e255b73` and its exact
 //! `comfy-kitchen==0.2.26` dependency at
 //! `255a43879fe57bbcbecfdb273b46d772b00c5a90`. They operate only on tensors
@@ -129,7 +129,10 @@ fn regular_hadamard_values(size: usize) -> Result<Vec<f32>> {
         let next_width = width
             .checked_mul(4)
             .ok_or_else(|| candle::Error::Msg("MiniMax H3 Hadamard dimension overflows".into()))?;
-        let mut next = vec![0.0; next_width * next_width];
+        let elements = next_width.checked_mul(next_width).ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 Hadamard element count overflows".into())
+        })?;
+        let mut next = vec![0.0; elements];
         for row in 0..width {
             for column in 0..width {
                 let value = matrix[row * width + column];
@@ -230,14 +233,25 @@ impl H3ComfyInt8ConvRotLinear {
         self.out_features
     }
 
-    /// Checkpoint bytes retained by this compressed weight and its row scale.
+    /// Source-encoded checkpoint bytes represented by this weight and row scale.
     pub fn encoded_weight_bytes(&self) -> Result<usize> {
-        self.out_features
+        let weight = self
+            .out_features
             .checked_mul(self.in_features)
-            .and_then(|bytes| bytes.checked_add(self.out_features * std::mem::size_of::<f32>()))
+            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 byte count overflows".into()))?;
+        let scales = self
+            .out_features
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 scale bytes overflow".into()))?;
+        weight
+            .checked_add(scales)
             .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 byte count overflows".into()))
     }
 
+    /// Dense F32 device-weight bytes staged for one output-row chunk.
+    ///
+    /// This deliberately excludes the already-resident compressed host tensor
+    /// and the final output tensor, which have separate lifetimes.
     pub fn portable_weight_staging_bytes(&self, rows_per_chunk: usize) -> Result<usize> {
         if rows_per_chunk == 0 {
             candle::bail!("MiniMax H3 INT8 row chunk must be positive")
@@ -368,7 +382,10 @@ fn unswizzle_nvfp4_scales(
             swizzled.len()
         )
     }
-    let mut natural = vec![0.0; logical_rows * logical_columns];
+    let logical_elements = logical_rows.checked_mul(logical_columns).ok_or_else(|| {
+        candle::Error::Msg("MiniMax H3 NVFP4 logical scale size overflows".into())
+    })?;
+    let mut natural = vec![0.0; logical_elements];
     for row in 0..logical_rows {
         let row_block = row / 128;
         let row_in_block = row % 128;
@@ -500,10 +517,13 @@ impl H3ComfyNvfp4AwqLinear {
         self.out_features
     }
 
-    /// Checkpoint bytes retained by the packed weight and quantization sidecars.
+    /// Source-encoded checkpoint bytes represented by the packed weight and
+    /// quantization sidecars.
     ///
     /// The AWQ vector is charged at its incoming F16, BF16, or F32 dtype; it is
-    /// converted to F32 only while validating or executing a forward pass.
+    /// converted to F32 only while validating or executing a forward pass. The
+    /// FP8 block scales are charged at their source byte width even though this
+    /// portable implementation retains an unswizzled F32 cache for execution.
     pub fn encoded_weight_bytes(&self) -> Result<usize> {
         let packed = self
             .padded_out_features
@@ -532,6 +552,10 @@ impl H3ComfyNvfp4AwqLinear {
             .ok_or_else(|| candle::Error::Msg("MiniMax H3 NVFP4 byte count overflows".into()))
     }
 
+    /// Dense F32 device-weight bytes staged for one output-row chunk.
+    ///
+    /// This deliberately excludes the already-resident packed host tensor,
+    /// its unswizzled scale cache, and the final output tensor.
     pub fn portable_weight_staging_bytes(&self, rows_per_chunk: usize) -> Result<usize> {
         if rows_per_chunk == 0 {
             candle::bail!("MiniMax H3 NVFP4 row chunk must be positive")
@@ -551,7 +575,10 @@ impl H3ComfyNvfp4AwqLinear {
             .narrow(0, start, rows)?
             .flatten_all()?
             .to_vec1::<u8>()?;
-        let mut output = vec![0.0; rows * self.in_features];
+        let output_elements = rows.checked_mul(self.in_features).ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 NVFP4 dequantized chunk size overflows".into())
+        })?;
+        let mut output = vec![0.0; output_elements];
         for row in 0..rows {
             let packed_row = &packed[row * packed_columns..(row + 1) * packed_columns];
             let scales = &self.natural_block_scales
@@ -669,6 +696,93 @@ mod tests {
         swizzled
     }
 
+    #[cfg(any(feature = "metal", feature = "cuda"))]
+    fn synthetic_int8_forward(device: &Device) -> Result<Tensor> {
+        let columns = H3_COMFY_CONVROT_GROUP_SIZE;
+        let weight_values = (0..2 * columns)
+            .map(|index| (((index * 19 + 7) % 29) as i8 - 14) as u8)
+            .collect::<Vec<_>>();
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::from_vec(weight_values, (2, columns), &Device::Cpu)?,
+            Tensor::from_vec(vec![0.125f32, 0.25], (2, 1), &Device::Cpu)?,
+        )?;
+        let input_values = (0..2 * columns)
+            .map(|index| (index as f32 % 17.0 - 8.0) / 5.0)
+            .collect::<Vec<_>>();
+        linear
+            .forward_dequantized(
+                &Tensor::from_vec(input_values, (2, columns), device)?,
+                None,
+                DType::F32,
+                1,
+            )?
+            .to_device(&Device::Cpu)
+    }
+
+    #[cfg(any(feature = "metal", feature = "cuda"))]
+    fn synthetic_nvfp4_forward(device: &Device) -> Result<Tensor> {
+        let out_features = 2;
+        let in_features = 16;
+        let padded_rows = 16;
+        let mut packed = vec![0u8; padded_rows * in_features / 2];
+        packed[0] = 0x71;
+        packed[in_features / 2] = 0xaf;
+        let natural_scales = vec![1.0f32; padded_rows];
+        let block_scales = Tensor::from_vec(
+            swizzle_scales(&natural_scales, padded_rows, 1),
+            (128, 4),
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::F8E4M3)?;
+        let linear = H3ComfyNvfp4AwqLinear::new(
+            Tensor::from_vec(packed, (padded_rows, in_features / 2), &Device::Cpu)?,
+            block_scales,
+            Tensor::new(0.5f32, &Device::Cpu)?,
+            Tensor::from_vec(
+                (0..in_features)
+                    .map(|column| if column == 0 { 2.0f32 } else { 1.0f32 })
+                    .collect(),
+                in_features,
+                &Device::Cpu,
+            )?
+            .to_dtype(DType::F16)?,
+            out_features,
+            in_features,
+        )?;
+        linear
+            .forward_dequantized(
+                &Tensor::from_vec(vec![1.0f32; in_features], (1, in_features), device)?,
+                None,
+                DType::F32,
+                1,
+            )?
+            .to_device(&Device::Cpu)
+    }
+
+    #[test]
+    fn regular_hadamard_matches_pinned_comfy_kitchen_seed_and_kron_order() -> Result<()> {
+        let h4 = regular_hadamard_values(4)?;
+        assert_eq!(
+            h4,
+            vec![
+                0.5, 0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5,
+            ]
+        );
+
+        let h16 = regular_hadamard_values(16)?;
+        let row0 = [
+            1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0,
+        ]
+        .map(|value| value * 0.25);
+        let row5 = [
+            1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0,
+        ]
+        .map(|value| value * 0.25);
+        assert_eq!(&h16[..16], &row0);
+        assert_eq!(&h16[5 * 16..6 * 16], &row5);
+        Ok(())
+    }
+
     #[test]
     fn regular_hadamard_is_symmetric_and_orthonormal() -> Result<()> {
         let device = Device::Cpu;
@@ -709,6 +823,10 @@ mod tests {
         assert!(max_error(&actual, &expected)? <= 2e-4);
         assert_eq!(linear.encoded_weight_bytes()?, rows * columns + rows * 4);
         assert_eq!(linear.portable_weight_staging_bytes(2)?, 2 * columns * 4);
+        assert!(linear.portable_weight_staging_bytes(0).is_err());
+        assert!(linear
+            .forward_dequantized(&input, Some(&bias), DType::F32, 0)
+            .is_err());
         Ok(())
     }
 
@@ -726,41 +844,67 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("[2, 1]"));
+        let weight = Tensor::zeros((2, H3_COMFY_CONVROT_GROUP_SIZE), DType::U8, &device)?;
+        let nonpositive = Tensor::from_vec(vec![0.5f32, 0.0], (2, 1), &device)?;
+        assert!(H3ComfyInt8ConvRotLinear::new(weight, nonpositive)
+            .unwrap_err()
+            .to_string()
+            .contains("finite and positive"));
+        Ok(())
+    }
+
+    #[test]
+    fn int8_convrot_widens_raw_twos_complement_bytes_as_signed() -> Result<()> {
+        let mut bytes = vec![0u8; H3_COMFY_CONVROT_GROUP_SIZE];
+        bytes[..4].copy_from_slice(&[0x80, 0xff, 0x00, 0x7f]);
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::from_vec(bytes, (1, H3_COMFY_CONVROT_GROUP_SIZE), &Device::Cpu)?,
+            Tensor::ones((1, 1), DType::F32, &Device::Cpu)?,
+        )?;
+        let signed = linear.signed_rows(0, 1, &Device::Cpu)?.to_vec2::<f32>()?;
+        assert_eq!(&signed[0][..4], &[-128.0, -1.0, 0.0, 127.0]);
         Ok(())
     }
 
     #[cfg(feature = "metal")]
     #[test]
-    fn int8_convrot_forward_matches_metal() -> Result<()> {
+    fn portable_quantized_forwards_match_metal() -> Result<()> {
         let Ok(metal) = Device::new_metal(0) else {
             return Ok(());
         };
-        let columns = H3_COMFY_CONVROT_GROUP_SIZE;
-        let weight_values = (0..2 * columns)
-            .map(|index| (((index * 19 + 7) % 29) as i8 - 14) as u8)
-            .collect::<Vec<_>>();
-        let linear = H3ComfyInt8ConvRotLinear::new(
-            Tensor::from_vec(weight_values, (2, columns), &Device::Cpu)?,
-            Tensor::from_vec(vec![0.125f32, 0.25], (2, 1), &Device::Cpu)?,
-        )?;
-        let input_values = (0..2 * columns)
-            .map(|index| (index as f32 % 17.0 - 8.0) / 5.0)
-            .collect::<Vec<_>>();
-        let cpu = linear.forward_dequantized(
-            &Tensor::from_vec(input_values.clone(), (2, columns), &Device::Cpu)?,
-            None,
-            DType::F32,
-            1,
-        )?;
-        let metal = linear
-            .forward_dequantized(
-                &Tensor::from_vec(input_values, (2, columns), &metal)?,
-                None,
-                DType::F32,
-                1,
-            )?
-            .to_device(&Device::Cpu)?;
-        assert!(max_error(&cpu, &metal)? <= 2e-4);
+        assert!(
+            max_error(
+                &synthetic_int8_forward(&Device::Cpu)?,
+                &synthetic_int8_forward(&metal)?
+            )? <= 2e-4
+        );
+        assert!(
+            max_error(
+                &synthetic_nvfp4_forward(&Device::Cpu)?,
+                &synthetic_nvfp4_forward(&metal)?
+            )? <= 2e-4
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn portable_quantized_forwards_match_cuda() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        assert!(
+            max_error(
+                &synthetic_int8_forward(&Device::Cpu)?,
+                &synthetic_int8_forward(&cuda)?
+            )? <= 2e-4
+        );
+        assert!(
+            max_error(
+                &synthetic_nvfp4_forward(&Device::Cpu)?,
+                &synthetic_nvfp4_forward(&cuda)?
+            )? <= 2e-4
+        );
         Ok(())
     }
 
@@ -775,7 +919,9 @@ mod tests {
         packed[0] = 0x71; // +6.0 then +0.5 in the first logical row.
         packed[in_features / 2] = 0xaf; // -1.0 then -6.0 in the second row.
         let packed = Tensor::from_vec(packed, (padded_rows, in_features / 2), &device)?;
-        let natural_scales = vec![1.0f32; padded_rows * blocks_per_row];
+        let mut natural_scales = vec![1.0f32; padded_rows * blocks_per_row];
+        natural_scales[0] = 2.0;
+        natural_scales[1] = 0.5;
         let swizzled = swizzle_scales(&natural_scales, padded_rows, blocks_per_row);
         let scales = Tensor::from_vec(swizzled, (128, 4), &device)?.to_dtype(DType::F8E4M3)?;
         let tensor_scale = Tensor::new(0.5f32, &device)?;
@@ -797,20 +943,24 @@ mod tests {
         )?;
         let dense = linear.dequantize_weight(DType::F32, &device, 1)?;
         let dense = dense.to_vec2::<f32>()?;
-        assert_eq!(dense[0][0], 3.0);
-        assert_eq!(dense[0][1], 0.25);
-        assert_eq!(dense[1][0], -0.5);
-        assert_eq!(dense[1][1], -3.0);
+        assert_eq!(dense[0][0], 6.0);
+        assert_eq!(dense[0][1], 0.5);
+        assert_eq!(dense[1][0], -0.25);
+        assert_eq!(dense[1][1], -1.5);
 
         let input = Tensor::from_vec(vec![1.0f32; in_features], (1, in_features), &device)?;
         let actual = linear.forward_dequantized(&input, None, DType::F32, 1)?;
         // AWQ doubles only input column zero before the dequantized matmul.
-        assert_eq!(actual.to_vec2::<f32>()?, vec![vec![6.25, -4.0]]);
+        assert_eq!(actual.to_vec2::<f32>()?, vec![vec![12.5, -2.0]]);
         assert_eq!(
             linear.encoded_weight_bytes()?,
             padded_rows * in_features / 2 + 128 * 4 + 4 + in_features * 2
         );
         assert_eq!(linear.portable_weight_staging_bytes(1)?, in_features * 4);
+        assert!(linear.portable_weight_staging_bytes(0).is_err());
+        assert!(linear
+            .forward_dequantized(&input, None, DType::F32, 0)
+            .is_err());
         Ok(())
     }
 
@@ -878,6 +1028,30 @@ mod tests {
         .to_string()
         .contains("pre_quant_scale"));
         let awq = Tensor::ones(16, DType::F32, &device)?;
+        let zero_tensor_scale = Tensor::new(0.0f32, &device)?;
+        assert!(H3ComfyNvfp4AwqLinear::new(
+            packed.clone(),
+            block_scales.clone(),
+            zero_tensor_scale,
+            awq.clone(),
+            2,
+            16,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("finite and positive"));
+        let zero_awq = Tensor::zeros(16, DType::F32, &device)?;
+        assert!(H3ComfyNvfp4AwqLinear::new(
+            packed.clone(),
+            block_scales.clone(),
+            tensor_scale,
+            zero_awq,
+            2,
+            16,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("AWQ input scales"));
         let scalar_int8 = Tensor::new(1u8, &device)?;
         assert!(
             H3ComfyNvfp4AwqLinear::new(packed, block_scales, scalar_int8, awq, 2, 16,)
